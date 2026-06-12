@@ -119,8 +119,13 @@ every CI run. The default stub returns deterministic group proposals
 ranks every canonical op in the top-3", not "the LLM produces good
 groups" (the latter is a manual operator-review step). An opt-in
 ``ANTHROPIC_API_KEY``-gated live-LLM run via
-``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real Anthropic adapter
-once the production adapter wires up (G0.7 follow-up #467).
+``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real Anthropic adapter.
+The production ``LlmClient`` (``build_anthropic_ingest_llm_client``)
+is wired at FastAPI lifespan startup, reusing
+``settings.anthropic_api_key`` (#1386) — see
+``docs/codebase/spec-ingestion.md`` §"LLM-client wiring". The
+live-LLM variant remains a manual, key-gated sanity hook (CI never
+runs it — no key in the sandbox).
 """
 
 from __future__ import annotations
@@ -1471,14 +1476,20 @@ async def test_canary_live_llm_grouping_produces_named_groups(
         "anthropic",
         reason="anthropic SDK not installed; live-LLM variant is opt-in",
     )
-    # The production LLM adapter lands in a sibling Task (#467);
-    # until then this stub raises BLOCKED-prerequisite so operators
-    # running this manually see a clear pointer rather than a
-    # silent skip.
+    # The production Anthropic LlmClient (build_anthropic_ingest_llm_client)
+    # now ships and is wired at FastAPI lifespan startup (#1386); the
+    # previously-cited ``Task #467`` was G8.1-T3 (audit CLI verbs,
+    # CLOSED), never the adapter. This live-LLM variant stays a manual,
+    # key-gated sanity hook — keep the skip so operators running the
+    # canary manually see a clear pointer rather than a silent skip. See
+    # ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring" for the
+    # operator-facing framing.
     pytest.skip(
-        "Live-LLM canary requires the production Anthropic adapter (Task #467). "
-        "Stubs cover the canary's correctness; this variant lands when the "
-        "adapter does.",
+        "Live-LLM canary is a manual, key-gated sanity hook; not run "
+        "automatically. The production Anthropic LlmClient ships and is "
+        "wired at lifespan startup (#1386) — stubs cover the canary's "
+        "correctness; run this manually with ANTHROPIC_API_KEY set (see "
+        "docs/codebase/spec-ingestion.md).",
     )
 
 

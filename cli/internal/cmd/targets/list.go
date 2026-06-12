@@ -8,30 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// TargetSummary mirrors the backend TargetSummary Pydantic model
-// (backend/src/meho_backplane/targets/schemas.py L57-72). Hand-
-// written rather than aliased to the generated api.TargetSummary so
-// the targets package stays decoupled from the generated client's
-// type surface — the operation/retrieval packages take the same
-// stance for the same reason (generated types churn on every spec
-// re-snapshot).
-type TargetSummary struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Aliases []string `json:"aliases"`
-	Product string   `json:"product"`
-	Host    string   `json:"host"`
-}
 
 // newListCmd returns the `meho targets list` command.
 //
@@ -117,9 +102,34 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	summaries, err := getTargets(cmd.Context(), backplaneURL, opts)
+	statusCode, body, err := getTargets(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	// G0.16-T6 Finding A (#1312) — `GET /api/v1/targets` opted into a
+	// non-breaking envelope=v2 shape, so the OpenAPI spec now declares
+	// two `200` content schemas (bare `list[TargetSummary]` by default,
+	// `{"items": [...], "next_cursor": …}` when the operator passes
+	// `?envelope=v2`). oapi-codegen collapses multi-shape 200s into a
+	// `struct{union json.RawMessage}` whose discriminator field is
+	// unexported and whose parser fails json.Unmarshal on any concrete
+	// shape, so the `*WithResponse` path can't deliver a typed payload.
+	// The CLI never sends `envelope=v2` (today's bare-list UX is the
+	// operator contract); `getTargets` calls the low-level client and
+	// returns the raw body, which we decode into the default shape
+	// here. Once oapi-codegen ships an `.AsXxx()` helper for the
+	// default branch (issue tracked upstream), swap this for it.
+	var summaries []api.TargetSummary
+	if err := json.Unmarshal(body, &summaries); err != nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: decode targets list: %v", backplaneURL, err)),
+			opts.JSONOut,
+		)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), summaries)
@@ -128,44 +138,67 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/targets query string from
-// the per-call options. Exposed for tests so the URL construction
-// stays unit-checkable without standing up an httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// buildListParams assembles the typed query-parameter struct from the
+// per-call options. Exposed for tests so the param wiring stays
+// unit-checkable without standing up an httptest.Server. The typed
+// client (`oapi-codegen`-generated) handles URL encoding internally,
+// so the previous `buildListPath` string-concat helper retired.
+func buildListParams(opts listOptions) *api.ListTargetsApiV1TargetsGetParams {
+	params := &api.ListTargetsApiV1TargetsGetParams{}
 	if opts.Product != "" {
-		q.Set("product", opts.Product)
+		p := opts.Product
+		params.Product = &p
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Cursor != "" {
-		q.Set("cursor", opts.Cursor)
+		c := opts.Cursor
+		params.Cursor = &c
 	}
-	path := "/api/v1/targets"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getTargets(ctx context.Context, backplaneURL string, opts listOptions) ([]TargetSummary, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getTargets(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+) (int, []byte, error) {
+	// G0.16-T6 Finding A (#1312). Calls the low-level
+	// `Client.ListTargetsApiV1TargetsGet` (which returns *http.Response)
+	// instead of `*WithResponse` because oapi-codegen's generated
+	// parser fails on the envelope=v2 multi-shape 200 response
+	// (`struct{union json.RawMessage}` with an unexported discriminator
+	// the parser can't bind). Reading the body manually keeps the
+	// default bare-list path working until the codegen ships an
+	// `.AsXxx()` helper.
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	var out []TargetSummary
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode targets response: %w", err)
+	params := buildListParams(opts)
+	rsp, err := retryHTTPOn401(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.ListTargetsApiV1TargetsGet(ctx, params)
+		},
+	)
+	if err != nil {
+		return 0, nil, err
 	}
-	return out, nil
+	defer func() { _ = rsp.Body.Close() }()
+	body, err := io.ReadAll(rsp.Body)
+	if err != nil {
+		return rsp.StatusCode, nil, fmt.Errorf("read targets list body: %w", err)
+	}
+	return rsp.StatusCode, body, nil
 }
 
 // printTargetsTable renders the list as a compact, scannable table.
 // Columns: NAME, ALIASES, PRODUCT, HOST per the issue's acceptance
 // criterion 1. ID is omitted from the human view (operators rarely
 // need the UUID; --json surfaces it).
-func printTargetsTable(w io.Writer, summaries []TargetSummary) {
+func printTargetsTable(w io.Writer, summaries []api.TargetSummary) {
 	if len(summaries) == 0 {
 		fmt.Fprintln(w, "no targets registered in this tenant")
 		return

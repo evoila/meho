@@ -85,7 +85,7 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
     {
         "title": "Knowledge",
         "summary": "Search + browse the team's distilled knowledge base.",
-        "href": "/ui/knowledge",
+        "href": "/ui/kb",
         "icon": "book-open",
     },
     {
@@ -105,6 +105,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "summary": "Operator + tenant + target memories across 5 scopes.",
         "href": "/ui/memory",
         "icon": "brain",
+    },
+    {
+        "title": "Runbooks",
+        "summary": "Browse runbook templates + lifecycle state.",
+        "href": "/ui/runbooks",
+        "icon": "scroll",
     },
 )
 

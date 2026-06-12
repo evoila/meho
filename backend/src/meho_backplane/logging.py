@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 
 import structlog
+from structlog.tracebacks import ExceptionDictTransformer
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -34,12 +35,31 @@ def configure_logging(level: int = logging.INFO) -> None:
     2. ``add_log_level`` — adds the ``level`` key.
     3. ``TimeStamper(fmt="iso", utc=True)`` — adds the ``timestamp``
        key in ISO 8601 UTC form.
-    4. ``dict_tracebacks`` — when an event includes ``exc_info`` (set
-       by :meth:`structlog.stdlib.BoundLogger.exception`), serialises
-       the exception chain into a structured ``exception`` list. Must
-       run before ``JSONRenderer``; otherwise the exception surfaces
-       as the unhelpful ``"exc_info": true`` literal and the traceback
-       is lost. Load-bearing for production triage of 5xx responses.
+    4. ``ExceptionRenderer(ExceptionDictTransformer(show_locals=False))``
+       — the ``dict_tracebacks`` processor with frame-local rendering
+       **disabled**. When an event includes ``exc_info`` (set by
+       :meth:`structlog.stdlib.BoundLogger.exception`), it serialises the
+       exception chain into a structured ``exception`` list. Must run
+       before ``JSONRenderer``; otherwise the exception surfaces as the
+       unhelpful ``"exc_info": true`` literal and the traceback is lost.
+       The structured frames (file / line / function / exception type +
+       message) stay — only the per-frame *locals* dict is dropped.
+
+       ``show_locals`` defaults to ``True`` in structlog, which renders
+       every frame's local variables into the log line. That is a
+       credential-disclosure vector (CWE-532): any secret held as a frame
+       local on a traceback is written to stdout verbatim. The
+       motivating incident was a failed scheduled agent run logging the
+       agent's ``client_credentials`` secret (held as
+       ``agent_client_secret`` on the scheduler fire path). The secret is
+       now additionally wrapped in :class:`~pydantic.SecretStr` at the
+       source (defense in depth), but disabling ``show_locals`` closes
+       the vector for *every* frame across the backplane — including
+       frames that must hold a secret as a plain ``str`` (e.g. the httpx
+       form-post in :mod:`meho_backplane.auth.agent_token`, where the raw
+       value is unavoidable). Frame locals are convenient for triage but
+       not worth a standing credential-leak surface; the structured
+       traceback without locals remains sufficient for 5xx triage.
     5. ``JSONRenderer`` — final processor; serialises the event dict
        to a single JSON line.
 
@@ -84,7 +104,12 @@ def configure_logging(level: int = logging.INFO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
+            # ``dict_tracebacks`` with frame-local rendering disabled.
+            # ``show_locals=True`` (the structlog default) writes every
+            # frame's locals into the log line -- a credential-disclosure
+            # vector (CWE-532) for any secret held as a frame local on a
+            # traceback. See :func:`configure_logging`'s docstring.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=False)),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

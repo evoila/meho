@@ -232,27 +232,45 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "EVENT_OUTBOX_NOTIFY_CHANNEL",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
     "AuditLog",
     "Base",
     "BroadcastOverride",
+    "BudgetWindowKind",
     "Document",
     "EndpointDescriptor",
+    "EventOutbox",
     "GraphEdge",
     "GraphEdgeHistory",
     "GraphEdgeKind",
     "GraphHistoryChangeKind",
     "GraphNode",
     "GraphNodeHistory",
+    "IdentityBudget",
     "OperationGroup",
+    "RunbookRun",
+    "RunbookRunStepState",
+    "RunbookTemplate",
     "Target",
     "Tenant",
     "TenantConvention",
     "TenantConventionHistory",
     "WebSession",
 ]
+
+
+#: PostgreSQL ``LISTEN/NOTIFY`` channel name the event-outbox drain
+#: loop subscribes to, and the same channel the writer ``NOTIFY``s on
+#: after an outbox insert commits. The notification is a **latency
+#: hint** only; the drain loop's durable guarantee comes from the
+#: outbox table (G11.3-T3 #824). A dropped notification is benign --
+#: the next polled tick picks the row up anyway. Channel names in PG
+#: are quoted-lower-case identifiers; lowercase + underscore keeps
+#: the ``LISTEN`` / ``NOTIFY`` statements quoting-free.
+EVENT_OUTBOX_NOTIFY_CHANNEL: str = "event_outbox_new"
 
 
 #: Portable JSON column type — :class:`JSONB` on PostgreSQL (binary
@@ -443,6 +461,47 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Connector-boundary redaction middleware (G11.4-T2 #1071). The
+    # dispatcher captures the raw connector response, hands it to the
+    # redaction engine, and stores the raw payload here verbatim so an
+    # auditor can reconstruct the pre-redaction view (the trust boundary
+    # is the API surface, not the audit log — internal incident response
+    # needs the raw record). ``redaction_manifest`` carries one entry
+    # per rule firing (``rule`` / ``pattern`` / ``action`` / ``count`` /
+    # ``span`` / ``reason`` / ``path``) plus the resolved ``policy_id``;
+    # the C1-d round-trip CI gate (#1073) replays the manifest against
+    # the raw payload to confirm the redactor stays deterministic across
+    # policy revisions. Both columns are nullable: pre-G11.4 audit rows
+    # carry NULL, and error-path rows (handler/connector raised before
+    # producing a response) have no raw payload to redact. Added by
+    # migration ``0030``.
+    raw_payload: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    redaction_manifest: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    # Runbook correlation (G12.1-T2 #1292). The dispatcher contextvar
+    # populates ``run_id`` + ``step_id`` for every operation issued inside
+    # a runbook run; pre-G12.1 rows and operations outside a run context
+    # carry NULL on both columns. Soft-FK discipline — no DB-level FK
+    # constraint to ``runbook_runs.run_id`` in v0.2, same as
+    # ``parent_audit_id`` / ``target_id`` / ``agent_session_id``. Added by
+    # migration ``0034``.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    step_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -478,6 +537,11 @@ class AuditLog(Base):
         Index(
             "audit_log_actor_sub_idx",
             "actor_sub",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_run_id_idx",
+            "run_id",
             postgresql_using="btree",
         ),
     )
@@ -762,6 +826,21 @@ class Target(Base):
         default=list,
     )
     product: Mapped[str] = mapped_column(Text, nullable=False)
+    # Operator-asserted product version, e.g. ``"9.0"``, ``"1.x"``.
+    # Nullable so a fresh target without out-of-band version knowledge
+    # can still be created and probed; once the probe succeeds the
+    # authoritative ``fingerprint.version`` takes precedence at resolver
+    # time (see
+    # :func:`~meho_backplane.connectors.resolver._resolve_target_version`).
+    # G0.15-T6 (#1215) ships this column to break the chicken-and-egg
+    # the v0.7.0 dogfood surfaced (RDC #753, signal 6): every typed
+    # connector except K8s required ``fingerprint.version`` to resolve,
+    # but the probe needed the resolver to find a connector first. The
+    # column is the operator-driven entry point; the wildcard
+    # registrations fanned out to every typed connector in the same
+    # PR are the always-resolvable fallback. Added by migration
+    # ``0032``.
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
     host: Mapped[str] = mapped_column(Text, nullable=False)
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fqdn: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -805,6 +884,20 @@ class Target(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
+    )
+    # Soft-delete timestamp. NULL → live row; non-NULL → wall-clock
+    # time of the DELETE call. Written by ``DELETE /api/v1/targets/{name}``
+    # (G0.14-T4 #1145); never rewritten. Every read path
+    # (:func:`~meho_backplane.targets.resolver.resolve_target`, the
+    # list endpoint, the dispatcher) filters
+    # ``WHERE deleted_at IS NULL`` so a soft-deleted target is
+    # invisible to the resolver while staying queryable from the
+    # ``audit_log.target_id`` soft-FK (which would otherwise dangle).
+    # Added by migration ``0028``.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
     )
 
     __table_args__ = (
@@ -938,6 +1031,168 @@ class OperationGroup(Base):
         sa.CheckConstraint(
             "review_status IN ('staged', 'enabled', 'disabled')",
             name="ck_operation_group_review_status",
+        ),
+    )
+
+
+class DocCollection(Base):
+    """A named documentation corpus an agent can search (collections-as-data).
+
+    Initiative #1548 (G4.6 Doc-collection catalogue), Task #1550 (T1)
+    substrate. One row per corpus (e.g. ``vmware``). This table is the
+    docs analogue of :class:`Target` — ``list_targets`` answers "what
+    infra can I act on?", ``list_doc_collections`` (T4 #1553) answers
+    "what docs can I search?". The registry is **authoritative for
+    identity + backend binding** (operator-set); the liveness fields
+    (``doc_count`` / ``last_ingested_at`` / ``readiness``) are
+    probe-written from the backend (T6 #1555) — the same data split
+    ``targets`` rows + ``Target.fingerprint`` use.
+
+    ``tenant_id`` is NULL for global / shared collections (available to
+    every tenant) and populated for tenant-curated collections, the
+    NULLABLE-tenant idiom :class:`OperationGroup` established. No FK to
+    ``tenant.id`` in v0.x by the same soft-FK discipline as
+    ``audit_log.tenant_id``.
+
+    Uniqueness on ``collection_key`` is enforced by **two partial unique
+    indexes** rather than a single composite UNIQUE because SQL's
+    NULL != NULL semantics mean a single ``UNIQUE (tenant_id,
+    collection_key)`` would not catch two global rows sharing a
+    ``collection_key``. The split lets a global ``vmware`` row and a
+    tenant-curated ``vmware`` row coexist (the resolver prefers the
+    tenant row); see :class:`OperationGroup` for the precedent.
+
+    ``backend`` is the ``{type, ref}`` routing record the T2 (#1551)
+    backend-agnostic search router resolves server-side — the backend
+    (``vertex-rag`` / ``meho-knowledge``) never appears in a request or
+    response. Operator-set; never probe-written.
+
+    ``status`` is a bounded enum enforced via a DB-layer CHECK
+    (``'provisioning'`` → registered, corpus not yet answerable;
+    ``'ready'`` → live for search; ``'rebuilding'`` → a managed-RAG
+    index rebuild is in flight; ``'disabled'`` → hidden from the
+    catalogue). Portable enum-shape across PG + SQLite — see
+    :attr:`OperationGroup.review_status` for the precedent. T3 (#1552)
+    fails typed against a not-``ready`` collection; the ``readiness``
+    JSON column lands here (NULL until T6's probe writes it) so that
+    typed failure has somewhere to read its detail from.
+
+    ``when_to_use`` mirrors :attr:`OperationGroup.when_to_use`: a blurb
+    ``list_doc_collections`` returns verbatim so an agent can pick the
+    right collection *before* searching.
+
+    ``extras`` is the forward-compat escape hatch for per-collection
+    structured fields without first-class columns; v1 writes ``{}``.
+
+    The model ships with no helper methods — population is operator-
+    managed seed for v1 (no create/import API until a collection needs
+    one); read paths land at the resolver (this task) and the
+    catalogue / search tools (T3 / T4).
+    """
+
+    __tablename__ = "doc_collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NULL → global/shared collection (every tenant sees it); non-null →
+    # tenant-curated. No FK clause by soft-FK discipline.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    # Stable operator-chosen id, e.g. ``"vmware"``. The binary routing +
+    # entitlement key the agent passes as ``collection=<key>`` (#1548).
+    collection_key: Mapped[str] = mapped_column(Text, nullable=False)
+    vendor: Mapped[str] = mapped_column(Text, nullable=False)
+    # Products the corpus covers, e.g. ``["vsphere", "nsx"]``. TEXT[] on
+    # PG (GIN-indexable containment), JSON array on SQLite. NOT NULL with
+    # an empty-list default to avoid NULL vs [] ambiguity (Target.aliases
+    # precedent).
+    products: Mapped[list[str]] = mapped_column(
+        _PORTABLE_ARRAY,
+        nullable=False,
+        default=list,
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Agent-facing "pick this collection when…" blurb. Mirrors
+    # OperationGroup.when_to_use; surfaced verbatim by list_doc_collections
+    # (T4) and the initialize.instructions catalogue band.
+    when_to_use: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator-set ``{type, ref}`` backend routing record (the T2 router
+    # key). JSONB on PG, generic JSON (text) on SQLite. NOT NULL with no
+    # default — every collection must bind to exactly one backend, so a
+    # writer has to supply ``{type, ref}`` explicitly. Unlike
+    # ``products`` / ``extras`` / ``readiness`` (where empty is a valid
+    # state), an empty ``backend`` is a routing-broken row, so there is
+    # no silent ``{}`` fallback at the ORM or migration layer.
+    backend: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="provisioning",
+    )
+    # Probe-written liveness (T6 #1555). NULL until the first probe.
+    last_ingested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    doc_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Probe-written readiness detail (T6 #1555); the column lands here so
+    # T3 (#1552) can fail typed against a not-ready collection. NULL until
+    # the first probe writes it. JSONB on PG, generic JSON on SQLite.
+    readiness: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    extras: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Partial unique on (collection_key) for global rows. The WHERE
+        # clause is emitted on both dialects via the postgresql_where /
+        # sqlite_where pair (OperationGroup precedent).
+        Index(
+            "doc_collections_global_idx",
+            "collection_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        # Partial unique on (tenant_id, collection_key) for tenant rows.
+        Index(
+            "doc_collections_tenant_idx",
+            "tenant_id",
+            "collection_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "status IN ('provisioning', 'ready', 'rebuilding', 'disabled')",
+            name="ck_doc_collections_status",
         ),
     )
 
@@ -2588,6 +2843,32 @@ _AGENT_RUN_STATUSES: tuple[str, ...] = tuple(s.value for s in AgentRunStatus)
 #: discipline as :data:`_AGENT_RUN_STATUSES`.
 _AGENT_RUN_TRIGGERS: tuple[str, ...] = tuple(t.value for t in AgentRunTrigger)
 
+#: Closed enum of :attr:`AgentRun.in_flight_policy` -- the per-run
+#: snapshot of the firing trigger's :class:`ScheduledTriggerInFlightPolicy`
+#: copied at run-start so a mid-flight definition edit cannot flip
+#: behavior on a run that's already executing (T4 #825). Frozen literal
+#: tuple here (not derived from the enum class) because
+#: :class:`ScheduledTriggerInFlightPolicy` is defined further down in
+#: the module file -- reshuffling the file to import-order matters less
+#: than keeping the closed-vocab snapshot self-contained and the
+#: file-order grouping (agent-runtime models together, scheduler models
+#: together) intact. The drift guard
+#: :func:`tests.test_db_agent_run.test_in_flight_policy_check_matches_scheduled_trigger_enum`
+#: asserts this tuple matches :class:`ScheduledTriggerInFlightPolicy`
+#: at unit-test time so the two cannot silently drift.
+_AGENT_RUN_IN_FLIGHT_POLICIES: tuple[str, ...] = (
+    "resume",
+    "fail_into_audit",
+)
+
+#: Per-run default for :attr:`AgentRun.in_flight_policy`. Mirrors
+#: :class:`ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT` -- the
+#: conservative outcome the consumer doc (``agent-runtime-for-ops-spec.md``
+#: §P2) explicitly accepts. Operators opt into ``resume`` per agent
+#: definition; the scheduler then copies the value into the run row
+#: at run-start.
+_AGENT_RUN_IN_FLIGHT_POLICY_DEFAULT: str = "fail_into_audit"
+
 
 class AgentRun(Base):
     """One row per LLM-agent invocation hosted in MEHO's process.
@@ -2706,6 +2987,37 @@ class AgentRun(Base):
       Both NULL until those transitions fire -- the lifecycle service
       stamps them.
 
+    * ``lease_owner`` -- Text nullable. Initiative #804 (G11.3
+      Scheduler), Task #825 (T4). The worker process / replica
+      identifier that holds the lease on this run while it executes.
+      NULL when no worker is executing the run (``pending`` /
+      ``awaiting_approval`` after a release / any terminal state). A
+      non-NULL value means "this worker is responsible for advancing
+      the run". The reaper consults it for diagnostics; the *expiry*
+      column drives reclaim.
+
+    * ``lease_expires_at`` -- ``timestamptz`` nullable. The wall-clock
+      after which the lease is considered abandoned (the worker died,
+      a pod was OOM-killed, the network partitioned). The reaper
+      (``meho_backplane.scheduler.reaper``) scans
+      ``status='running' AND lease_expires_at < now()`` and applies
+      :attr:`in_flight_policy`. The healthy worker bumps this
+      forward periodically via the lifecycle service's
+      ``heartbeat`` -- as long as heartbeats land, the reaper never
+      sees the run. NULL whenever ``lease_owner`` is NULL; the
+      lifecycle service keeps both columns in lock-step.
+
+    * ``in_flight_policy`` -- Text NOT NULL with a DB-layer ``CHECK
+      in_flight_policy IN (...)`` constraint enforcing the closed
+      :class:`ScheduledTriggerInFlightPolicy` vocabulary. Per-run
+      snapshot of the trigger's policy copied at run-start (T4 #825),
+      so a definition edit mid-flight cannot flip behavior on a run
+      that's already executing. Defaults to ``fail_into_audit`` --
+      the conservative outcome the consumer doc explicitly accepts.
+      ``direct`` and ``agent-invoked`` runs (no scheduler trigger)
+      take the default; they cannot resume regardless because nothing
+      will re-fire them.
+
     Indexes
     -------
 
@@ -2718,6 +3030,10 @@ class AgentRun(Base):
     * ``agent_run_parent_run_id_idx`` -- b-tree on ``parent_run_id``.
       Drives the composition-tree walk (children of a parent run,
       G11.1-T5).
+    * ``agent_run_lease_expires_at_idx`` -- partial b-tree on
+      ``lease_expires_at`` (PG ``WHERE status='running'``). Drives
+      the reaper's "what leases have expired" query without
+      scanning the table. T4 #825.
     """
 
     __tablename__ = "agent_run"
@@ -2793,6 +3109,28 @@ class AgentRun(Base):
         nullable=True,
         default=None,
     )
+    # Initiative #804 (G11.3 Scheduler), Task #825 (T4) -- lease /
+    # heartbeat / per-run in-flight-policy snapshot. ``lease_owner`` +
+    # ``lease_expires_at`` are kept in lock-step by the lifecycle
+    # service (both set together at claim, both cleared together at
+    # release). ``in_flight_policy`` is the per-run snapshot of the
+    # firing trigger's policy; defaults to ``fail_into_audit`` (the
+    # conservative outcome the consumer doc accepts).
+    lease_owner: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    in_flight_policy: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=_AGENT_RUN_IN_FLIGHT_POLICY_DEFAULT,
+    )
 
     __table_args__ = (
         Index(
@@ -2811,6 +3149,19 @@ class AgentRun(Base):
             "parent_run_id",
             postgresql_using="btree",
         ),
+        # T4 #825 -- the reaper's claim query is
+        # ``WHERE status='running' AND lease_expires_at < now()``.
+        # The full index drives the lookup on SQLite (which ignores
+        # the postgresql_where); the partial index on PG keeps the
+        # index narrow (terminal-state and ``pending`` rows are
+        # excluded since they have ``lease_expires_at IS NULL`` and
+        # the partial predicate filters them anyway).
+        Index(
+            "agent_run_lease_expires_at_idx",
+            "lease_expires_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'running'"),
+        ),
         sa.CheckConstraint(
             _ck_in("status", _AGENT_RUN_STATUSES),
             name="ck_agent_run_status",
@@ -2818,6 +3169,10 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+        sa.CheckConstraint(
+            _ck_in("in_flight_policy", _AGENT_RUN_IN_FLIGHT_POLICIES),
+            name="ck_agent_run_in_flight_policy",
         ),
     )
 
@@ -3180,11 +3535,18 @@ class ScheduledTriggerStatus(StrEnum):
       without recomputing.
     * :attr:`CANCELLED` -- terminal. The trigger row is retained for
       audit purposes but never fires again.
+    * :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2
+      #823) widened the enum so a one-off trigger transitions
+      ``ACTIVE -> FIRED`` after its single dispatch instead of going
+      to ``CANCELLED`` (which carries operator-intent semantics).
+      :class:`ScheduledTrigger` rows in this state are retained for
+      audit (last-fired-at + identity_sub) but never re-dispatched.
     """
 
     ACTIVE = "active"
     PAUSED = "paused"
     CANCELLED = "cancelled"
+    FIRED = "fired"
 
 
 class ScheduledTriggerInFlightPolicy(StrEnum):
@@ -3279,11 +3641,16 @@ class ScheduledTrigger(Base):
       replayed tenant id surfaces as :class:`IntegrityError` at insert.
 
     * ``agent_definition_id`` -- UUID NOT NULL with a real
-      ``REFERENCES agent_definition(id)`` FK. The parent table already
-      exists at HEAD (``0016`` shipped ahead of this work), so the FK is
-      tightened here -- the sibling :class:`AgentRun` (``0017``) had to
-      use a soft-FK only because its migration landed in parallel with
-      ``0016``. A trigger cannot point at a deleted definition.
+      ``REFERENCES agent_definition(id) ON DELETE CASCADE`` FK. The
+      parent table already exists at HEAD (``0016`` shipped ahead of this
+      work), so the FK is tightened here -- the sibling
+      :class:`AgentRun` (``0017``) had to use a soft-FK only because its
+      migration landed in parallel with ``0016``. A trigger cannot point
+      at a definition that no longer exists: deleting the definition
+      cascade-deletes its triggers (``ondelete='CASCADE'`` added by
+      migration ``0035`` / #1480), so a once-scheduled definition stays
+      deletable instead of being pinned by an audit-retained cancelled
+      trigger.
 
     * ``kind`` -- Text NOT NULL with a DB-layer ``CHECK kind IN (...)``
       constraint enforcing the closed
@@ -3370,15 +3737,28 @@ class ScheduledTrigger(Base):
     )
     # Real REFERENCES agent_definition(id) FK -- the parent table exists
     # at HEAD (0016) so this Task tightens the FK 0017 had to leave soft.
+    # ``ondelete='CASCADE'`` (migration 0035, #1480): deleting a
+    # definition removes its dependent trigger rows -- including a
+    # cancelled one cancel() retains for audit -- so a once-scheduled
+    # definition is still deletable. The cascade must be the DB-level FK
+    # clause, not an ORM ``cascade=`` relationship: the delete path issues
+    # a bulk Core ``DELETE`` that bypasses unit-of-work cascades.
     agent_definition_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
-        ForeignKey("agent_definition.id"),
+        ForeignKey("agent_definition.id", ondelete="CASCADE"),
         nullable=False,
     )
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     # Discriminated by ``kind`` -- exactly one populated; the DB-side
     # ``ck_scheduled_trigger_kind_fields`` CHECK enforces the invariant.
     cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Per-trigger IANA timezone name. Cron expressions evaluate in this
+    # zone via ``zoneinfo.ZoneInfo`` so an operator scheduling
+    # ``0 9 * * *`` in ``Europe/Sarajevo`` fires at 09:00 local rather
+    # than 09:00 UTC. Migration ``0025`` adds this column with a server
+    # default of ``'UTC'`` for the rows shipped by 0020; the ORM-side
+    # default keeps fresh inserts on the same backstop.
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
     fire_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -3418,6 +3798,29 @@ class ScheduledTrigger(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    # JSON payload forwarded as the agent run's initial input by the
+    # dispatcher (T2 #823). Nullable: a trigger that just kicks off an
+    # agent definition with no extra parameters leaves this NULL.
+    # ``none_as_null=True`` keeps SQL NULL distinct from the JSON
+    # literal ``'null'`` -- the same discipline ``event_filter`` uses.
+    inputs: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Identity ``sub`` the dispatcher impersonates when starting the
+    # agent run. Distinct from :attr:`created_by_sub` because the
+    # operator who created the trigger is not necessarily the identity
+    # the scheduler should fire under at runtime (e.g. a service
+    # principal). Migration ``0025`` adds this column with a server
+    # default of ``'__scheduler__'`` (a sentinel) so the rows shipped
+    # by 0020 remain valid; production triggers should set this
+    # explicitly at create time.
+    identity_sub: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="__scheduler__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -3574,8 +3977,17 @@ class ApprovalRequest(Base):
 
     * ``params_hash`` -- SHA-256 hex hash of the canonicalised params
       (from :func:`~meho_backplane.operations._validate.compute_params_hash`).
-      Does not persist the params themselves; the resume endpoint
-      re-hashes its params against this value to detect substitution.
+      The swap-defence value: a caller-supplied params dict on the REST
+      ``/approve`` path is re-hashed against this to detect substitution
+      between request and approval.
+
+    * ``params`` -- JSON nullable (JSONB on PG). The original dispatch
+      params, stored verbatim (#1503) so a parked **direct** operator op
+      approved via ``/decide`` or MCP by-id — surfaces that hold only the
+      request id, not the params — can re-dispatch with the stored params
+      rather than only recording the decision. Nullable so pre-0036 rows
+      remain valid. Internal re-dispatch input; never serialised onto a
+      read view or broadcast frame.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for
@@ -3627,6 +4039,21 @@ class ApprovalRequest(Base):
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)
     target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
     params_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # Original dispatch params, stored verbatim so any approval surface
+    # (REST /decide, MCP by-id approve) can re-dispatch a parked *direct*
+    # operator op without the approver re-supplying them (#1503). REST
+    # /approve still supplies them in-band and verifies them against
+    # params_hash; the in-process agent-run resume uses its own in-memory
+    # params and ignores this column. Nullable so pre-0036 rows (which
+    # have no stored params) stay valid; a row written on or after 0036
+    # always carries the params. Internal re-dispatch input only -- never
+    # surfaced on a read view or broadcast frame (the swap-defence hash
+    # and the redacted proposed_effect remain the reviewer-facing fields).
+    params: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     # Proposed effect -- human-readable summary for the reviewer.
     proposed_effect: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
@@ -3675,5 +4102,668 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Event outbox (G11.3-T3 / #824)
+# ---------------------------------------------------------------------------
+
+
+class EventOutbox(Base):
+    """One durable MEHO-internal event ready for subscription dispatch.
+
+    Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The
+    transactional outbox: producers insert one of these rows in the
+    same DB transaction that writes the event-producing state change
+    (an :class:`AgentRun` transitioning to ``succeeded`` / ``failed`` /
+    ``cancelled``; future kinds: audit predicates, connector alerts).
+    A separate drain loop (:mod:`meho_backplane.events.drain`) scans the
+    outbox via ``SELECT ... FOR UPDATE SKIP LOCKED``, claims unprocessed
+    rows, and dispatches them to subscribed
+    :class:`ScheduledTrigger` rows of kind ``'event'`` once the
+    subscription matcher lands (T5 #826).
+
+    Why a transactional outbox (not raw ``LISTEN/NOTIFY``)
+    ------------------------------------------------------
+
+    Plain PG ``LISTEN/NOTIFY`` loses notifications sent while no
+    listener is connected. For an event-driven agent trigger that must
+    survive process restarts that loss is unacceptable. The
+    transactional outbox is the durable, replica-safe alternative; the
+    drain loop's ``SELECT ... FOR UPDATE SKIP LOCKED`` makes it
+    multi-replica safe (no double-dispatch). ``LISTEN/NOTIFY`` is
+    layered on top as a sub-second wake hint; the drain still ticks
+    on a 5-10s timer so a dropped notification is benign.
+
+    Append-only discipline
+    ----------------------
+
+    Producers only ever ``INSERT`` into this table; the drain loop
+    is the only mutator (stamps ``claimed_at`` / ``claimed_by`` and
+    eventually ``processed_at``). The :class:`AuditLog` append-only
+    recipe (one row per event, indexed by tenant + sequence) shapes
+    this table; the model carries no transition helpers because the
+    drain is the only mutator and lives in its own service module.
+
+    Schema decisions
+    ----------------
+
+    * ``event_id`` -- ``BIGSERIAL`` primary key on PG; ``Integer``
+      autoincrement on SQLite via :data:`_PORTABLE_BIG_SERIAL`. Monotonic
+      so the drain's "scan unprocessed events" query has a natural
+      ordering key without timestamp ties; the drain queries
+      ``WHERE processed_at IS NULL ORDER BY event_id``.
+
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
+      FK (migration 0027). Same discipline as :attr:`AgentRun.tenant_id`
+      / :attr:`ScheduledTrigger.tenant_id`.
+
+    * ``event_kind`` -- Text NOT NULL. The discriminator the matcher
+      will use once the subscription-junction lands. Free-text (not a
+      closed enum) because event kinds are added per-Initiative
+      without coordinated DB migrations; the matching policy lives in
+      the subscriber. v0.2 values shipped: ``agent_run.completed``.
+
+    * ``payload`` -- portable JSON -> JSONB NOT NULL DEFAULT ``'{}'``.
+      The event-specific payload the subscriber's filter matches
+      against. Not-null with a default keeps a payload-less event
+      insertable without ambiguity at the SQL layer.
+
+    * ``claimed_at`` / ``claimed_by`` -- ``timestamptz`` + Text, both
+      nullable. Stamped by the drain on a successful claim;
+      ``claimed_by`` records a process identifier so an operator can
+      observe which replica is handling a stuck claim.
+
+    * ``processed_at`` -- ``timestamptz`` nullable. Stamped after the
+      event has been dispatched (or marked no-op in v0.2 when no
+      subscriber matches). NULL means "not yet processed"; the partial
+      index keys on this column.
+
+    * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
+
+    Indexes
+    -------
+
+    * ``event_outbox_tenant_unprocessed_idx`` -- b-tree on
+      ``(tenant_id, processed_at, event_id)``. Drives the future
+      tenant-scoped scan once the matcher lands.
+    * ``event_outbox_unprocessed_idx`` -- partial b-tree on
+      ``event_id`` ``WHERE processed_at IS NULL`` on PG (plain b-tree
+      on SQLite). Drives the global drain scan; partial keeps the
+      index size flat as processed rows are tombstoned.
+    """
+
+    __tablename__ = "event_outbox"
+
+    event_id: Mapped[int] = mapped_column(
+        _PORTABLE_BIG_SERIAL,
+        primary_key=True,
+        autoincrement=True,
+    )
+    # Real REFERENCES tenant(id) FK -- migration 0027 enforces it at
+    # the DB layer (same discipline AgentRun / ScheduledTrigger follow).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # NOT NULL with a default of ``{}`` (see class docstring); the
+    # ``none_as_null`` flag stays off because a producer-side ``None``
+    # is a bug, not a NULL-storing intent.
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "event_outbox_tenant_unprocessed_idx",
+            "tenant_id",
+            "processed_at",
+            "event_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "event_outbox_unprocessed_idx",
+            "event_id",
+            postgresql_using="btree",
+            postgresql_where=sa.text("processed_at IS NULL"),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T5 — per-identity token budget model (C3-a)
+# ---------------------------------------------------------------------------
+
+
+class BudgetWindowKind(StrEnum):
+    """Closed vocabulary of budget-window granularities.
+
+    Each :class:`IdentityBudget` row is keyed in part on a
+    :class:`BudgetWindowKind` — the budget answers "what's the cap for
+    this principal *per day / per week / per month*". The runtime
+    increments one row per active window-kind on every successful run
+    (one daily bucket, one weekly bucket, one monthly bucket).
+
+    The vocabulary is intentionally closed (three values). A fourth
+    granularity would require both a code change and an Alembic
+    migration (the
+    :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+    column carries a DB-level CHECK constraint backed by this enum),
+    which is the cheapest way to prevent drift between the DB row, the
+    consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+
+    Members:
+
+    * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+    * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+    * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+      00:00 UTC.
+    """
+
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class IdentityBudget(Base):
+    """One per-(tenant, principal, window-kind, window-start) budget bucket.
+
+    Initiative #806 (G11.5 Portability + cost), Task #1079 (G11.5-T5 /
+    C3-a). The table is the data substrate for per-identity LLM token /
+    cost / request budgets attached to *any* MEHO principal (human,
+    service account, or agent — see :class:`AgentPrincipal` for the
+    agent-only registry). Each row carries:
+
+    * **Limits** (``token_limit`` / ``cost_limit`` / ``request_limit``)
+      — nullable; ``NULL`` means *"no cap on this dimension"*. Limits
+      are set by an operator / seed once and are static within a
+      window bucket; rotating to the next bucket carries over the
+      limits via a service-side helper, not a DB constraint.
+    * **Consumption** (``tokens_consumed`` / ``cost_consumed`` /
+      ``requests_consumed``) — NOT NULL with default 0; incremented by
+      the runtime's
+      :func:`~meho_backplane.operations.identity_budget.apply_consumption`
+      after every successful agent run. ``cost_consumed`` is
+      :class:`~decimal.Decimal` to keep arithmetic precision tight on
+      the money-shaped quantity; ``tokens_consumed`` is
+      :class:`~decimal.Decimal` rather than ``int`` because some
+      providers emit per-window aggregates that exceed 64-bit
+      ``Integer`` range when the prompt cache is hot (cache reads
+      count as a separate token stream).
+
+    The row is **keyed** by
+    ``(tenant_id, principal_sub, window_kind, window_start)`` —
+    enforced both at the DB layer (``uq_identity_budget_window``) and
+    by every upsert in the consumption service. A duplicate would feed
+    nondeterministic increments (*"which bucket do we charge?"*).
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key. PG ``gen_random_uuid()`` server
+      default via the migration; SQLite via ORM
+      ``default=uuid.uuid4``. The unique key is the
+      ``(tenant_id, principal_sub, window_kind, window_start)`` tuple
+      — the ``id`` exists only to give the row a stable handle for
+      cross-table references (none in v0.2).
+
+    * ``tenant_id`` — UUID NOT NULL, ``REFERENCES tenant(id)``. Brand-
+      new table, no chassis-era rows — same FK discipline as
+      :class:`AgentPermission` (0022).
+
+    * ``principal_sub`` — Text NOT NULL. The JWT ``sub`` claim of the
+      principal whose budget this is. Same soft-FK discipline as
+      :attr:`AgentPermission.principal_sub`: the principal can be a
+      human (no row in any principal table), a service account, or an
+      agent, and the JWT ``sub`` is the stable Keycloak-issued
+      identifier across all three.
+
+    * ``window_kind`` — Text NOT NULL with a portable
+      ``CHECK window_kind IN ('daily', 'weekly', 'monthly')``
+      constraint enforcing the closed :class:`BudgetWindowKind`
+      vocabulary. The enum and the constraint move in lock-step; a
+      drift guard in :mod:`tests.test_db_identity_budget` asserts
+      equality.
+
+    * ``window_start`` / ``window_end`` — ``timestamptz`` NOT NULL.
+      Inclusive lower / exclusive upper bound of the bucket. The
+      consumption service truncates *"now"* to the window-kind
+      boundary (00:00 UTC for daily / Monday 00:00 UTC for weekly /
+      1st of the month at 00:00 UTC for monthly) at upsert time, so
+      every row's pair is canonical and reproducible from
+      ``(window_kind, window_start)`` alone. ``window_end`` is
+      persisted so an audit / dashboard reader does not have to
+      re-derive the boundary.
+
+    * ``token_limit`` — ``Numeric(20, 0)`` nullable. NULL = no cap.
+      Wider than ``Integer`` for the same hot-prompt-cache reason
+      ``tokens_consumed`` is widened.
+
+    * ``cost_limit`` — ``Numeric(14, 6)`` nullable. NULL = no cap.
+      Eight integer digits hold "ten million USD per window"; six
+      fractional digits keep micro-cent precision for cache-read
+      rates.
+
+    * ``request_limit`` — ``Integer`` nullable. NULL = no cap. The
+      request count per principal per window is comfortably bounded
+      by a 32-bit signed range (≤2.1B), so a plain :class:`Integer`
+      suffices.
+
+    * ``tokens_consumed`` — ``Numeric(20, 0)`` NOT NULL DEFAULT 0.
+      Same precision rationale as ``token_limit``.
+
+    * ``cost_consumed`` — ``Numeric(14, 6)`` NOT NULL DEFAULT 0.
+      Same precision rationale as ``cost_limit``.
+
+    * ``requests_consumed`` — ``Integer`` NOT NULL DEFAULT 0.
+
+    * ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL. PG
+      server defaults ``now()``; ORM ``default=lambda:
+      datetime.now(UTC)`` for SQLite.
+
+    Indexes / constraints
+    ---------------------
+
+    * ``uq_identity_budget_window`` — unique on
+      ``(tenant_id, principal_sub, window_kind, window_start)``.
+      Drives the upsert path and prevents duplicate buckets.
+    * ``ck_identity_budget_window_kind`` — CHECK on ``window_kind``.
+    * ``identity_budget_tenant_principal_idx`` — b-tree on
+      ``(tenant_id, principal_sub)``. Drives the post-run consumption
+      walk (find the active buckets for this principal in this
+      tenant) and the dashboard / enforcement read.
+    """
+
+    __tablename__ = "identity_budget"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK to tenant.id -- brand-new table, no chassis-era rows.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft reference -- principal can be human / service / agent.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Closed CHECK-backed vocabulary (BudgetWindowKind).
+    window_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Inclusive lower bound of the bucket; truncated to window boundary.
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # Exclusive upper bound; persisted for audit reads.
+    window_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # Limits: nullable = "no cap on this dimension".
+    token_limit: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 0),
+        nullable=True,
+        default=None,
+    )
+    cost_limit: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 6),
+        nullable=True,
+        default=None,
+    )
+    request_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+    )
+    # Consumption: NOT NULL DEFAULT 0; incremented by apply_consumption.
+    tokens_consumed: Mapped[Decimal] = mapped_column(
+        Numeric(20, 0),
+        nullable=False,
+        default=lambda: Decimal(0),
+    )
+    cost_consumed: Mapped[Decimal] = mapped_column(
+        Numeric(14, 6),
+        nullable=False,
+        default=lambda: Decimal(0),
+    )
+    requests_consumed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "principal_sub",
+            "window_kind",
+            "window_start",
+            name="uq_identity_budget_window",
+        ),
+        sa.CheckConstraint(
+            "window_kind IN ('daily', 'weekly', 'monthly')",
+            name="ck_identity_budget_window_kind",
+        ),
+        Index(
+            "identity_budget_tenant_principal_idx",
+            "tenant_id",
+            "principal_sub",
+            postgresql_using="btree",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runbook schema (G12.1-T1 / #1292)
+# ---------------------------------------------------------------------------
+
+
+class RunbookTemplate(Base):
+    """A versioned runbook recipe (immutable on publish).
+
+    One row per ``(tenant_id, slug, version)`` triple. The ``slug`` is
+    the operator-facing stable identifier for the procedure (e.g.
+    ``drain-k8s-node``); ``version`` is a monotonically increasing
+    integer per ``(tenant_id, slug)`` — first draft starts at 1, each
+    edit that bumps the draft creates a new version row. The G12.2
+    write layer rejects edits to published templates (a new version must
+    be created).
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key; ``default=uuid.uuid4`` for the SQLite
+      dev/test path (no ``gen_random_uuid()`` server default in v0.2).
+    * ``tenant_id`` — UUID NOT NULL. Soft-FK per existing discipline
+      (no DB-level FK to ``tenant.id`` in v0.2 — same as every other
+      per-tenant table that predates the FK-tightening pass).
+    * ``slug`` — Text NOT NULL. Validated against
+      :data:`meho_backplane.kb.schemas.SLUG_PATTERN` at the schema
+      layer (G12.2); the DB only stores the pre-validated string.
+    * ``version`` — Integer NOT NULL. Uniqueness enforced by
+      ``runbook_templates_tenant_slug_version_idx`` (unique b-tree on
+      ``(tenant_id, slug, version)``).
+    * ``steps`` — ``_PORTABLE_JSON`` NOT NULL. Ordered list of step
+      descriptors; shape validation (discriminated
+      ``type: operation_call`` / ``type: manual`` unions) lives in the
+      Pydantic layer (G12.2).
+    * ``status`` — Text NOT NULL DEFAULT ``'draft'``. Drives the
+      lifecycle machine ``draft → published → deprecated``.
+      ``CheckConstraint`` enforces the closed vocabulary.
+    * ``created_by`` / ``edited_by`` — operator sub (JWT ``sub`` claim).
+      ``edited_by`` mirrors ``created_by`` on first creation; updated by
+      the G12.2 edit surface on each subsequent write.
+    * ``created_at`` / ``edited_at`` — ``timestamptz`` NOT NULL.
+      ``default=lambda: datetime.now(UTC)`` so SQLite dev/test paths
+      populate the column without relying on a dialect server default.
+
+    Indexes
+    -------
+
+    * ``runbook_templates_tenant_slug_version_idx`` — unique b-tree on
+      ``(tenant_id, slug, version)``.  Templates are always
+      tenant-scoped so a single full unique index suffices (no partial-
+      index split like ``operation_group_global_idx`` /
+      ``operation_group_tenant_idx``).
+    * ``runbook_templates_tenant_status_idx`` — b-tree on
+      ``(tenant_id, status)`` for the ``runbook_list_templates`` query
+      path (G12.2).
+    """
+
+    __tablename__ = "runbook_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK — no DB-level FK to tenant.id in v0.2 (same discipline
+    # as every other per-tenant table in this module).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    steps: Mapped[list[dict[str, object]]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=list,
+    )
+    target_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    edited_by: Mapped[str] = mapped_column(Text, nullable=False)
+    edited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "runbook_templates_tenant_slug_version_idx",
+            "tenant_id",
+            "slug",
+            "version",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "runbook_templates_tenant_status_idx",
+            "tenant_id",
+            "status",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "status IN ('draft', 'published', 'deprecated')",
+            name="ck_runbook_templates_status",
+        ),
+    )
+
+
+class RunbookRun(Base):
+    """An execution of a :class:`RunbookTemplate` — one row per invocation.
+
+    The state machine drives ``in_progress → completed | abandoned``.
+    ``template_slug`` and ``template_version`` are pinned at run start so
+    later template edits cannot alter an in-flight run's step list. The
+    ``params`` column carries the ``${run.params.X}`` substitution context
+    (G12.3); it defaults to an empty dict so a params-less run is
+    insertable without ambiguity.
+
+    Schema decisions
+    ----------------
+
+    * ``run_id`` — UUID primary key; ``default=uuid.uuid4`` for dev/test.
+    * ``tenant_id`` — UUID NOT NULL. Soft-FK (no DB-level FK in v0.2).
+    * ``template_slug`` / ``template_version`` — pinned at start. Composite
+      soft-reference to ``(tenant_id, slug, version)`` in
+      ``runbook_templates`` — no DB-level multi-column FK in v0.2 by the
+      existing discipline.
+    * ``params`` — ``_PORTABLE_JSON`` NOT NULL. ``default=dict`` for the
+      SQLite path; PG gets ``'{}'`` as the server default in the migration
+      (same pattern as ``event_outbox.payload`` in migration ``0027``).
+    * ``state`` — Text NOT NULL DEFAULT ``'in_progress'``.
+      ``CheckConstraint`` enforces the closed vocabulary.
+    * ``completed_at`` / ``abandoned_at`` — NULL until the respective
+      terminal transition.
+
+    Indexes
+    -------
+
+    * ``runbook_runs_tenant_assigned_state_idx`` — b-tree on
+      ``(tenant_id, assigned_to, state)`` — drives the G12.4 priming
+      query ("in-progress runs assigned to this operator") and
+      ``runbook_list_runs`` (G12.3).
+    * ``runbook_runs_tenant_template_idx`` — b-tree on
+      ``(tenant_id, template_slug, template_version)`` — drives the
+      G12.3 post-completion read-allowance lookup ("did this operator
+      run this template?").
+    """
+
+    __tablename__ = "runbook_runs"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK (same discipline as tenant_id on other tables).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    # Pinned at start; composite soft-reference to runbook_templates.
+    template_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    assigned_to: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="in_progress")
+    started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    abandoned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "runbook_runs_tenant_assigned_state_idx",
+            "tenant_id",
+            "assigned_to",
+            "state",
+            postgresql_using="btree",
+        ),
+        Index(
+            "runbook_runs_tenant_template_idx",
+            "tenant_id",
+            "template_slug",
+            "template_version",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "state IN ('in_progress', 'completed', 'abandoned')",
+            name="ck_runbook_runs_state",
+        ),
+    )
+
+
+class RunbookRunStepState(Base):
+    """Per-(run, step) state for a :class:`RunbookRun`.
+
+    One row per step per run; created in bulk when a run is started
+    (G12.3), all rows initially in ``state='pending'``. The composite PK
+    ``(run_id, step_id)`` is the natural join key; no additional index is
+    needed because the PK covers the per-run advance query path (G12.3:
+    "advance run X to step Y").
+
+    Schema decisions
+    ----------------
+
+    * ``run_id`` — part of the composite PK. Real
+      ``ForeignKey("runbook_runs.run_id", ondelete="CASCADE")`` — this
+      is a new-table child relationship, so a DB-level FK is
+      appropriate (same pattern as :class:`GraphEdge` → :class:`GraphNode`
+      with ``ondelete="CASCADE"``). Cascade-delete so dropping a run row
+      also removes its step states.
+    * ``step_id`` — part of the composite PK. Matches the ``id`` field
+      inside ``runbook_templates.steps[]``; validated by the G12.3 layer
+      at write time.
+    * ``state`` — Text NOT NULL DEFAULT ``'pending'``. Drives the per-step
+      state machine. ``CheckConstraint`` enforces the closed vocabulary.
+    * ``started_at`` — NULL while ``state='pending'``; stamped when the
+      step transitions to ``in_progress``.
+    * ``verified_at`` — NULL until the step reaches ``verified``.
+    * ``verify_response`` — nullable JSONB. Captures the operator's
+      confirmation result (``yes`` / ``no`` / ``escalate`` for ``confirm``
+      steps) or the dispatched-call result (for ``operation_call`` steps).
+      NULL while the step is in-progress or pending.
+    """
+
+    __tablename__ = "runbook_run_step_states"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("runbook_runs.run_id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    step_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    verify_response: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "state IN ('pending', 'in_progress', 'verified', 'failed')",
+            name="ck_runbook_run_step_states_state",
         ),
     )

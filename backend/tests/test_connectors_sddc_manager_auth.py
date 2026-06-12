@@ -19,12 +19,13 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -88,6 +89,10 @@ class _StubTarget:
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     sso_realm: str = field(default="vsphere.local")
+    # Tenant-unique cache key components (#1642). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -336,6 +341,63 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_credentials() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached credential.
+
+    Regression guard for #1642: the credential cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry and one tenant could be served another
+    tenant's cached credential. The cache keys on the tenant-unique
+    ``(tenant_id, id)`` tuple instead.
+    """
+    load_count = 0
+
+    async def _counting_loader(target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
+        nonlocal load_count
+        load_count += 1
+        return {"username": f"svc-{target.tenant_id}", "password": "pass"}
+
+    tenant_one = _StubTarget(
+        name="sddc-shared",
+        host="sddc-shared.test.invalid",
+        port=443,
+        secret_ref="sddc/sddc-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="sddc-shared",
+        host="sddc-shared.test.invalid",
+        port=443,
+        secret_ref="sddc/sddc-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    connector = SddcManagerConnector(credentials_loader=_counting_loader)
+    h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+    h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    user_one, _ = _decode_basic_auth(h_one["Authorization"])
+    user_two, _ = _decode_basic_auth(h_two["Authorization"])
+    # Each tenant triggered its own load -- no cross-tenant cache hit.
+    assert load_count == 2
+    assert user_one == f"svc-{tenant_one.tenant_id}@vsphere.local"
+    assert user_two == f"svc-{tenant_two.tenant_id}@vsphere.local"
+    assert user_one != user_two
+    assert connector._creds_cache.keys() == {
+        target_cache_key(tenant_one),
+        target_cache_key(tenant_two),
+    }
+
+    # Same-tenant re-fetch is a cache HIT -- behaviour unchanged.
+    h_one_again = await connector.auth_headers(tenant_one, operator=_make_operator())
+    assert h_one_again == h_one
+    assert load_count == 2
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Credential loading failure modes
 # ---------------------------------------------------------------------------
@@ -559,7 +621,7 @@ async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert "sddc-a" in connector._creds_cache
+    assert target_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}
@@ -572,3 +634,100 @@ async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
     await connector.aclose()
     assert connector._clients == {}
     assert connector._creds_cache == {}
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T4 (#1306) probe-vs-dispatch convergence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_forwards_route_operator_to_credentials_loader() -> None:
+    """G0.16-T4 (#1306) probe-vs-dispatch convergence regression for sddc-manager.
+
+    Pre-#1306 the probe route called ``cls().fingerprint(target)``
+    without an operator; the connector synthesised a system operator
+    whose placeholder ``raw_jwt`` is not a compact-JWS. Vault's
+    JWT/OIDC auth method rejected it before the per-target read,
+    surfacing as ``vault OIDC malformed jwt: must have three parts``
+    on the v0.8.0 dogfood's ``vcf9-sddc`` probe.
+
+    Post-#1306 the probe route forwards its operator — the same code
+    path the dispatch surface uses. Test pins:
+    1. The credentials loader receives the route operator.
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
+       parts).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: SddcTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = SddcManagerConnector(credentials_loader=_capturing_loader)
+
+    route_operator = Operator(
+        sub="op-rdc",
+        name="RDC Operator",
+        email=None,
+        raw_jwt="header.payload.signature",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={
+                "elements": [
+                    {
+                        "id": "sddc-uuid-1",
+                        "fqdn": "sddc-a.test.invalid",
+                        "version": "9.0.0.0-24276214",
+                        "build": "24276214",
+                        "domain": {"id": "domain-uuid-1", "name": "MGMT"},
+                    }
+                ],
+                "pageMetadata": {"pageNumber": 1, "pageSize": 10, "totalElements": 1},
+            },
+        )
+        await connector.fingerprint(_TARGET_A, operator=route_operator)
+
+    assert len(captured) == 1
+    fwd = captured[0]
+    assert fwd.sub == route_operator.sub
+    assert len(fwd.raw_jwt.split(".")) >= 3, (
+        "forwarded JWT must look like a compact-JWS so Vault accepts it"
+    )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_operator_falls_back_to_system_operator() -> None:
+    """``fingerprint(target)`` without ``operator`` synthesises the
+    system operator (the system-call carve-out).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: SddcTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = SddcManagerConnector(credentials_loader=_capturing_loader)
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={"elements": [], "pageMetadata": {}},
+        )
+        await connector.fingerprint(_TARGET_A)
+
+    assert len(captured) == 1
+    assert captured[0].sub == SYSTEM_OPERATOR_SUB
+    await connector.aclose()

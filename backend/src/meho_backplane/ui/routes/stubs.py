@@ -17,14 +17,15 @@ shell renders end-to-end before the per-surface Initiatives
   state-changing form rendered before the surface Initiative lands
   has the double-submit chain in place from request one.
 
-The remaining stub paths are kept consistent with the chassis
-``base.html`` sidebar -- ``/ui/knowledge``, ``/ui/connectors``,
-``/ui/memory``. ``/ui/topology`` and ``/ui/broadcast`` are intentionally
-NOT stubbed here: topology's real table view ships in G10.5-T1 (#880)
-and broadcast's real live-feed view ships in G10.1-T1 (#867), each
-owning its path; registering a stub for either would shadow the real
-route in the generated OpenAPI schema. The Goal #336 done-when and
-Initiative #337 work-item #5 reference these exact URLs.
+No stub paths remain. All five surfaces ship real routers, each
+owning its path -- topology's table view (G10.5-T1 #880), broadcast's
+live-feed view (G10.1-T1 #867), memory's list / detail / edit surface
+(G10.4-T1 #877), the connectors targets list + detail (G10.3-T1 #873),
+and the KB read surface (G10.2-T1 #870). Registering a stub for any of
+them would shadow the real route in the generated OpenAPI schema, so
+:data:`_SURFACE_STUBS` is now empty and :func:`build_stubs_router`
+returns a router with no routes. The Goal #336 done-when and Initiative
+#337 work-item #5 reference these exact URLs.
 
 Why one shared template
 -----------------------
@@ -74,24 +75,10 @@ class _SurfaceStub:
 
 
 _SURFACE_STUBS: Final[tuple[_SurfaceStub, ...]] = (
-    _SurfaceStub(
-        slug="knowledge",
-        title="Knowledge",
-        initiative_number=339,
-        summary="Search + view + drag-and-drop upload + Markdown editor over the team kb.",
-    ),
-    _SurfaceStub(
-        slug="connectors",
-        title="Connectors",
-        initiative_number=340,
-        summary="Per-tenant target CRUD + per-target detail (fingerprint, last probe, ops).",
-    ),
-    _SurfaceStub(
-        slug="memory",
-        title="Memory",
-        initiative_number=341,
-        summary="Browse + edit memories across the 5 scopes; scope-promotion UI.",
-    ),
+    # All surfaces ship real routers, so no stubs remain:
+    # ``broadcast`` G10.1-T1 (#867), ``topology`` G10.5-T1 (#880),
+    # ``memory`` G10.4-T1 (#877), ``connectors`` G10.3-T1 (#873),
+    # ``kb`` G10.2-T1 (#870).
 )
 
 

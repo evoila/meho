@@ -352,11 +352,19 @@ def test_happy_path_returns_full_federation_response(
     # ``db.migrated`` now reflects the DB-migration-state probe verdict.
     # Post-T28, the autouse default DATABASE_URL has the audit-log
     # migration applied at fixture setup, so the probe reports healthy
-    # and ``migrated`` is True.
+    # and ``migrated`` is True. ``mcp_session_id_capture`` reports the
+    # G8.2 audit-replay capture mode (G0.14-T6 #1147); default mode is
+    # ``"always"`` because ``MCP_REQUIRE_SESSION_ID`` is unset in this
+    # test fixture's env. ``mcp_protocol_version`` reports the server's
+    # build-time pinned MCP revision (G0.14-T13 #1202).
+    from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+
     assert body == {
         "operator": {"sub": "op-100", "name": "Alice", "email": "alice@example.com"},
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
         "db": {"migrated": True},
+        "mcp_session_id_capture": "always",
+        "mcp_protocol_version": PROTOCOL_VERSION,
     }
 
     # Vault was hit with the configured role / mount and the operator's
@@ -600,3 +608,107 @@ def test_vault_malformed_payload_returns_200_with_read_failed_detail(
     assert body["vault"]["reachable"] is True
     assert body["vault"]["read_ok"] is False
     assert body["vault"]["detail"] == "read_failed: KeyError"
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T6 (#1147) — mcp_session_id_capture field
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_session_id_capture_default_always(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default deploy → ``mcp_session_id_capture == "always"``.
+
+    Unset ``MCP_REQUIRE_SESSION_ID`` → the capture-vs-enforcement
+    decouple (G0.14-T6 #1147) reports ``"always"``: any
+    ``Mcp-Session-Id`` header the client sends is captured, and a
+    missing header is accepted (the audit row's ``agent_session_id``
+    lands as NULL). This is the mode G8.2 audit-replay needs to light
+    up on a stock deploy.
+    """
+    monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
+    get_settings.cache_clear()
+
+    key = _make_rsa_keypair("kid-capture-always")
+    token = _mint_token(key, sub="op-capture-always")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mcp_session_id_capture"] == "always"
+
+
+def test_mcp_session_id_capture_enforced_when_env_set(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``MCP_REQUIRE_SESSION_ID=true`` → ``"enforced"``.
+
+    Capture still works the same way (any present header is bound);
+    the field flips to ``"enforced"`` to signal that a missing header
+    is additionally a JSON-RPC ``-32600`` reject at the transport
+    boundary, which compliance deploys mandate.
+    """
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+
+    key = _make_rsa_keypair("kid-capture-enforced")
+    token = _mint_token(key, sub="op-capture-enforced")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mcp_session_id_capture"] == "enforced"
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T13 (#1202) — mcp_protocol_version field
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_protocol_version_reports_server_pinned_revision(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /api/v1/health`` surfaces the server-pinned MCP protocol version.
+
+    Acceptance criterion (G0.14-T13 #1202): the health endpoint includes
+    ``mcp_protocol_version`` carrying the build-time constant
+    :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION` so operators can
+    discover the negotiation outcome from a single authenticated GET,
+    without having to read CHANGELOGs or open an MCP handshake.
+
+    The field is sourced from the constant, not from a settings field —
+    no env-var monkeypatch is needed to exercise it. The test pins the
+    expected value to the same constant the production handler reads so
+    a future revision bump propagates without surface-test churn.
+    """
+    from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+
+    key = _make_rsa_keypair("kid-protocol-version")
+    token = _mint_token(key, sub="op-protocol-version")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["mcp_protocol_version"] == PROTOCOL_VERSION

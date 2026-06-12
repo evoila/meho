@@ -85,12 +85,53 @@ class _FakeJWTAuth:
 class _FakeTokenAuth:
     revoke_calls: int = 0
     raise_on_revoke: Exception | None = None
+    # G3.15-T4 (#1412) token lifecycle ops. ``create`` mints into its
+    # response payload (the secret the credential_mint redaction must
+    # keep off audit/broadcast); ``revoke_accessor`` / ``list_accessors``
+    # record their calls and surface an injectable failure + payload.
+    minted_client_token: str = field(
+        default_factory=lambda: f"vault-fake-mint-{secrets.token_hex(8)}"
+    )
+    minted_accessor: str = field(default_factory=lambda: f"fake-accessor-{secrets.token_hex(8)}")
+    create_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_create: Exception | None = None
+    revoke_accessor_calls: list[str] = field(default_factory=list)
+    raise_on_revoke_accessor: Exception | None = None
+    accessors_payload: Any = None
+    raise_on_list_accessors: Exception | None = None
+    list_accessors_calls: int = 0
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
         self.revoke_calls += 1
         if self.raise_on_revoke is not None:
             raise self.raise_on_revoke
+
+    def create(self, **kwargs: Any) -> dict[str, Any]:
+        self.create_calls.append(dict(kwargs))
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        return {
+            "auth": {
+                "client_token": self.minted_client_token,
+                "accessor": self.minted_accessor,
+                "policies": list(kwargs.get("policies", []) or []),
+            }
+        }
+
+    def revoke_accessor(self, accessor: str, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.revoke_accessor_calls.append(accessor)
+        if self.raise_on_revoke_accessor is not None:
+            raise self.raise_on_revoke_accessor
+        return _DeleteResponse()
+
+    def list_accessors(self, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.list_accessors_calls += 1
+        if self.raise_on_list_accessors is not None:
+            raise self.raise_on_list_accessors
+        return self.accessors_payload
 
 
 @dataclass
@@ -109,8 +150,18 @@ class _FakeUserpassAuth:
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
     list_exc: Exception | None = None
     read_exc: Exception | None = None
+    # G3.15-T3 (#1411) write half. Per-verb call logs + exception knobs
+    # so the credential-lifecycle tests can target one op without
+    # disturbing the read ops. Defaults are benign so the pre-existing
+    # read-only suites that never touch these attributes keep passing.
+    write_exc: Exception | None = None
+    update_password_exc: Exception | None = None
+    delete_exc: Exception | None = None
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    write_calls: list[dict[str, Any]] = field(default_factory=list)
+    update_password_calls: list[dict[str, Any]] = field(default_factory=list)
+    delete_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def list_user(self, mount_point: str = "userpass") -> dict[str, Any]:
         self.list_calls.append({"mount_point": mount_point})
@@ -123,6 +174,43 @@ class _FakeUserpassAuth:
         if self.read_exc is not None:
             raise self.read_exc
         return {"data": self.users[username]}
+
+    def create_or_update_user(
+        self,
+        username: str,
+        password: str | None = None,
+        mount_point: str = "userpass",
+        **kwargs: Any,
+    ) -> Any:
+        self.write_calls.append(
+            {
+                "username": username,
+                "password": password,
+                "mount_point": mount_point,
+                **kwargs,
+            }
+        )
+        if self.write_exc is not None:
+            raise self.write_exc
+        self.users[username] = {"token_policies": list(kwargs.get("token_policies", []))}
+        return _DeleteResponse(status_code=204)
+
+    def update_password_on_user(
+        self, username: str, password: str, mount_point: str = "userpass"
+    ) -> Any:
+        self.update_password_calls.append(
+            {"username": username, "password": password, "mount_point": mount_point}
+        )
+        if self.update_password_exc is not None:
+            raise self.update_password_exc
+        return _DeleteResponse(status_code=204)
+
+    def delete_user(self, username: str, mount_point: str = "userpass") -> Any:
+        self.delete_calls.append({"username": username, "mount_point": mount_point})
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        self.users.pop(username, None)
+        return _DeleteResponse(status_code=204)
 
 
 @dataclass
@@ -137,8 +225,21 @@ class _FakeAppRoleAuth:
     roles: dict[str, dict[str, Any]] = field(default_factory=dict)
     list_exc: Exception | None = None
     read_exc: Exception | None = None
+    # G3.15-T3 (#1411) write half. ``secret_id`` is the value the
+    # generate_secret_id fake mints into its response payload so the
+    # redaction tests can seed a distinctive sentinel and positively
+    # assert its absence from the serialised broadcast event.
+    write_exc: Exception | None = None
+    delete_exc: Exception | None = None
+    generate_secret_id_exc: Exception | None = None
+    secret_id: str = "fake-secret-id"
+    secret_id_accessor: str = "fake-secret-id-accessor"
+    secret_id_ttl: int = 600
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    write_calls: list[dict[str, Any]] = field(default_factory=list)
+    delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    generate_secret_id_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def list_roles(self, mount_point: str = "approle") -> dict[str, Any]:
         self.list_calls.append({"mount_point": mount_point})
@@ -151,6 +252,38 @@ class _FakeAppRoleAuth:
         if self.read_exc is not None:
             raise self.read_exc
         return {"data": self.roles[role_name]}
+
+    def create_or_update_approle(
+        self, role_name: str, mount_point: str = "approle", **kwargs: Any
+    ) -> Any:
+        self.write_calls.append({"role_name": role_name, "mount_point": mount_point, **kwargs})
+        if self.write_exc is not None:
+            raise self.write_exc
+        self.roles[role_name] = dict(kwargs)
+        return _DeleteResponse(status_code=204)
+
+    def delete_role(self, role_name: str, mount_point: str = "approle") -> Any:
+        self.delete_calls.append({"role_name": role_name, "mount_point": mount_point})
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        self.roles.pop(role_name, None)
+        return _DeleteResponse(status_code=204)
+
+    def generate_secret_id(
+        self, role_name: str, mount_point: str = "approle", **kwargs: Any
+    ) -> dict[str, Any]:
+        self.generate_secret_id_calls.append(
+            {"role_name": role_name, "mount_point": mount_point, **kwargs}
+        )
+        if self.generate_secret_id_exc is not None:
+            raise self.generate_secret_id_exc
+        return {
+            "data": {
+                "secret_id": self.secret_id,
+                "secret_id_accessor": self.secret_id_accessor,
+                "secret_id_ttl": self.secret_id_ttl,
+            }
+        }
 
 
 @dataclass
@@ -187,10 +320,12 @@ class _FakeKVv2:
     )
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
+    patch_calls: list[dict[str, Any]] = field(default_factory=list)
     versions_calls: list[dict[str, Any]] = field(default_factory=list)
     delete_calls: list[dict[str, Any]] = field(default_factory=list)
     list_exc: Exception | None = None
     put_exc: Exception | None = None
+    patch_exc: Exception | None = None
     versions_exc: Exception | None = None
     delete_exc: Exception | None = None
 
@@ -228,6 +363,22 @@ class _FakeKVv2:
         )
         if self.put_exc is not None:
             raise self.put_exc
+        return {"data": {"version": self.version + 1}}
+
+    def patch(
+        self,
+        path: str,
+        secret: dict[str, Any],
+        mount_point: str = "secret",
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        # hvac's ``patch`` takes no ``cas`` kwarg — it issues its own
+        # internal read+write. Mirror that signature so a stray ``cas``
+        # in a test would be a clear TypeError rather than silently
+        # accepted.
+        self.patch_calls.append({"path": path, "secret": secret, "mount_point": mount_point})
+        if self.patch_exc is not None:
+            raise self.patch_exc
         return {"data": {"version": self.version + 1}}
 
     def read_secret_metadata(
@@ -268,8 +419,94 @@ class _FakeKV:
 
 
 @dataclass
+class _FakeIdentity:
+    """Fake ``client.secrets.identity`` backend (G3.15-T4 #1412).
+
+    Models the entity/group/alias surface the identity ops drive. Writes
+    record their kwargs and return a ``{"data": {"id": ...}}`` envelope
+    (a create) by default — set ``minted_id=None`` to model an update's
+    204/no-body. Reads return an injectable payload or raise; ``list_*``
+    surface the ``keys`` envelope (or ``InvalidPath`` for an empty store).
+    """
+
+    minted_id: str | None = field(default_factory=lambda: f"fake-id-{secrets.token_hex(8)}")
+    entity_payload: Any = None
+    raise_on_read_entity: Exception | None = None
+    group_payload: Any = None
+    raise_on_read_group: Exception | None = None
+    groups_payload: Any = None
+    raise_on_list_groups: Exception | None = None
+    entities_payload: Any = None
+    raise_on_list_entities: Exception | None = None
+    entity_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    entity_alias_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    group_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    group_delete_calls: list[str] = field(default_factory=list)
+    read_entity_calls: list[str] = field(default_factory=list)
+    read_group_calls: list[str] = field(default_factory=list)
+
+    def _mint_envelope(self) -> Any:
+        if self.minted_id is None:
+            return None
+        return {"data": {"id": self.minted_id}}
+
+    def create_or_update_entity(self, name: str, **kwargs: Any) -> Any:
+        self.entity_write_calls.append({"name": name, **kwargs})
+        return self._mint_envelope()
+
+    def create_or_update_entity_alias(
+        self, name: str, canonical_id: str, mount_accessor: str, **kwargs: Any
+    ) -> Any:
+        self.entity_alias_write_calls.append(
+            {
+                "name": name,
+                "canonical_id": canonical_id,
+                "mount_accessor": mount_accessor,
+                **kwargs,
+            }
+        )
+        return self._mint_envelope()
+
+    def create_or_update_group(self, name: str, **kwargs: Any) -> Any:
+        self.group_write_calls.append({"name": name, **kwargs})
+        return self._mint_envelope()
+
+    def delete_group_by_name(self, name: str, mount_point: str = "identity") -> _DeleteResponse:
+        _ = mount_point
+        self.group_delete_calls.append(name)
+        return _DeleteResponse()
+
+    def read_entity(self, entity_id: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        self.read_entity_calls.append(entity_id)
+        if self.raise_on_read_entity is not None:
+            raise self.raise_on_read_entity
+        return self.entity_payload
+
+    def read_group_by_name(self, name: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        self.read_group_calls.append(name)
+        if self.raise_on_read_group is not None:
+            raise self.raise_on_read_group
+        return self.group_payload
+
+    def list_groups(self, method: str = "LIST", mount_point: str = "identity") -> Any:
+        _ = (method, mount_point)
+        if self.raise_on_list_groups is not None:
+            raise self.raise_on_list_groups
+        return self.groups_payload
+
+    def list_entities(self, method: str = "LIST", mount_point: str = "identity") -> Any:
+        _ = (method, mount_point)
+        if self.raise_on_list_entities is not None:
+            raise self.raise_on_list_entities
+        return self.entities_payload
+
+
+@dataclass
 class _FakeSecrets:
     kv: _FakeKV
+    identity: _FakeIdentity
 
 
 @dataclass
@@ -290,6 +527,65 @@ class _FakeSysBackend:
     auth_methods_payload: Any = None
     raise_on_auth_methods: Exception | None = None
     auth_methods_calls: int = 0
+    # G3.15-T2 (#1410) ACL-policy ops. Same payload / raise pair shape as
+    # the sibling sys-read knobs above so the policy-op tests inject a
+    # success body or a failure independently. ``write`` / ``delete``
+    # record the call args (Vault returns 204 with no body, so there is
+    # no payload to inject — only a failure knob).
+    policy_read_payload: Any = None
+    raise_on_policy_read: Exception | None = None
+    policy_read_calls: list[dict[str, Any]] = field(default_factory=list)
+    policy_list_payload: Any = None
+    raise_on_policy_list: Exception | None = None
+    policy_list_calls: int = 0
+    raise_on_policy_write: Exception | None = None
+    policy_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_policy_delete: Exception | None = None
+    policy_delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    # G3.15-T5 (#1413) sys bootstrap writes — auth-method + secret-mount
+    # enable/tune. Each verb records its call args and gets a failure
+    # knob; the two enables return 204 (no body) on success, so there is
+    # no payload to inject — only the failure knob plus the call log so
+    # the idempotency / forwarding assertions can introspect what hvac
+    # was handed.
+    raise_on_auth_enable: Exception | None = None
+    auth_enable_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_auth_tune: Exception | None = None
+    auth_tune_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_mount_enable: Exception | None = None
+    mount_enable_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_mount_tune: Exception | None = None
+    mount_tune_calls: list[dict[str, Any]] = field(default_factory=list)
+    # G0.20-T4 (#1504) park-time write-capability preflight. The Vault
+    # KV-write preflight calls ``client.sys.get_capabilities(paths=[...])``
+    # → ``POST sys/capabilities-self``. ``capabilities_by_path`` maps the
+    # probed data path to the capability list Vault would return; an
+    # unmapped path falls back to ``default_capabilities`` (defaults to
+    # the deny-by-omission empty list so a test that forgets to grant a
+    # path models a read-only role). ``raise_on_get_capabilities`` drives
+    # the fail-soft branch.
+    capabilities_by_path: dict[str, list[str]] = field(default_factory=dict)
+    default_capabilities: list[str] = field(default_factory=list)
+    raise_on_get_capabilities: Exception | None = None
+    get_capabilities_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def get_capabilities(
+        self, paths: list[str], token: str | None = None, accessor: str | None = None
+    ) -> dict[str, Any]:
+        self.get_capabilities_calls.append(
+            {"paths": list(paths), "token": token, "accessor": accessor}
+        )
+        if self.raise_on_get_capabilities is not None:
+            raise self.raise_on_get_capabilities
+        # Vault returns a per-path key plus a ``capabilities`` mirror for
+        # a single-path query. Model both so consumers can read either.
+        body: dict[str, Any] = {}
+        single = paths[0] if len(paths) == 1 else None
+        for p in paths:
+            body[p] = list(self.capabilities_by_path.get(p, self.default_capabilities))
+        if single is not None:
+            body["capabilities"] = list(body[single])
+        return body
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
         self.read_calls.append({"method": method})
@@ -314,6 +610,67 @@ class _FakeSysBackend:
         if self.raise_on_auth_methods is not None:
             raise self.raise_on_auth_methods
         return self.auth_methods_payload
+
+    def read_policy(self, name: str) -> Any:
+        self.policy_read_calls.append({"name": name})
+        if self.raise_on_policy_read is not None:
+            raise self.raise_on_policy_read
+        return self.policy_read_payload
+
+    def list_policies(self) -> Any:
+        self.policy_list_calls += 1
+        if self.raise_on_policy_list is not None:
+            raise self.raise_on_policy_list
+        return self.policy_list_payload
+
+    def create_or_update_policy(
+        self, name: str, policy: str, pretty_print: bool = True
+    ) -> _DeleteResponse:
+        self.policy_write_calls.append(
+            {"name": name, "policy": policy, "pretty_print": pretty_print}
+        )
+        if self.raise_on_policy_write is not None:
+            raise self.raise_on_policy_write
+        # Vault returns 204 with no body; hvac yields the requests.Response.
+        return _DeleteResponse()
+
+    def delete_policy(self, name: str) -> _DeleteResponse:
+        self.policy_delete_calls.append({"name": name})
+        if self.raise_on_policy_delete is not None:
+            raise self.raise_on_policy_delete
+        return _DeleteResponse()
+
+    def enable_auth_method(
+        self, method_type: str, path: str | None = None, description: str | None = None
+    ) -> _DeleteResponse:
+        self.auth_enable_calls.append(
+            {"method_type": method_type, "path": path, "description": description}
+        )
+        if self.raise_on_auth_enable is not None:
+            raise self.raise_on_auth_enable
+        return _DeleteResponse()
+
+    def tune_auth_method(self, path: str, **kwargs: Any) -> _DeleteResponse:
+        self.auth_tune_calls.append({"path": path, **kwargs})
+        if self.raise_on_auth_tune is not None:
+            raise self.raise_on_auth_tune
+        return _DeleteResponse()
+
+    def enable_secrets_engine(
+        self, backend_type: str, path: str | None = None, description: str | None = None
+    ) -> _DeleteResponse:
+        self.mount_enable_calls.append(
+            {"backend_type": backend_type, "path": path, "description": description}
+        )
+        if self.raise_on_mount_enable is not None:
+            raise self.raise_on_mount_enable
+        return _DeleteResponse()
+
+    def tune_mount_configuration(self, path: str, **kwargs: Any) -> _DeleteResponse:
+        self.mount_tune_calls.append({"path": path, **kwargs})
+        if self.raise_on_mount_tune is not None:
+            raise self.raise_on_mount_tune
+        return _DeleteResponse()
 
 
 @dataclass
@@ -356,7 +713,7 @@ def install_fake_vault(
         token=None,
         auth=_FakeAuth(jwt=jwt_auth, token=token_auth),
         sys=_FakeSysBackend(),
-        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2)),
+        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2), identity=_FakeIdentity()),
     )
     jwt_auth.parent = fake
 
@@ -384,10 +741,21 @@ def install_fake_client(
     mounts_exc: Exception | None = None,
     auth_methods_payload: Any = None,
     auth_methods_exc: Exception | None = None,
+    policy_read_payload: Any = None,
+    policy_read_exc: Exception | None = None,
+    policy_list_payload: Any = None,
+    policy_list_exc: Exception | None = None,
+    policy_write_exc: Exception | None = None,
+    policy_delete_exc: Exception | None = None,
+    auth_enable_exc: Exception | None = None,
+    auth_tune_exc: Exception | None = None,
+    mount_enable_exc: Exception | None = None,
+    mount_tune_exc: Exception | None = None,
     keys: list[str] | None = None,
     versions_meta: dict[str, Any] | None = None,
     list_exc: Exception | None = None,
     put_exc: Exception | None = None,
+    patch_exc: Exception | None = None,
     versions_exc: Exception | None = None,
     delete_exc: Exception | None = None,
 ) -> _FakeClient:
@@ -400,9 +768,15 @@ def install_fake_client(
     login / revoke / health-read / kv-read exception injection plus
     secret and KV-version overrides, the G3.3-T2 (#546) sys read
     group's seal-status / mounts / auth-methods payload + exception
-    injection, and the G3.3-T1 KV-v2 verbs (list / put / versions /
+    injection, the G3.3-T1 KV-v2 verbs (list / put / versions / patch /
     delete) with per-verb exception injection and key/version-metadata
-    overrides.
+    overrides, the G3.15-T2 (#1410) ACL-policy verbs (read / list
+    payload + exception injection; write / delete exception injection,
+    write/delete returning 204 with no body), and the G3.15-T5 (#1413)
+    sys bootstrap verbs (auth/mount enable + tune; exception injection
+    only — all four return 204 with no body, so an injected
+    :class:`hvac.exceptions.InvalidRequest` carrying "path is already in
+    use" drives the enable-idempotency unwrap).
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
@@ -415,6 +789,16 @@ def install_fake_client(
     fake.sys.raise_on_mounts = mounts_exc
     fake.sys.auth_methods_payload = auth_methods_payload
     fake.sys.raise_on_auth_methods = auth_methods_exc
+    fake.sys.policy_read_payload = policy_read_payload
+    fake.sys.raise_on_policy_read = policy_read_exc
+    fake.sys.policy_list_payload = policy_list_payload
+    fake.sys.raise_on_policy_list = policy_list_exc
+    fake.sys.raise_on_policy_write = policy_write_exc
+    fake.sys.raise_on_policy_delete = policy_delete_exc
+    fake.sys.raise_on_auth_enable = auth_enable_exc
+    fake.sys.raise_on_auth_tune = auth_tune_exc
+    fake.sys.raise_on_mount_enable = mount_enable_exc
+    fake.sys.raise_on_mount_tune = mount_tune_exc
     kv = fake.secrets.kv.v2
     if secret is not None:
         kv.secret = secret
@@ -425,6 +809,7 @@ def install_fake_client(
         kv.versions_meta = versions_meta
     kv.list_exc = list_exc
     kv.put_exc = put_exc
+    kv.patch_exc = patch_exc
     kv.versions_exc = versions_exc
     kv.delete_exc = delete_exc
     return fake

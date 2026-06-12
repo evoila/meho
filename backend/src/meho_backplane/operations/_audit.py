@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -45,9 +46,14 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
 
 __all__ = [
+    "AgentRunAuditMeta",
+    "agent_run_audit_meta_var",
+    "agent_session_id_var",
     "audit_and_broadcast_safe",
     "parent_audit_id_var",
     "publish_broadcast",
+    "run_id_var",
+    "step_id_var",
     "write_audit_row",
 ]
 
@@ -64,6 +70,115 @@ _log = structlog.get_logger(__name__)
 #: parent.
 parent_audit_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "parent_audit_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the active agent run's id while a tool call is
+#: dispatched from inside an agent loop (G11.4-T5 #1074). The
+#: :class:`~meho_backplane.agent.invocation.AgentInvoker` binds this
+#: contextvar around every ``run`` / ``stream_events`` call before the
+#: bounded loop starts; the loop's meta-tools dispatch through
+#: :func:`meho_backplane.operations.dispatch`, and the dispatcher's
+#: :func:`write_audit_row` reads it into the real
+#: ``audit_log.agent_session_id`` column (already on the schema via
+#: migration ``0014`` / G8.2-T1 #1009). Defaulting to ``None`` is
+#: correct -- a top-level HTTP / MCP dispatch outside an agent run has
+#: no session.
+#:
+#: The mechanism mirrors the existing MCP-session wiring
+#: (``meho_backplane.mcp.server._bind_mcp_session_id`` /
+#: ``meho_backplane.mcp.audit``): one source-of-truth contextvar bound
+#: at the run-start boundary, read at every audit-write call site that
+#: lives inside the same async task. ``asyncio.create_task`` snapshots
+#: the contextvars, so the agent's background task inherits the
+#: binding for its whole life; every per-tool-call audit row the loop
+#: produces shares the same ``agent_session_id``, which drives the
+#: G8.2-T3 #1011 recursive-CTE reconstruct-sense replay over the
+#: agent's full session graph.
+agent_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
+    "agent_session_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the active runbook run's id while a step's
+#: ``operation_call`` (step body OR verify dispatch) fires from the
+#: G12.3 step-execution engine. The engine binds this contextvar
+#: around every ``call_operation(...)`` invocation produced by step
+#: execution; :func:`write_audit_row` reads it into the real
+#: ``audit_log.run_id`` column added by migration ``0034`` (#1292 /
+#: G12.1-T1). Defaulting to ``None`` is correct -- a non-runbook
+#: dispatch (chassis HTTP, MCP tool, agent loop outside a runbook)
+#: has no run.
+#:
+#: Same mechanism as :data:`parent_audit_id_var` and
+#: :data:`agent_session_id_var`: one source-of-truth contextvar
+#: bound at a boundary, read at every audit-write call site that
+#: lives inside the same async task. ``asyncio.create_task``
+#: snapshots the contextvars, so the engine can spawn helpers that
+#: inherit the binding for their whole life.
+run_id_var: ContextVar[uuid.UUID | None] = ContextVar(
+    "run_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the active runbook step's id (the ``id`` field
+#: inside ``runbook_templates.steps[]``) while a step's
+#: ``operation_call`` fires. Bound by the G12.3 engine alongside
+#: :data:`run_id_var`; read by :func:`write_audit_row` into
+#: ``audit_log.step_id``. ``str`` (not UUID) because step ids are
+#: template-author-defined slugs (``revoke-old-cert``,
+#: ``rotate-credentials``), not generated UUIDs. ``None`` outside a
+#: runbook step execution.
+step_id_var: ContextVar[str | None] = ContextVar(
+    "step_id",
+    default=None,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunAuditMeta:
+    """Per-tool-call audit metadata sourced from the active agent run.
+
+    Carried alongside :data:`agent_session_id_var` so the dispatcher's
+    per-tool-call audit row records *which model the agent ran against*
+    and *which provider served it* at the moment the tool fired, even
+    though those facts live durably on the ``agent_run`` parent row
+    (:class:`~meho_backplane.db.models.AgentRun.provider` /
+    :attr:`AgentRun.model`). Stamping them onto each per-tool-call row
+    is what makes a row-by-row audit forensically self-contained -- a
+    consumer reading one ``audit_log`` row in isolation can attribute
+    cost + model regression without joining against ``agent_run``.
+
+    Fields are frozen by ``frozen=True`` so the meta handed to a tool
+    cannot mutate mid-run; ``slots=True`` keeps the per-row overhead
+    minimal (the meta is read once per dispatch).
+
+    ``cost`` is intentionally typed ``object``: the substrate carries
+    cost as a :class:`~decimal.Decimal` on the ``agent_run`` row but
+    the audit payload is JSON-shaped and Decimal does not survive the
+    encoder unaided. The dispatcher's audit payload composer
+    (:func:`_build_audit_payload`) string-coerces a Decimal to keep
+    arithmetic precision intact on the wire. ``None`` indicates "cost
+    not yet attributed" (the G11.5 multi-provider routing slice will
+    wire per-call cost; v0.2's agent runs leave the column NULL and
+    this field carries ``None`` in lockstep).
+    """
+
+    model: str | None
+    provider: str | None
+    cost: object | None = None
+
+
+#: ContextVar carrying the active agent run's :class:`AgentRunAuditMeta`
+#: snapshot. Bound by the same boundary that binds
+#: :data:`agent_session_id_var` (the
+#: :class:`~meho_backplane.agent.invocation.AgentInvoker`) so the two
+#: contextvars travel together. ``None`` outside an agent run.
+agent_run_audit_meta_var: ContextVar[AgentRunAuditMeta | None] = ContextVar(
+    "agent_run_audit_meta",
     default=None,
 )
 
@@ -112,12 +227,15 @@ def _build_audit_payload(
     descriptor: EndpointDescriptor,
     params_hash: str,
     result_status: str,
+    *,
+    redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
     Default fields (descriptor, params_hash, result_status,
-    parent_audit_id-mirror) are merged with any ``audit_*``
-    contextvars bound by the connector handler — see
+    parent_audit_id-mirror, agent-run mirror) are merged with any
+    ``audit_*`` contextvars bound by the connector handler — see
     :func:`_resolve_audit_extras_from_contextvars`. The
     parent_audit_id mirror in the payload remains for the v0.2
     broadcast-event surface (the broadcast schema is JSON-shaped and
@@ -125,6 +243,32 @@ def _build_audit_payload(
     linkage lives in the real ``audit_log.parent_audit_id`` column
     added by migration ``0006`` and written by
     :func:`write_audit_row`.
+
+    Agent-run attribution (G11.4-T5 #1074): when the dispatch fires
+    from inside an agent loop -- :data:`agent_session_id_var` is set
+    by the :class:`~meho_backplane.agent.invocation.AgentInvoker`
+    around the loop -- the ``model`` / ``provider`` / ``cost`` from
+    the active :class:`AgentRunAuditMeta` snapshot land in the
+    payload alongside the session id. This makes a per-tool-call
+    audit row forensically self-contained: a consumer reading one
+    row can attribute "which model said this" / "what did it cost"
+    without joining against the ``agent_run`` table.
+
+    *redaction_policy_id* is the connector-boundary redaction
+    middleware's resolved policy id (G11.4-T2 #1071); the manifest
+    itself lands in the dedicated ``redaction_manifest`` column
+    (migration ``0030``), but mirroring the policy id into the
+    JSON payload keeps the broadcast-event surface (which serialises
+    ``payload``, not the dedicated columns) attribution-complete.
+
+    *handle_metadata* is the JsonFlux reducer's per-dispatch handle
+    summary (G0.15-T8 #1219) -- ``handle_id`` + ``total_rows`` +
+    ``sample_rows_returned``. Present on the success path of any
+    reducing dispatch; ``None`` on pass-through reduces (small
+    payloads) and on every error-path audit write. The keys land
+    verbatim under the audit payload so a consumer reading one row
+    attributes *"the agent saw N of M rows materialized as handle
+    <uuid>"* without joining the reducer's in-memory state.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -138,6 +282,48 @@ def _build_audit_payload(
     parent_audit_id = parent_audit_id_var.get()
     if parent_audit_id is not None:
         payload["parent_audit_id"] = str(parent_audit_id)
+    if redaction_policy_id is not None:
+        payload["redaction_policy_id"] = redaction_policy_id
+    if handle_metadata is not None:
+        # The reducer ships pre-coerced primitives (``handle_id`` already
+        # a UUID-as-str, ``total_rows`` an int, ``sample_rows_returned``
+        # an int) so the dict merges into the JSON payload verbatim.
+        payload.update(handle_metadata)
+    # G11.4-T5 #1074 -- agent-run attribution. The session id mirror in
+    # the JSON payload is for the broadcast-event surface (consumers
+    # parse ``payload``); the canonical lineage key lives in the real
+    # ``audit_log.agent_session_id`` column (migration ``0014`` /
+    # G8.2-T1 #1009), written by :func:`write_audit_row`. ``model`` /
+    # ``provider`` / ``cost`` carry only in the payload -- the
+    # ``agent_run`` row holds the durable copy; this snapshot is the
+    # per-row attribution slice.
+    agent_session_id = agent_session_id_var.get()
+    if agent_session_id is not None:
+        payload["agent_session_id"] = str(agent_session_id)
+    meta = agent_run_audit_meta_var.get()
+    if meta is not None:
+        if meta.model is not None:
+            payload["agent_model"] = meta.model
+        if meta.provider is not None:
+            payload["agent_provider"] = meta.provider
+        if meta.cost is not None:
+            # ``Decimal`` survives the encoder as a string so cost
+            # arithmetic stays precise on the wire; pass other shapes
+            # (a numeric provider that wires a ``float`` cost, for
+            # example) through verbatim. JSON-incompatible shapes are
+            # the meta producer's responsibility, not this layer's.
+            payload["agent_cost"] = str(meta.cost) if isinstance(meta.cost, Decimal) else meta.cost
+    # G12.1-T2 #1294 -- runbook correlation. The run_id / step_id mirrors in
+    # the JSON payload serve the broadcast-event surface (consumers parse
+    # ``payload``); the canonical columns live on ``audit_log.run_id`` /
+    # ``audit_log.step_id`` (migration ``0034`` / G12.1-T1 #1292), written
+    # by :func:`write_audit_row`. ``None`` outside a runbook step execution.
+    run_id = run_id_var.get()
+    if run_id is not None:
+        payload["run_id"] = str(run_id)
+    step_id = step_id_var.get()
+    if step_id is not None:
+        payload["step_id"] = step_id
     # Handler-bound extras last so a handler can intentionally override
     # a default (e.g. a future per-op result_status override); the
     # default keys are documented + load-bearing for audit consumers,
@@ -166,6 +352,10 @@ async def write_audit_row(
     params_hash: str,
     result_status: str,
     duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for this dispatch.
 
@@ -177,11 +367,40 @@ async def write_audit_row(
     structured ``connector_error`` rather than crashing the request).
 
     The payload shape is documented in :func:`_build_audit_payload`.
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
+    the connector-boundary redaction middleware's three artefacts
+    (G11.4-T2 #1071): the raw connector response, the engine's
+    manifest, and the resolved policy id. Error-path rows (handler
+    raised before producing a response) leave them ``None``; the
+    columns are nullable per migration ``0030``.
     """
     sessionmaker = get_sessionmaker()
-    payload = _build_audit_payload(descriptor, params_hash, result_status)
+    payload = _build_audit_payload(
+        descriptor,
+        params_hash,
+        result_status,
+        redaction_policy_id=redaction_policy_id,
+        handle_metadata=handle_metadata,
+    )
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
+    # G11.4-T5 #1074 -- read the agent-session lineage key off the
+    # contextvar the invoker bound around the loop. ``None`` outside
+    # an agent run (the chassis HTTP / MCP dispatch path), which is
+    # the correct value for the nullable column.
+    agent_session_id = agent_session_id_var.get()
+    # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
+    # columns (``run_id`` / ``step_id``) are added by migration ``0034``
+    # (G12.1-T1 #1292). We pass them only when the model carries the
+    # columns so this module stays forward-compatible while #1292 is
+    # not yet merged into the base branch.
+    run_id = run_id_var.get()
+    step_id = step_id_var.get()
+    runbook_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "run_id"):
+        runbook_kwargs["run_id"] = run_id
+    if hasattr(AuditLog, "step_id"):
+        runbook_kwargs["step_id"] = step_id
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
@@ -191,12 +410,16 @@ async def write_audit_row(
             tenant_id=operator.tenant_id,
             target_id=target_id,
             parent_audit_id=parent_audit_id,
+            agent_session_id=agent_session_id,
             method="DISPATCH",
             path=descriptor.op_id,
             status_code=status_code_for_result(result_status),
             request_id=None,
             duration_ms=Decimal(str(round(duration_ms, 2))),
             payload=payload,
+            raw_payload=raw_payload,
+            redaction_manifest=redaction_manifest,
+            **runbook_kwargs,
         )
         session.add(row)
         await session.commit()
@@ -247,6 +470,10 @@ async def audit_and_broadcast_safe(
     params_hash: str,
     result_status: str,
     duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write the audit row + publish broadcast; swallow internal failures.
 
@@ -264,6 +491,16 @@ async def audit_and_broadcast_safe(
     A future tightening of the audit-failure handling (e.g. failing the
     operation when audit cannot land) is a v0.2.next consideration and
     would land in this helper.
+
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
+    the connector-boundary redaction artefacts (G11.4-T2 #1071);
+    forwarded to :func:`write_audit_row`. The broadcast event still
+    consumes *params* (request-side) rather than the response-side
+    raw payload: per :func:`publish_broadcast`'s
+    :func:`~meho_backplane.broadcast.events.redact_payload` step, the
+    broadcast surface ships params only -- the response goes nowhere
+    near the broadcast subscribers, who already see redacted outcomes
+    via the broadcast detail policy (G6.3).
     """
     try:
         await write_audit_row(
@@ -274,6 +511,10 @@ async def audit_and_broadcast_safe(
             params_hash=params_hash,
             result_status=result_status,
             duration_ms=duration_ms,
+            raw_payload=raw_payload,
+            redaction_manifest=redaction_manifest,
+            redaction_policy_id=redaction_policy_id,
+            handle_metadata=handle_metadata,
         )
     except Exception:
         _log.exception(

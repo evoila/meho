@@ -36,11 +36,28 @@ on:
       - '**/package.json'
       - '**/package-lock.json'
       - '.github/workflows/dependency-license-check.yml'
+  # Fires when a PR enters the GitHub merge queue. Required so the
+  # `Python License Check` and `NPM License Check` status contexts —
+  # required checks in branch protection — report against the
+  # synthesised merge commit, not just the PR head. Bare `merge_group:`
+  # is intentional: the `merge_group` event does not support `paths:`
+  # filtering (GitHub docs only allow `types:`), so the license jobs
+  # run on every queue admission. The `hashFiles()` guards on each
+  # step already make the jobs no-op when manifests are unchanged, so
+  # the redundant runs are cheap. Same rationale as ci.yml's
+  # merge_group trigger (#769).
+  merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: dependency-license-check-${{ github.ref }}
-  cancel-in-progress: true
+  # Mirrors ci.yml's pattern (#769): event-suffixed group key so
+  # pull_request / push / merge_group runs don't collide, and
+  # cancel-in-progress is scoped OFF for merge_group because a
+  # cancelled queue check fails the merge attempt and defeats the
+  # queue. Workflow-name-specific group prefix so this workflow's
+  # cancellation domain stays distinct from ci.yml's.
+  group: dependency-license-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 permissions:
   contents: read
@@ -51,7 +68,7 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         if: hashFiles('**/pyproject.toml') != ''
         with:
@@ -77,7 +94,7 @@ jobs:
         # Multiple identifier forms covered because pip-licenses falls back
         # from PEP 639 License-Expression to Classifier to raw License field.
         #
-        # --ignore-packages "py_rust_stemmers fastembed": two
+        # --ignore-packages "py_rust_stemmers fastembed tiktoken": three
         # holdouts even with pip-licenses 5.5.5's PEP 639 support.
         # py_rust_stemmers (fastembed's tokeniser) ships no license
         # metadata at all — the crate is MIT in its repo
@@ -93,6 +110,19 @@ jobs:
         # license metadata is corrected. ``--ignore-packages`` accepts
         # ``nargs=*`` (space-separated), NOT a semicolon-joined string.
         #
+        # tiktoken (transitive of ``openai>=2.29.0`` pulled in by the
+        # ``[openai]`` extra in G11.5-T3 #1077) is MIT-licensed upstream
+        # (github.com/openai/tiktoken) but its PyPI 0.13.0 metadata ships
+        # the full MIT license *text* in the ``License`` field instead of
+        # a clean SPDX identifier — pip-licenses surfaces that multi-line
+        # blob, which fails the allow-only gate that keys on exact license
+        # identifiers. Adding the literal license-text blob to
+        # ``--allow-only`` would force the allowlist to absorb arbitrary
+        # multi-line payloads and weaken every other entry; the
+        # minimum-diff fix is the ignore-line, mirroring the
+        # py_rust_stemmers / fastembed pattern. Remove when tiktoken
+        # publishes an SPDX identifier in its packaging metadata.
+        #
         # ``EPL-2.0 OR GPL-2.0-or-later``: asyncssh (G0.2-T4, an existing
         # accepted dependency) reports this PEP 639 dual-license expression
         # under pip-licenses 5.5.5. The EPL-2.0 arm is weak (file-level)
@@ -100,8 +130,16 @@ jobs:
         # against the Apache-2.0 outbound (see header); we consume asyncssh
         # unmodified as an SSH transport library. Allowing the exact emitted
         # expression keeps the gate specific rather than broadening it.
+        #
+        # ``Apache-2.0 AND CNRI-Python``: regex (a transitive dep of
+        # presidio-analyzer, added in G11.4-T3 #1072) emits this PEP 639
+        # dual-license expression under pip-licenses 5.5.5. CNRI-Python
+        # is the original CPython license from CNRI — BSD-style permissive,
+        # OSI-approved (https://opensource.org/license/cnri-python). Allowing
+        # the exact emitted expression keeps the gate specific rather than
+        # broadening to either arm alone or to bare ``CNRI-Python``.
         run: >
-          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed --allow-only="
+          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed tiktoken --allow-only="
           Apache Software License;
           Apache-2.0;
           Apache 2.0;
@@ -128,6 +166,7 @@ jobs:
           Apache-2.0 OR BSD-2-Clause;
           Apache-2.0 OR BSD-3-Clause;
           Apache-2.0 AND BSD-2-Clause;
+          Apache-2.0 AND CNRI-Python;
           Apache-2.0 AND MIT;
           BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0;
           MIT AND PSF-2.0;
@@ -141,7 +180,7 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         if: hashFiles('**/package-lock.json') != ''
         with:

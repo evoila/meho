@@ -42,6 +42,7 @@ from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.nsx import (
     NSX_CONNECTOR_ID,
     NSX_CORE_OPS,
@@ -195,6 +196,7 @@ def _resolve_connector() -> NsxConnector:
 class _NsxE2EBundle:
     target_name: str
     connector_instance: NsxConnector
+    db_target: Any
 
 
 @pytest.fixture
@@ -212,7 +214,7 @@ async def nsx_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_NsxE2EBun
        register the 9 read-op routes + session-create.
     """
     await _insert_nsx_descriptors()
-    await _seed_target()
+    seeded_target = await _seed_target()
     instance = _resolve_connector()
 
     async with respx.mock(
@@ -225,6 +227,7 @@ async def nsx_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_NsxE2EBun
             yield _NsxE2EBundle(
                 target_name=_E2E_TARGET_NAME,
                 connector_instance=instance,
+                db_target=seeded_target,
             )
         finally:
             await instance.aclose()
@@ -296,7 +299,7 @@ async def nsx_e2e_401_canary(
                 200,
                 json={
                     "node_version": NSX_VERSION,
-                    "kernel_version": "4.2.1.0.0",
+                    "kernel_version": "9.0.2.0.0",
                     "node_uuid": "deadbeef-retry-test",
                     "hostname": "nsx-retry.test.invalid",
                 },
@@ -361,8 +364,11 @@ async def test_nsx_e2e_session_establishes_on_first_dispatch(
     """
     instance = nsx_e2e_canary.connector_instance
     target_name = nsx_e2e_canary.target_name
+    # The session-token cache is keyed on the tenant-unique (tenant_id, id)
+    # tuple (#1642), not the bare name.
+    cache_key = target_cache_key(nsx_e2e_canary.db_target)
 
-    assert target_name not in instance._session_tokens, (
+    assert cache_key not in instance._session_tokens, (
         "Expected empty token cache before first dispatch; "
         f"got _session_tokens={instance._session_tokens!r}"
     )
@@ -377,7 +383,7 @@ async def test_nsx_e2e_session_establishes_on_first_dispatch(
         },
     )
     assert result["status"] == "ok"
-    assert instance._session_tokens.get(target_name) == "canary-xsrf-token", (
+    assert instance._session_tokens.get(cache_key) == "canary-xsrf-token", (
         f"Expected XSRF token cached after first dispatch; "
         f"got _session_tokens={instance._session_tokens!r}"
     )
@@ -425,7 +431,8 @@ async def test_nsx_e2e_401_retry_via_connector_method(
         f"Expected GET /api/v1/node called twice (401 + retry); "
         f"got call_count={bundle.node_route.call_count}"
     )
-    assert bundle.connector_instance._session_tokens.get(_E2E_TARGET_NAME) == "xsrf-second", (
+    cache_key = target_cache_key(bundle.db_target)
+    assert bundle.connector_instance._session_tokens.get(cache_key) == "xsrf-second", (
         f"Expected post-retry XSRF token to be 'xsrf-second'; "
         f"got _session_tokens={bundle.connector_instance._session_tokens!r}"
     )

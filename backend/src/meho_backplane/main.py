@@ -47,9 +47,14 @@ from typing import Final
 
 import structlog
 from fastapi import FastAPI, Response
+from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.agent.reaper import (
+    start_agent_run_reaper,
+    stop_agent_run_reaper,
+)
 from meho_backplane.agents import (
     start_grant_expiry_sweeper,
     stop_grant_expiry_sweeper,
@@ -69,7 +74,11 @@ from meho_backplane.api.v1.broadcast_overrides import (
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
+from meho_backplane.api.v1.connectors_ingest import (
+    set_llm_client_factory,
+)
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
+from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
@@ -79,6 +88,10 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
+from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
+from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -90,12 +103,15 @@ from meho_backplane.auth.jwt import (
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
     get_broadcast_client,
 )
-from meho_backplane.connectors.registry import _eager_import_connectors
+from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
+from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -109,9 +125,14 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
-from meho_backplane.operations.ingest import load_catalog
+from meho_backplane.operations.ingest import (
+    build_anthropic_ingest_llm_client,
+    load_catalog,
+    validate_catalog_registry_coverage,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_history_retention_sweeper,
@@ -151,6 +172,24 @@ async def _preload_embedding_model() -> None:
         )
 
 
+def _wire_ingest_llm_client() -> None:
+    """Install the production spec-ingestion grouping LLM client (#1386).
+
+    Replaces the fail-closed ``default_llm_client_factory`` holder with
+    :func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`,
+    which reuses ``settings.anthropic_api_key`` (the key the agent
+    runtime already reads) so non-dry-run ``--catalog`` ingest grouping
+    works on deployed backplanes instead of failing closed with 503.
+
+    Installs the factory *callable* — it is not invoked here, so startup
+    never crashes on a missing key. The fail-closed
+    :class:`~meho_backplane.operations.ingest.LlmClientUnavailable`
+    (-> HTTP 503) surfaces only when an ingest actually runs the
+    grouping pass on a deploy that configured no key.
+    """
+    set_llm_client_factory(build_anthropic_ingest_llm_client)
+
+
 def _assert_mcp_resource_uri_configured() -> None:
     """Fail loudly at startup when the MCP audience can't be resolved.
 
@@ -184,14 +223,52 @@ def _assert_mcp_resource_uri_configured() -> None:
         raise RuntimeError(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
 
 
+def _advise_vault_tenant_scope_unenforced() -> None:
+    """Emit a one-time startup advisory when the Vault tenant-scope guard is off.
+
+    The application-layer ``vault.kv.*`` tenant-scope guard (#1643) is
+    **opt-in** and **default-off** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``),
+    because the shipped Vault layout scopes secrets per operator ``sub``
+    rather than per tenant, so a hard tenant prefix would deny every
+    existing call. The consequence is silent: an operator running a
+    **tenant-partitioned** Vault gets no signal that the guard is a no-op
+    and cross-tenant ``vault.kv.*`` isolation is therefore unenforced at
+    the app layer (the empty-prefix branch of
+    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`).
+
+    This logs **one** structured advisory at startup naming the env var
+    that enables the guard. It is purely observability — it does **not**
+    change dispatch behaviour or flip the default; whether to enable the
+    prefix (and migrate the Vault layout) is an explicit human/infra
+    decision, documented under "Choosing a layout" in
+    ``docs/codebase/connectors-vault-tenant-scope.md``. A deploy that
+    relies solely on the per-``sub`` Vault policy can ignore the line; a
+    tenant-partitioned deploy treats it as the cue to set the prefix.
+
+    Mirrors the loud-but-non-fatal advisory shape the rest of the
+    lifespan uses (e.g. :func:`_preload_embedding_model`): a single
+    ``structlog`` event, no f-strings, no raise.
+    """
+    if not get_settings().vault_kv_tenant_scope_prefix:
+        structlog.get_logger().warning(
+            "vault_tenant_scope_unenforced",
+            enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
+            doc="docs/codebase/connectors-vault-tenant-scope.md",
+        )
+
+
 async def _run_lifespan_shutdown() -> None:
     """Dispose every long-lived resource the lifespan opened.
 
     Per-disposer ``try`` / ``except`` so an asyncpg-pool teardown
     failure in :func:`dispose_engine` cannot short-circuit
-    :func:`dispose_broadcast_client` and leak the redis pool;
-    structlog captures the failure class so operators can chase
-    the leak from logs.
+    :func:`dispose_broadcast_client` (or
+    :func:`dispose_broadcast_blocking_client`) and leak the redis
+    pool; structlog captures the failure class so operators can chase
+    the leak from logs. The two broadcast clients (fast for
+    PING/XADD, long-poll for XREAD BLOCK readers — see
+    :mod:`meho_backplane.broadcast.client`) get independent dispose
+    arms so a failure in one doesn't leak the other's pool.
     """
     log = structlog.get_logger()
     try:
@@ -202,6 +279,10 @@ async def _run_lifespan_shutdown() -> None:
         await dispose_broadcast_client()
     except Exception:
         log.exception("dispose_broadcast_client_failed")
+    try:
+        await dispose_broadcast_blocking_client()
+    except Exception:
+        log.exception("dispose_broadcast_blocking_client_failed")
 
 
 async def _run_lifespan_startup() -> None:
@@ -222,15 +303,19 @@ async def _run_lifespan_startup() -> None:
        ``register_*`` calls run before the first request arrives.
     5. Typed-op registrars run **after** connector discovery (the
        registrars are appended during the import pass).
-    6. MCP audience guard last — the eager-init failures above raise
-       before this, so the guard's CrashLoopBackOff carries the
-       MCP-audience message, not a stale earlier failure.
+    6. MCP audience guard after the eager-init steps, so a failure there
+       carries the MCP-audience message, not a stale earlier one; the
+       Vault tenant-scope advisory (operability-only) follows it.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
     register_probe("broadcast", broadcast_readiness_probe)
+    # G4.6-T6 (#1555) — coarse "which search backends are configured"
+    # check; observability-only since #1606 (unconfigured optional
+    # backends are skipped, never failed — no live round-trip).
+    register_probe("docs_backends", docs_backends_readiness_probe)
     # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
     # at startup so first-request latency doesn't absorb the pool build.
     get_engine()
@@ -247,11 +332,26 @@ async def _run_lifespan_startup() -> None:
     # field, non-PEP-440 spec_info_version, duplicate (product, version))
     # raises here and crashes the lifespan, so CI's app-boot smoke fails
     # instead of the bad catalog surfacing as a 500 on first
-    # GET /api/v1/connectors/catalog. Registry-coverage of each entry's
-    # requires_connector_class is a CI regression test, not a startup
-    # guard (the registry's populated-ness is import-order-dependent
-    # under pytest-xdist; see catalog.py).
+    # GET /api/v1/connectors/catalog.
     load_catalog()
+    # Catalog ↔ registry triple coverage (G3.11-T10 #1253). At chassis
+    # boot the registry is fully populated (_eager_import_connectors
+    # above ran every connectors/<product>/__init__.py registration),
+    # so the validator can assert both the class-presence check
+    # (#743 crit. b) and the (product, version, impl_id) triple-
+    # registration check (T10) without the pytest-xdist import-order
+    # hazard the test suite hits. A mismatch fails-fast here rather
+    # than surfacing as ``no_connector`` on the first dispatch — the
+    # T8 #1242 class of bug (catalog ``version: v3`` vs registry
+    # ``version: "3"``) would have crashed the lifespan instead of
+    # shipping silently.
+    validate_catalog_registry_coverage()
+    # Production spec-ingestion grouping LLM client (#1386). Installs the
+    # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
+    # works on deployed backplanes (reusing settings.anthropic_api_key)
+    # instead of the build-time-only 503. Fail-closed when no key is set
+    # — the factory raises LlmClientUnavailable only when invoked.
+    _wire_ingest_llm_client()
     # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
     # docstring for the contract; runs registrars connectors appended
     # to during the import pass above so descriptor rows are populated
@@ -269,12 +369,12 @@ async def _run_lifespan_startup() -> None:
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
     eager_import_mcp_modules()
-    # MCP audience guard (G0.8-T4 #633). The /mcp router is mounted
-    # unconditionally; a deploy with neither MCP_RESOURCE_URI nor
-    # BACKPLANE_URL leaves the audience empty and every /mcp request
-    # 401s with no signal. Crash loudly here with the remediation
-    # instead of serving a dark, silent surface.
+    # Startup guards (each self-documented in its own docstring): MCP
+    # audience guard crashes loudly on an unresolvable /mcp audience
+    # (G0.8-T4 #633); the Vault tenant-scope advisory is operability-only
+    # (#1673).
     _assert_mcp_resource_uri_configured()
+    _advise_vault_tenant_scope_unenforced()
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled
@@ -302,6 +402,9 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
+    scheduler: asyncio.Task[None] | None
+    agent_run_reaper: asyncio.Task[None] | None
+    event_drain: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -335,11 +438,33 @@ def _start_background_tasks() -> _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
         grant_expiry = start_grant_expiry_sweeper()
+    # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
+    # SCHEDULER_ENABLED so operators using an external orchestrator
+    # (or running the test path without a scheduler) can opt out.
+    scheduler: asyncio.Task[None] | None = None
+    if settings.scheduler_enabled:
+        scheduler = start_scheduler()
+    # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine) can disable the in-tree reaper without
+    # patching code.
+    agent_run_reaper: asyncio.Task[None] | None = None
+    if settings.agent_run_reaper_enabled:
+        agent_run_reaper = start_agent_run_reaper()
+    # G11.3-T3 #824 — event-outbox drain loop. Gated on
+    # EVENT_DRAIN_ENABLED so operators using an external orchestrator
+    # (or running the test path without the drain) can opt out.
+    event_drain: asyncio.Task[None] | None = None
+    if settings.event_drain_enabled:
+        event_drain = start_event_drain()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
+        scheduler=scheduler,
+        agent_run_reaper=agent_run_reaper,
+        event_drain=event_drain,
     )
 
 
@@ -351,6 +476,12 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.event_drain is not None:
+        await stop_event_drain(tasks.event_drain)
+    if tasks.agent_run_reaper is not None:
+        await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.scheduler is not None:
+        await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:
@@ -491,6 +622,23 @@ app.include_router(api_v1_retrieve_eval_router)
 # counts can leak retire-decision intent so the broadcast event ships
 # in aggregate-only mode.
 app.include_router(api_v1_retrieve_retire_router)
+# G4.5-T3 (#1521) — federated vendor-document retrieval at
+# `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
+# Operator role minimum; tenant-scoped via the forwarded operator JWT.
+# Enforces the mandatory binary product+version scope (422 fail-closed
+# under `corpus_require_filters`, default on), federates to the external
+# corpus via the T2 client (`CorpusUnavailable` → 503, never an empty
+# 200), and binds the central audit row under the canonical op_id
+# `meho.docs.search` + `read` class via the `audit_op_id` /
+# `audit_op_class` contextvar overrides. The MCP tool (T4) and CLI verb
+# (T5) reuse the same `docs_search.search_docs` service this route fronts.
+app.include_router(api_v1_search_docs_router)
+# G4.6-T6 (#1555) — doc-collection readiness probe + lifecycle. Tenant-
+# admin-gated probe (success-only write-back of liveness onto the row,
+# mirroring probe_target → Target.fingerprint) + enable/disable
+# transitions. The collection-scoped search wiring that reads the
+# probe-written status lands in T3 (#1552).
+app.include_router(api_v1_doc_collections_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 # G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover
@@ -536,6 +684,48 @@ app.include_router(api_v1_connectors_ingest_router)
 # ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.
 app.include_router(api_v1_kb_router)
+# G12.2-T3 (#1297) -- runbook template REST surface at
+# /api/v1/runbooks/templates*. Six routes (POST / GET / GET /{slug} /
+# PATCH /{slug} / POST /{slug}/publish / POST /{slug}/deprecate) that
+# expose the T2 :class:`RunbookTemplateService` to operators + ops UIs.
+# Tenant-scoped via the JWT's tenant_id claim; cross-tenant probes return
+# 404 (not 403) by the service's tenant filter. ``list`` requires
+# ``operator`` minimum; the other five require ``tenant_admin`` (``show``
+# is admin-only -- the opacity floor; the post-completion operator
+# exception lives on the run surface in G12.3). Typed-exception mapping:
+# TemplateNotFoundError -> 404, TemplateNotDraftError /
+# TemplateNotPublishedError -> 400, DuplicateDraftError -> 409,
+# InvalidKbSlugError -> 422. Audit + broadcast op_ids:
+# ``runbook.draft_template`` / ``runbook.list_templates`` /
+# ``runbook.show_template`` / ``runbook.edit_template`` /
+# ``runbook.publish_template`` / ``runbook.deprecate_template`` -- bound
+# via the ``audit_op_id`` / ``audit_op_class`` contextvar overrides the
+# chassis publisher honours. The MCP tools (T4 #1298) reach the same
+# service over MCP.
+app.include_router(api_v1_runbook_templates_router)
+# G12.3-T5 (#1311) -- runbook run REST surface at /api/v1/runbooks/runs*.
+# Five routes (POST / POST /{run_id}/next / POST /{run_id}/abort /
+# POST /{run_id}/reassign / GET) that expose the T3
+# :class:`RunbookRunService` (#1308) to operators + ops UIs. Tenant-scoped
+# via the JWT's tenant_id claim; cross-tenant probes on someone else's
+# ``run_id`` return 404 by the service's tenant filter (anti-enumeration).
+# ``start`` / ``next`` / ``abort`` / ``list`` require ``operator``
+# minimum; ``reassign`` requires ``tenant_admin``. The single-assignee
+# invariant is enforced at the service layer for ``next`` (a
+# tenant_admin who is not the assignee still gets 403); ``abort``
+# widens the allowance via a ``caller_is_admin`` flag the route
+# computes from ``operator.tenant_role``. Typed-exception mapping:
+# RunNotFoundError / TemplateNotFoundError -> 404, NotRunAssigneeError ->
+# 403, RunAlreadyTerminalError / PreviousStepFailedError /
+# PreviousStepNotVerifiedError / DeprecatedTemplateError -> 400,
+# MissingParamsError / VerifyResponseRequiredError /
+# VerifyResponseMismatchError -> 422. Audit + broadcast op_ids:
+# ``runbook.start_run`` / ``runbook.next_step`` / ``runbook.abort_run`` /
+# ``runbook.reassign_run`` / ``runbook.list_runs`` -- bound via the
+# ``audit_op_id`` / ``audit_op_class`` contextvar overrides the chassis
+# publisher honours. The MCP tools (T6 #1313) reach the same service
+# over MCP.
+app.include_router(api_v1_runbook_runs_router)
 # G5.1-T2 (#422) -- memory REST surface at /api/v1/memory*.
 # Four routes (POST / GET / GET /{scope}/{slug} / DELETE /{scope}/{slug})
 # that expose the T1 :class:`MemoryService` to operators + agents. Tenant-
@@ -571,6 +761,20 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
+# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. Every mutation writes an
+# audit row and broadcasts under op_class=write.
+#
+# Registered BEFORE ``api_v1_agents_router`` (G11.2 follow-up #1168):
+# FastAPI dispatches routes in include order, so the agents-router's
+# ``GET /{name}`` would otherwise shadow ``GET /api/v1/agents/grants``
+# (matching ``name="grants"``). Specific prefix first → grants-list
+# route resolves correctly; ``GET /api/v1/agents/incident-triage``
+# (and every other non-``grants`` name) still falls through to
+# ``show_agent`` because the grants router only matches paths under
+# its own ``/api/v1/agents/grants`` prefix.
+app.include_router(api_v1_agent_grants_router)
 # G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
 # / edit / delete) over the AgentDefinition ORM model. Reads gated to
 # operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
@@ -578,11 +782,6 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
-# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
-# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
-# the JWT; cross-tenant probes return 404. Every mutation writes an
-# audit row and broadcasts under op_class=write.
-app.include_router(api_v1_agent_grants_router)
 # G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
 # register creates a Keycloak client tagged kind=agent + inserts a DB row.
 # revoke disables the Keycloak client (kill switch) + marks the row revoked.
@@ -596,6 +795,13 @@ app.include_router(api_v1_agent_principals_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
+# G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
+# (list, paginated, operator-level), POST /scheduler/triggers (create,
+# tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).
+# Tenant-scoped via the JWT; tenant_admin may pass tenant_filter / a
+# body tenant_id to act cross-tenant for admin operations. Every
+# mutation writes an audit row and broadcasts under op_class=write.
+app.include_router(api_v1_scheduler_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``
@@ -686,6 +892,97 @@ if parse_bool_env(os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE")):
     )
 
     app.include_router(api_v1_rbac_test_router)
+
+
+def _inject_target_product_enum(schema: dict[str, object]) -> None:
+    """Mutate ``TargetCreate.product`` in ``schema`` with the live product enum.
+
+    G0.14-T3 (#1144). Reads :func:`registered_product_tokens` and sets
+    the ``enum`` + ``description`` on the ``TargetCreate.product``
+    JSON Schema property in place. Defensive ``isinstance`` walks let
+    the override survive future schema-shape rearrangements without
+    raising on a missing key (the worst case becomes "the enum is not
+    injected" rather than "the OpenAPI doc fails to serve").
+    """
+    valid_products = sorted(registered_product_tokens())
+    if not valid_products:
+        return
+    components = schema.get("components")
+    if not isinstance(components, dict):
+        return
+    schemas = components.get("schemas")
+    if not isinstance(schemas, dict):
+        return
+    target_create = schemas.get("TargetCreate")
+    if not isinstance(target_create, dict):
+        return
+    properties = target_create.get("properties")
+    if not isinstance(properties, dict):
+        return
+    product_field = properties.get("product")
+    if not isinstance(product_field, dict):
+        return
+    product_field["enum"] = list(valid_products)
+    product_field["description"] = (
+        "Connector product slug. Must match the ``product`` "
+        "field of a registered connector class; see "
+        "``GET /api/v1/connectors`` for the live list and "
+        "``docs/codebase/error-message-shape.md`` for the "
+        "422 shape returned on miss."
+    )
+
+
+def build_openapi_schema() -> dict[str, object]:
+    """Generate the OpenAPI schema with the ``TargetCreate.product`` enum injected.
+
+    G0.14-T3 (#1144). Overrides the default :meth:`FastAPI.openapi` so
+    the ``product`` property on the ``TargetCreate`` request schema
+    renders as a JSON Schema enum populated from the live connector
+    registry. Without this hook the schema would surface ``product`` as
+    a free-form string — the dogfood signal 5 UX miss in
+    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    resolver matched on ``'k8s'``, no early signal). Paired with the
+    runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
+    (Options A + C from the task body, sharing one source-of-truth
+    helper so they cannot drift).
+
+    Calls :func:`_eager_import_connectors` when the registry is empty
+    so the schema is correct even when the override fires before the
+    FastAPI lifespan (the OpenAPI snapshot script under
+    ``cli/api/snapshot-openapi.py`` calls :meth:`app.openapi` directly
+    without running the lifespan). Idempotent — modules already in
+    ``sys.modules`` are a no-op on the second call.
+
+    Caches the result on ``app.openapi_schema`` to match FastAPI's
+    own caching behaviour.
+    """
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+
+    if not registered_product_tokens():
+        _eager_import_connectors()
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        routes=app.routes,
+        webhooks=app.webhooks.routes,
+        tags=app.openapi_tags,
+        servers=app.servers,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+    )
+    _inject_target_product_enum(schema)
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = build_openapi_schema  # type: ignore[method-assign]
 
 
 @app.get("/")

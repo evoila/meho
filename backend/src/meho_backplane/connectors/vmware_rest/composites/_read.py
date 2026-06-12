@@ -79,6 +79,9 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._preflight import (
+    preflight_l2_dependencies,
+)
 from meho_backplane.operations.composite import DispatchChild
 
 __all__ = [
@@ -102,8 +105,62 @@ _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
 _OP_LIST_DATASTORES = "GET:/vcenter/datastore"
 _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
 _OP_LIST_VMS = "GET:/vcenter/vm"
-_OP_LIST_DVS = "GET:/vcenter/network/distributed-switch"
-_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
+# vSphere Automation REST keys the distributed-switch listing under the
+# *plural* resource path (a preview feature on the appliance-served
+# ``vcenter.yaml``); the singular ``distributed-switch`` spelling that
+# G3.1-T5 #508 shipped does not exist in the spec and never resolved
+# against a real ingest (#1602). The DVS-list response carries a
+# ``vds``/``distributed_switch`` moid per entry, which drives the
+# ``dvs_index`` enrichment below.
+_OP_LIST_DVS = "GET:/vcenter/network/distributed-switches"
+# There is NO dedicated ``distributed-portgroup(s)`` list resource in
+# the REST Automation API: distributed portgroups are enumerated via the
+# generic network resource filtered to ``DISTRIBUTED_PORTGROUP`` (the
+# singular ``distributed-portgroup`` op_id #508 declared was absent from
+# every ingest -- #1602). The generic ``Network`` summary returns only
+# ``{network (id), name, type}`` -- it carries no parent-DVS field, so
+# the per-portgroup ``dvs``/``dvs_name`` enrichment is best-effort (see
+# the handler note).
+_OP_LIST_NETWORK = "GET:/vcenter/network"
+_NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+
+# Composite op_ids -- used by the preflight cache key. Centralised here
+# so the test-side coverage assertion (every registered composite has
+# both a sub-op_id tuple and a preflight-cache-key constant) can read
+# them by name rather than re-spelling.
+_COMPOSITE_OP_ID_CLUSTER_DRS_RECS = "vmware.composite.cluster.drs_recommendations"
+_COMPOSITE_OP_ID_EVENT_TAIL = "vmware.composite.event.tail"
+_COMPOSITE_OP_ID_PERFORMANCE_SUMMARY = "vmware.composite.performance.summary"
+_COMPOSITE_OP_ID_DATASTORE_USAGE = "vmware.composite.datastore.usage"
+_COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT = "vmware.composite.network.portgroup.audit"
+
+# Per-composite sub-op-id tuples consumed by the L2 pre-flight check
+# (G0.14-T10 / #1151). Each tuple lists the L2 raw-REST sub-ops the
+# composite dispatches against; the pre-flight helper walks them
+# against ``endpoint_descriptor`` before any ``dispatch_child`` call so
+# a missing-L2 deployment surfaces as a structured
+# ``composite_l2_missing`` error rather than a mid-flight ``unknown_op``
+# from a sub-op call. See ``_preflight.py`` for the design rationale
+# (Option B / lazy pre-resolve).
+_SUB_OPS_CLUSTER_DRS_RECS: tuple[str, ...] = (
+    _OP_GET_CLUSTER,
+    _OP_GET_CLUSTER_DRS,
+)
+_SUB_OPS_EVENT_TAIL: tuple[str, ...] = (_OP_POST_QUERY_EVENTS,)
+_SUB_OPS_PERFORMANCE_SUMMARY: tuple[str, ...] = (
+    _OP_POST_QUERY_AVAILABLE_PERF_METRIC,
+    _OP_POST_QUERY_PERF,
+)
+_SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
+    _OP_LIST_DATASTORES,
+    _OP_GET_DATASTORE,
+    _OP_LIST_VMS,
+)
+_SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
+    _OP_LIST_DVS,
+    _OP_LIST_NETWORK,
+    _OP_LIST_VMS,
+)
 
 
 def _unwrap_value(payload: Any) -> Any:
@@ -177,6 +234,12 @@ async def cluster_drs_recommendations_composite(
     cluster summary plus the DRS config -- the format/aggregation is
     what differentiates the composite from a raw GET.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_CLUSTER_DRS_RECS,
+        sub_op_ids=_SUB_OPS_CLUSTER_DRS_RECS,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     cluster_moid = params["cluster"]
     include_history = bool(params.get("include_recommendations_history", False))
 
@@ -238,6 +301,12 @@ async def event_tail_composite(
         "moId": <str>, "max_events_applied": <int>}``. ``count`` is
         the post-cap length so operators can detect truncation.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_EVENT_TAIL,
+        sub_op_ids=_SUB_OPS_EVENT_TAIL,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     mo_id = params.get("moId", "EventManager")
     max_events = int(params.get("max_events", 100))
     raw = _require_ok(
@@ -295,6 +364,12 @@ async def performance_summary_composite(
     ``counter_ids``) is an explicit v0.2.next concern per the issue
     body's *Out of scope* section.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_PERFORMANCE_SUMMARY,
+        sub_op_ids=_SUB_OPS_PERFORMANCE_SUMMARY,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     entity_moid = params["entity_moid"]
     perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
     interval_s = int(params.get("interval_seconds", 20))
@@ -343,6 +418,11 @@ async def performance_summary_composite(
     }
 
 
+# Pre-existing >100-line handler from G3.1-T5 #508; G0.14-T10 #1151
+# added a 6-line pre-flight call at the top, pushing the diff-only
+# checker into block territory. Refactor is out of scope for T10
+# (the L2-dependency strategy).
+# code-quality-allow: pre-existing G3.1-T5 #508 handler, T10 added preflight only
 async def datastore_usage_composite(
     *,
     operator: Operator,
@@ -382,6 +462,12 @@ async def datastore_usage_composite(
         fields may be ``None`` if the upstream payload omits them
         (e.g. a partially-mounted datastore).
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_DATASTORE_USAGE,
+        sub_op_ids=_SUB_OPS_DATASTORE_USAGE,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     filter_names: list[str] = list(params.get("filter_names") or [])
 
     listing_params: dict[str, Any] = {}
@@ -449,6 +535,11 @@ async def datastore_usage_composite(
     return {"datastores": aggregated}
 
 
+# Pre-existing >100-line handler from G3.1-T5 #508; G0.14-T10 #1151
+# added a 6-line pre-flight call at the top, pushing the diff-only
+# checker into block territory. Refactor is out of scope for T10
+# (the L2-dependency strategy).
+# code-quality-allow: pre-existing G3.1-T5 #508 handler, T10 added preflight only
 async def network_portgroup_audit_composite(
     *,
     operator: Operator,
@@ -462,11 +553,19 @@ async def network_portgroup_audit_composite(
 
     Sub-ops dispatched:
 
-    1. ``GET:/vcenter/network/distributed-switch`` -- list DVS entries
-       (filtered to ``filter_dvs`` when supplied). Drives the DVS
-       index used to enrich each portgroup.
-    2. ``GET:/vcenter/network/distributed-portgroup`` -- list
-       portgroups (filtered to ``filter_dvs`` when supplied).
+    1. ``GET:/vcenter/network/distributed-switches`` -- list DVS
+       entries (filtered to ``filter_dvs`` via the resource's
+       ``filter.vdses`` query when supplied). Drives the DVS index
+       used to enrich each portgroup with its switch name.
+    2. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
+       -- list distributed portgroups. The REST Automation API has no
+       dedicated distributed-portgroup resource; portgroups are
+       enumerated through the generic ``Network`` resource filtered to
+       the ``DISTRIBUTED_PORTGROUP`` type (#1602). ``filter_dvs`` is
+       *not* applied here -- the generic ``Network`` FilterSpec exposes
+       ``types``/``names``/``networks``/``datacenters``/``folders`` but
+       no per-DVS filter, so DVS scoping narrows the index (and thus the
+       enriched ``dvs_name``) rather than the portgroup set.
     3. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
        VMs connected to the portgroup. Drives the ``vm_count`` +
        ``vm_names`` aggregation.
@@ -477,7 +576,19 @@ async def network_portgroup_audit_composite(
         ``{"portgroups": [{"id": ..., "name": ..., "dvs": <id|None>,
         "dvs_name": <str|None>, "type": ..., "vm_count": ...,
         "vm_names": [...]}, ...]}``.
+
+    The generic ``Network`` summary carries only ``{network (id), name,
+    type}`` -- it has no parent-DVS reference -- so ``dvs``/``dvs_name``
+    are best-effort: populated when the upstream payload happens to
+    expose a ``vds``/``distributed_switch`` field (e.g. a richer target
+    or a future spec revision), ``None`` otherwise.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT,
+        sub_op_ids=_SUB_OPS_NETWORK_PORTGROUP_AUDIT,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     filter_dvs = params.get("filter_dvs")
     include_disconnected = bool(params.get("include_disconnected_vms", False))
 
@@ -506,21 +617,24 @@ async def network_portgroup_audit_composite(
             name = entry.get("name") if isinstance(entry.get("name"), str) else None
             dvs_index[dvs_id] = name
 
-    pg_params: dict[str, Any] = {}
-    if isinstance(filter_dvs, str):
-        pg_params["filter.vdses"] = [filter_dvs]
+    # Distributed portgroups come from the generic network resource
+    # filtered to the DISTRIBUTED_PORTGROUP type -- there is no
+    # standalone distributed-portgroup list endpoint. ``filter_dvs`` has
+    # no analogue on this FilterSpec, so it is deliberately not threaded
+    # in here (it scopes the DVS index above instead).
+    pg_params: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
 
     pg_listing = _require_ok(
         await dispatch_child(
             connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_PORTGROUPS,
+            op_id=_OP_LIST_NETWORK,
             params=pg_params,
         )
     )
     pg_entries = _unwrap_value(pg_listing)
     if not isinstance(pg_entries, list):
         raise RuntimeError(
-            f"network_portgroup_audit: expected list from {_OP_LIST_PORTGROUPS!r}, "
+            f"network_portgroup_audit: expected list from {_OP_LIST_NETWORK!r}, "
             f"got {type(pg_entries).__name__}"
         )
 

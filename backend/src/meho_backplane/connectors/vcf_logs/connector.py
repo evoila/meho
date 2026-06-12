@@ -93,6 +93,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -233,7 +234,7 @@ class VcfLogsConnector(HttpConnector):
         credentials_loader: VcfCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[str, str] = {}
+        self._session_tokens: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
         self._credentials = CredentialsCache(
             credentials_loader if credentials_loader is not None else load_credentials_from_vault,
@@ -317,8 +318,9 @@ class VcfLogsConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            cached = self._session_tokens.get(target.name)
+            cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
             creds = await self._credentials.get(target, operator)
@@ -337,7 +339,7 @@ class VcfLogsConnector(HttpConnector):
                     "Accept": "application/json",
                 },
             )
-            self._session_tokens[target.name] = token
+            self._session_tokens[cache_key] = token
             _log.info(
                 "vrli_session_established",
                 target=target.name,
@@ -358,7 +360,7 @@ class VcfLogsConnector(HttpConnector):
         wrong.
         """
         async with self._session_lock:
-            self._session_tokens.pop(target.name, None)
+            self._session_tokens.pop(target_cache_key(target), None)
 
     async def _get_json_with_session_retry(
         self,
@@ -398,7 +400,11 @@ class VcfLogsConnector(HttpConnector):
                 ) from exc
             raise
 
-    async def fingerprint(self, target: VcfLogsTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VcfLogsTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from unauthenticated ``GET /api/v2/version``.
 
         The version endpoint is unauthenticated -- the wrapper's probe
@@ -415,7 +421,12 @@ class VcfLogsConnector(HttpConnector):
         operator's first ``meho connector fingerprint`` against an
         unreachable vRLI gets a structured response rather than a
         stack trace.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — vRLI's
+        version endpoint is unauthenticated, so the route operator
+        plays no role here.
         """
+        del operator  # unused — unauthenticated probe, no Vault read
         probed_at = datetime.now(UTC)
         probe_method = f"GET {_VERSION_PATH}"
         try:

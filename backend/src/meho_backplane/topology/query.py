@@ -84,6 +84,30 @@ than traversing the merged closure. ``find_path`` applies the same
 contract independently to each endpoint via ``from_kind`` /
 ``to_kind``.
 
+Untracked-anchor handling (G0.18-T4 #1357)
+------------------------------------------
+
+Pre-G0.18-T4, an anchor with no matching :class:`GraphNode` in the
+tenant returned ``[]`` from :func:`find_dependents` /
+:func:`find_dependencies`. Auto-discovery is k8s-only — every
+non-k8s connector inherits the no-op
+:meth:`~meho_backplane.connectors.base.Connector.discover_topology`
+from the ABC — so every registered ``vault`` / ``vcenter`` / ``nsx``
+/ ``sddc-manager`` / ``gh`` target falls into that hole and reads as
+"nothing depends on me," which the pre-destructive blast-radius use
+case mis-reads as "safe to delete" (RDC #789 N2 false-negative).
+
+The closure verbs now resolve the anchor via
+:func:`~meho_backplane.topology.resolvers.resolve_node` before
+executing the CTE; an untracked anchor surfaces as
+:class:`NodeNotFoundError` and an empty return list is structurally
+impossible. A tracked node with no dependents still returns the
+one-element ``[root]`` (the CTE's depth-0 anchor row).
+:func:`find_path` keeps its G9.1 silent-on-miss contract — an
+unreachable / missing endpoint reads as ``None`` and the verb's
+*null* is the recoverable "no route" answer, distinct from "anchor
+doesn't exist."
+
 SQL parameter binding mirrors the established raw-SQL pattern in
 :mod:`meho_backplane.retrieval.retriever`: every statement is a
 fully-literal ``text("...")`` (nothing interpolated, so the SQLAlchemy
@@ -348,24 +372,50 @@ async def _traverse(
     Picks the reverse or forward literal statement and runs it
     tenant-scoped on its own session, mirroring the session-per-call
     shape of the memory / kb services. Resolves the anchor up front:
-    an ambiguous bare-name root (multiple kinds, no ``kind`` pin)
-    raises :class:`AmbiguousNodeError` rather than traversing a merged
-    closure.
+
+    * an ambiguous bare-name root (multiple kinds, no ``kind`` pin)
+      raises :class:`AmbiguousNodeError` rather than traversing a merged
+      closure;
+    * an anchor that does not exist in this tenant raises
+      :class:`NodeNotFoundError` so the caller can distinguish
+      **untracked** (no anchor in the graph — auto-discovery is k8s-only
+      today, so every registered non-k8s target falls here) from
+      **tracked with no dependents / dependencies** (the anchor exists,
+      the closure is just the one-element root). Bare ``[]`` was the
+      pre-G0.18-T4 behaviour and conflated the two; the conflation
+      reads as "safe to delete" for the pre-destructive blast-radius
+      use case and is the RDC #789 N2 false-negative this resolution
+      closes.
     """
     sql = _TRAVERSAL_SQL_REVERSE if reverse else _TRAVERSAL_SQL_FORWARD
     tenant_id = str(operator.tenant_id)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        await _assert_anchor_unambiguous(
-            session, tenant_id=tenant_id, name=name_or_alias, kind=kind
-        )
+        # G0.18-T4 (#1357): resolve the anchor up front. The two-step
+        # path — :func:`resolve_node` then the recursive CTE — is the
+        # planned migration the G9.2 resolver was designed for (see
+        # :mod:`meho_backplane.topology.resolvers` module docstring's
+        # "Not-found semantics intentionally differ" carve-out, now
+        # reconciled for the closure verbs). ``resolve_node`` raises
+        # :class:`NodeNotFoundError` on miss and
+        # :class:`AmbiguousNodeError` on multi-kind, so the previous
+        # ``_assert_anchor_unambiguous`` probe is subsumed — one
+        # session round-trip covers both checks. The kind pin
+        # (``kind=`` argument) flows through verbatim. ``resolve_node``
+        # also returns the canonical ``GraphNode.kind``; we pass it
+        # to the CTE so the traversal anchors on the exact row the
+        # resolver picked (avoiding a redundant ``CAST(:kind AS text)
+        # IS NULL OR n.kind = :kind`` re-evaluation that would in
+        # principle traverse a different row when, say, an
+        # alias-resolution layer lands on top of this code path).
+        anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
         result = await session.execute(
             sql,
             {
                 "name": name_or_alias,
                 "tenant_id": tenant_id,
-                "kind": kind,
+                "kind": anchor.kind,
                 "depth": depth,
                 "kind_filter": kind_filter,
             },
@@ -400,9 +450,24 @@ async def find_dependents(
     — a same-named node in another tenant is never returned. Cycles
     terminate at the CYCLE clause.
 
-    The root node itself is included (depth 0) so a caller can
-    distinguish "node exists but has no dependents" (one-element list)
-    from "node does not exist in this tenant" (empty list).
+    The root node itself is included (depth 0). G0.18-T4 (#1357,
+    RDC #789 N2) changed the not-found contract: an anchor name with
+    no matching :class:`~meho_backplane.db.models.GraphNode` in the
+    tenant raises :class:`NodeNotFoundError` rather than returning
+    ``[]``. **An empty return is now structurally impossible** — the
+    minimum response is the one-element list ``[root]`` for a tracked
+    node with no dependents. Callers distinguish the two cases by the
+    exception:
+
+    * one-element list → **tracked, no dependents** (safe to delete
+      from a blast-radius perspective).
+    * :class:`NodeNotFoundError` → **untracked** (the node is not in
+      the topology graph; for registered non-k8s targets this is the
+      expected state today because only the KubernetesConnector
+      overrides
+      :meth:`~meho_backplane.connectors.base.Connector.discover_topology`).
+      *Not* equivalent to "safe to delete" — the call has produced no
+      blast-radius signal.
     """
     return await _traverse(
         operator,
@@ -428,8 +493,10 @@ async def find_dependencies(
     per-node closure dedupe, same ``kind`` disambiguation contract,
     same tenant scoping, same cycle safety and depth bound — with edges
     walked in the opposite direction (out of the current node rather
-    than into it). Root included at depth 0; empty list means the node
-    does not exist in this tenant.
+    than into it). Root included at depth 0; an untracked anchor
+    raises :class:`NodeNotFoundError` (G0.18-T4 #1357 — see
+    :func:`find_dependents` for the full contract). An empty return
+    list is structurally impossible.
     """
     return await _traverse(
         operator,

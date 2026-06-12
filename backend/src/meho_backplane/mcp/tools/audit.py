@@ -72,6 +72,7 @@ from meho_backplane.audit_query import (
     replay_session,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
@@ -143,9 +144,13 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         },
         "op_class": {
             "type": ["string", "null"],
+            "enum": [*OP_CLASS_ENUM, None],
             "description": (
-                'One of "read" / "write" / "credential_read" / '
-                '"audit_query" / "other". Exact match.'
+                "Sensitivity classification (exact match). Same vocabulary "
+                "as `meho.broadcast.recent` / `meho.broadcast.watch` so a "
+                "consumer that filters audit on `credential_mint` and the "
+                "broadcast stream on `credential_mint` uses one enum. "
+                "Values: " + ", ".join(f"`{value}`" for value in OP_CLASS_ENUM) + "."
             ),
             "maxLength": 64,
         },
@@ -384,8 +389,9 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
        :data:`_MCP_SESSION_CONTEXTVAR` the transport binds from the
        inbound ``Mcp-Session-Id`` header). Any mismatch → -32602 —
        including the case where the request carried no session header at
-       all, since the transport then binds a fresh per-call uuid4 that
-       the client cannot have predicted.
+       all, since the transport then leaves the contextvar unbound
+       (G0.14-T6 #1147 decoupled capture from enforcement; the bound
+       value can only ever be a value the client explicitly sent).
     """
     requested = arguments.get("agent_session_id")
     if requested is None:

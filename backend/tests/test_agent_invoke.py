@@ -350,7 +350,7 @@ async def test_child_run_linked_to_parent_in_lineage() -> None:
         operator: Operator,
         definition: AgentDefinition,
         parent_run_id: UUID | None,
-    ) -> UUID:
+    ) -> tuple[UUID, str]:
         recorded.append(
             {
                 "tenant_id": operator.tenant_id,
@@ -358,7 +358,7 @@ async def test_child_run_linked_to_parent_in_lineage() -> None:
                 "parent_run_id": parent_run_id,
             }
         )
-        return child_run_id
+        return child_run_id, "test-worker:0"
 
     invoke_tool = make_invoke_agent_tool(
         resolver=resolver, child_runner=child_runner, recorder=recorder
@@ -392,15 +392,15 @@ def _resolver_for(child_def: AgentDefinition) -> ChildAgentResolver:
 
 
 async def _recorder_returning(child_run_id: UUID) -> ChildRunRecorder:
-    """A recorder that records the requested child and returns *child_run_id*."""
+    """A recorder that records the requested child and returns ``(id, owner)``."""
 
     async def recorder(
         *,
         operator: Operator,
         definition: AgentDefinition,
         parent_run_id: UUID | None,
-    ) -> UUID:
-        return child_run_id
+    ) -> tuple[UUID, str]:
+        return child_run_id, "test-worker:0"
 
     return recorder
 

@@ -1,0 +1,11 @@
+{
+  "kind": "cron",
+  "agent_definition_id": "00000000-0000-0000-0000-000000000000",
+  "cron_expr": "*/15 * * * *",
+  "timezone": "UTC",
+  "inputs": {
+    "instructions": "Read the latest batch of broadcast events for this tenant from the harness-supplied input. The harness has already loaded `## Known policy` and `## Recent events` into the input string. For each event, decide skip/escalate per your system prompt; for each escalation, call invoke_agent against r1-deep-tier-investigator with the briefing shape your prompt specifies."
+  },
+  "identity_sub": "agent:r1-cheap-tier-classifier",
+  "in_flight_policy": "fail_into_audit"
+}

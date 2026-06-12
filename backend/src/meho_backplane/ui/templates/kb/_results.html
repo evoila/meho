@@ -1,0 +1,210 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB search/list results partial.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1). This
+  fragment is swapped into ``#kb-results`` by the HTMX keyup POST;
+  it is also included directly into ``index.html`` for the initial
+  page render so both paths share identical markup.
+
+  Context variables:
+    query      -- str: current search query (empty for list view)
+    hits       -- list[KbEntrySearchHit]: ranked hits (non-empty query)
+    entries    -- list[KbEntry]: paginated entries (empty query)
+    has_more   -- bool: whether more entries exist beyond this page
+    limit      -- int: page size
+    offset     -- int: current offset
+    next_offset -- int: next page offset
+    prev_offset -- int: previous page offset (0 when at first page)
+
+  Layout:
+    * Non-empty query: DaisyUI card-grid of result cards, each showing
+      slug, score pills (fused / BM25 / cosine), preview snippet, and
+      hover-preview trigger + detail link.
+    * Empty query: table of slug + kind + indexed_at for browsing.
+    * Empty state: friendly empty-state card.
+-#}
+<div id="kb-results" class="space-y-3">
+  {% if query %}
+    {# ---------- Search results ---------- #}
+    {% if hits %}
+      <p class="text-sm opacity-70" aria-live="polite">
+        {{ hits | length }} result{% if hits | length != 1 %}s{% endif %}
+        for <em>&ldquo;{{ query }}&rdquo;</em>
+      </p>
+      <ul class="space-y-3" role="list" aria-label="Search results">
+        {% for hit in hits %}
+          <li
+            class="card bg-base-100 border-base-300 border shadow-sm relative"
+            id="kb-card-{{ hit.slug }}"
+          >
+            {# Hover-preview target: HTMX mouseenter fetches the preview partial #}
+            <div
+              id="kb-preview-{{ hit.slug }}"
+              class="hidden"
+              aria-live="polite"
+              aria-label="Preview of {{ hit.slug }}"
+            ></div>
+            <div class="card-body py-3 space-y-2">
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <h3 class="card-title text-base font-mono">
+                  <a
+                    href="/ui/kb/{{ hit.slug }}"
+                    class="link link-primary"
+                    aria-label="View entry {{ hit.slug }}"
+                  >{{ hit.slug }}</a>
+                </h3>
+                {# Score pills #}
+                <div class="flex flex-wrap gap-1 text-xs" aria-label="Relevance scores">
+                  <span
+                    class="badge badge-primary badge-outline"
+                    title="Fused RRF score"
+                    aria-label="Fused score {{ '%.3f' | format(hit.fused_score) }}"
+                  >
+                    fused {{ "%.3f" | format(hit.fused_score) }}
+                  </span>
+                  {% if hit.bm25_score is not none %}
+                    <span
+                      class="badge badge-ghost badge-outline"
+                      title="BM25 lexical score"
+                      aria-label="BM25 score {{ '%.3f' | format(hit.bm25_score) }}"
+                    >
+                      bm25 {{ "%.3f" | format(hit.bm25_score) }}
+                    </span>
+                  {% endif %}
+                  {% if hit.cosine_score is not none %}
+                    <span
+                      class="badge badge-ghost badge-outline"
+                      title="Cosine semantic score"
+                      aria-label="Cosine score {{ '%.4f' | format(hit.cosine_score) }}"
+                    >
+                      cos {{ "%.4f" | format(hit.cosine_score) }}
+                    </span>
+                  {% endif %}
+                </div>
+              </div>
+              {# Snippet preview #}
+              <p class="text-sm opacity-70 line-clamp-2">{{ hit.snippet }}</p>
+              {# Hover-preview trigger button #}
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs"
+                  hx-get="/ui/kb/{{ hit.slug }}/preview?q={{ query | urlencode }}"
+                  hx-target="#kb-preview-{{ hit.slug }}"
+                  hx-swap="innerHTML"
+                  hx-trigger="mouseenter delay:200ms"
+                  aria-label="Preview {{ hit.slug }}"
+                  x-data="{}"
+                  x-on:htmx:after-swap.document="$el.closest('.card').querySelector('#kb-preview-{{ hit.slug }}').classList.remove('hidden')"
+                >
+                  Preview
+                </button>
+                <a href="/ui/kb/{{ hit.slug }}" class="btn btn-primary btn-xs">
+                  View
+                </a>
+              </div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      {# Empty search results #}
+      <div class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body text-center py-10">
+          <p class="text-lg opacity-60">No entries matched &ldquo;{{ query }}&rdquo;</p>
+          <p class="text-sm opacity-40">
+            Try a different query or
+            <a href="/ui/kb" class="link">browse all entries</a>.
+          </p>
+        </div>
+      </div>
+    {% endif %}
+
+  {% else %}
+    {# ---------- Paginated entry list (empty query) ---------- #}
+    {% if entries %}
+      <div class="card bg-base-100 border-base-300 border shadow-sm overflow-x-auto">
+        <table class="table table-sm" aria-label="Knowledge base entries">
+          <thead>
+            <tr>
+              <th scope="col">Slug</th>
+              <th scope="col" class="hidden sm:table-cell">Kind</th>
+              <th scope="col" class="hidden md:table-cell">Indexed at</th>
+              <th scope="col" class="sr-only">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="kb-results-body">
+            {% for entry in entries %}
+              <tr>
+                <td class="font-mono">
+                  <a href="/ui/kb/{{ entry.slug }}" class="link link-primary">{{ entry.slug }}</a>
+                </td>
+                <td class="hidden sm:table-cell opacity-70">
+                  {{ entry.metadata.get("kind", "kb-entry") }}
+                </td>
+                <td class="hidden md:table-cell opacity-70 text-xs">
+                  {{ entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
+                </td>
+                <td>
+                  <a
+                    href="/ui/kb/{{ entry.slug }}"
+                    class="btn btn-ghost btn-xs"
+                    aria-label="View entry {{ entry.slug }}"
+                  >
+                    View
+                  </a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {# Pagination bar #}
+      {% if has_more or offset > 0 %}
+        <nav class="flex items-center justify-between gap-2" aria-label="Pagination">
+          {% if offset > 0 %}
+            <a
+              href="/ui/kb?offset={{ prev_offset }}&limit={{ limit }}"
+              class="btn btn-sm btn-ghost"
+              aria-label="Previous page"
+            >
+              &larr; Previous
+            </a>
+          {% else %}
+            <span class="btn btn-sm btn-ghost btn-disabled" aria-disabled="true">&larr; Previous</span>
+          {% endif %}
+          <span class="text-sm opacity-60">
+            Showing {{ offset + 1 }}–{{ offset + entries | length }}
+          </span>
+          {% if has_more %}
+            <a
+              href="/ui/kb?offset={{ next_offset }}&limit={{ limit }}"
+              class="btn btn-sm btn-ghost"
+              aria-label="Next page"
+            >
+              Next &rarr;
+            </a>
+          {% else %}
+            <span class="btn btn-sm btn-ghost btn-disabled" aria-disabled="true">Next &rarr;</span>
+          {% endif %}
+        </nav>
+      {% endif %}
+
+    {% else %}
+      {# Empty state — no entries in this tenant's KB #}
+      <div class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body text-center py-10">
+          <p class="text-lg opacity-60">No knowledge entries yet</p>
+          <p class="text-sm opacity-40">
+            The knowledge base is empty. Use <code>meho kb ingest &lt;dir&gt;</code>
+            to add entries via CLI, or
+            <a href="/ui/kb/upload" class="link">upload a .md file</a>.
+          </p>
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

@@ -70,7 +70,13 @@ from ._vault_fakes import install_fake_client
 _CANARY_USERNAME = "svc-nsx-canary"
 _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-nsx"
 
-#: The connector triple ``nsx-rest-4.2`` decodes to.
+#: The connector triple ``nsx-rest-4.2`` decodes to. Deliberately a
+#: 4.x label (not the VCF-9-aligned "9.0" class pin) so this test
+#: doubles as a regression guard that a standalone NSX-T 4.x target
+#: still dispatches through the widened-range NsxConnector (#1530):
+#: the test registers this triple against a fresh registry and the
+#: target's fingerprint reports ``version=4.2``, so the resolver binds
+#: via the ``>=4.0,<10.0`` SpecifierSet, not the class pin.
 _PRODUCT = "nsx"
 _VERSION = "4.2"
 _IMPL_ID = "nsx-rest"
@@ -177,6 +183,7 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a1")
         self.name = "nsx-credread"
         self.host = _NSX_HOST
         self.port = 443

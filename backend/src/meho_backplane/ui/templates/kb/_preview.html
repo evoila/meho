@@ -1,0 +1,37 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Hover-preview partial for KB search result cards.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1). Swapped
+  into ``#kb-preview-<slug>`` by ``hx-trigger="mouseenter delay:200ms"``
+  on a result card's Preview button.
+
+  Context variables:
+    entry               -- KbEntry: the full entry
+    highlighted_snippet -- Markup: snippet text with query terms wrapped
+                           in ``<mark class="kb-term">``
+    query               -- str: the active search query
+
+  Design:
+    * DaisyUI ``card`` inside the result card.
+    * The highlighted snippet is the primary content.
+    * A "View full entry" link anchors to the detail page.
+    * The component is lightweight: no headings, no sidebar. The full
+      metadata lives on the detail page.
+-#}
+<div class="card bg-base-200 border-base-300 border mt-2">
+  <div class="card-body py-3 space-y-2">
+    <p class="text-sm leading-relaxed">{{ highlighted_snippet }}</p>
+    <div class="flex justify-end">
+      <a
+        href="/ui/kb/{{ entry.slug }}{% if query %}?q={{ query | urlencode }}{% endif %}"
+        class="btn btn-primary btn-xs"
+        aria-label="View full entry {{ entry.slug }}"
+      >
+        View full entry &rarr;
+      </a>
+    </div>
+  </div>
+</div>

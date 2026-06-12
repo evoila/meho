@@ -13,6 +13,12 @@ Coverage matrix (Task #27 acceptance criteria #3, #4):
 * ``/api/v1/health.db.migrated`` reflects the probe outcome — the
   response field is no longer hardcoded ``None``.
 
+Plus the #1607 rollback-tolerance matrix: the DB *ahead* of the
+image's head (the post-``helm rollback`` state — the pre-upgrade
+migration Job's commit survives a manifest-only rollback) is healthy,
+while the DB *behind* head stays unhealthy, and the pgvector gate
+still applies on the ahead path.
+
 The aiosqlite tests stay always-on; they exercise the probe's
 revision comparison machinery without needing Docker. The probe's
 async-engine code path is the same one a PG deployment hits — the
@@ -28,6 +34,7 @@ from unittest.mock import patch
 
 import pytest
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -234,6 +241,140 @@ async def test_probe_registers_with_async_runner(
     assert len(results) == 1
     assert results[0].name == "db"
     assert isinstance(results[0], ProbeResult)
+
+
+# ---------------------------------------------------------------------------
+# #1607 rollback tolerance — DB ahead of the image's head
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_healthy_when_db_ahead_of_head(
+    sqlite_engine: AsyncEngine,
+) -> None:
+    """DB stamped with a revision this image doesn't ship → ``ok=True``.
+
+    The post-auto-rollback state (#1607): the ``pre-upgrade``
+    migration Job committed ``0037``, the new release failed
+    readiness, and Helm rolled the Deployment back to the prior image
+    whose ``versions/`` ends at ``0036``. Helm reverts manifests only
+    — the schema stays at ``0037``. The additive-only ``upgrade()``
+    contract (``scripts/ci/check_migration_compat.py``) makes the
+    newer schema readable by the older code, so the rolled-back pod
+    must report Ready; the strict ``current == head`` equality this
+    test replaces is what made the 2026-06-08 auto-rollback dead on
+    arrival. ``get_revision`` raising ``CommandError`` mirrors
+    Alembic's real unknown-revision behaviour (verified on 1.18.4).
+    """
+    await _create_alembic_version_table(sqlite_engine, "0037")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_script = fake_from_config.return_value
+        fake_script.get_current_head.return_value = "0036"
+        fake_script.get_revision.side_effect = CommandError(
+            "Can't locate revision identified by '0037'",
+        )
+        result = await db_migration_probe()
+
+    assert result.ok is True
+    assert result.detail == "current=0037 head=0036 db_ahead=true"
+    fake_script.get_revision.assert_called_once_with("0037")
+
+
+@pytest.mark.asyncio
+async def test_probe_unhealthy_when_db_behind_head(
+    sqlite_engine: AsyncEngine,
+) -> None:
+    """DB stamped with an *older* revision this image knows → ``ok=False``.
+
+    The dangerous direction: the code expects schema objects migration
+    ``0036`` creates and the DB is still at ``0035`` (a forward-deploy
+    missed its ``alembic upgrade head``). ``0035`` resolves in this
+    image's script directory, so this is not the db-ahead rollback
+    state — the fail-closed contract is preserved.
+    """
+    await _create_alembic_version_table(sqlite_engine, "0035")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_script = fake_from_config.return_value
+        fake_script.get_current_head.return_value = "0036"
+        # Default Mock behaviour: ``get_revision("0035")`` returns a
+        # Mock Script — the revision is *known* to this image.
+        result = await db_migration_probe()
+
+    assert result.ok is False
+    assert result.detail == "current=0035 head=0036"
+    fake_script.get_revision.assert_called_once_with("0035")
+
+
+@pytest.mark.asyncio
+async def test_probe_db_ahead_still_fails_when_pgvector_missing(
+    sqlite_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The db-ahead tolerance must not bypass the pgvector gate.
+
+    A rolled-back pod on PostgreSQL with the ``vector`` extension
+    dropped out-of-band is still unready — the revision tolerance and
+    the extension check are orthogonal, and the ahead path joins the
+    pgvector gate rather than short-circuiting around it. The detail
+    reports the DB's actual revision (``0037``), not the image head.
+    """
+    await _create_alembic_version_table(sqlite_engine, "0037")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_script = fake_from_config.return_value
+        fake_script.get_current_head.return_value = "0036"
+        fake_script.get_revision.side_effect = CommandError(
+            "Can't locate revision identified by '0037'",
+        )
+        monkeypatch.setattr(sqlite_engine.dialect, "name", "postgresql", raising=False)
+        with patch(
+            "meho_backplane.db.migrations._check_pgvector_extension",
+            return_value=False,
+        ):
+            result = await db_migration_probe()
+
+    assert result.ok is False
+    assert result.detail == "revision=0037 pgvector=missing"
+
+
+@pytest.mark.asyncio
+async def test_probe_db_ahead_healthy_on_postgres_with_pgvector(
+    sqlite_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rolled-back pod on PostgreSQL with pgvector intact → ``ok=True``.
+
+    The full production rollback shape: PG dialect, schema ahead,
+    extension present. Pins that the ahead path emits the
+    ``db_ahead=true`` detail after the pgvector gate passes.
+    """
+    await _create_alembic_version_table(sqlite_engine, "0037")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_script = fake_from_config.return_value
+        fake_script.get_current_head.return_value = "0036"
+        fake_script.get_revision.side_effect = CommandError(
+            "Can't locate revision identified by '0037'",
+        )
+        monkeypatch.setattr(sqlite_engine.dialect, "name", "postgresql", raising=False)
+        with patch(
+            "meho_backplane.db.migrations._check_pgvector_extension",
+            return_value=True,
+        ):
+            result = await db_migration_probe()
+
+    assert result.ok is True
+    assert result.detail == "current=0037 head=0036 db_ahead=true"
 
 
 # ---------------------------------------------------------------------------

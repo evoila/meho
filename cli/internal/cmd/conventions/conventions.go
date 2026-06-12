@@ -32,16 +32,33 @@
 // `meho audit`. The backend writes the audit_log row keyed by op_id
 // (`conventions.<verb>`); the CLI just calls the route.
 //
-// The implementation deliberately follows the in-package HTTP helper
-// pattern the sibling verb trees use (a local doAuthedRequest /
-// renderRequestError pair) rather than a shared client package, for the
-// import-cycle reason every sibling cites: each verb tree is grafted
-// onto the root command, so a shared helper imported from cmd/* and
-// from a per-tree package would close the cycle.
+// G0.12-T8 #1266 migrated this package off the sibling-verb pattern of
+// hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed client methods (`ListConventionsApiV1ConventionsGet`
+// etc.) that own URL building, header injection, and request body
+// encoding from the generated query-param / body types
+// (`api.ConventionCreate`, `api.ConventionUpdate`,
+// `api.ListConventionsApiV1ConventionsGetParams`). Consumer-side
+// struct drift — the #1069 root cause Initiative #1118 targets —
+// can't recur because we now consume `api.Convention`,
+// `api.ConventionSummary`, `api.ConventionListResponse`,
+// `api.ConventionHistoryEntry`, `api.BudgetStatus` directly.
+//
+// We deliberately bind to the lower-level non-`*WithResponse` methods
+// (each returns `*http.Response`, not the typed `*<Op>Response`
+// envelope) so the generated parser's HTTPValidationError-only 422
+// unmarshal doesn't swallow the over-budget string-detail 422 the
+// conventions surface emits (G7.1-T7 #1094). The shared `doRequest`
+// helper reads the body once into a `rawResponse` (status + bytes)
+// and the verbs unmarshal 2xx payloads themselves; non-2xx flows
+// through `renderHTTPStatus` uniformly regardless of whether the body
+// matches the OpenAPI spec's declared error shape.
 package conventions
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -86,121 +103,133 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// Convention mirrors the backend Convention pydantic model
-// (`backend/src/meho_backplane/api/v1/conventions.py`). Hand-written
-// rather than aliased to the generated oapi-codegen client type so the
-// conventions package stays decoupled from generator churn — the kb /
-// agent / audit packages take the same stance. `CreatedBySub` is a
-// pointer because the seed migration (T5) inserts rows with no
-// authenticated principal (the seed pre-dates any HTTP request).
-type Convention struct {
-	ID           string  `json:"id"`
-	TenantID     string  `json:"tenant_id"`
-	Slug         string  `json:"slug"`
-	Title        string  `json:"title"`
-	Body         string  `json:"body"`
-	Kind         string  `json:"kind"`
-	Priority     int     `json:"priority"`
-	CreatedBySub *string `json:"created_by_sub"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-}
-
-// Summary mirrors the backend ConventionSummary pydantic model — the
-// lighter list-row shape returned by GET /api/v1/conventions. Omits the
-// full `body` so a list of 20 conventions doesn't materialise 20 KB of
-// rule text on every list call.
-type Summary struct {
-	ID           string  `json:"id"`
-	TenantID     string  `json:"tenant_id"`
-	Slug         string  `json:"slug"`
-	Title        string  `json:"title"`
-	Kind         string  `json:"kind"`
-	Priority     int     `json:"priority"`
-	CreatedBySub *string `json:"created_by_sub"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-}
-
-// BudgetStatus mirrors the backend BudgetStatus pydantic model — the
-// preamble budget arithmetic the GET /api/v1/conventions list response
-// surfaces on every call (T7 #1094). MaxTokens is the budget the
-// preamble assembler enforces; EstimatedTokens is the actual weight of
-// the assembled preamble text; OverBudget is True iff DroppedSlugs is
-// non-empty; DroppedSlugs lists the slugs the packer omitted, in
-// lowest-priority-first drop order.
-//
-// The list verb consults DroppedSlugs: when non-empty (and not in --json
-// mode), it prints a stderr warning naming the dropped slugs and exits
-// with code 5 (insufficient_budget). --json mode emits the full envelope
-// and exits 0 — JSON consumers parse the field themselves.
-type BudgetStatus struct {
-	MaxTokens       int      `json:"max_tokens"`
-	EstimatedTokens int      `json:"estimated_tokens"`
-	OverBudget      bool     `json:"over_budget"`
-	DroppedSlugs    []string `json:"dropped_slugs"`
-}
-
-// ListResponse mirrors the backend ConventionListResponse envelope —
-// wrapped in `{"entries": [...]}` for forward-compat with future paging
-// fields. Same shape kb / agent adopted.
-//
-// BudgetStatus (T7 #1094) is always populated; the backend computes it
-// from the tenant's full operational-conventions set on every list
-// call. The --kind query filter narrows Entries only; BudgetStatus
-// always reflects the full operational set so an operator scoping
-// the list by kind cannot mask an over-budget tenant.
-type ListResponse struct {
-	Entries      []Summary    `json:"entries"`
-	BudgetStatus BudgetStatus `json:"budget_status"`
-}
-
-// HistoryEntry mirrors the backend ConventionHistoryEntry pydantic
-// model. `BodyBefore` is a pointer because the first history row (the
-// CREATE event) has no prior state; `AuditID` is a pointer because the
-// T5 seed migration inserts history rows with no audit_log row.
-type HistoryEntry struct {
-	ID           string  `json:"id"`
-	ConventionID string  `json:"convention_id"`
-	BodyBefore   *string `json:"body_before"`
-	BodyAfter    string  `json:"body_after"`
-	ActorSub     string  `json:"actor_sub"`
-	AuditID      *string `json:"audit_id"`
-	Ts           string  `json:"ts"`
-}
-
 // validKinds mirrors the backend ConventionKind enum. CLI-side
 // validation gives the operator an immediate rejection rather than a
 // remote 422.
 var validKinds = map[string]bool{"operational": true, "workflow": true, "reference": true}
 
-// errMissingAccessToken is the sentinel doAuthedRequest returns when
+// errMissingAccessToken is the sentinel newAuthedClient returns when
 // the stored token row exists but its access_token is empty — a
-// credential-state failure that renderRequestError maps to
-// auth_expired with a `meho login` hint. Mirrors the kb / agent shape.
+// credential-state failure renderRequestError maps to auth_expired
+// with a `meho login` hint. Mirrors the agent-principal / approvals
+// packages' shape so an operator sees the same hint across every verb
+// tree.
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
-// renderRequestError translates a request error into the right
-// output.StructuredError category. Maps the conventions REST surface's
-// status codes:
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL and verifies a non-empty bearer is loaded. Centralised
+// so every verb's typed-call path goes through the same
+// "stored-token-loaded + non-empty bearer" gate; the caller forwards
+// any returned error to renderRequestError for category mapping.
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// rawResponse is the (status, body) pair the verbs operate on after a
+// successful HTTP round-trip. We bind to `*http.Response` rather than
+// the generated `*WithResponse` envelope because the conventions
+// surface emits two distinct 422 shapes (string detail for the
+// over-budget gate; list detail for pydantic validation), only one of
+// which matches the OpenAPI spec's HTTPValidationError. The generated
+// parser surfaces a json.Unmarshal error on the unspec'd shape and
+// drops the response on the floor — costing us the status + body
+// we need to render the right error category. Reading the body
+// ourselves bypasses that limitation while keeping every URL / query
+// / body shape in lock-step with the generated client (the typed
+// non-WithResponse methods own URL building, header injection, and
+// request encoding).
+type rawResponse struct {
+	StatusCode int
+	Body       []byte
+}
+
+// readAllBody drains rsp.Body up to the responseBodyCap, closing the
+// body before returning. Splitting this out keeps each verb's call
+// site to a single line and makes the cap auditable in one place.
+func readAllBody(rsp *http.Response) ([]byte, error) {
+	defer rsp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(io.LimitReader(rsp.Body, responseBodyCap+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if int64(len(raw)) > responseBodyCap {
+		return nil, fmt.Errorf(
+			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
+			responseBodyCap,
+		)
+	}
+	return raw, nil
+}
+
+// responseBodyCap bounds the response body the CLI will read. A
+// convention body is a Markdown rule (the operational kind is hard-
+// capped at the preamble token budget, ~3 KB; workflow / reference can
+// be larger but ~50 KB is realistic). 1 MiB is comfortable headroom
+// and protects against an adversarial / misconfigured backplane sending
+// an unbounded response.
+const responseBodyCap int64 = 1 << 20
+
+// doRequest invokes call once and, if the resulting response status
+// is 401, runs a one-shot bearer refresh + re-issues call. Mirrors
+// the behaviour `api.AuthedClient.GetHealth` implements for
+// /api/v1/health, generalised so every conventions verb runs the same
+// transparent-retry contract. Returns the drained (status, body) pair
+// on the final response.
+//
+// The conventions package binds to the lower-level non-WithResponse
+// client methods (each returns *http.Response, not the
+// `*<Op>Response` envelope) so the generated parser's
+// HTTPValidationError-only 422 unmarshal doesn't swallow the
+// over-budget string-detail 422 the conventions surface emits.
+// Reading the body via readAllBody lets renderHTTPStatus classify
+// every non-2xx uniformly off the (status, body) pair, regardless of
+// whether the body matches the OpenAPI spec's 422 shape.
+func doRequest(
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*http.Response, error),
+) (*rawResponse, error) {
+	rsp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if rsp.StatusCode == http.StatusUnauthorized {
+		// Drain + close before re-issuing so the underlying transport
+		// can reuse the connection.
+		_, _ = io.Copy(io.Discard, rsp.Body)
+		rsp.Body.Close() //nolint:errcheck
+		if rerr := authed.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		rsp, err = call(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	raw, err := readAllBody(rsp)
+	if err != nil {
+		return nil, err
+	}
+	return &rawResponse{StatusCode: rsp.StatusCode, Body: raw}, nil
+}
+
+// renderRequestError translates a transport-layer request error into
+// the right output.StructuredError category. Maps the conventions REST
+// surface's pre-response failures: missing bearer, no-refresh-token,
+// token-not-found, plus the generic transport-down case. Non-2xx
+// status codes carried in a typed response envelope are classified by
+// renderHTTPStatus instead.
 //
 //   - empty stored bearer → auth_expired.
-//   - 401 (refresh failed) → auth_expired with a `meho login` hint.
-//   - 403 → insufficient_role (the backend's detail names the required
-//     role, typically "tenant_admin required" on write verbs).
-//   - 404 → unexpected with the backend's detail (`convention_not_found`;
-//     cross-tenant probes land here per the no-existence-leak posture).
-//   - 409 → unexpected with the duplicate detail
-//     (`convention_already_exists` on create with a slug that already
-//     exists in the same tenant).
-//   - 422 → unexpected with the validation envelope. The conventions
-//     route has a domain-specific 422 the others don't: the over-budget
-//     gate, raised when an `operational` body exceeds the preamble
-//     token budget. The detail string is human-friendly verbatim
-//     ("convention body exceeds preamble budget (estimated=X,
-//     budget=Y)"); surface it as-is so the operator sees exactly how
-//     many tokens over they are.
-//   - Other 4xx/5xx → unexpected with the raw body.
+//   - `meho login` not yet run → auth_expired with the file-store hint.
+//   - 401 after a failed refresh (no refresh_token) → auth_expired.
 //   - Pure transport errors → unreachable.
 func renderRequestError(
 	cmd *cobra.Command,
@@ -235,25 +264,48 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-// renderHTTPError classifies a non-2xx response into the right
-// StructuredError category.
-func renderHTTPError(
+// renderHTTPStatus classifies a non-2xx response (or 401 after a
+// failed refresh) carried in the typed envelope into the right
+// StructuredError category. Mirrors the pre-migration `httpError`
+// switch but acts on the (statusCode, body) pair lifted off the
+// generated `*Response.HTTPResponse` + `Body` fields rather than a
+// sentinel value.
+//
+// The mapping preserved across the migration:
+//
+//   - 401 → auth_expired (refresh impossible / token rejected).
+//   - 403 → insufficient_role with the backend's detail string.
+//   - 404 → unexpected with the backend's detail
+//     (convention_not_found; cross-tenant probes land here per the
+//     no-existence-leak posture).
+//   - 409 → unexpected with the backend's detail
+//     (convention_already_exists on create with a slug that already
+//     exists in the same tenant).
+//   - 422 → unexpected, prefixed with "invalid request: ". The
+//     conventions surface emits two distinct 422s: pydantic
+//     validation envelopes (`{"detail":[{...}]}`) on malformed
+//     input, and the over-budget gate string detail when an
+//     `operational` body exceeds DEFAULT_MAX_PREAMBLE_TOKENS.
+//     decodeDetailString returns the string detail verbatim for
+//     the budget gate; the validation envelope falls through to
+//     the raw body. Both surface as unexpected so callers can branch
+//     on exit code 4.
+//   - Other non-2xx → unexpected with the raw body.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -264,7 +316,7 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -276,53 +328,45 @@ func renderHTTPError(
 		// doesn't exist on this backplane — typically an older deploy
 		// without T2.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusConflict:
 		// `create` with a slug that already exists in the same tenant
 		// surfaces here (`convention_already_exists`).
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
-		// The conventions surface emits two distinct 422s:
-		//   1. Pydantic validation envelope (`{"detail":[{...}]}`) on
-		//      malformed input (invalid slug shape, missing field, bad
-		//      kind value).
-		//   2. The over-budget gate detail string when an `operational`
-		//      body exceeds DEFAULT_MAX_PREAMBLE_TOKENS. Backend emits a
-		//      string detail with the estimated and budget token counts
-		//      so the operator can re-size the body precisely.
-		//
-		// decodeDetailString returns the string detail verbatim when the
-		// JSON shape matches `{"detail": "..."}`; on the pydantic
-		// envelope shape (`{"detail": [...]}`) it falls through to the
-		// raw body. Both surface as unexpected so callers can branch
-		// on exit code 4.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("invalid request: %s", decodeDetailString(he.Body))),
+			output.Unexpected(fmt.Sprintf("invalid request: %s", decodeDetailString(bodyStr))),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
 }
 
-// detailEnvelope models FastAPI's HTTPException JSON shape.
+// detailEnvelope models FastAPI's HTTPException JSON shape. `detail`
+// is a `json.RawMessage` so both shapes the conventions route emits
+// round-trip cleanly: the plain `{"detail":"..."}` string the
+// HTTPException branch emits, and the `{"detail":[...]}` list shape
+// pydantic's validation envelope produces. decodeDetailString below
+// only surfaces the string form; the list form falls back to the raw
+// body so the operator sees the validation context.
 type detailEnvelope struct {
 	Detail json.RawMessage `json:"detail"`
 }
 
 // decodeDetailString pulls the `detail` field out of a FastAPI error
 // body when it's a plain string. Falls back to the raw body when the
-// JSON shape doesn't match (the pydantic validation envelope's `detail`
-// is a list, not a string).
+// JSON shape doesn't match (the pydantic validation envelope's
+// `detail` is a list, not a string).
 func decodeDetailString(body string) string {
 	var env detailEnvelope
 	if err := json.Unmarshal([]byte(body), &env); err == nil {
@@ -332,114 +376,6 @@ func decodeDetailString(body string) string {
 		}
 	}
 	return strings.TrimSpace(body)
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection and one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on 2xx, or an *httpError on
-// non-2xx, or an error categorised by api.IsTokenNotFound /
-// api.IsNoRefreshToken / generic transport. A 204 yields a nil body
-// without error (the DELETE verb hits this path).
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errMissingAccessToken
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// responseBodyCap bounds the response body the CLI will read. A
-// convention body is a Markdown rule (the operational kind is hard-
-// capped at the preamble token budget, ~3 KB; workflow / reference can
-// be larger but ~50 KB is realistic). 1 MiB is comfortable headroom
-// and protects against an adversarial / misconfigured backplane sending
-// an unbounded response.
-const responseBodyCap int64 = 1 << 20
-
-// httpError carries a non-2xx response so per-verb runners render the
-// right category.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-// pathEscape escapes a single path segment.
-func pathEscape(segment string) string {
-	// url.PathEscape is the right call but we shouldn't import net/url
-	// just for this; mirror the kb package's helper signature so the
-	// per-verb buildShowPath / buildHistoryPath stays unit-testable.
-	return urlPathEscape(segment)
 }
 
 // loadBodyFlag reads the --body flag value supporting inline text,
@@ -529,34 +465,6 @@ func confirmPrompt(cmd *cobra.Command, prompt string) bool {
 	}
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes"
-}
-
-// urlPathEscape escapes a path segment. Pulled out for a per-package
-// seam — agents have a richer pathEscape with multi-segment handling;
-// conventions doesn't need that level today.
-func urlPathEscape(s string) string {
-	// Per RFC 3986, a path segment may contain unreserved (ALPHA / DIGIT /
-	// `-._~`), `pct-encoded`, sub-delims (`!$&'()*+,;=`), and `:@`.
-	// Conventions slugs are constrained server-side to lowercase ASCII +
-	// digits + hyphen (the V_SLUG pattern), so the escape is a no-op in
-	// the realistic case — but we still escape defensively so an
-	// adversarial slug (e.g., from a buggy script) can't smuggle a path
-	// separator. Using net/url here directly to keep the implementation
-	// stdlib-only and the code path obvious.
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case 'a' <= c && c <= 'z',
-			'A' <= c && c <= 'Z',
-			'0' <= c && c <= '9',
-			c == '-', c == '.', c == '_', c == '~':
-			b.WriteByte(c)
-		default:
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
 }
 
 // runEditor lives in editor.go alongside the other editor-related

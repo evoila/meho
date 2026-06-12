@@ -54,13 +54,13 @@ from uuid import UUID
 import pytest
 import respx
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from meho_backplane.api.v1.rbac_test import router as rbac_test_router
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -472,3 +472,57 @@ def test_settings_enable_rbac_test_route_falsy_values(
     monkeypatch.setenv("MEHO_ENABLE_RBAC_TEST_ROUTE", value)
     get_settings.cache_clear()
     assert get_settings().enable_rbac_test_route is False
+
+
+# ---------------------------------------------------------------------------
+# authorize_tenant_scope — cross-tenant authorization (#1640)
+# ---------------------------------------------------------------------------
+
+_TENANT_SELF = UUID("11111111-1111-1111-1111-111111111111")
+_TENANT_OTHER = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _scope_op(
+    *,
+    role: TenantRole = TenantRole.TENANT_ADMIN,
+    platform_admin: bool = False,
+) -> Operator:
+    return Operator(
+        sub="op",
+        raw_jwt="t",
+        tenant_id=_TENANT_SELF,
+        tenant_role=role,
+        platform_admin=platform_admin,
+    )
+
+
+def test_authorize_tenant_scope_none_returns_own() -> None:
+    """No requested tenant → the operator's own tenant."""
+    assert authorize_tenant_scope(_scope_op(), None) == _TENANT_SELF
+
+
+def test_authorize_tenant_scope_own_returns_own() -> None:
+    """Explicitly requesting one's own tenant is always allowed."""
+    assert authorize_tenant_scope(_scope_op(), _TENANT_SELF) == _TENANT_SELF
+
+
+def test_authorize_tenant_scope_foreign_tenant_admin_denied() -> None:
+    """A tenant-admin without platform_admin cannot cross tenants (the IDOR fix)."""
+    with pytest.raises(HTTPException) as exc:
+        authorize_tenant_scope(
+            _scope_op(role=TenantRole.TENANT_ADMIN, platform_admin=False),
+            _TENANT_OTHER,
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "cross_tenant_requires_platform_admin"
+
+
+def test_authorize_tenant_scope_foreign_platform_admin_allowed() -> None:
+    """A platform-admin may target another tenant even with a sub-admin role."""
+    assert (
+        authorize_tenant_scope(
+            _scope_op(role=TenantRole.OPERATOR, platform_admin=True),
+            _TENANT_OTHER,
+        )
+        == _TENANT_OTHER
+    )

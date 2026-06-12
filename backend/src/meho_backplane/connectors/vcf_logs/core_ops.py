@@ -50,9 +50,9 @@ which describe the same shape under the ``/api/v2/`` family in 9.x):
 2. ``GET:/api/v2/events/{constraints}`` — ``vrli.event.query`` —
    constraint + time-range filtered raw-event search. Returns a
    :class:`~meho_backplane.connectors.schemas.ResultHandle` for
-   large result sets so the agent reads them back via
-   ``result_describe`` / ``result_query`` rather than receiving the
-   full payload inline.
+   large result sets -- a bounded inline sample plus a ``fetch_more``
+   envelope -- rather than the full payload inline. To act on more than
+   the sample the agent re-runs with a narrower constraint / time range.
 3. ``GET:/api/v2/aggregated-events/{constraints}`` — ``vrli.aggregated.query``
    — group-by aggregation over the same constraint set as the event
    query. Useful for "how many events per host / severity / source
@@ -288,9 +288,10 @@ VRLI_CORE_GROUPS: Final[tuple[VrliCoreGroup, ...]] = (
             "of vRLI: event queries return constraint-filtered, "
             "time-range-bounded log lines; aggregated queries return "
             "numeric counts grouped by one or more fields. Result sets "
-            "are JSONFlux-handle-shaped (typically large), so the agent "
-            "reads them back via result_describe / result_query rather "
-            "than inlining the full payload."
+            "are JSONFlux-handle-shaped (typically large): a bounded "
+            "inline sample plus a ``fetch_more`` envelope rather than the "
+            "full payload. Re-run with a narrower constraint / time range "
+            "to act on more than the sample."
         ),
     ),
     VrliCoreGroup(
@@ -399,8 +400,10 @@ VRLI_CORE_OPS: Final[tuple[VrliCoreOp, ...]] = (
                 "rows (each with timestamp, text, fields), plus "
                 "complete (bool) indicating whether the constraint "
                 "exhausted the index or hit the limit. Large result "
-                "sets return a JSONFlux ResultHandle; navigate via "
-                "result_describe + result_query."
+                "sets return a JSONFlux ResultHandle with a bounded "
+                "inline sample plus a ``fetch_more`` envelope; re-run "
+                "with a narrower constraint / time range to act on more "
+                "than the sample."
             ),
             next_step=(
                 "If complete=false, surface the truncation to the "

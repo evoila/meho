@@ -1,0 +1,20 @@
+# Action-shape fixture: pins the ``mask`` and ``hash`` action
+# replacement formats produced by the engine. Mask is length-
+# preserving with a 4-char trailing suffix; hash is the stable
+# ``sha256:<first-12-hex>`` correlator. A future engine change to
+# either replacement format will break this fixture loudly.
+
+id: roundtrip-mask-and-hash
+version: 1
+description: |
+  Round-trip fixture pinning the mask + hash action replacement
+  shapes. Narrow rules (uuid mask, fqdn hash) only; no scope.
+rules:
+  - name: mask-uuid
+    pattern: uuid
+    action: mask
+    reason: "shape-correlatable mask"
+  - name: hash-fqdn
+    pattern: fqdn
+    action: hash
+    reason: "stable replay correlator for tenant infra"

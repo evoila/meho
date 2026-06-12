@@ -511,8 +511,18 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "returns -32602 naming the candidate kinds.\n\n"
     "Returns `{kind, nodes: [TopologyNode, ...]}` for the closure kinds "
     "(root at depth 0, so a one-element list means 'exists but nothing "
-    "depends on it' and an empty list means 'no such node in this "
-    'tenant\'); `{kind: "path", path: TopologyPath|null}` for `path` '
+    "depends on it'); when the anchor is not tracked in the topology "
+    'graph for this tenant, returns `{kind, status: "node_untracked", '
+    "name, nodes: []}` (and `node_kind` when `node_kind=` was supplied) "
+    "rather than -32602 — auto-discovery is k8s-only today, so every "
+    "registered non-k8s target (vault, vcenter, nsx, sddc-manager, "
+    "gh) surfaces as untracked until non-k8s populators or a curated "
+    "annotation lands. *Do not* read an `node_untracked` response as "
+    "'safe to delete'; the call has produced no blast-radius signal. "
+    "The recovery is `meho topology refresh <target>` for a k8s "
+    "target or `meho.topology.annotate` for cross-system relationships "
+    "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
+    '`{kind: "path", path: TopologyPath|null}` for `path` '
     "(null = unreachable within `max_hops`, a valid answer, not an "
     'error); `{kind: "edges", edges: [TopologyEdge, ...]}` for `edges` '
     "(flat list, ordered by `last_seen DESC NULLS LAST, id`).\n\n"
@@ -576,24 +586,8 @@ async def _query_topology_handler(
     """
     kind: str = arguments["kind"]
     try:
-        if kind == "dependents":
-            nodes = await find_dependents(
-                operator,
-                arguments["target"],
-                kind=arguments.get("node_kind"),
-                depth=int(arguments.get("depth", _DEPTH_DEFAULT)),
-                kind_filter=arguments.get("kind_filter"),
-            )
-            return {"kind": kind, "nodes": [n.model_dump(mode="json") for n in nodes]}
-        if kind == "dependencies":
-            nodes = await find_dependencies(
-                operator,
-                arguments["target"],
-                kind=arguments.get("node_kind"),
-                depth=int(arguments.get("depth", _DEPTH_DEFAULT)),
-                kind_filter=arguments.get("kind_filter"),
-            )
-            return {"kind": kind, "nodes": [n.model_dump(mode="json") for n in nodes]}
+        if kind in ("dependents", "dependencies"):
+            return await _closure_facet(operator, kind, arguments)
         if kind == "edges":
             edges = await _list_edges_facet(operator, arguments)
             return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
@@ -615,16 +609,99 @@ async def _query_topology_handler(
     except AmbiguousNodeError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
     except NodeNotFoundError as exc:
-        # ``kind=history`` resolves the anchor and surfaces a missing
-        # or cross-tenant name as :class:`NodeNotFoundError`; the
-        # closure / path verbs treat a missing name as an empty
-        # result (G9.1 contract) so they never raise this. The catch
-        # is keyed by the substrate, not by the dispatch branch.
+        # Reached only when the substrate verb that surfaces a missing
+        # anchor as :class:`NodeNotFoundError` runs and is not the
+        # closure pair handled above. Today that's ``kind=history``
+        # (resolves the anchor and raises on miss). ``find_path``
+        # keeps its G9.1 silent-on-miss contract — an unreachable /
+        # missing endpoint is the verb's ``None`` answer, not an
+        # exception. The closure verbs (G0.18-T4 #1357) intercept
+        # their own :class:`NodeNotFoundError` upstream and translate
+        # it to the typed ``node_untracked`` envelope rather than
+        # -32602, so a closure miss never lands here.
         raise McpInvalidParamsError(str(exc)) from exc
     return {
         "kind": kind,
         "path": None if result is None else result.model_dump(mode="json"),
     }
+
+
+async def _closure_facet(
+    operator: Operator,
+    kind: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch a ``query_topology`` closure-kind call.
+
+    Wraps the ``find_dependents`` / ``find_dependencies`` substrate
+    selection plus the G0.18-T4 (#1357) :class:`NodeNotFoundError`
+    translation to the typed ``node_untracked`` envelope. Extracted
+    so :func:`_query_topology_handler` stays under the C901 McCabe
+    bound — the two closure branches and their identical fallback
+    structure would otherwise push the parent over (the parent
+    already dispatches seven sibling ``kind`` values plus a
+    catch-all).
+
+    :class:`AmbiguousNodeError` is re-raised to the parent's outer
+    ``try`` so the -32602 translation stays single-sourced; the
+    untracked path is handled here because the typed envelope it
+    returns is a successful tool call, not an exception.
+    """
+    target = arguments["target"]
+    node_kind = arguments.get("node_kind")
+    depth = int(arguments.get("depth", _DEPTH_DEFAULT))
+    kind_filter = arguments.get("kind_filter")
+    verb = find_dependents if kind == "dependents" else find_dependencies
+    try:
+        nodes = await verb(
+            operator,
+            target,
+            kind=node_kind,
+            depth=depth,
+            kind_filter=kind_filter,
+        )
+    except NodeNotFoundError as exc:
+        return _node_untracked_envelope(kind, exc)
+    return {"kind": kind, "nodes": [n.model_dump(mode="json") for n in nodes]}
+
+
+def _node_untracked_envelope(
+    kind: str,
+    exc: NodeNotFoundError,
+) -> dict[str, Any]:
+    """Build the closure-kind ``node_untracked`` typed envelope.
+
+    G0.18-T4 (#1357, RDC #789 N2). The pre-fix behaviour translated
+    every closure-anchor miss into -32602, conflating "you passed a
+    bad name" (operator-actionable input problem) with "the anchor
+    isn't in the topology graph yet" (a real condition for every
+    registered non-k8s target, because only the
+    :class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`
+    overrides
+    :meth:`~meho_backplane.connectors.base.Connector.discover_topology`).
+    The agent recovering from -32602 retries with corrections; the
+    agent reading a typed ``node_untracked`` knows to fall through to
+    "register / refresh the target first" instead of misreading an
+    empty closure as "safe to delete."
+
+    The envelope keeps ``status: "node_untracked"`` orthogonal to
+    ``kind`` (the verb discriminator) so a downstream consumer that
+    only cares about the closure verb's shape can read ``status`` to
+    decide whether ``nodes`` is meaningful (when present, always
+    empty) vs. the operator should switch to an "untracked anchor"
+    recovery path. Includes the substrate's resolved ``name`` and,
+    when supplied, the ``kind`` pin so the front can render a
+    diagnostic without a second round-trip.
+    """
+    envelope: dict[str, Any] = {
+        "kind": kind,
+        "status": "node_untracked",
+        "name": exc.name,
+        "nodes": [],
+    }
+    if exc.kind is not None:
+        envelope["node_kind"] = exc.kind
+    return envelope
 
 
 async def _timeline_facet(
@@ -900,7 +977,45 @@ register_mcp_tool(
                     "description": (
                         "Present for the closure kinds. TopologyNode rows "
                         "ordered (depth, name); root at depth 0. See "
-                        "`meho_backplane.topology.schemas.TopologyNode`."
+                        "`meho_backplane.topology.schemas.TopologyNode`. "
+                        "When the anchor is untracked the array is empty "
+                        "and `status` carries `node_untracked` (G0.18-T4 "
+                        "#1357)."
+                    ),
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["node_untracked"],
+                    "description": (
+                        "Present for the closure kinds **only** when the "
+                        "anchor name does not resolve to a "
+                        "`graph_node` row in this tenant. Distinct from "
+                        "a tracked-but-no-dependents response (which "
+                        "omits `status` and carries the one-element "
+                        "`[root]` in `nodes`). Auto-discovery is "
+                        "k8s-only today; non-k8s targets surface here "
+                        "until a populator or curated annotation lands. "
+                        "(G0.18-T4 #1357, RDC #789 N2.)"
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Present for the closure kinds when "
+                        "`status=node_untracked` — echoes the anchor "
+                        "name the operator passed so a multi-call "
+                        "consumer can pair the response with its "
+                        "request without re-parsing the argument bag."
+                    ),
+                },
+                "node_kind": {
+                    "type": "string",
+                    "description": (
+                        "Present for the closure kinds when "
+                        "`status=node_untracked` **and** the caller "
+                        "supplied `node_kind=` on the request. Echoes "
+                        "the kind pin so the diagnostic is "
+                        "self-contained."
                     ),
                 },
                 "path": {
@@ -1014,16 +1129,38 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             ),
             "maxLength": 256,
         },
-        "tenant": {
+        "tenant_id": {
             "type": ["string", "null"],
             "description": (
                 "Cross-tenant scope. Omit / null → the operator's own "
-                "tenant (the only choice for the `operator` role). A "
-                "tenant slug or UUID selects another tenant's targets "
-                "and REQUIRES the `tenant_admin` role; an `operator`-role "
-                "caller passing this gets -32602."
+                "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
+                "selects that tenant's targets and REQUIRES the "
+                "`platform_admin` capability (#1641); a caller who is "
+                "not a platform-admin passing a foreign tenant gets "
+                "-32602 (naming your own tenant explicitly is always "
+                "allowed). Canonical name "
+                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "`meho.connector.*` / `meho.scheduler.create`. "
+                "NOTE: `list_targets.tenant_id` accepts a slug OR a "
+                "UUID; the connector / scheduler tools accept UUID-"
+                "only because they cannot resolve slugs from inside "
+                "their service layer (cross-tenant slug resolution "
+                "requires a session). The accepted-shape asymmetry "
+                "is documented in "
+                "`docs/codebase/api-shape-conventions.md` §14."
             ),
             "maxLength": 256,
+        },
+        "tenant": {
+            "type": ["string", "null"],
+            "description": (
+                "DEPRECATED alias for `tenant_id` (v0.8.0 wire shape). "
+                "Accepted for backward compatibility; new callers "
+                "SHOULD use `tenant_id`. Mutually exclusive with "
+                "`tenant_id`; passing both rejects with -32602."
+            ),
+            "maxLength": 256,
+            "deprecated": True,
         },
         "limit": {
             "type": "integer",
@@ -1055,7 +1192,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
     "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
-    "operator's own tenant unless a `tenant_admin` passes `tenant`.\n\n"
+    "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
     "last name on the page when more rows may exist, else null."
@@ -1063,49 +1200,59 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
 
 
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
-    """Resolve the tenant id to scope the listing to.
+    """Resolve the tenant id to scope the listing to, authorizing a cross-tenant claim.
 
-    No ``tenant`` argument → the operator's own tenant (the only path
-    open to an ``operator``-role caller). A ``tenant`` argument is a
-    cross-tenant request: it requires ``tenant_admin`` and is resolved
-    by slug first then UUID. An unknown tenant, or a non-admin passing
-    ``tenant``, surfaces as ``-32602`` (operator-actionable input
-    problem) rather than silently falling back to the own-tenant scope
-    — a silent fallback would make a typo'd cross-tenant query look
-    like an empty tenant.
+    No ``tenant_id`` argument → the operator's own tenant (the common,
+    same-tenant path open to any role). A ``tenant_id`` argument is
+    resolved by slug first then UUID; an unknown tenant surfaces as
+    ``-32602`` (operator-actionable input problem) rather than silently
+    falling back to the own-tenant scope — a silent fallback would make
+    a typo'd cross-tenant query look like an empty tenant.
+
+    Authorization mirrors the REST ``authorize_tenant_scope`` helper
+    (#1640): resolving to the operator's *own* tenant is always allowed
+    (a caller may name their own tenant explicitly by slug or UUID);
+    resolving to a *different* tenant is the cross-tenant case and is
+    permitted **only** for a ``platform_admin`` (#1638). A non-platform-
+    admin naming a foreign tenant is denied with ``-32602``.
+
+    The gate moved off ``tenant_admin`` *rank*: tenant role governs what
+    an operator may do *within* their tenant, while crossing the tenant
+    boundary is a separate, platform-level capability — gating cross-
+    tenant enumeration on ``tenant_admin`` alone let a tenant-admin of A
+    enumerate B's targets (a cross-tenant IDOR, #1641).
     """
     if tenant_arg is None:
         return operator.tenant_id
-    if operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise McpInvalidParamsError(
-            "list_targets: the `tenant` argument (cross-tenant scope) "
-            "requires the tenant_admin role",
-        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         by_slug = await session.execute(
             select(Tenant.id).where(Tenant.slug == tenant_arg),
         )
-        tenant_id = by_slug.scalar_one_or_none()
-        if tenant_id is not None:
-            return tenant_id
-        # Slug miss — try the argument as a tenant UUID.
-        try:
-            from uuid import UUID
-
-            candidate = UUID(tenant_arg)
-        except ValueError:
-            candidate = None
-        if candidate is not None:
-            by_id = await session.execute(
-                select(Tenant.id).where(Tenant.id == candidate),
-            )
-            tenant_id = by_id.scalar_one_or_none()
-            if tenant_id is not None:
-                return tenant_id
-    raise McpInvalidParamsError(
-        f"list_targets: no tenant matches {tenant_arg!r} (tried slug then UUID)",
-    )
+        resolved = by_slug.scalar_one_or_none()
+        if resolved is None:
+            # Slug miss — try the argument as a tenant UUID.
+            try:
+                candidate = uuid.UUID(tenant_arg)
+            except ValueError:
+                candidate = None
+            if candidate is not None:
+                by_id = await session.execute(
+                    select(Tenant.id).where(Tenant.id == candidate),
+                )
+                resolved = by_id.scalar_one_or_none()
+    if resolved is None:
+        raise McpInvalidParamsError(
+            f"list_targets: no tenant matches {tenant_arg!r} (tried slug then UUID)",
+        )
+    if resolved == operator.tenant_id:
+        return resolved
+    if not operator.platform_admin:
+        raise McpInvalidParamsError(
+            "list_targets: the `tenant_id` argument (cross-tenant scope) "
+            "requires the platform_admin capability",
+        )
+    return resolved
 
 
 async def _list_targets_handler(
@@ -1122,10 +1269,33 @@ async def _list_targets_handler(
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
     filter (targets carry a product slug, not a connector id).
-    """
-    scope_tenant_id = await _resolve_tenant_scope(operator, arguments.get("tenant"))
 
-    stmt = select(TargetORM).where(TargetORM.tenant_id == scope_tenant_id)
+    Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
+    are excluded — same filter the REST list route applies so MCP and
+    REST never disagree about which targets are visible to a tenant.
+
+    Tenant-argument aliasing (G0.18-T5 #1358)
+    -----------------------------------------
+
+    ``tenant_id`` is the canonical cross-tenant scope argument; matches
+    the field name on ``meho.connector.*`` / ``meho.scheduler.create``.
+    ``tenant`` (v0.8.0 wire shape) is retained as a deprecated alias;
+    the two are mutually exclusive (passing both rejects with -32602).
+    """
+    tenant_id_arg = arguments.get("tenant_id")
+    legacy_tenant_arg = arguments.get("tenant")
+    if tenant_id_arg is not None and legacy_tenant_arg is not None:
+        raise McpInvalidParamsError(
+            "list_targets: pass either `tenant_id` (canonical) or "
+            "`tenant` (deprecated alias), not both",
+        )
+    tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
+    scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
+
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == scope_tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
 
     connector_id = arguments.get("connector_id")
     if connector_id is not None:
@@ -1251,9 +1421,20 @@ _ANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "auto-discovery cannot infer — those are the canonical "
                 "use cases. The four auto-discoverable kinds "
                 "(`runs-on`, `mounts`, `routes-through`, `belongs-to`) "
-                "are accepted too but ANNOTATING THEM IS NOISE: probes "
-                "already write them and the next refresh will mark "
-                "your assertion as a §6 conflict marker."
+                "are accepted too. A curated assertion of an auto-kind "
+                "lands as a §6 conflict marker *only when a competing "
+                "**auto** edge already exists for that pair* — i.e. on "
+                "a pair a probe covers (today, only the Kubernetes "
+                "connector populates auto edges; G0.18-T4 #1357). For "
+                "a non-k8s pair, or any pair no probe covers, the "
+                "curated row inserts clean with "
+                "`source: curated, conflicts: []` and is the right way "
+                "to assert e.g. `runs-on` against vault / vcenter / "
+                "nsx / sddc-manager / gh targets until non-k8s "
+                "populators land. The over-cautious 'annotating "
+                "auto-kinds is noise' wording the pre-G0.18-T4 doc "
+                "carried steered operators away from this legitimate "
+                "path."
             ),
         },
         "to_name": {
@@ -1333,13 +1514,21 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "authenticates-via, to_name: rdc-vault-role-bar}`. After this, "
     "`query_topology {kind: dependents, target: rdc-vault-role-bar}` "
     "surfaces the namespace in the blast radius.\n\n"
-    "DO NOT use to annotate edges the probes already discover "
-    "(`runs-on`, `mounts`, `routes-through`, `belongs-to`) — those "
-    "would land as §6 conflict markers (`conflicts_with`) and clutter "
-    "the inventory survey without semantic gain. Use a curated-only "
-    "kind for cross-system assertions: `authenticates-via`, "
-    "`depends-on`, `replicates-to`, `backed-up-by`, `routes-via`, "
-    "`policy-binds`.\n\n"
+    "AUTO-DISCOVERABLE KINDS (`runs-on`, `mounts`, `routes-through`, "
+    "`belongs-to`) — accepted, with one caveat: when a probe-written "
+    "**auto** edge already exists for the same pair, the curated row "
+    "lands as a §6 conflict marker (`conflicts_with`) for operator "
+    "review. Today only the Kubernetes connector populates auto edges "
+    "(G0.18-T4 #1357 — every other shipped connector inherits the "
+    "no-op `Connector.discover_topology` from the ABC), so on a "
+    "non-k8s pair (or any pair no probe covers) the curated row "
+    "inserts clean (`source: curated, conflicts: []`) and is the "
+    "right way to assert e.g. `runs-on` against a vault / vcenter / "
+    "nsx / sddc-manager / gh target until non-k8s populators ship. "
+    "For cross-system assertions auto-discovery cannot infer "
+    "(role-binding / depends-on / replication-target) prefer a "
+    "curated-only kind: `authenticates-via`, `depends-on`, "
+    "`replicates-to`, `backed-up-by`, `routes-via`, `policy-binds`.\n\n"
     "Returns `{edge_id, from: {id, kind, name}, to: {id, kind, name}, "
     'kind, source: "curated", conflicts: [<edge-id>...]}`. `conflicts` '
     "lists edges of an incompatible kind over the same endpoint pair — "

@@ -253,6 +253,28 @@ func requiredDefaultScopes() []string {
 	return []string{"basic", "roles", "web-origins", "acr"}
 }
 
+// requiredMCPOptionalScopes returns the optional client-scopes the
+// recipe pins on the MCP browser-flow client. Today this is the
+// realm-built-in `offline_access` scope: OIDC Core §11 makes
+// `offline_access` the request signal for a refresh token, and Claude
+// Code's MCP client always requests it during its auth-code + PKCE
+// flow. Without the scope assigned (default OR optional), Keycloak
+// rejects the authorization request with `invalid_scope` — RDC Wall
+// W7.
+//
+// Optional, not default: only flows that explicitly include
+// `offline_access` in their scope parameter should mint a refresh
+// token. Listing it as a default would mint refresh tokens into every
+// browser-flow login regardless of whether the client asked for one.
+// The CLI device-code client (`meho-cli`) deliberately does NOT get
+// `offline_access` at all — RFC 8628 device-code clients re-run the
+// device dance instead of holding a long-lived refresh token, and a
+// stolen device-code refresh token has worse blast-radius than a
+// fresh dance prompt.
+func requiredMCPOptionalScopes() []string {
+	return []string{"offline_access"}
+}
+
 // boolPtr / strSlice are tiny helpers to make the desired-client
 // builders readable.
 func boolPtr(b bool) *bool { return &b }
@@ -306,9 +328,10 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",
 		},
-		RedirectURIs:        append([]string{}, o.MCPRedirectURIs...),
-		WebOrigins:          append([]string{}, o.MCPWebOrigins...),
-		DefaultClientScopes: append([]string{"openid", "profile", "email"}, requiredDefaultScopes()...),
+		RedirectURIs:         append([]string{}, o.MCPRedirectURIs...),
+		WebOrigins:           append([]string{}, o.MCPWebOrigins...),
+		DefaultClientScopes:  append([]string{"openid", "profile", "email"}, requiredDefaultScopes()...),
+		OptionalClientScopes: append([]string{}, requiredMCPOptionalScopes()...),
 	}
 }
 
@@ -335,7 +358,10 @@ type Result struct {
 //  2. 5 protocol mappers cloned from the reference
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //  4. Public MCP browser-flow client (`meho-mcp-client`)
-//  5. Same 5 mappers + 4 default scopes on the MCP client
+//  5. Same 5 mappers + 4 default scopes on the MCP client, **plus**
+//     `offline_access` as an *optional* client scope (the CLI
+//     device-code client deliberately doesn't get it — see RDC Wall W7
+//     in deploy/values-examples/README.md)
 //  6. `meho-admins` group (top-level, no attributes)
 //  7. Admin user, set password, join meho-admins
 //
@@ -433,6 +459,12 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile MCP default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, mcpScopeEvents...)
+	mcpOptionalEvents, err := reconcileOptionalScopes(
+		ctx, c, mcpUUID, requiredMCPOptionalScopes())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile MCP optional scopes: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, mcpOptionalEvents...)
 
 	// --- Admin group + user -------------------------------------------------
 
@@ -484,6 +516,12 @@ func dryRunSummary(
 	}
 	fmt.Fprintln(out, "==> default client scopes (each on both clients):")
 	for _, s := range requiredDefaultScopes() {
+		fmt.Fprintf(out, "    - %s\n", s)
+	}
+	fmt.Fprintln(out, "==> optional client scopes (MCP client only — "+
+		"Claude Code requests offline_access for refresh tokens; "+
+		"CLI device-code client deliberately skipped):")
+	for _, s := range requiredMCPOptionalScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
 	if !opts.SkipUserProvisioning {
@@ -649,6 +687,61 @@ func reconcileDefaultScopes(
 		}
 		events = append(events,
 			fmt.Sprintf("[added]   scope %s", name))
+	}
+	return events, nil
+}
+
+// reconcileOptionalScopes resolves each desired-scope name to its
+// realm-level UUID, then PUTs every one that isn't already an
+// optional scope on the client. Mirrors reconcileDefaultScopes for
+// the parallel `/optional-client-scopes` endpoint — the only
+// difference is the endpoint path baked into the adminClient calls.
+//
+// Used today to assign the realm-built-in `offline_access` scope to
+// the MCP browser-flow client (RDC Wall W7); see
+// requiredMCPOptionalScopes for the asymmetry rationale.
+func reconcileOptionalScopes(
+	ctx context.Context, c *adminClient,
+	clientUUID string, desired []string,
+) ([]string, error) {
+	allScopes, err := c.listRealmClientScopes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scopeIDByName := make(map[string]string, len(allScopes))
+	for _, s := range allScopes {
+		scopeIDByName[s.Name] = s.ID
+	}
+	existing, err := c.listClientOptionalScopes(ctx, clientUUID)
+	if err != nil {
+		return nil, err
+	}
+	already := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		already[s.ID] = true
+	}
+	var events []string
+	for _, name := range desired {
+		id, ok := scopeIDByName[name]
+		if !ok {
+			events = append(events,
+				fmt.Sprintf("[WARN]    optional scope %s not in realm — skipping",
+					name))
+			continue
+		}
+		if already[id] {
+			events = append(events,
+				fmt.Sprintf("[skip]    optional scope %s (already optional)",
+					name))
+			continue
+		}
+		if err := c.addClientOptionalScope(
+			ctx, clientUUID, id); err != nil {
+			return nil, fmt.Errorf(
+				"add optional scope %s: %w", name, err)
+		}
+		events = append(events,
+			fmt.Sprintf("[added]   optional scope %s", name))
 	}
 	return events, nil
 }

@@ -10,7 +10,27 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
+
+// fakeTargetUUID is a stable canonical UUID used as the typed
+// `target_id` field on the substrate's RefreshResult contract. The
+// pre-migration shape carried this as a free-form string ("abc", "z");
+// the typed `api.RefreshResult.TargetId` is `openapi_types.UUID` so
+// the test fixture must round-trip a real UUID through the wire.
+const fakeTargetUUID = "11111111-2222-3333-4444-555555555555"
+
+func mustUUID(t *testing.T, s string) openapi_types.UUID {
+	t.Helper()
+	parsed := openapi_types.UUID{}
+	if err := parsed.UnmarshalText([]byte(s)); err != nil {
+		t.Fatalf("UnmarshalText(%q): %v", s, err)
+	}
+	return parsed
+}
 
 // TestRefreshHappyPath drives runRefresh end-to-end through the auth
 // + transport stack against an httptest server, asserting the POST
@@ -25,8 +45,9 @@ func TestRefreshHappyPath(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RefreshResult{
-			TargetID: "abc", AddedNodes: 3, RemovedNodes: 1, UpdatedNodes: 2,
+		_ = json.NewEncoder(w).Encode(api.RefreshResult{
+			TargetId:   mustUUID(t, fakeTargetUUID),
+			AddedNodes: 3, RemovedNodes: 1, UpdatedNodes: 2,
 			AddedEdges: 4, RemovedEdges: 0, UpdatedEdges: 1,
 		})
 	})
@@ -48,10 +69,13 @@ func TestRefreshHappyPath(t *testing.T) {
 
 // TestRefreshJSON — --json round-trips the raw RefreshResult shape.
 func TestRefreshJSON(t *testing.T) {
+	const altUUID = "22222222-3333-4444-5555-666666666666"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/refresh/t", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RefreshResult{TargetID: "z", AddedNodes: 1, DurationMs: 42.5})
+		_ = json.NewEncoder(w).Encode(api.RefreshResult{
+			TargetId: mustUUID(t, altUUID), AddedNodes: 1, DurationMs: 42.5,
+		})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -61,11 +85,11 @@ func TestRefreshJSON(t *testing.T) {
 	if err := runRefresh(cmd, refreshOptions{Target: "t", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRefresh --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded RefreshResult
+	var decoded api.RefreshResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}
-	if decoded.TargetID != "z" || decoded.AddedNodes != 1 {
+	if decoded.TargetId.String() != altUUID || decoded.AddedNodes != 1 {
 		t.Errorf("--json decode produced %+v", decoded)
 	}
 	// duration_ms is part of the T5 RefreshResult contract; --json
@@ -115,9 +139,9 @@ func TestDependentsHappyPathFlagsPassThrough(t *testing.T) {
 		}
 		via := "routes-through"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]Node{
-			{ID: "1", Kind: "service", Name: "customer-a-prod-foo", Depth: 0},
-			{ID: "2", Kind: "ingress", Name: "ing-1", Depth: 1, ViaEdgeKind: &via},
+		_ = json.NewEncoder(w).Encode([]api.TopologyNode{
+			{Id: mustUUID(t, "10000000-0000-0000-0000-000000000001"), Kind: "service", Name: "customer-a-prod-foo", Depth: 0},
+			{Id: mustUUID(t, "10000000-0000-0000-0000-000000000002"), Kind: "ingress", Name: "ing-1", Depth: 1, ViaEdgeKind: &via},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -139,12 +163,15 @@ func TestDependentsHappyPathFlagsPassThrough(t *testing.T) {
 	}
 }
 
-// TestDependenciesJSON — --json round-trips the []Node shape.
+// TestDependenciesJSON — --json round-trips the []api.TopologyNode shape.
 func TestDependenciesJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/dependencies/web", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]Node{{ID: "1", Kind: "vm", Name: "web", Depth: 0}})
+		_ = json.NewEncoder(w).Encode([]api.TopologyNode{{
+			Id:   mustUUID(t, "10000000-0000-0000-0000-000000000003"),
+			Kind: "vm", Name: "web", Depth: 0,
+		}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -157,7 +184,7 @@ func TestDependenciesJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runClosure --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded []Node
+	var decoded []api.TopologyNode
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}
@@ -190,27 +217,34 @@ func TestDependentsAmbiguousNode409(t *testing.T) {
 	}
 }
 
-// TestDependentsCrossTenantEmpty — a node name that exists only in
-// another tenant returns an empty list (200), rendered as the
-// not-found line, never the other tenant's node. Tenant-boundary
-// acceptance criterion for the read verbs.
-func TestDependentsCrossTenantEmpty(t *testing.T) {
+// TestDependentsCrossTenantNodeUntracked — G0.18-T4 (#1357, RDC #789
+// N2). A node name that exists only in another tenant surfaces as
+// HTTP 404 `node_untracked` (not the empty 200 list the
+// pre-G0.18-T4 contract returned). The CLI renders the
+// "not tracked in the topology graph" operator-actionable line via
+// `formatNotFound`; tenant-boundary acceptance still holds (the
+// other tenant's node is never visible).
+func TestDependentsCrossTenantNodeUntracked(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/dependents/tenant-b-node", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":{"error":"node_untracked","name":"tenant-b-node"}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, _, stderr := newRunCmd(t)
 	err := runClosure(cmd, closureOptions{Verb: "dependents", Name: "tenant-b-node", BackplaneOverride: srv.URL})
-	if err != nil {
-		t.Fatalf("runClosure: %v; stderr=%s", err, stderr.String())
+	if err == nil {
+		t.Fatalf("expected error for cross-tenant 404; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "no node named") {
-		t.Errorf("cross-tenant query should render not-found; got %q", stdout.String())
+	if !strings.Contains(stderr.String(), "not tracked in the topology graph") {
+		t.Errorf("cross-tenant query should render node_untracked; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tenant-b-node") {
+		t.Errorf("cross-tenant query should echo anchor name; got %q", stderr.String())
 	}
 }
 
@@ -241,10 +275,10 @@ func TestPathReachable(t *testing.T) {
 			t.Errorf("max_hops param: got %q; want 5", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Path{
-			Nodes: []Node{
-				{Kind: "vm", Name: "web"},
-				{Kind: "datastore", Name: "ds"},
+		_ = json.NewEncoder(w).Encode(api.TopologyPath{
+			Nodes: []api.TopologyNode{
+				{Id: mustUUID(t, "10000000-0000-0000-0000-000000000004"), Kind: "vm", Name: "web"},
+				{Id: mustUUID(t, "10000000-0000-0000-0000-000000000005"), Kind: "datastore", Name: "ds"},
 			},
 			TotalHops: 1,
 		})
@@ -344,24 +378,24 @@ func TestAnnotateRoundTripVisibleViaListEdgesThenUnannotate(t *testing.T) {
 	mux.HandleFunc("/api/v1/topology/edges", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
-			var body annotateRequestBody
+			var body api.UnderscoreAnnotateEdgeRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode POST body: %v", err)
 			}
-			if body.From.Name != "service-x" || body.Kind != "depends-on" || body.To.Name != "database-y" {
+			if body.From.Name != "service-x" || string(body.Kind) != "depends-on" || body.To.Name != "database-y" {
 				t.Errorf("POST body mismatch: %+v", body)
 			}
-			if body.EvidenceURL != "https://docs/example" {
-				t.Errorf("evidence_url not propagated: %q", body.EvidenceURL)
+			if body.EvidenceUrl == nil || *body.EvidenceUrl != "https://docs/example" {
+				t.Errorf("evidence_url not propagated: %v", body.EvidenceUrl)
 			}
 			annotated = true
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(Edge{
-				ID:     edgeID,
-				From:   EdgeEndpoint{ID: "a", Kind: "service", Name: "service-x"},
-				To:     EdgeEndpoint{ID: "b", Kind: "database", Name: "database-y"},
-				Kind:   "depends-on",
-				Source: "curated",
+			_ = json.NewEncoder(w).Encode(api.TopologyEdge{
+				Id:   mustUUID(t, edgeID),
+				From: api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000001"), Kind: "service", Name: "service-x"},
+				To:   api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000002"), Kind: "database", Name: "database-y"},
+				Kind: "depends-on", Source: "curated",
 			})
 		case http.MethodGet:
 			// Honour the source filter — annotate test issues
@@ -374,12 +408,11 @@ func TestAnnotateRoundTripVisibleViaListEdgesThenUnannotate(t *testing.T) {
 				_, _ = w.Write([]byte(`[]`))
 				return
 			}
-			_ = json.NewEncoder(w).Encode([]Edge{{
-				ID:     edgeID,
-				From:   EdgeEndpoint{ID: "a", Kind: "service", Name: "service-x"},
-				To:     EdgeEndpoint{ID: "b", Kind: "database", Name: "database-y"},
-				Kind:   "depends-on",
-				Source: "curated",
+			_ = json.NewEncoder(w).Encode([]api.TopologyEdge{{
+				Id:   mustUUID(t, edgeID),
+				From: api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000001"), Kind: "service", Name: "service-x"},
+				To:   api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000002"), Kind: "database", Name: "database-y"},
+				Kind: "depends-on", Source: "curated",
 			}})
 		default:
 			t.Errorf("unexpected method on /edges: %s", r.Method)
@@ -452,13 +485,15 @@ func TestAnnotateRoundTripVisibleViaListEdgesThenUnannotate(t *testing.T) {
 // TopologyEdge envelope unchanged so a consumer (jq, MCP shim, etc.)
 // can pipe the response into a follow-up call.
 func TestAnnotateJSONPassesThroughRawEdge(t *testing.T) {
+	const edgeID = "33333333-4444-5555-6666-777777777777"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/edges", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Edge{
-			ID:   "edge-abc",
-			From: EdgeEndpoint{ID: "1", Kind: "vm", Name: "a"},
-			To:   EdgeEndpoint{ID: "2", Kind: "vm", Name: "b"},
+		_ = json.NewEncoder(w).Encode(api.TopologyEdge{
+			Id:   mustUUID(t, edgeID),
+			From: api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000003"), Kind: "vm", Name: "a"},
+			To:   api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000004"), Kind: "vm", Name: "b"},
 			Kind: "depends-on", Source: "curated",
 		})
 	})
@@ -474,11 +509,11 @@ func TestAnnotateJSONPassesThroughRawEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAnnotate --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded Edge
+	var decoded api.TopologyEdge
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v\n%s", err, stdout.String())
 	}
-	if decoded.ID != "edge-abc" || decoded.Kind != "depends-on" {
+	if decoded.Id.String() != edgeID || decoded.Kind != "depends-on" {
 		t.Errorf("--json decode produced %+v", decoded)
 	}
 }
@@ -613,9 +648,9 @@ func TestUnannotateTupleAmbiguous(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/edges", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]Edge{
-			{ID: "id-1", From: EdgeEndpoint{Kind: "vm", Name: "a"}, To: EdgeEndpoint{Kind: "host", Name: "b"}, Kind: "runs-on"},
-			{ID: "id-2", From: EdgeEndpoint{Kind: "vm", Name: "a"}, To: EdgeEndpoint{Kind: "host", Name: "b"}, Kind: "runs-on"},
+		_ = json.NewEncoder(w).Encode([]api.TopologyEdge{
+			{Id: mustUUID(t, "40000000-0000-0000-0000-000000000001"), From: api.TopologyEdgeEndpoint{Kind: "vm", Name: "a"}, To: api.TopologyEdgeEndpoint{Kind: "host", Name: "b"}, Kind: "runs-on"},
+			{Id: mustUUID(t, "40000000-0000-0000-0000-000000000002"), From: api.TopologyEdgeEndpoint{Kind: "vm", Name: "a"}, To: api.TopologyEdgeEndpoint{Kind: "host", Name: "b"}, Kind: "runs-on"},
 		})
 	})
 	mux.HandleFunc("/api/v1/topology/edges/", func(_ http.ResponseWriter, _ *http.Request) {
@@ -632,7 +667,7 @@ func TestUnannotateTupleAmbiguous(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for ambiguous tuple")
 	}
-	for _, want := range []string{"matches 2 curated edges", "id-1", "id-2"} {
+	for _, want := range []string{"matches 2 curated edges", "40000000-0000-0000-0000-000000000001", "40000000-0000-0000-0000-000000000002"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("ambiguous render missing %q in %q", want, stderr.String())
 		}
@@ -664,16 +699,16 @@ func TestUnannotateTupleNotFound(t *testing.T) {
 	}
 }
 
-// TestListEdgesJSONRoundTrip — --json emits the raw []Edge envelope so
+// TestListEdgesJSONRoundTrip — --json emits the raw []TopologyEdge envelope so
 // a consumer can pipe the response into the unannotate id form.
 func TestListEdgesJSONRoundTrip(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/edges", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]Edge{{
-			ID:   "edge-1",
-			From: EdgeEndpoint{ID: "n1", Kind: "vm", Name: "web"},
-			To:   EdgeEndpoint{ID: "n2", Kind: "host", Name: "esxi-1"},
+		_ = json.NewEncoder(w).Encode([]api.TopologyEdge{{
+			Id:   mustUUID(t, "50000000-0000-0000-0000-000000000001"),
+			From: api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000005"), Kind: "vm", Name: "web"},
+			To:   api.TopologyEdgeEndpoint{Id: mustUUID(t, "20000000-0000-0000-0000-000000000006"), Kind: "host", Name: "esxi-1"},
 			Kind: "runs-on", Source: "auto",
 		}})
 	})
@@ -686,11 +721,11 @@ func TestListEdgesJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runListEdges --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded []Edge
+	var decoded []api.TopologyEdge
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v\n%s", err, stdout.String())
 	}
-	if len(decoded) != 1 || decoded[0].ID != "edge-1" {
+	if len(decoded) != 1 || decoded[0].Id.String() != "50000000-0000-0000-0000-000000000001" {
 		t.Errorf("--json decode produced %+v", decoded)
 	}
 }

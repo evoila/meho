@@ -30,15 +30,61 @@ The locked decision (#7 in [v0.2-decisions.md](../planning/v0.2-decisions.md)) w
 
 **Streamable HTTP**, not stdio. MEHO is a hosted server, not a local subprocess. The `/mcp` route accepts JSON-RPC 2.0 POST requests with a single envelope per body (batch arrays are unsupported — MCP Streamable HTTP transport mandates single envelopes).
 
-### Session id capture (audit correlation)
+> **Why `/mcp` is root-mounted and not under `/api/v1/*`.** The MCP endpoint is the lone, deliberate route-prefix carve-out from MEHO's `/api/v1/*` chassis convention — root-mounted, unversioned, single-path — because MCP clients use the bare server URL, the OAuth `aud` claim is bound to `${BACKPLANE_URL}/mcp`, and RFC 9728 protected-resource discovery assumes that exact URI. Tool names (`query_topology`, `call_operation`, …) are JSON-RPC body params, **never URL path segments**, so `/api/v1/mcp` and `/api/v1/query/topology` are phantom paths that have never existed in any tag. Full convention + phantom-path callout: [`docs/codebase/api-shape-conventions.md` §13](../codebase/api-shape-conventions.md#13-route-prefix-placement-apiv1-vs-the-mcp-carve-out).
 
-Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` that the client echoes in the `Mcp-Session-Id` header on later requests. MEHO runs **no** stateful session store in v0.2 — it captures the header purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace. On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
+### Session id issuance + capture (audit correlation)
+
+Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` by returning it in an `Mcp-Session-Id` **response header** on the `InitializeResult`; the client MUST then include the header on every subsequent HTTP POST to the MCP endpoint. The handshake is strictly **server-driven** — clients do not invent session ids, they only relay what the server gave them. MEHO runs **no** stateful session store in v0.2 — the id exists purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace.
+
+**Issuance side (G0.15-T4 #1213).** On a successful `initialize` reply, [`_maybe_issue_initialize_session_id`](../../backend/src/meho_backplane/mcp/server.py) stamps a fresh `uuid4()` onto the response's `Mcp-Session-Id` header (and binds the same id into a structlog `mcp_session_id` contextvar so any post-issue log line carries the same correlation key). The issuance is gated on:
+
+- Method is `initialize` and it's a *request*, not a notification.
+- The dispatched response is HTTP 2xx **and** the JSON-RPC envelope has no `error` member — a failed initialize must not seed a session id.
+- The client did not already send an `Mcp-Session-Id` header inbound (a resume / replay attempt where the client carries an id is accepted lenient; MEHO does not overwrite the client's correlation key).
+
+Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom (`claude-rdc-hetzner-dc#753` finding 2) was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"always"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
+
+**Capture side.** On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
 
 - Header present and a parseable UUID → bind it.
-- Header present but malformed (non-UUID) → treated as absent (a malformed *client* header never 500s the call; a non-UUID can't go in a `uuid` column).
-- Header absent/empty → fresh `uuid4()` for the single-call duration, so the audit row still carries a stable, non-NULL session id (the spec permits servers to not require sessions).
+- Header present but malformed (non-UUID) → treated as absent (a malformed *client* header never 500s the call; a non-UUID can't go in a `uuid` column). The audit row's `agent_session_id` lands as NULL.
+- Header absent/empty → contextvar stays unbound. The audit row's `agent_session_id` lands as NULL; the G8.2 replay route's session walk treats NULLs as "not part of any session," which is correct for a stateless-client call.
 
-`MCP_REQUIRE_SESSION_ID=true` ([`Settings.mcp_require_session_id`](../../backend/src/meho_backplane/settings.py), default `false`) turns a missing/empty header into a JSON-RPC `-32600` Invalid Request **before** dispatch — no audit row is written for the rejected call. A present-but-malformed header is not a rejection in require-mode (the client did send an id); it falls back to a fresh `uuid4()` as in the default mode.
+[`write_mcp_audit_row`](../../backend/src/meho_backplane/mcp/audit.py) reads the contextvar via [`_resolve_uuid_contextvar`](../../backend/src/meho_backplane/mcp/audit.py) and writes `audit_log.agent_session_id`. The structlog contextvar propagates down the async call chain inside one request, so the write picks up the binding without threading the value through every handler signature.
+
+`MCP_REQUIRE_SESSION_ID=true` ([`Settings.mcp_require_session_id`](../../backend/src/meho_backplane/settings.py), default `false`) turns a missing/empty header into a JSON-RPC `-32600` Invalid Request **before** dispatch — no audit row is written for the rejected call. A present-but-malformed header is not a rejection in require-mode (the client did send an id, just an unparseable one); the audit row lands NULL and a structured `mcp_malformed_session_id` warning surfaces the misbehaving client without breaking client retry logic.
+
+### `initialize.instructions` — session preamble
+
+The spec-optional [`instructions`](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle) field on `InitializeResult` is MEHO's surface for the agent-facing session preamble. Two banded text sections stack into the field, in this order: **tenant conventions** (tenant-wide), then **runbook priming** (operator-personal, per-session). The assembler is [`assemble_preamble(tenant_id, operator_sub)`](../../backend/src/meho_backplane/conventions/preamble.py) at [`backend/src/meho_backplane/mcp/server.py:327`](../../backend/src/meho_backplane/mcp/server.py); the empty-string result is collapsed to `None` so a spec-conforming client sees the field omitted rather than emitted as a literal empty string.
+
+Order rationale: tenant conventions are background context that frames every dispatch in this tenant; runbook priming is a per-session imperative the agent must consult before its next move. Conventions go first because they set the operating environment; priming goes second because it's the higher-precedence "what to do right now" layer. Two newlines separate the bands so they render as distinct paragraphs in the agent's context (see [`_combine_bands`](../../backend/src/meho_backplane/conventions/preamble.py)). The two bands have independent token budgets: a tenant with many conventions does not shrink the priming surface, and an operator with many in-progress runs does not shrink the conventions surface.
+
+#### Tenant conventions band
+
+Database-backed `kind='operational'` rows packed in `priority DESC, created_at ASC` order and wrapped in a positional `<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>` guard with the `GUARD_PREFIX` reminder that the wrapped content is admin-authored tenant guidance, not system directives. Originated in G7.1-T4 ([#316](https://github.com/evoila/meho/issues/316)); the canonical references are [`docs/codebase/tenant_conventions.md`](../codebase/tenant_conventions.md) (control flow, packer arithmetic, OWASP LLM01 isolation) and [`docs/architecture/conventions-seed.md`](conventions-seed.md) (seed migrations + the consumer-side override template). This doc does not re-derive that material.
+
+#### Runbook session priming
+
+Added in G12.4 ([Initiative #1199](https://github.com/evoila/meho/issues/1199), Tasks [#1315](https://github.com/evoila/meho/issues/1315) / [#1316](https://github.com/evoila/meho/issues/1316)). Operators who attach to MCP with one or more `in_progress` runs in `runbook_runs` whose `assigned_to == operator.sub` see a per-run priming block appended after the conventions band. Generated by [`assemble_runbook_priming(operator_sub, tenant_id)`](../../backend/src/meho_backplane/runbooks/priming.py); appended in [`assemble_preamble_detailed`](../../backend/src/meho_backplane/conventions/preamble.py). The single example block:
+
+```
+<<RUNBOOK_PRIMING — CRITICAL>>
+You are mid-runbook `cert-rotation-vcenter` v3 on step 2/7 (`revoke-old-cert`).
+Follow only the current step. Do not look ahead. Do not improvise. Do not combine steps.
+If the step looks wrong, call meho.runbook.abort and escalate to a senior in chat.
+Use meho.runbook.next to advance once the current step's verify passes.
+
+<<END_RUNBOOK_PRIMING>>
+```
+
+**Composition rules.** One block per in-progress run, capped at `MAX_PRIMING_BLOCKS = 5` ([`runbooks/priming.py`](../../backend/src/meho_backplane/runbooks/priming.py)). Operators with `>5` in-progress runs see one summary block (`"You have N in-progress runbook runs … call meho.runbook.list_runs to see them and proceed one at a time."`) instead of per-run blocks — the per-block text would otherwise dominate the preamble. Each per-run block carries the run's `template_slug`, `template_version`, current `step_id`, and `n/total` position, all taken from the [`RunSummary`](../../backend/src/meho_backplane/runbooks/runs_schemas.py) row the run service returns; the delimiters (`BLOCK_START` / `BLOCK_END`) are hard-coded module constants emitted by the wrapper, so a slug that somehow contained the terminator string cannot escape the block (same positional-wrapper discipline the conventions band uses).
+
+**Empty case is byte-identical.** An operator with no in-progress runs sees the conventions text alone, with no trailing separator and no priming guards — the [`_combine_bands`](../../backend/src/meho_backplane/conventions/preamble.py) helper short-circuits when `priming.text == ""` so the wire shape is unchanged from the pre-T2 (#1316) preamble. The test pin lives at [`backend/tests/test_conventions_preamble.py`](../../backend/tests/test_conventions_preamble.py).
+
+**Regenerated per `initialize`, never cached.** The priming helper queries `runbook_runs` fresh on every handshake. Run state changes between MCP sessions (a senior reassigns a run, the operator advances or aborts one between sessions, a new run is started in the gap) and a cached priming text would lie about the operator's current obligations. The cost is one indexed query against `runbook_runs` per `initialize`; acceptable since `initialize` is once-per-session.
+
+**Priming is a UX hint, not enforcement.** The load-bearing adherence mechanism is the **step opacity contract** owned by the runbook substrate ([G12.3](https://github.com/evoila/meho/issues/1198), see [`docs/architecture/runbooks.md`](runbooks.md) §The opacity contract): `meho.runbook.next` returns the body of exactly one step, and there is no response shape on any surface — schema, function signature, service, transport — that could carry an adjacent or future step. The opacity contract is the floor; priming is how the agent should behave inside the floor. A future bug or regression in the priming text does not weaken opacity — an agent that ignores priming, or that never sees priming because the helper returned `""`, still cannot read step 3 while the run is on step 2, because the substrate has no code path that would surface it. The two layers are independent by design: never document priming as if it were the gate.
 
 Response shapes per the spec's *Sending Messages to the Server* section:
 
@@ -142,7 +188,7 @@ The per-operation writer is [`mcp/audit.py::write_mcp_audit_row`](../../backend/
 ```text
 operator_sub     ← from JWT (validated by /mcp auth chain)
 tenant_id        ← operator.tenant_id
-agent_session_id ← Mcp-Session-Id header (or fresh uuid4); NULL on chassis HTTP rows (G8.2-T2)
+agent_session_id ← Mcp-Session-Id header (issued by server on initialize per G0.15-T4 #1213, echoed by client); NULL when the client didn't echo one back, and on chassis HTTP rows (G8.2-T2)
 parent_audit_id  ← parent_audit_id contextvar (forward-compat; unbound in v0.2)
 request_id       ← from RequestContextMiddleware (still runs)
 method           ← "MCP"
@@ -160,32 +206,41 @@ Fail-closed: audit write failure → MCP call fails with JSON-RPC `INTERNAL_ERRO
 
 ## Target-reference shape convention
 
-The agent surface today has three distinct shapes for "name a target/node by name". This is deliberate but easy to mistake for inconsistency — and it surfaced as Signal #8 of the 2026-05-21 RDC second-cycle dogfood (#780). The shapes are internally coherent per tool; the divergence is *across* tools.
+The agent surface has shapes for "name a target/node by name" that
+diverge slightly across tools. The divergence is internally coherent
+per tool's role; cross-tool, an agent carrying a target name across
+the read and the write surfaces no longer needs to reshape it.
+
+G0.13-T2 (#1132) is the additive convergence step: `call_operation`
+now accepts a bare-string `target` alongside the existing dict shape,
+matching `query_topology` / `query_audit`. The dict shape stays
+supported -- agents pinned to it are unchanged -- and is the form
+that opens the `fqdn` vhost-override door.
 
 | Shape | Tool(s) | Why |
 |---|---|---|
-| `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | The dispatcher reserves room for additional future selector fields on the target descriptor (e.g. an `alias_precedence` pin or a tenant-scoped `kind` disambiguator) without a breaking schema change. The `{name}` envelope is the partial form; only `name` is honoured today. |
-| `target: "<name>"` (bare string) | [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Read tools only need the name. The bare-string shape keeps the argument cheap and the schema legible; no selector fields are anticipated. |
-| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. |
+| `target: "<name>"` (bare string, **preferred forward**) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) (since G0.13-T2 #1132), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Either-shape acceptance reduces agent retries (the consumer's most-cited daily-driver sharp edge at v0.6.0). The handler normalises the bare string to `{name: <string>}` before dispatch, so downstream code sees one canonical form. |
+| `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | Original shape; still accepted unchanged. Opens the optional `fqdn` field for per-call vhost-override (`vcfa-rest-9.0`-style routing); the bare-string form does not, so callers needing the override stay on the dict. The dispatcher also reserves room here for future selector fields without a breaking schema change. |
+| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. The future-`target`-unification work does *not* roll edge tools into a single `target` field; the directed-edge intent is signalled by the field names. |
 
-[`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
+[`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (either as a bare string or wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
 
 ### Forward convention for new tools
 
 When a new tool needs to reference a target/node by name, pick the shape that matches the tool's *role*:
 
-1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **use the `{name: ...}` object form.** The forward-compat headroom matters; the cost of an envelope is one extra brace pair.
+1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **accept the bare-string `target` as the primary shape and document the dict alias.** Either shape is fine; bare-string is preferred for cross-tool consistency. Reserve the dict for the case where forward-compat selector room (e.g. `fqdn`, future `alias_precedence`) is needed.
 2. **Read tools that filter by one target name** (anything like `query_audit`, single-anchor closure queries) — **use the bare-string `target`.** No selector room is needed; keep the schema flat.
 3. **Tools that operate on an edge (two endpoints)** — **use the `from_name`/`to_name` pair.** Match the existing `meho.topology.annotate` schema verbatim so an agent carrying a node-pair through the topology surface can hand the same arguments to the next tool without renaming.
 
-A future v0.4+ unification (a shared `TargetRef` / `TargetSelector` model with strict-schema breakage) is on the roadmap (Initiative #772 out-of-scope; v0.3.2 is docs-first); that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
+A future breaking unification (a shared `TargetRef` / `TargetSelector` model that collapses the dict variant entirely) remains a v0.7+ window decision; that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
 
 ## Adding an MCP tool
 
 For a new vendor connector op:
 
 1. **Implement the op** in your connector's `_op_map` (per [`connectors.md`](connectors.md)).
-2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools, `{name: ...}` object for write/dispatch tools, `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
+2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools (and as the preferred forward shape for write/dispatch tools too; the dict shape stays accepted on `call_operation` for forward-compat selector room), `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
 3. **Register an MCP tool** in `backend/src/meho_backplane/mcp/tools/<product>.py`:
    ```python
    register_mcp_tool(
@@ -294,3 +349,6 @@ If Claude renders a connector error rather than the tools, the OAuth handshake f
 - [RFC 9728 (Protected Resource Metadata)](https://datatracker.ietf.org/doc/html/rfc9728), [RFC 8707 (Resource Indicators)](https://www.rfc-editor.org/rfc/rfc8707.html), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-13).
 - [docs/planning/v0.2-decisions.md](../planning/v0.2-decisions.md) — decision #7 (ship MCP in v0.2).
 - [docs/architecture/connectors.md](connectors.md) — the parallel connector op registry every MCP tool wraps.
+- [docs/architecture/runbooks.md](runbooks.md) — the runbook substrate, where the step opacity contract that priming is the UX surface for lives ([#1198](https://github.com/evoila/meho/issues/1198), [#1314](https://github.com/evoila/meho/issues/1314)).
+- [docs/runbooks/authoring.md](../runbooks/authoring.md) — the authoring-side counterpart for runbook templates ([#1299](https://github.com/evoila/meho/issues/1299)).
+- [docs/codebase/tenant_conventions.md](../codebase/tenant_conventions.md) — control flow and packer arithmetic of the conventions band; [docs/architecture/conventions-seed.md](conventions-seed.md) — seed migrations and consumer-side override template.

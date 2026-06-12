@@ -175,6 +175,9 @@ class _FakeVmwareTarget:
         self.fingerprint = _FakeFingerprint(version="9.0")
         self.preferred_impl_id: str | None = "vmware-rest"
         self.id: UUID = uuid.uuid4()
+        # Tenant-unique cache key component (#1642/#1672); without it
+        # ``target_cache_key`` raises AttributeError at runtime.
+        self.tenant_id: UUID = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
         self.name = "test-vcenter"
         self.host = "vcenter.test"
         self.port = 443
@@ -195,7 +198,7 @@ class _NoOpVmwareConnector(Connector):
     version = "9.0"
     impl_id = "vmware-rest"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

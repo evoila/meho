@@ -24,9 +24,27 @@
 //
 // Each verb is a thin cobra command that POSTs / GETs / PATCHes a
 // single backplane route under `/api/v1/connectors*` (T6 #406).
-// Authentication piggybacks on the token meho login wrote — the
-// shared doAuthedRequest helper handles the bearer injection +
-// 401-refresh dance identically to the `operation` sibling package.
+// Authentication piggybacks on the token meho login wrote — every
+// verb drives the generated `api.ClientWithResponses` surface via
+// `api.AuthedClient`, which wires the bearer + lazy 401-refresh
+// editor onto the embedded typed client.
+//
+// G0.12-T7 #1265 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// `api.CatalogListResponse` / `api.ConnectorSpecEntry`,
+// `api.IngestRequest` / `api.IngestResponse` /
+// `api.IngestionResultModel` / `api.GroupingResultModel` /
+// `api.SpecSource`, `api.ConnectorReviewPayload` /
+// `api.ConnectorReviewGroup` / `api.ConnectorReviewOp`,
+// `api.EditGroupBody`, and `api.EditOpBody` are the single source
+// of truth on the CLI side, kept in lock-step with the FastAPI
+// Pydantic models by the `cli-api-snapshot-freshness` CI gate. The
+// list endpoint deliberately returns `dict[str, list[dict]]` on the
+// backend (per-row UUID-serialisation reason; see
+// `backend/src/meho_backplane/api/v1/connectors_ingest.py:list_endpoint`),
+// so the list-response shape stays a package-private decode against
+// the raw `*Response.Body` bytes — the typed client is still the
+// transport.
 //
 // Cross-task contract: this package consumes T6 #406's REST routes;
 // the route shape (request/response Pydantic models) is documented
@@ -37,7 +55,6 @@
 package connector
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -147,19 +164,103 @@ func normaliseURL(s string) (string, error) {
 	return u.String(), nil
 }
 
-// renderRequestError translates an error from doAuthedRequest into
-// the right output.RenderError category. Adds one branch over the
-// operation sibling: HTTP 403 lands as InsufficientRole (exit 5) so
-// the tenant_admin-gated verbs produce the right hint when an
-// operator-role token tries to ingest. HTTP 401-after-refresh,
-// non-recoverable refresh failures, and missing tokens all map to
-// auth_expired (exit 2) as in the sibling.
+// httpResponseError carries a non-2xx status from a typed-client
+// `*WithResponse` call up to the verb's renderer. The typed-client
+// surface returns non-2xx responses in-band on the `(*Response,
+// nil)` tuple (transport-layer failures come back on `(nil, err)`);
+// we lift the HTTP-failure case to an error type so the call sites
+// can use a single `if err != nil` branch and `errors.As` routes
+// the right way (HTTP status → renderHTTPStatus, everything else →
+// renderRequestError).
+type httpResponseError struct {
+	statusCode int
+	body       []byte
+}
+
+func (e *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.statusCode, strings.TrimSpace(string(e.body)))
+}
+
+// errMissingAccessToken is the sentinel newAuthedClient returns when
+// the stored token row exists but its access_token is empty — a
+// credential-state failure renderRequestError maps to auth_expired
+// with a `meho login` hint. Same shape as the sibling-package
+// agent-principal / agent packages.
+var errMissingAccessToken = errors.New("meho: stored token has no access_token")
+
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL and verifies a non-empty bearer is loaded. Centralised
+// so every verb's typed-call path goes through the same
+// "stored-token-loaded + non-empty bearer" gate; the caller forwards
+// any returned error to renderRequestError for category mapping.
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Mirrors
+// the behaviour `api.AuthedClient.GetHealth` implements for the
+// /api/v1/health endpoint, generalised so every connector verb runs
+// the same transparent-retry contract.
+//
+// statusOf reads the StatusCode off the typed response envelope
+// (the generated *Response types expose StatusCode() through their
+// embedded *http.Response). A nil response counts as "no retry" —
+// the transport already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return call(ctx)
+}
+
+// renderRequestError translates a transport-layer or
+// credential-state error (returned on `(nil, err)` from the typed-
+// client surface, or surfaced by newAuthedClient before any HTTP
+// round-trip) into the right output.RenderError category. Non-2xx
+// statuses carried in a typed response envelope are classified by
+// renderHTTPStatus instead.
+//
+// One branch differs from the operation sibling: HTTP 403 lands as
+// InsufficientRole (exit 5) so the tenant_admin-gated verbs produce
+// the right hint when an operator-role token tries to ingest. That
+// branch lives in renderHTTPStatus now; the pre-migration
+// `*httpError` 403 path moved with the rest of the status-code
+// switch.
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
+	if errors.Is(err, errMissingAccessToken) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"stored credentials for %s are incomplete; run `meho login %s`",
+				backplaneURL, backplaneURL,
+			)),
+			jsonOut,
+		)
+	}
 	if api.IsTokenNotFound(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -175,29 +276,6 @@ func renderRequestError(
 				"stored token rejected and no refresh_token present; run `meho login %s`",
 				backplaneURL,
 			)),
-			jsonOut,
-		)
-	}
-	var he *httpError
-	if errors.As(err, &he) {
-		// 403 carries a distinct exit code so operators see "ask
-		// the tenant admin for a role grant" rather than "your
-		// network is down". The connector verb tree's mutating
-		// routes (ingest / edit-* / enable / disable) all require
-		// tenant_admin; a plain operator-role token gets the
-		// right hint here.
-		if he.StatusCode == http.StatusForbidden {
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.InsufficientRole(fmt.Sprintf(
-					"call %s: HTTP 403: %s (this verb requires tenant_admin role)",
-					backplaneURL, he.Body,
-				)),
-				jsonOut,
-			)
-		}
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
 			jsonOut,
 		)
 	}
@@ -227,105 +305,50 @@ func renderRequestError(
 	)
 }
 
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Mirrors the
-// operation sibling's implementation verbatim (the underlying auth
-// dance is shared; cmd/connector can't import cmd/operation without
-// an import cycle since cmd/root.go grafts both onto the tree).
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
+// renderHTTPStatus classifies a non-2xx response (or 401 after a
+// failed refresh) carried in the typed envelope into the right
+// StructuredError category. Mirrors the pre-migration `httpError`
+// switch but acts on the (statusCode, body) pair lifted off the
+// generated `*Response.HTTPResponse` + `Body` fields rather than a
+// sentinel value. The mapping preserved across the migration:
+//
+//   - 401 → auth_expired (refresh impossible / token rejected).
+//   - 403 → insufficient_role; the mutating verbs (ingest /
+//     edit-* / enable / disable) all require tenant_admin, so the
+//     hint names the role.
+//   - Other non-2xx → unexpected with the raw body.
+func renderHTTPStatus(
+	cmd *cobra.Command,
+	backplaneURL string,
+	statusCode int,
 	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
+	jsonOut bool,
+) error {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"backplane rejected the stored token; run `meho login %s`",
+				backplaneURL,
+			)),
+			jsonOut,
+		)
+	case http.StatusForbidden:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.InsufficientRole(fmt.Sprintf(
+				"call %s: HTTP 403: %s (this verb requires tenant_admin role)",
+				backplaneURL, bodyStr,
+			)),
+			jsonOut,
+		)
+	default:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
+			jsonOut,
+		)
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	// 4 MiB cap. Higher than the operation sibling's 1 MiB because
-	// an ingest of vcenter.yaml (961 paths) returns an
-	// IngestionResult + GroupingResult envelope that can run into
-	// the hundreds of KiB; review payload for the same connector is
-	// similarly fat (per-op flags + descriptions). 4 MiB is
-	// generous enough for v0.2's largest known spec (vi-json.yaml,
-	// 2195 paths) while still capping pathological responses.
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	// Accept any 2xx as success. T6 routes return 200 OK for read /
-	// ingest endpoints that ship a JSON body, and 204 No Content for
-	// the four state-mutating routes (PATCH edit-group / edit-op,
-	// POST enable / disable). Callers expecting a JSON body must
-	// inspect the returned slice length before decoding; callers
-	// that expect 204 should pass through the empty slice as a
-	// success signal.
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// httpError carries a non-2xx response so renderRequestError can
-// pick the right StructuredError category (403 → insufficient_role;
-// other 4xx/5xx → unexpected_response). Same shape as the operation
-// sibling.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest builds + fires the HTTP request. Split out so the
-// 401-refresh-retry path can reuse the same body bytes without
-// re-marshalling.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
 }
 
 // loadTextFlag reads a flag value that supports both inline text and
@@ -382,86 +405,92 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
-// resolveSpecURI normalises a --spec flag value into the canonical
-// URI the backplane's IngestRequest accepts. Three input shapes are
+// resolveSpecURI normalises a --spec flag value into the (uri, content)
+// pair the backplane's IngestRequest accepts. Three input shapes are
 // supported:
 //
-//   - `file://<absolute path>`    — passes through after path validation.
-//   - `https://<url>` / `http://` — passes through.
-//   - `docs:<product-version>/<spec>` — shorthand resolving against
-//     the consumer's checked-in docs/ directory. The base directory
-//     comes from the CLAUDE_RDC_DOCS env var (operator workstation
-//     convention — points at a checkout of
-//     `claude-rdc-hetzner-dc/docs/meho-coordination/`). The resolved
-//     form is `file://<absolute path>` so the backplane sees a uniform
-//     scheme. When CLAUDE_RDC_DOCS is unset, the shorthand resolves
-//     to a bare `docs:<...>` URI and the backplane handles resolution
-//     server-side against its own configured docs root.
+//   - `https://<url>` -- passed through as the uri; the backplane fetches
+//     it under the https-only SSRF / local-file guard (#95). content is
+//     empty. (`http://` is passed through too, but the https-only guard
+//     rejects it backplane-side.)
+//   - `file://<absolute path>` -- the CLI reads the file and uploads its
+//     bytes as content; uri is kept as the audit label. No local path
+//     reaches the backplane.
+//   - `docs:<product-version>/<spec>` -- resolved CLI-side against the
+//     consumer's checked-in docs/ directory ($CLAUDE_RDC_DOCS, e.g. a
+//     checkout of `claude-rdc-hetzner-dc/docs/meho-coordination/`), then
+//     read + uploaded as content with the `docs:` label kept as uri.
+//     When CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
+//     hint naming the env var (#1535).
 //
-// Anything else returns an error — the operator gets a clear "use
-// one of file:// / https:// / docs:<...>" hint rather than a 422
-// from the backplane.
-func resolveSpecURI(raw string) (string, error) {
+// Reading docs:/file:// CLI-side and uploading the bytes is what keeps
+// the #95 https-only backend from breaking the local-spec on-ramp: the
+// backplane never sees a local path or a non-https scheme (#102).
+//
+// Anything else returns an error -- the operator gets a clear "use one of
+// file:// / https:// / docs:<...>" hint rather than a 422 from the
+// backplane.
+func resolveSpecURI(raw string) (uri string, content string, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", errors.New("--spec value is empty")
+		return "", "", errors.New("--spec value is empty")
 	}
 	if strings.HasPrefix(raw, "file://") {
-		// Validate locally so operators see a fast CLI error rather
-		// than a backplane 4xx. The contract is `file://<absolute
-		// path>` — relative or scheme-less file URIs are rejected.
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme != "file" {
-			return "", fmt.Errorf("--spec %q: invalid file URI", raw)
+		// Validate locally so operators see a fast CLI error rather than a
+		// backplane 4xx. The contract is `file://<absolute path>`.
+		u, perr := url.Parse(raw)
+		if perr != nil || u.Scheme != "file" {
+			return "", "", fmt.Errorf("--spec %q: invalid file URI", raw)
 		}
-		// Per RFC 8089, file URIs have either an empty authority
-		// or `localhost`. A bare `file://relative/path` would
-		// parse `relative` as the host, which is what RFC 3986
-		// says but not what an operator typing the URL means. Reject
-		// any other host so the typo surfaces here instead of as
-		// a confused on-disk lookup.
+		// Per RFC 8089, file URIs have either an empty authority or
+		// `localhost`. Reject any other host so a `file://relative/path`
+		// typo surfaces here instead of as a confused on-disk lookup.
 		if u.Host != "" && u.Host != "localhost" {
-			return "", fmt.Errorf("--spec %q: file URI host must be empty or \"localhost\"", raw)
+			return "", "", fmt.Errorf("--spec %q: file URI host must be empty or \"localhost\"", raw)
 		}
-		// u.Path is the on-disk path with the `file://` (and optional
-		// host) prefix stripped. `path.IsAbs` covers POSIX absolute
-		// paths; the Windows drive-letter form (`/C:/...`) also
-		// satisfies path.IsAbs after url.Parse normalises the leading
-		// slash, so one check covers both.
-		//
-		// Root-only (`file:///`) is rejected too — there's no spec
-		// file name to ingest. `len(u.Path) <= 1` covers both the
-		// empty case and the bare-slash case.
+		// Root-only (`file:///`) is rejected too -- no spec file to read.
 		if len(u.Path) <= 1 || !path.IsAbs(u.Path) {
-			return "", fmt.Errorf("--spec %q: file URI must be an absolute path to a spec", raw)
+			return "", "", fmt.Errorf("--spec %q: file URI must be an absolute path to a spec", raw)
 		}
-		return raw, nil
+		b, rerr := os.ReadFile(u.Path) // #nosec G304 -- operator-supplied spec path, operator-only CLI
+		if rerr != nil {
+			return "", "", fmt.Errorf("--spec %q: %w", raw, rerr)
+		}
+		return raw, string(b), nil
 	}
 	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
-		return raw, nil
+		return raw, "", nil
 	}
 	if strings.HasPrefix(raw, "docs:") {
 		shorthand := strings.TrimPrefix(raw, "docs:")
 		if shorthand == "" {
-			return "", errors.New("--spec docs: shorthand has no path")
+			return "", "", errors.New("--spec docs: shorthand has no path")
 		}
 		root := os.Getenv("CLAUDE_RDC_DOCS")
 		if root == "" {
-			// No env override: pass the shorthand through verbatim
-			// for the backplane to resolve against its own checked-in
-			// docs root. Documented behaviour — the v0.2 backplane
-			// understands the `docs:` scheme natively.
-			return raw, nil
+			// The `docs:` shorthand is resolved CLI-side only. The backplane
+			// has no docs root and is https-only, so it cannot resolve a bare
+			// `docs:` URI. Fail here with a clear hint naming the env var
+			// the operator must set (#1535).
+			return "", "", errors.New(
+				"--spec docs: shorthand requires $CLAUDE_RDC_DOCS to be set " +
+					"(the backplane does not resolve docs: URIs); set it to a " +
+					"docs checkout, or pass a file:// / https:// spec URI",
+			)
 		}
 		abs := filepath.Join(root, shorthand)
 		if !filepath.IsAbs(abs) {
-			// filepath.Join keeps relative roots relative; reject
-			// rather than ship a half-resolved URI.
-			return "", fmt.Errorf("CLAUDE_RDC_DOCS=%q produced non-absolute spec path %q", root, abs)
+			// filepath.Join keeps relative roots relative; reject rather
+			// than read from a half-resolved path.
+			return "", "", fmt.Errorf("CLAUDE_RDC_DOCS=%q produced non-absolute spec path %q", root, abs)
 		}
-		return "file://" + abs, nil
+		b, rerr := os.ReadFile(abs) // #nosec G304 -- operator-supplied docs path, operator-only CLI
+		if rerr != nil {
+			return "", "", fmt.Errorf("--spec %q (resolved to %q): %w", raw, abs, rerr)
+		}
+		return raw, string(b), nil
 	}
-	return "", fmt.Errorf(
+	return "", "", fmt.Errorf(
 		"--spec %q: unknown URI scheme; expected file:// / https:// / docs:<product-version>/<spec>",
 		raw,
 	)
@@ -482,25 +511,4 @@ func confirm(cmd *cobra.Command, prompt string) bool {
 	}
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "y" || answer == "yes"
-}
-
-// pathEscapeOpID escapes the op_id segment for use in a URL path.
-// op_id values contain `:` (method separator) and `/` (path
-// separator) — e.g. `GET:/api/vcenter/cluster`. url.PathEscape on
-// the raw value produces a single segment the FastAPI router can
-// match via `{op_id:path}` (or equivalent). connector_id and
-// group_key never contain reserved chars in v0.2 but pass through
-// the same escape for defence in depth.
-func pathEscapeOpID(s string) string {
-	return url.PathEscape(s)
-}
-
-// decodeJSON unmarshals raw into out and wraps any error with a
-// caller-friendly context string. Pattern matches the operation
-// sibling.
-func decodeJSON(raw []byte, what string, out any) error {
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("decode %s response: %w", what, err)
-	}
-	return nil
 }

@@ -5,14 +5,13 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -37,7 +36,7 @@ func newListCmd() *cobra.Command {
 			"definitions in the operator's tenant, name-sorted. --limit " +
 			"caps the page size (1..500, server default 100). --offset " +
 			"advances the page window (default 0). --json emits the raw " +
-			"ListResponse envelope for jq pipelines.",
+			"AgentDefinitionListResponse envelope for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -55,7 +54,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&offset, "offset", 0,
 		"offset into the name-sorted result set (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON instead of the human table")
+		"emit raw AgentDefinitionListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -91,46 +90,49 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printListTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/agents query string. Exposed
-// for unit tests so URL construction stays checkable without standing
-// up an httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. limit / offset are *int because oapi-codegen emits `omitempty`
+// pointer fields when the OpenAPI parameter is optional.
+func listQueryParams(opts listOptions) *api.ListAgentsApiV1AgentsGetParams {
+	params := &api.ListAgentsApiV1AgentsGetParams{}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		limit := opts.Limit
+		params.Limit = &limit
 	}
 	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+		offset := opts.Offset
+		params.Offset = &offset
 	}
-	path := "/api/v1/agents"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getList(ctx context.Context, backplaneURL string, opts listOptions) (*api.ListAgentsApiV1AgentsGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListAgentsApiV1AgentsGetResponse, error) {
+			return authed.ListAgentsApiV1AgentsGetWithResponse(ctx, params)
+		},
+		func(r *api.ListAgentsApiV1AgentsGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printListTable renders the definitions as a compact table:
 // NAME, TIER, BUDGET, ENABLED, IDENTITY.
-func printListTable(w io.Writer, r *ListResponse) {
+func printListTable(w io.Writer, r *api.AgentDefinitionListResponse) {
 	if r == nil || len(r.Agents) == 0 {
 		fmt.Fprintln(w, "no agent definitions registered in this tenant")
 		return

@@ -136,10 +136,48 @@ vault kv put kv/harbor/prod-harbor \
   password="<service-account-password>"
 ```
 
+## Spec ingest (Swagger 2.0 → OpenAPI 3.x conversion)
+
+Harbor publishes its API spec at
+[`api/v2.0/swagger.yaml`](https://raw.githubusercontent.com/goharbor/harbor/v2.11.0/api/v2.0/swagger.yaml),
+which is a **Swagger 2.0** document (`swagger: "2.0"`). The G0.7 ingest
+parser is OpenAPI-3.x-only and **does not convert in-process**, so
+handing it the raw `swagger.yaml` is rejected with an actionable
+`UnsupportedSpecError`:
+
+```text
+Swagger 2.0 specs are not ingestible directly (document declares
+swagger='2.0'); convert it to OpenAPI 3.x first (e.g. the
+swagger2openapi CLI `npx swagger2openapi swagger.yaml -o openapi.yaml`,
+or the hosted converter at https://converter.swagger.io/), then ingest
+the converted 3.x document
+```
+
+Convert once, then ingest the 3.x output:
+
+```bash
+# Option A — swagger2openapi CLI (Node; the de-facto oas-kit converter)
+npx swagger2openapi swagger.yaml -o harbor-openapi3.yaml
+
+# Option B — the hosted converter (no local Node toolchain)
+curl -sS https://converter.swagger.io/api/convert \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @swagger.yaml -o harbor-openapi3.json
+
+# Ingest the converted 3.x document via the explicit-quadruple shape
+meho connector ingest \
+  --product harbor --version 2.x --impl harbor-rest \
+  --spec ./harbor-openapi3.yaml
+```
+
+The conversion preserves every operation; the 3.x output ingests
+through the same path an OpenAPI-3.x vendor surface would. The catalog
+row for `harbor/2.x` flags this same SHARP EDGE (#1532).
+
 ## Curation step (run once per Harbor target)
 
 The 9 read-only ops must be enabled via the operator-review substrate
-before they are dispatchable. Run once after the G0.7 spec ingest:
+before they are dispatchable. Run once after the spec ingest above:
 
 ```bash
 # From the backplane's Python environment:

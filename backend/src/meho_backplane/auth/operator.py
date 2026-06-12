@@ -35,6 +35,24 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   are unaffected. Agents authenticate via Keycloak clients tagged
   ``kind=agent`` whose tokens carry ``principal_kind=agent``; dispatch
   and audit can branch on this field without touching the identity chain.
+* ``capabilities`` — the set of tenant-provisioned capability keys the
+  operator's tenant has enabled (G4.5-T1). Lifted from a configurable
+  JWT claim (default ``capabilities``). Drives the MCP capability gate:
+  a tool carrying ``required_capability="x"`` is absent from
+  ``tools/list`` and 403s on ``tools/call`` unless ``"x"`` is in this
+  set. Modelled as a ``frozenset`` so the frozen :class:`Operator` stays
+  immutable and the membership test is O(1). Defaults to the empty set
+  so tokens minted before the capability mapper existed simply see no
+  capability-gated tools (fail-closed).
+* ``platform_admin`` — whether this principal holds the cross-tenant
+  *platform* capability, orthogonal to :class:`TenantRole` (which is
+  scoped *within* a single tenant). Lifted from a configurable JWT claim
+  (default ``platform_admin``) and defaults to ``False`` so every token
+  minted before the claim existed — and every agent / service principal —
+  materialises as non-platform-admin (fail-closed). No surface consumes
+  this field yet; it is the substrate a later cross-tenant authorization
+  gate will check, so that a ``tenant_admin`` cannot be mistaken for a
+  platform operator on the strength of role rank alone.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -127,3 +145,5 @@ class Operator(BaseModel):
     tenant_id: UUID
     tenant_role: TenantRole
     principal_kind: PrincipalKind = PrincipalKind.USER
+    capabilities: frozenset[str] = frozenset()
+    platform_admin: bool = False

@@ -5,14 +5,13 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -99,7 +98,7 @@ func NewListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limitFlag, "limit", 0,
 		"max memories per page (1..500, server default 100 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON instead of the human table")
+		"emit raw MemoryListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by `meho login`)")
 	return cmd
@@ -116,20 +115,21 @@ type listOptions struct {
 }
 
 func runList(cmd *cobra.Command, opts listOptions) error {
+	var typedScope *Scope
 	if opts.ScopeArg != "" {
 		scope, err := parseScope(opts.ScopeArg)
 		if err != nil {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(err.Error()), opts.JSONOut)
 		}
-		// Write the trimmed Scope value back so buildListPath
-		// forwards the normalised form. Without this, a padded
-		// input like `--scope " user "` passes the preflight (the
-		// validScopes lookup trims) and then 422s on the backend
-		// when the raw query string reaches FastAPI's enum check.
-		// Mirrors the recall.go:191-203 pattern where parseScope's
-		// return value is propagated through kindFilter.
-		opts.ScopeArg = string(scope)
+		// Capture the trimmed Scope value so listQueryParams forwards
+		// the normalised form. Without this, a padded input like
+		// `--scope " user "` passes the preflight (the validScopes
+		// lookup trims) and then 422s on the backend when the raw
+		// query string reaches FastAPI's enum check. Mirrors the
+		// recall.go pattern where parseScope's typed return value is
+		// propagated through kindFilter.
+		typedScope = &scope
 	}
 	// Mirror the kb list helper's bound check: server clamps with
 	// Query(ge=1, le=500). Surface the constraint string locally so
@@ -147,55 +147,85 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := getList(cmd.Context(), backplaneURL, opts)
+	resp, err := getList(cmd.Context(), backplaneURL, opts, typedScope)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	// Guard against 200 + missing-content-type leaving JSON200 nil.
+	// printListTable's nil-or-empty branch prints "no memories" —
+	// without this guard, a malformed 200 would be actively
+	// misleading (conflated with a genuinely-empty tenant). Mirrors
+	// `cli/internal/cmd/status.go:142` + the kb sibling's
+	// post-iter-2 nil-guard pattern.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a memory list payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printListTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/memory query string from
-// the per-call options. Exposed for unit tests so the URL
-// construction stays unit-checkable without standing up an
-// httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
-	if opts.ScopeArg != "" {
-		q.Set("scope", opts.ScopeArg)
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. Each pointer field is set only when the operator supplied
+// the flag so the backplane's own defaults apply for unset values
+// (filter omitted entirely; limit defaults to 100 server-side;
+// include_expired defaults to false). `typedScope` is the
+// pre-validated `*Scope` from runList — passing the typed pointer
+// directly into the generated `Scope *MemoryScope` field eliminates
+// the post-validate round-trip through a string.
+func listQueryParams(opts listOptions, typedScope *Scope) *api.ListMemoriesApiV1MemoryGetParams {
+	params := &api.ListMemoriesApiV1MemoryGetParams{}
+	if typedScope != nil {
+		params.Scope = typedScope
 	}
 	if opts.SlugPatternArg != "" {
-		q.Set("slug_pattern", opts.SlugPatternArg)
+		s := opts.SlugPatternArg
+		params.SlugPattern = &s
 	}
 	if opts.TagArg != "" {
-		q.Set("tag", opts.TagArg)
+		t := opts.TagArg
+		params.Tag = &t
 	}
 	if opts.IncludeExpired {
-		q.Set("include_expired", "true")
+		ie := true
+		params.IncludeExpired = &ie
 	}
 	if opts.LimitArg > 0 {
-		q.Set("limit", strconv.Itoa(opts.LimitArg))
+		l := opts.LimitArg
+		params.Limit = &l
 	}
-	path := "/api/v1/memory"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getList(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+	typedScope *Scope,
+) (*api.ListMemoriesApiV1MemoryGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts, typedScope)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListMemoriesApiV1MemoryGetResponse, error) {
+			return authed.ListMemoriesApiV1MemoryGetWithResponse(ctx, params)
+		},
+		func(r *api.ListMemoriesApiV1MemoryGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printListTable renders the list as a compact, scannable table.
@@ -204,7 +234,7 @@ func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListR
 // audit-log rows want the precise cutoff; "(none)" is rendered for
 // the absent case. Body is truncated to 60 chars so a default
 // terminal width doesn't wrap.
-func printListTable(w io.Writer, r *ListResponse) {
+func printListTable(w io.Writer, r *api.MemoryListResponse) {
 	if r == nil || len(r.Entries) == 0 {
 		fmt.Fprintln(w, "no memories visible in this tenant")
 		return
@@ -215,7 +245,7 @@ func printListTable(w io.Writer, r *ListResponse) {
 		fmt.Fprintf(w, "%-14s %-32s %-32s %s\n",
 			truncate(string(e.Scope), 14),
 			truncate(e.Slug, 32),
-			truncate(pluralisePtr(e.ExpiresAt), 32),
+			truncate(formatTimePtr(e.ExpiresAt), 32),
 			truncate(snippetOf(e.Body), 60),
 		)
 	}

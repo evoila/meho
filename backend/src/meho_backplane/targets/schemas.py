@@ -14,9 +14,11 @@ Four models cover the full CRUD + list contract:
   fields have documented defaults matching the ORM column defaults.
   Rejects unknown fields (``extra='forbid'``).
 * :class:`TargetUpdate` — PATCH body. Every field optional; only fields
-  that are not ``None`` are applied by the route handler. ``name`` and
-  ``product`` are intentionally absent — rename = delete + create.
-  Rejects unknown fields (``extra='forbid'``).
+  that are not ``None`` are applied by the route handler. ``name`` is
+  intentionally absent — rename = delete + create. ``product`` is
+  patchable as of G0.14-T4 (#1145) with route-handler validation
+  against the registered connector products; rejects unknown fields
+  (``extra='forbid'``).
 
 The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
 
@@ -28,7 +30,13 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
   ``extra='forbid'`` so clients cannot seed the G0.6 resolver with
   fabricated values.
 * ``preferred_impl_id`` — operator override for the G0.6 resolver's
-  tie-break ladder. Acceptable on both write schemas.
+  tie-break ladder. Acceptable on both write schemas. The canonical
+  form is **versioned** (``"nsx-rest-4.2"``) per
+  ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
+  discipline); the base form (``"nsx-rest"``) stays accepted on both
+  ``TargetCreate`` and ``TargetUpdate`` for backward compatibility,
+  and the resolver normalizes both to the same connector
+  (G0.16-T6 Finding C #1312).
 
 ``AuthModel`` is imported from :mod:`meho_backplane.connectors.schemas`
 (G0.2-T1) and re-used here so the enum value set stays in one place.
@@ -38,12 +46,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.connectors.schemas import AuthModel
+
+if TYPE_CHECKING:
+    from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
     "AuthModel",
@@ -51,25 +62,61 @@ __all__ = [
     "TargetCreate",
     "TargetSummary",
     "TargetUpdate",
+    "project_target_to_summary",
 ]
 
 
 class TargetSummary(BaseModel):
     """Short shape for list endpoints.
 
-    Omits ``notes``, ``extras``, and connection-auth details to keep
-    list responses fast and small. The ``aliases`` field is included
-    because list consumers (CLI ``meho target list``, autocomplete)
-    need it to display secondary names.
+    G0.16-T6 Finding D (#1312) widened this from the previous narrow
+    projection (``id, name, aliases, product, host``) to mirror the
+    detail-endpoint shape's identification + connection-routing
+    fields, including ``version``, ``port``, ``fqdn``, ``secret_ref``,
+    ``auth_model``, ``vpn_required``, ``preferred_impl_id``, and the
+    server-managed timestamps. Per
+    ``docs/codebase/api-shape-conventions.md`` §5, list endpoints
+    must not silently mask fields the detail endpoint exposes
+    (RDC #771 Finding 8 caught list returning ``version=null,
+    secret_ref=null, preferred_impl_id=null`` for targets whose
+    detail endpoint returned actual values; adopters either wrote
+    N+1 calls or accepted silent data masking).
+
+    The two remaining omissions vs :class:`Target` are deliberate:
+    ``notes`` and ``extras``. Both are operator-authored free-form
+    blobs that can carry meaningful payload (``extras`` is
+    capability-marker metadata; ``notes`` is operator commentary)
+    and shipping them in the list response would inflate the page
+    size for the common "give me the names and routing" question
+    that list consumers ask. The convention doc's escape valve
+    applies: when an N+1 cost on these specifically becomes a real
+    concern, a future ``GET /api/v1/targets/summary`` projection
+    endpoint can carry the narrow shape under an explicit name
+    (anti-pattern is silent masking, not documented projection).
+
+    Frozen so callers can stash instances in request state or
+    structured logs without fear of mutation.
     """
 
     model_config = ConfigDict(frozen=True)
 
     id: UUID
+    tenant_id: UUID
     name: str
     aliases: tuple[str, ...]
     product: str
+    version: str | None = None
     host: str
+    port: int | None
+    fqdn: str | None
+    secret_ref: str | None
+    auth_model: AuthModel
+    vpn_required: bool
+    fingerprint: Mapping[str, Any] | None
+    preferred_impl_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class Target(BaseModel):
@@ -89,6 +136,21 @@ class Target(BaseModel):
     (JSON-safe dict from ``model_dump(mode='json')``) or ``None`` until
     the first successful probe. ``preferred_impl_id`` is the operator's
     optional override for the G0.6 connector-impl resolver.
+
+    ``version`` is the operator-asserted product version (e.g.
+    ``"9.0"``, ``"1.x"``) shipped by G0.15-T6 (#1215). It is **operator-
+    editable** via :class:`TargetCreate` / :class:`TargetUpdate` so a
+    fresh target can carry a version *before* the first probe, breaking
+    the chicken-and-egg the v0.7.0 dogfood surfaced (RDC #753, signal
+    6): every typed connector except K8s required ``fingerprint.version``
+    to resolve, but the probe needed the resolver to find a connector
+    first. The G0.15-T6 fix adds operator-asserted ``version`` as a
+    second source the resolver consults, with ``fingerprint.version``
+    (probed reality) taking precedence when both are present. The K8s
+    pattern (sibling wildcard registration at
+    ``connectors/kubernetes/__init__.py``) is fanned out across every
+    typed connector in the same PR so an unfingerprinted target with
+    ``version=None`` *also* resolves through the wildcard.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -98,6 +160,12 @@ class Target(BaseModel):
     name: str
     aliases: tuple[str, ...]
     product: str
+    # G0.15-T6 (#1215). Defaults to ``None`` so call sites that have
+    # not yet been updated to populate the field (test helpers,
+    # historical fixtures, legacy code constructing :class:`Target`
+    # by hand) keep working; production code paths go through
+    # :func:`_to_full` which now passes the column through explicitly.
+    version: str | None = None
     host: str
     port: int | None
     fqdn: str | None
@@ -110,6 +178,15 @@ class Target(BaseModel):
     preferred_impl_id: str | None
     created_at: datetime
     updated_at: datetime
+    # Soft-delete timestamp (G0.14-T4 #1145). ``None`` for live
+    # targets; a non-``None`` value names the wall-clock time of
+    # the ``DELETE /api/v1/targets/{name}`` call that retired the
+    # row. Read paths (``resolve_target``, ``list_targets``)
+    # exclude rows where the column is non-``None``, so a caller
+    # holding a :class:`Target` instance with ``deleted_at`` set
+    # observed the target through an audit-history surface, not a
+    # live registry probe.
+    deleted_at: datetime | None = None
 
 
 class TargetCreate(BaseModel):
@@ -125,6 +202,15 @@ class TargetCreate(BaseModel):
     so clients cannot seed the G0.6 resolver's tie-break input with
     fabricated values. ``preferred_impl_id`` is accepted as an optional
     operator override.
+
+    ``version`` is accepted as an optional operator-asserted product
+    version (G0.15-T6 #1215). Operators who know the version up-front
+    (e.g. ``"9.0"`` for a vCenter Hetzner-DC target the consumer just
+    deployed) can pass it at create time so the very first probe
+    dispatches against the versioned connector without round-tripping
+    through PATCH. Fresh targets still default to ``None`` and resolve
+    via the sibling wildcard registration applied to every typed
+    connector in the same PR (K8s pattern fanned out).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -132,6 +218,7 @@ class TargetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     aliases: list[str] = Field(default_factory=list)
     product: str = Field(min_length=1, max_length=100)
+    version: str | None = Field(default=None, max_length=100)
     host: str = Field(min_length=1, max_length=512)
     port: int | None = Field(default=None, ge=1, le=65535)
     fqdn: str | None = None
@@ -149,18 +236,42 @@ class TargetUpdate(BaseModel):
     All fields are optional. The route handler applies only the fields
     that are not ``None``; callers must send an explicit ``null`` JSON
     value to clear a nullable column (``fqdn``, ``secret_ref``,
-    ``notes``). ``name`` and ``product`` are absent — rename = delete
-    + create.
+    ``notes``). ``name`` is absent — rename = delete + create.
+
+    ``product`` is patchable as of G0.14-T4 (#1145). The original
+    G0.3 contract treated ``product`` as immutable after creation
+    on the theory that the operator should delete + re-create on a
+    typo, but the v0.6.0 dogfood pass (signal 6) showed the
+    combination of "no DELETE route" + "no PATCH on product" left a
+    misregistered target permanently broken — name and alias slots
+    occupied, ``secret_ref`` pointing at a stranded Vault path. T4
+    closes the gap by adding DELETE *and* allowing PATCH on
+    ``product``. The route handler validates the new value against
+    the set of registered connector products and rejects unknown
+    values with a structured 422 mirroring the ``/probe`` 501
+    shape — so a typo at PATCH time produces the same actionable
+    diagnostic as the typo would at probe time, instead of
+    silently breaking the working target.
 
     ``fingerprint`` is **not** accepted via PATCH — it is server-managed
     and rewritten by every successful probe. Sending ``fingerprint``
     raises 422 via ``extra='forbid'`` for the same reason
     :class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable.
+
+    ``version`` is patchable as of G0.15-T6 (#1215) — same fix-class as
+    G0.14-T4 #1145's PATCH-on-``product``. An operator who probes the
+    target manually (or has out-of-band knowledge of the product
+    version) can set it to flip the resolver from the wildcard fallback
+    to the versioned connector. Clearing it (``{"version": null}``) is
+    legal and returns the target to the wildcard-fallback shape — the
+    column is nullable so this is not a constraint violation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     aliases: list[str] | None = None
+    product: str | None = Field(default=None, min_length=1, max_length=100)
+    version: str | None = Field(default=None, max_length=100)
     host: str | None = Field(default=None, max_length=512)
     port: int | None = Field(default=None, ge=1, le=65535)
     fqdn: str | None = None
@@ -170,3 +281,49 @@ class TargetUpdate(BaseModel):
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+
+
+def project_target_to_summary(t: TargetORM) -> TargetSummary:
+    """Project a :class:`TargetORM` row to the wire :class:`TargetSummary` shape.
+
+    G0.16-T6 review-iter-1 m1 (#1312). Single canonical projection
+    for both the ``GET /api/v1/targets`` list endpoint
+    (:mod:`meho_backplane.api.v1.targets`) and the
+    :func:`~meho_backplane.targets.resolver.resolve_target`
+    near-miss / ambiguity diagnostics
+    (:mod:`meho_backplane.targets.resolver`). The two sites
+    previously held byte-for-byte duplicate ``_to_summary`` helpers;
+    the drift class they invited is exactly what Finding D caught
+    (list silently masking ``version`` / ``secret_ref`` /
+    ``preferred_impl_id`` while detail returned them). One helper,
+    one place to change, no drift.
+
+    Coerces ``aliases`` from the ORM column's mutable ``list[str]``
+    JSON shape to the wire schema's ``tuple[str, ...]`` so the
+    frozen :class:`TargetSummary` instance is genuinely immutable,
+    and wraps the raw ``auth_model`` string in the
+    :class:`~meho_backplane.connectors.schemas.AuthModel` enum so
+    callers get the typed value the schema declares.
+    """
+    return TargetSummary(
+        id=t.id,
+        tenant_id=t.tenant_id,
+        name=t.name,
+        # ORM stores aliases as ``list[str]`` (mutable JSON column);
+        # the response schema declares ``tuple[str, ...]`` for
+        # frozen-model immutability. Coerce at the boundary.
+        aliases=tuple(t.aliases),
+        product=t.product,
+        version=t.version,
+        host=t.host,
+        port=t.port,
+        fqdn=t.fqdn,
+        secret_ref=t.secret_ref,
+        auth_model=AuthModel(t.auth_model),
+        vpn_required=t.vpn_required,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
+    )

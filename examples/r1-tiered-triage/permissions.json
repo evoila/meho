@@ -1,0 +1,35 @@
+{
+  "_comment": "AgentPermission grants for the R1 tiered-triage pattern. Apply each row as one INSERT into backend/src/meho_backplane/db/models.py:AgentPermission. The /api/v1/agent-grants surface (G11.2-T6 #819) is the operator path; the `_purpose` fields are doc-only metadata stripped before the POST. Substitute <cheap-principal-sub> and <deep-principal-sub> with the Keycloak sub claims for each agent's principal registry row (see GUIDE.md Step 3).",
+  "_note_on_agent_to_agent_dispatch": "v0.2 does NOT gate agent-to-agent invocation on grant rows. The `meho.invoke_agent` meta-tool is permitted by reaching the child agent's identity via the in-process harness's child_agent_resolver (see backend/src/meho_backplane/agent/invoke.py:307-477; the only runtime checks are name-resolution scoped to the parent operator's tenant + a depth cap). No grant row makes the escalate edge work; no grant row blocks it. The agent-grants table gates `call_operation` dispatch only. The cheap → deep escalate edge in this example is therefore controlled by the harness composition in workflow.py (`_name_resolver`), not by RBAC.",
+  "_note_on_no_write_grants": "Neither agent carries write grants on managed targets. The cheap tier is read-only on the broadcast / memory connectors (loaded by the harness, not the loop); the deep tier is read-only across the discovery connector surface. Action recommendations from the deep tier route through the operator-approval gate (see R2) -- the agent identifies the action; the operator authorises it.",
+  "permissions": [
+    {
+      "principal_sub": "<cheap-principal-sub>",
+      "op_pattern": "meho.broadcast.recent",
+      "target_scope": "*",
+      "verdict": "auto-execute",
+      "_purpose": "Cheap tier reads recent broadcast events as the source of triage signal. Read-only op; auto-executes."
+    },
+    {
+      "principal_sub": "<deep-principal-sub>",
+      "op_pattern": "*.read",
+      "target_scope": "*",
+      "verdict": "auto-execute",
+      "_purpose": "Deep tier needs read access across discovery connectors (audit query, broadcast history, target inventory) to investigate. The .read suffix is the conventional read-op marker; consumers may want to tighten this to a per-connector allow-list."
+    },
+    {
+      "principal_sub": "<deep-principal-sub>",
+      "op_pattern": "*.list",
+      "target_scope": "*",
+      "verdict": "auto-execute",
+      "_purpose": "Same rationale as the *.read grant. List ops on inventory are how the deep tier walks the target topology when an investigation needs the full target surface."
+    },
+    {
+      "principal_sub": "<deep-principal-sub>",
+      "op_pattern": "*.write",
+      "target_scope": "*",
+      "verdict": "needs-approval",
+      "_purpose": "Defence-in-depth ceiling. The deep tier's prompt forbids write ops, but if the model attempts one anyway (a prompt-injection, a misclassified op, a model hallucination), the dispatch pauses for approval instead of executing silently. This is the R2 approval-gate pattern applied to the investigator's surface."
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+openapi: 3.0.3
+info:
+  title: Response-ref fixture
+  version: 1.0.0
+# Models the GitHub REST spec shape: shared response envelopes
+# referenced from operations via ``$ref:
+# '#/components/responses/<name>'``. G3.11-T7 #1241 flips this from
+# rejected to accepted.
+paths:
+  /widgets:
+    get:
+      summary: List widgets
+      responses:
+        "200":
+          $ref: "#/components/responses/WidgetList"
+  /widgets/{id}:
+    get:
+      summary: Read one widget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Widget"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  responses:
+    WidgetList:
+      description: Page of widgets
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/Widget"
+    Widget:
+      description: One widget
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Widget"
+    NotFound:
+      description: Widget not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+  schemas:
+    Widget:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string

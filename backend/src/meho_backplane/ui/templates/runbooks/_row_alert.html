@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks catalog row-action result slot.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1384 (T3). Returned by the
+  publish / deprecate POST handlers (``lifecycle.register_lifecycle_routes``)
+  when the action was dispatched from the **catalog** row (HTMX targets the
+  per-row ``#runbook-row-alert-<slug>@<version>`` slot, not the detail surface's
+  ``#runbook-lifecycle``). The catalog row action posts with this slot as its
+  ``hx-target`` (``hx-swap="innerHTML"``):
+
+    * On a typed-400 (publishing a non-draft / deprecating a non-published
+      version on a stale row) ``lifecycle_error`` is set, so the slot renders
+      an inline DaisyUI ``alert-error`` -- the same surface treatment the detail
+      view gives a typed-400, instead of silently swallowing it under a list
+      refresh.
+    * On success ``lifecycle_error`` is None, so the slot renders empty; the
+      catalog button's ``htmx:after-request`` handler then dispatches
+      ``runbooks-refresh`` (success-only) to reload the list so the new badge
+      shows.
+
+  Context variables:
+    lifecycle_error -- str | None: typed-400 message -> inline alert-error
+-#}
+{% if lifecycle_error %}
+  <div role="alert" class="alert alert-error mt-1 text-sm" aria-live="assertive">
+    <span aria-hidden="true">&#9888;</span>
+    <span>{{ lifecycle_error }}</span>
+  </div>
+{% endif %}

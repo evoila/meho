@@ -66,6 +66,7 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
@@ -192,6 +193,9 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        # Tenant-unique cache key component (#1642/#1672); without it
+        # ``target_cache_key`` would raise AttributeError at runtime.
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a0")
         self.name = "vcenter-credread"
         self.host = _VCENTER_HOST
         self.port = 443
@@ -382,7 +386,7 @@ async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
         mock.delete("/api/session").respond(204)
         primed = await connector._session_token(target, _make_operator())
         assert primed == _SESSION_TOKEN
-        assert connector._session_tokens[target.name] == _SESSION_TOKEN
+        assert connector._session_tokens[target_cache_key(target)] == _SESSION_TOKEN
 
         system_operator = Operator(
             sub="system",
@@ -399,7 +403,7 @@ async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
         assert "operator" in str(exc_info.value).lower()
         # The cache still holds the primed token; the guard ran ahead of
         # any cache mutation.
-        assert connector._session_tokens[target.name] == _SESSION_TOKEN
+        assert connector._session_tokens[target_cache_key(target)] == _SESSION_TOKEN
 
         # aclose() inside the respx.mock context so the DELETE /api/session
         # cleanup is mocked and never leaks to live network.

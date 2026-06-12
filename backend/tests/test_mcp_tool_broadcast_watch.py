@@ -54,9 +54,12 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     BroadcastEvent,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
+    get_broadcast_blocking_client,
     get_broadcast_client,
     publish_event,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.mcp.schemas import INVALID_PARAMS
@@ -103,8 +106,10 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     yield
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     get_settings.cache_clear()
 
 
@@ -198,11 +203,23 @@ def test_tools_list_exposes_watch_for_operator(
     schema = watch_def["inputSchema"]
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    assert "since_cursor" in schema["properties"]
+    assert "cursor" in schema["properties"]
+    assert "since_cursor" in schema["properties"]  # deprecated alias
     assert "filter" in schema["properties"]
     assert "timeout_ms" in schema["properties"]
-    # ``since_cursor`` is required at the schema layer.
-    assert schema["required"] == ["since_cursor"]
+    # NOTE: `anyOf` is stripped from the wire copy by
+    # ``_wire_safe_input_schema`` (Anthropic Messages API rejects
+    # top-level combinators). The handler-side XOR enforcement runs
+    # against the full ``defn.inputSchema`` and is covered by
+    # ``test_handler_rejects_both_cursor_and_since_cursor`` below;
+    # ``tests/test_mcp_tools_list_shape_conventions.py`` asserts the
+    # internal-shape ``anyOf`` directly off the registry.
+    assert "anyOf" not in schema, "wire shape must not expose top-level anyOf"
+    assert "required" not in schema
+    # The deprecated alias carries the `deprecated: true` flag so a
+    # schema-driven client renders the migration nudge.
+    assert schema["properties"]["since_cursor"].get("deprecated") is True
+    assert "deprecated" not in schema["properties"]["cursor"]
     # ``timeout_ms`` bounds are wired.
     assert schema["properties"]["timeout_ms"]["minimum"] == _WATCH_MIN_TIMEOUT_MS
     assert schema["properties"]["timeout_ms"]["maximum"] == _WATCH_MAX_TIMEOUT_MS
@@ -280,14 +297,34 @@ def test_empty_since_cursor_rejects_with_invalid_params(
 
 
 async def test_handler_directly_rejects_non_string_since_cursor() -> None:
-    """Handler-side typed-contract: non-string ``since_cursor`` raises -32602.
+    """Handler-side typed-contract: non-string cursor raises -32602.
 
     Belt-and-suspenders over the schema -- a future schema relaxation
-    wouldn't silently widen what the handler accepts.
+    wouldn't silently widen what the handler accepts. Post-G0.18-T5
+    #1358 the error message names ``cursor`` (the canonical wire
+    name); both alias names route through the same handler reject
+    branch.
     """
     op = build_operator(TenantRole.OPERATOR)
-    with pytest.raises(McpInvalidParamsError, match="since_cursor"):
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
         await _handler_watch(op, {"since_cursor": 12345})
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
+        await _handler_watch(op, {"cursor": 12345})
+
+
+async def test_handler_rejects_both_cursor_and_since_cursor() -> None:
+    """Passing both alias names rejects with -32602 (G0.18-T5 #1358).
+
+    The wire layer accepts both spellings to ease the v0.8.0 → v0.9.0
+    migration, but exactly one must be supplied per call — passing both
+    is an unambiguous client bug that surfaces at the handler boundary.
+    """
+    op = build_operator(TenantRole.OPERATOR)
+    with pytest.raises(McpInvalidParamsError, match=r"cursor.*since_cursor"):
+        await _handler_watch(
+            op,
+            {"cursor": _SINCE_FIXTURE, "since_cursor": _SINCE_FIXTURE},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +440,7 @@ def test_xread_timeout_none_returns_empty_with_unchanged_cursor(
     re-poll with the same cursor.
     """
     client, _op = client_with_operator
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
         resp = post_mcp(
             client,
@@ -432,7 +469,7 @@ def test_xread_empty_list_returns_empty_with_unchanged_cursor(
     check collapses ``None`` and ``[]`` into the same branch.
     """
     client, _op = client_with_operator
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=[])):
         resp = post_mcp(
             client,
@@ -472,7 +509,7 @@ def test_new_events_returned_with_advanced_cursor(
         stream_key,
         [(e1, "1747800000100-0"), (e2, "1747800000200-0"), (e3, "1747800000300-0")],
     )
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -510,7 +547,7 @@ def test_cursor_advances_past_filtered_out_entries(
         stream_key,
         [(read_event, "1747800000100-0"), (write_event, "1747800000200-0")],
     )
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -549,7 +586,7 @@ def test_filter_op_class_narrows_result(
         stream_key,
         [(read_event, "1747800000100-0"), (write_event, "1747800000200-0")],
     )
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -580,7 +617,7 @@ def test_filter_principal_narrows_result(
         stream_key,
         [(alice, "1747800000100-0"), (bob, "1747800000200-0")],
     )
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -623,7 +660,7 @@ def test_filter_target_narrows_result(
             (untagged, "1747800000300-0"),
         ],
     )
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -658,7 +695,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     proves the structural property holds.
     """
     client, op = client_with_operator
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
         post_mcp(
             client,
@@ -695,7 +732,7 @@ async def test_handler_with_distinct_operator_reads_distinct_stream() -> None:
         tenant_role=TenantRole.OPERATOR,
     )
 
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
         await _handler_watch(op_a, {"since_cursor": _SINCE_FIXTURE})
         await _handler_watch(op_b, {"since_cursor": _SINCE_FIXTURE})
@@ -723,7 +760,7 @@ async def test_handler_re_raises_cancelled_error_from_xread() -> None:
     async def _cancelled_xread(*_args: object, **_kwargs: object) -> Any:
         raise asyncio.CancelledError
 
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with (
         patch.object(bc, "xread", new=_cancelled_xread),
         pytest.raises(asyncio.CancelledError),
@@ -751,7 +788,7 @@ async def test_handler_cancellation_during_real_block_releases_worker() -> None:
         await asyncio.sleep(3600)  # never completes within the test window
         return None
 
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with (
         patch.object(bc, "xread", new=_never_returns),
         pytest.raises((asyncio.TimeoutError, asyncio.CancelledError)),
@@ -790,7 +827,7 @@ def test_credential_read_payload_surfaces_aggregate_only(
         payload=aggregate_payload,
     )
     envelope = _xread_envelope(stream_key, [(event, "1747800000100-0")])
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -825,7 +862,7 @@ def test_audit_query_payload_surfaces_aggregate_with_row_count(
         payload=aggregate_payload,
     )
     envelope = _xread_envelope(stream_key, [(event, "1747800000100-0")])
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
@@ -854,7 +891,7 @@ async def test_handler_skips_unknown_field_shape() -> None:
             ],
         ),
     ]
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         result = await _handler_watch(op, {"since_cursor": _SINCE_FIXTURE})
     assert len(result["events"]) == 1
@@ -877,7 +914,7 @@ async def test_handler_skips_malformed_event_json() -> None:
             ],
         ),
     ]
-    bc = get_broadcast_client()
+    bc = get_broadcast_blocking_client()
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         result = await _handler_watch(op, {"since_cursor": _SINCE_FIXTURE})
     assert len(result["events"]) == 1
@@ -997,10 +1034,12 @@ class TestBroadcastWatchIntegration:
             monkeypatch.setenv("BROADCAST_REDIS_URL", url)
             get_settings.cache_clear()
             reset_broadcast_client_for_testing()
+            reset_broadcast_blocking_client_for_testing()
             try:
                 yield url
             finally:
                 await dispose_broadcast_client()
+                await dispose_broadcast_blocking_client()
                 get_settings.cache_clear()
 
     async def test_watch_returns_immediately_when_event_already_present(

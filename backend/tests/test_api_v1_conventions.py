@@ -1223,3 +1223,510 @@ async def test_list_budget_status_kind_filter_does_not_narrow_budget(
     bs = body["budget_status"]
     assert bs["over_budget"] is True
     assert "op-c" in bs["dropped_slugs"]
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T8 #1149 -- preamble_status on POST/PATCH responses (signal 18)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_operational_returns_preamble_status_included(
+    client: TestClient,
+) -> None:
+    """POST an operational convention that fits → ``preamble_status.included=True``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-included")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug="fits-easily",
+            body="Short body that fits.",
+            kind="operational",
+            priority=10,
+        )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert "preamble_status" in body, "POST operational must surface inclusion"
+    ps = body["preamble_status"]
+    assert ps["included"] is True
+    assert ps["position"] == 1  # only convention in the tenant; takes first slot
+    assert ps["token_count"] > 0
+    assert ps["would_drop_slugs"] == []
+
+
+def _sized_body(char_count: int) -> str:
+    """Build an ASCII body of exactly *char_count* characters.
+
+    Pairs with the ``ceil(len / 3.3)`` heuristic so callers can
+    target a precise estimated-token cost without leaning on
+    :func:`_near_budget_body`'s ``max(target*4, 1400)`` floor (which
+    over-shoots for small targets).
+    """
+    return "x" * char_count
+
+
+@pytest.mark.asyncio
+async def test_post_operational_dropped_when_over_budget(
+    client: TestClient,
+) -> None:
+    """POST a convention that doesn't fit → ``included=False`` + slug in ``would_drop_slugs``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-dropped")
+    token = _token(key)
+    # ~250-token bodies (825 chars → ceil(825/3.3)=250). Two fit
+    # comfortably under the 600-token budget; a third pushes the
+    # cumulative pack over and the lowest-priority row drops.
+    body_mid = _sized_body(825)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Two priority-10 mid-sized rows fill most of the budget...
+        _post_convention(client, token, slug="winner-a", body=body_mid, priority=10)
+        _post_convention(client, token, slug="winner-b", body=body_mid, priority=10)
+        # ...the third lands at priority 1 -- packer drops it on overflow.
+        resp = _post_convention(
+            client,
+            token,
+            slug="loser-c",
+            body=body_mid,
+            priority=1,
+        )
+    assert resp.status_code == 201, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps["included"] is False
+    assert ps["position"] is None
+    assert ps["token_count"] > 0
+    # The just-written slug appears in would_drop_slugs (it was the
+    # one the packer dropped); the other two priority-10 rows fit
+    # and must not appear.
+    assert "loser-c" in ps["would_drop_slugs"]
+    assert "winner-a" not in ps["would_drop_slugs"]
+    assert "winner-b" not in ps["would_drop_slugs"]
+
+
+@pytest.mark.asyncio
+async def test_post_operational_high_priority_displaces_existing_slugs(
+    client: TestClient,
+) -> None:
+    """A high-prio POST that pushes a lower-prio neighbour out lists it in ``would_drop_slugs``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-displace")
+    token = _token(key)
+    # Two ~250-token rows fit; a third pushes overflow. The new top-
+    # priority row goes in at position 1 and the lowest-priority
+    # existing row drops.
+    body_mid = _sized_body(825)  # ~250 tokens
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="existing-mid", body=body_mid, priority=5)
+        _post_convention(client, token, slug="existing-low", body=body_mid, priority=1)
+        # New row at priority 100 -- highest -- takes position 1; the
+        # cumulative pack now overflows and the lowest-priority
+        # neighbour drops.
+        resp = _post_convention(
+            client,
+            token,
+            slug="new-top",
+            body=body_mid,
+            priority=100,
+        )
+    assert resp.status_code == 201, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps["included"] is True
+    assert ps["position"] == 1  # priority=100 wins the top slot
+    # ``existing-low`` had priority 1 -- the lowest -- so it's the
+    # natural drop on overflow. ``new-top`` itself is NOT in the
+    # drop list (it's the included one).
+    assert "existing-low" in ps["would_drop_slugs"]
+    assert "new-top" not in ps["would_drop_slugs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["workflow", "reference"])
+async def test_post_workflow_reference_omits_preamble_status(
+    client: TestClient,
+    kind: str,
+) -> None:
+    """Non-operational kinds don't enter the preamble → ``preamble_status`` is ``None``."""
+    await _seed_tenants()
+    key = make_rsa_keypair(f"kid-preamble-{kind}")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug=f"non-op-{kind}",
+            body="Workflow / reference text.",
+            kind=kind,
+        )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # The field is present on the schema (``Convention.preamble_status``)
+    # but null for preamble-unbound kinds. JSON consumers branching
+    # on ``preamble_status is None`` get the right "this write does
+    # not affect the preamble" signal.
+    assert body["preamble_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_operational_returns_preamble_status(client: TestClient) -> None:
+    """PATCH an operational convention's body → response carries fresh ``preamble_status``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-patch")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(
+            client,
+            token,
+            slug="patch-target",
+            body="Original short.",
+            priority=5,
+        )
+        resp = client.patch(
+            "/api/v1/conventions/patch-target",
+            json={"body": "Updated body text."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+    assert ps["would_drop_slugs"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_priority_only_returns_preamble_status(client: TestClient) -> None:
+    """Priority-only PATCH that re-ranks the convention still surfaces ``preamble_status``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-patch-prio")
+    token = _token(key)
+    body_near = _near_budget_body(target_tokens=400)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Three rows; only two fit. Start the to-be-patched row at
+        # priority 1 (definitely dropped) and bump it to 100 via
+        # PATCH (should now be included at position 1).
+        _post_convention(client, token, slug="patch-prio", body=body_near, priority=1)
+        _post_convention(client, token, slug="other-a", body=body_near, priority=5)
+        _post_convention(client, token, slug="other-b", body=body_near, priority=5)
+        # Pre-PATCH state: patch-prio is dropped.
+        resp_pre = client.get(
+            "/api/v1/conventions/patch-prio",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_pre.status_code == 200
+        # GET-single does NOT carry preamble_status (the aggregate
+        # signal lives on the list response's budget_status); the
+        # write-time feedback is the only post-mutation signal.
+        assert resp_pre.json().get("preamble_status") is None
+        # Bump priority to 100 -- now patch-prio takes the top slot.
+        resp = client.patch(
+            "/api/v1/conventions/patch-prio",
+            json={"priority": 100},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_single_does_not_carry_preamble_status(client: TestClient) -> None:
+    """``GET /{slug}`` returns ``preamble_status=None`` -- inclusion signal is write-time only."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-get")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="get-only")
+        resp = client.get(
+            "/api/v1/conventions/get-only",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    # GET-single is the natural read shape; ``budget_status`` on the
+    # list response is the aggregate-budget signal, so the per-row
+    # GET deliberately omits preamble_status (returns None) to keep
+    # the read paths' responsibilities clean.
+    assert resp.json()["preamble_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# G12.4-T2 #1316 -- runbook priming wire-up on the conventions routes
+# ---------------------------------------------------------------------------
+#
+# The issue body prescribes Tests #7 + #8: route-level coverage that
+# the calling operator's runbook priming flows through the conventions
+# API's read + write paths. The route response shapes are
+# ``ConventionListResponse`` (``entries`` + ``budget_status``) on the
+# list endpoint and ``Convention`` (with ``preamble_status``) on POST /
+# PATCH -- none of which surfaces the raw assembled preamble text.
+# By design, ``budget_status`` is **conventions-only** (the priming
+# band has its own implicit cap via ``MAX_PRIMING_BLOCKS`` and is not
+# charged to the conventions budget) and ``preamble_status`` is a
+# slug-scoped projection (``included`` / ``position`` / ``token_count``
+# / ``would_drop_slugs``) over the conventions pack alone (per the
+# ``_compute_preamble_status`` docstring).
+#
+# Per the iter-1 review's M1-alternative: "if the route response shape
+# doesn't expose raw preamble text, document the assembler-level
+# coverage as maximally-feasible and file a follow-up for end-to-end
+# MCP-level route coverage — the deferral has to be explicit."
+#
+# The maximally-feasible route-level coverage here is verifying the
+# **wire-up**: that each route invokes ``assemble_preamble`` /
+# ``assemble_preamble_detailed`` with the calling operator's
+# ``operator.sub`` as the second positional argument. That is the
+# load-bearing T2 claim ("all three call sites updated to pass
+# operator.sub"); a future commit that silently drops the sub argument
+# (or passes a hard-coded sentinel) would fail these tests even when
+# the conventions-only response fields stayed correct.
+#
+# End-to-end coverage of priming-band content in the assembled wire
+# text is delivered through:
+#   * the assembler-level tests in
+#     ``backend/tests/test_conventions_preamble.py`` (the
+#     ``test_one_in_progress_run_appends_priming_after_conventions``
+#     family) that exercise the primitive's full byte shape, and
+#   * ``backend/tests/test_mcp_initialize_instructions.py``
+#     covers the MCP-level wire-up (the load-bearing call site per
+#     the issue body).
+# The MCP-level path is the user-facing surface for priming text; the
+# conventions API surfaces the conventions-only ``budget_status`` /
+# ``preamble_status`` projections and does not promise the priming
+# text on its own response shape. A v0.2.next initiative may add a
+# dedicated ``GET /api/v1/conventions/preview`` route that returns
+# the assembled preamble verbatim (the issue body's original test
+# wording assumed such a route would exist; it does not, and the
+# conventions-only projections are the right shape for the list /
+# write feedback responsibility).
+
+
+@pytest.mark.asyncio
+async def test_list_conventions_invokes_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble``.
+
+    G12.4-T2 (#1316) wire-up regression guard. The list endpoint
+    builds ``budget_status`` by calling ``assemble_preamble`` with
+    the operator's tenant + sub; a refactor that silently dropped
+    the ``operator.sub`` argument (so every list call would assemble
+    priming for a sentinel operator and the calling operator's
+    in-progress runs would no longer flow into the preamble band)
+    would still produce a correct ``budget_status`` (the conventions
+    pack is sub-agnostic) but would silently break the user-visible
+    priming. This test asserts the right sub is forwarded so the
+    regression is caught at this layer.
+
+    Spy strategy: wrap the real ``assemble_preamble`` import in
+    ``meho_backplane.api.v1.conventions`` and record every call's
+    positional args. Assert the second positional matches the
+    operator's sub from the JWT.
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-list-spy")
+    op_sub = "op-priming-list-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_assemble = conventions_module.assemble_preamble
+
+    async def _spy_assemble(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(conventions_module, "assemble_preamble", _spy_assemble)
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    # The list handler invokes the assembler exactly once per request.
+    # Positional args are ``(tenant_id, operator_sub)``; assert the
+    # second one is the operator's sub from the JWT, not a sentinel.
+    assert len(captured) == 1, captured
+    args, _kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    # The conventions-only ``budget_status`` projection stays correct
+    # in the response -- the priming wiring does not corrupt it (an
+    # empty operational set still reports ``estimated_tokens=0``).
+    body = resp.json()
+    assert body["budget_status"]["estimated_tokens"] == 0
+    assert body["budget_status"]["over_budget"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_convention_invokes_detailed_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble_detailed``.
+
+    G12.4-T2 (#1316) wire-up regression guard for the post-write
+    inclusion-feedback path. ``_compute_preamble_status`` (the
+    helper that builds ``preamble_status`` on POST / PATCH responses)
+    delegates to ``assemble_preamble_detailed`` with the operator's
+    sub so the assembled preview reflects what the calling operator's
+    MCP session will see (priming included). Forgetting to pass the
+    sub would leave priming silently absent from the post-write
+    preview while ``preamble_status``'s conventions-only projection
+    still looked right.
+
+    Spy strategy: wrap the real ``assemble_preamble_detailed`` import
+    in ``meho_backplane.api.v1.conventions`` and assert every call
+    carries the operator's sub. Use an operational convention so the
+    helper is actually invoked (workflow / reference short-circuit
+    to ``preamble_status=None`` per the ``_compute_preamble_status``
+    docstring).
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-post-spy")
+    op_sub = "op-priming-post-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_detailed = conventions_module.assemble_preamble_detailed
+
+    async def _spy_detailed(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_detailed(*args, **kwargs)
+
+    monkeypatch.setattr(
+        conventions_module,
+        "assemble_preamble_detailed",
+        _spy_detailed,
+    )
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug="priming-wired-post",
+            body="Body for the post-write priming wire-up check.",
+            kind="operational",
+            priority=5,
+        )
+    assert resp.status_code == 201, resp.text
+    # ``_compute_preamble_status`` invokes the detailed assembler
+    # once per write against an operational kind. Assert the sub
+    # is forwarded as the second positional argument.
+    assert len(captured) == 1, captured
+    args, kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    # The route still threads the request-scoped session through so
+    # the post-write read sees the just-flushed row (the read-your-
+    # own-writes invariant ``_compute_preamble_status`` relies on);
+    # the spy must observe the kwarg.
+    assert "session" in kwargs
+    # And the conventions-only ``preamble_status`` projection stays
+    # correct -- the just-written slug lands in position 1 of the
+    # otherwise empty operational set.
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_patch_convention_invokes_detailed_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PATCH /api/v1/conventions/{slug}`` passes ``operator.sub`` to the detailed assembler.
+
+    G12.4-T2 (#1316) wire-up regression guard for PATCH -- pairs
+    with the POST spy above. ``_compute_preamble_status`` is invoked
+    once per write; the PATCH route's call site must forward
+    ``operator.sub`` so the post-update preview reflects the calling
+    operator's MCP session shape (priming included). Verify across
+    the create + update lifecycle so a refactor that dropped the sub
+    on either route would fail.
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-patch-spy")
+    op_sub = "op-priming-patch-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_detailed = conventions_module.assemble_preamble_detailed
+
+    async def _spy_detailed(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_detailed(*args, **kwargs)
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Seed an operational row first WITHOUT the spy so the POST
+        # call's invocation isn't captured -- the spy is installed
+        # after the create.
+        create_resp = _post_convention(
+            client,
+            token,
+            slug="priming-wired-patch",
+            body="Original body for PATCH wire-up check.",
+            kind="operational",
+            priority=10,
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        monkeypatch.setattr(
+            conventions_module,
+            "assemble_preamble_detailed",
+            _spy_detailed,
+        )
+        patch_resp = client.patch(
+            "/api/v1/conventions/priming-wired-patch",
+            json={"body": "Updated body for PATCH wire-up check."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert patch_resp.status_code == 200, patch_resp.text
+    # Exactly one detailed-assembler call from the PATCH route
+    # (the seeding POST predates the spy installation).
+    assert len(captured) == 1, captured
+    args, kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    assert "session" in kwargs
+    ps = patch_resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1

@@ -35,6 +35,10 @@ Scope:
   ``host.detach_from_vds``, ``cluster.patch``.
 """
 
+from meho_backplane.connectors.vmware_rest.composites._preflight import (
+    preflight_l2_dependencies,
+    reset_preflight_cache,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -63,6 +67,12 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
+# Side-effect import: registers the 8 write composites' park-time
+# ``proposed_effect`` preview builders (#1608) onto the per-op hook in
+# :mod:`meho_backplane.operations._preview` — mirrors how
+# ``connectors/argocd/__init__`` wires ``ops_write_preview``.
+from meho_backplane.connectors.vmware_rest.composites import _write_preview  # noqa: E402,F401
+
 __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_patch_composite",
@@ -72,7 +82,9 @@ __all__ = [
     "host_evacuate_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
+    "preflight_l2_dependencies",
     "register_vmware_composite_operations",
+    "reset_preflight_cache",
     "vm_clone_composite",
     "vm_create_composite",
     "vm_migrate_composite",

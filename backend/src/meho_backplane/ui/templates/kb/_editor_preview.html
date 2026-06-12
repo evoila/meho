@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Editor live-preview partial.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #872 (T3). Swapped
+  into ``#kb-editor-preview-content`` by the hidden textarea's
+  ``hx-trigger="input changed delay:500ms"`` listener.
+
+  Context variables:
+    rendered_body  -- Markup: server-rendered Markdown HTML
+    code_css       -- str: pygments CSS for the kb-code formatter
+
+  The CSS is injected inline here (not in the parent template's
+  ``{% block scripts %}``) so the preview fragment is self-contained
+  when returned as an HTMX swap — the parent template's scripts block
+  is not re-executed on partial swaps.
+-#}
+<style>
+{{ code_css | safe }}
+
+pre.kb-code {
+  background: var(--b2, #e5e7eb);
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+</style>
+{{ rendered_body }}

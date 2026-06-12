@@ -79,6 +79,64 @@ names.
   real HTTP submission layer (POST `/api/v1/memory`), post-login nudge,
   marker file, and `docs/cli/memory-migration.md`. Depends on
   `charm.land/huh/v2` (MIT).
+- `meho runbook ...` (G12.5-T1 #1318, G12.5-T2 #1319) — eleven-verb
+  runbook surface:
+  - **Template side** (T1, six verbs): `list-templates`,
+    `show-template`, `draft-template`, `edit-template`,
+    `publish-template`, `deprecate-template` wrap the six
+    `/api/v1/runbooks/templates*` routes shipped by G12.2-T3 (#1297).
+    The two non-trivial verbs (`draft-template` / `edit-template`)
+    accept `--from <file.yaml>` and run a local pre-flight (slug
+    regex, step-id uniqueness + grammar, step / verify type
+    allowlists, substitution allowlist over every string) that
+    mirrors the backend's
+    `_validate_step_ids_unique_and_substitutions_allowlisted` in
+    `backend/src/meho_backplane/runbooks/schemas.py`. Pre-flight is a
+    UX layer — the backend re-validates authoritatively at the wire.
+    Read verbs are operator-level (with the tenant_admin /
+    post-completion carve-out on `show-template`, implemented
+    backend-side per #1309); write verbs require tenant_admin.
+  - **Run side** (T2, five verbs): `start`, `next`, `abort`,
+    `reassign`, `runs` wrap the five `/api/v1/runbooks/runs*` routes
+    shipped by G12.3-T5 (#1311). `start` and `next` are the
+    human-surface end of the substrate opacity contract (#1313,
+    #1301): they render exactly one step body at a time, never the
+    full template, never future steps. The renderer reads only
+    fields under a narrow `stepBodyDTO` projection, so even a
+    hypothetical backend bug leaking other step ids into the response
+    envelope cannot reach the operator's terminal (regression-tested
+    in `start_test.go` / `next_test.go`'s opacity tests). `next`
+    carries the load-bearing interactive prompt: when the operator
+    omits `--verify-response yes|no|escalate` and the substrate
+    surfaces 422 `VerifyResponseRequiredError`, the CLI prompts on
+    stdin and re-issues the call with the answer (error-as-control-
+    flow per the issue's decision tree). `abort` follows the
+    `meho kb delete` pattern for the missing-`--reason` case: prompts
+    on a TTY, exits 1 with a useful message on non-TTY. Role-scoping
+    is server-side: an OPERATOR caller never sees other operators'
+    runs even with `--assignee` set; the CLI sends whatever flags the
+    caller supplied and renders what the backend returns.
+  - Both halves share the chassis (`runbook.go`, `yaml.go`): the
+    `newAuthedClient` / `retryOn401` / `renderRequestError` /
+    `renderHTTPStatus` helpers, the 1 MiB response-body cap, and the
+    FastAPI HTTPException detail decoder. The run-side verbs read the
+    raw response bytes for the **200/201 discriminated-union body**
+    (kind=current_step | completed) — the codegen lifts that into a
+    struct with an unexported `union json.RawMessage` field, so
+    `decodeNextStepResponse` re-reads the kind discriminator off the
+    raw bytes regardless. `start.go`'s `postStartRun` keeps the
+    `rawNextResponse` shim for that; `next.go`'s `postNext` now uses
+    the generated typed client (`...WithResponse`) directly, reading
+    `resp.Body` for the union render and the typed `resp.JSON422` for
+    the verify-prompt probe. The 422 bodies are now the OpenAPI
+    `HTTPValidationError` list shape (#1364), so the typed parser
+    deserializes them cleanly instead of rejecting the legacy
+    `{"detail": "<string>"}` body.
+  - T3 (#1320) ships [`docs/cli/runbook.md`](../cli/runbook.md) — the
+    operator-facing CLI reference for the eleven-verb tree (synopsis +
+    role gate + exit codes per verb, three worked transcripts —
+    execution / authoring / escalation, the YAML template body schema,
+    and the explicit "no skip, no force-advance" CLI contract).
 
 ## Module layout
 
@@ -119,7 +177,7 @@ cli/
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
-    │   │   ├── audit.go          # NewRootCmd + shared HTTP/auth helpers.
+    │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
     │   │   ├── recent.go         # `meho audit recent` — shortcut for `query --since 24h`.
     │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).
@@ -134,7 +192,7 @@ cli/
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
     │   ├── kb/               # G4.1-T4 #418 — `meho kb …` verb tree.
-    │   │   ├── kb.go             # NewRootCmd + shared HTTP/auth helpers + body/metadata/confirm helpers.
+    │   │   ├── kb.go             # NewRootCmd + newAuthedClient / retryOn401 / renderHTTPStatus typed-client helpers (G0.12-T9 #1267) + body/metadata/confirm helpers.
     │   │   ├── ingest.go         # `meho kb ingest <directory> [--dry-run]` (POST /api/v1/kb/ingest).
     │   │   ├── search.go         # `meho kb search <query>` (POST /api/v1/retrieve, source="kb").
     │   │   ├── list.go           # `meho kb list [--filter --limit --offset]` (GET /api/v1/kb).
@@ -158,49 +216,78 @@ cli/
     │   │   ├── history.go        # `meho conventions history <slug> [--limit N]` (GET /api/v1/conventions/{slug}/history); unified-diff per row.
     │   │   ├── conventions_test.go # helpers + register-all-six-verbs + body/confirm/path-escape contract tests.
     │   │   └── crud_test.go      # per-verb HTTP-server tests: list table + JSON, show 404, create 409/422-over-budget, edit flag/$EDITOR modes + 422 inline surface, delete confirm/decline/404, history diffs + --limit + --json.
-    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
-    │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
+    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list/promote` (no parent).
+    │   │   ├── memory.go         # Scope alias for api.MemoryScope + newAuthedClient/retryOn401/renderHTTPStatus typed-client helpers (G0.12-T10 #1268) + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
     │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
-    │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
-    │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
-    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).
-    │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors).
+    │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree. G0.12-T7 #1265 migrated every verb onto the generated typed client (api.ClientWithResponses via api.AuthedClient + retryOn401); api.CatalogListResponse / api.ConnectorReviewPayload / api.IngestRequest / api.IngestResponse / api.EditGroupBody / api.EditOpBody are the single source of truth, no consumer-side struct duplicates.
+    │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
+    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render.
+    │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
-    │   │   └── connector_test.go # pure-function + httptest-mocked HTTP contract tests.
+    │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
-    │   │   ├── operation.go      # NewRootCmd + shared HTTP/auth helpers.
-    │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups).
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search).
-    │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call).
-    │   │   └── operation_test.go # render + helper + sentinel tests.
-    │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
-    │   │   ├── retrieval.go            # NewRootCmd.
-    │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
-    │   │   ├── eval_test.go            # output-contract + URL-resolution tests.
-    │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464.
-    │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
-    │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
-    │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
-    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
+    │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
+    │   │   ├── operation_test.go # render + helper + sentinel tests.
+    │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
+    │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling. G0.12-T12 #1270 moved every verb onto the generated `api.ClientWithResponses` (no consumer-side struct copies).
+    │   │   ├── retrieval.go            # NewRootCmd + newAuthedClient + retryOn401 + renderRequestError/renderHTTPStatus + 1 MiB capRoundTripper.
+    │   │   ├── retrieval_test.go       # renderer + 401-retry + oversized-response (M1) + nil-payload guard (M2-M6 pre-empt).
+    │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval) via typed client.
+    │   │   ├── eval_test.go            # output-contract + URL-resolution + EvalRequest body shape tests.
+    │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464, typed client.
+    │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing + JSON200 nil-guard tests.
+    │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445, typed client. Keeps the hand-typed `ghIssueLabel` / `ghIssue` for the `gh issue list` subprocess output.
+    │   │   └── retire_checklist_test.go # surface-bucket + table-render + body-shape (null vs empty) tests.
+    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375). G0.12-T11 #1269 migrated to typed client.
     │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
-    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; real submitFn wired in T5 (#612).
-    │   │   ├── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
-    │   │   ├── submit.go         # G5.3-T5 #612 — doSubmit (spinner + POST /api/v1/memory), in-package HTTP helper trio, isTransient retry logic.
-    │   │   └── submit_test.go    # POST body shape, source_id stability, upsert rerun, transient retry, summary line, --mark-migrated.
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive. Dry-run envelope is `api.RememberBody` directly (post-T11 #1269; no consumer-side dryRunEnvelope shadow).
+    │   │   ├── memory_test.go    # --dry-run envelope, --non-interactive filter, machine-local skip, empty-dir guard, wire-body stability.
+    │   │   ├── submit.go         # doSubmit + spinner + RememberApiV1MemoryPostWithResponse via api.AuthedClient + retryOn401 generic. G0.12-T11 #1269 dropped the in-package HTTP helper trio (doAuthedRequest/sendRequest/httpError) + the local `source_id`-in-body bug the typed RememberBody schema's `extra="forbid"` would have rejected on a real backend (httptest mock masked it). isTransient retry logic preserved.
+    │   │   └── submit_test.go    # typed RememberBody body shape, same-slug rerun stable, no-source_id-on-wire, transient retry, summary line, --mark-migrated, 201-without-payload nil-guard, 401/403/422 classification, no-backplane → auth_expired.
+    │   ├── runbook/           # G12.5-T1 #1318 (template verbs) + G12.5-T2 #1319 (run verbs) — `meho runbook …` eleven-verb tree. Initiative #1200; wraps the six /api/v1/runbooks/templates routes (G12.2-T3 #1297) + the five /api/v1/runbooks/runs routes (G12.3-T5 #1311).
+    │   │   ├── runbook.go               # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus typed-client helpers + path-escape / truncate helpers + stdinIsTTY seam (golang.org/x/term, overridable for tests).
+    │   │   ├── yaml.go                  # YAML parsing + local pre-flight validators (slug regex, step-id grammar, step / verify type allowlists, substitution allowlist over every string). Mirrors `backend/src/meho_backplane/runbooks/schemas.py`'s `_validate_step_ids_unique_and_substitutions_allowlisted` + `validate_substitutions`.
+    │   │   ├── list_templates.go        # `meho runbook list-templates` (GET /api/v1/runbooks/templates).
+    │   │   ├── show_template.go         # `meho runbook show-template <slug>` (GET /api/v1/runbooks/templates/{slug}); heading + numbered step list + verify summary.
+    │   │   ├── draft_template.go        # `meho runbook draft-template <slug> --from <file.yaml>` (POST /api/v1/runbooks/templates).
+    │   │   ├── edit_template.go         # `meho runbook edit-template <slug> --from <file.yaml>` (PATCH /api/v1/runbooks/templates/{slug}); renders `forked_from` on the fork-on-edit path.
+    │   │   ├── publish_template.go      # `meho runbook publish-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/publish).
+    │   │   ├── deprecate_template.go    # `meho runbook deprecate-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/deprecate).
+    │   │   ├── start.go                 # T2 — `meho runbook start <slug> --target T [--param k=v ...]` (POST /api/v1/runbooks/runs). Hosts the opacity rendering helpers (stepBodyDTO + decodeNextStepResponse + renderCurrentStep) that next.go also consumes. Reads the raw 201 discriminated-union body via the rawNextResponse shim (defined here) so decodeNextStepResponse can route on `kind` and retryOn401's generic still flows.
+    │   │   ├── next.go                  # T2 — `meho runbook next <run_id> [--verify-response yes|no|escalate]` (POST /api/v1/runbooks/runs/{run_id}/next). Load-bearing: hosts the interactive verify-prompt loop, the buildNextRequestBody / makeConfirmVerifyResponse union builders, and renderNextResponse which routes between current_step and completed kinds. Uses the generated typed client directly (#1364): postNext returns the typed *...Response, renderNextResponse reads `resp.Body` for the 200 union render, and verifyResponseRequired reads the typed `resp.JSON422.Detail[0].Type == "verify_response_required"` discriminator to decide whether to prompt.
+    │   │   ├── abort.go                 # T2 — `meho runbook abort <run_id> [--reason "<text>"]` (POST /api/v1/runbooks/runs/{run_id}/abort). When `--reason` is missing: prompts on TTY (stdinIsTTY); exits 1 with abortExitCode1 wrapper on non-TTY. Mirrors the `meho kb delete` confirm-prompt pattern.
+    │   │   ├── reassign.go              # T2 — `meho runbook reassign <run_id> --to <sub>` (POST /api/v1/runbooks/runs/{run_id}/reassign). Tenant_admin-only at the route gate; thin HTTP wrapper.
+    │   │   ├── runs.go                  # T2 — `meho runbook runs [--assignee] [--status] [--template-slug] [--limit]` (GET /api/v1/runbooks/runs). 7-column table (RUN_ID truncated to 8 chars; full UUIDs in --json). Pass-through filters — the backend enforces role-based scoping (OPERATOR sees own; TENANT_ADMIN sees all unless narrowed).
+    │   │   ├── runbook_test.go          # helpers + register-all-eleven-verbs + URL-normalisation + body/role/path-escape contract tests + --help-mentions-all-verbs + OPACITY-language assertion.
+    │   │   ├── yaml_test.go             # YAML parse error, pre-flight matrix (slug regex, dup step id, step/verify type allowlists, substitution allowlist incl. nested-param rejection), buildRunbookTemplateBody discriminator round-trip.
+    │   │   ├── list_templates_test.go   # query-param emit (status/target_kind/limit) + 5-col table render + JSON envelope + 403/network error tests.
+    │   │   ├── show_template_test.go    # version query + heading + step-list render + 404 / 403 (incl. post-completion exception) tests.
+    │   │   ├── draft_template_test.go   # POST body shape + pre-flight short-circuits (bad slug, dup step id, disallowed substitution, bad YAML — all zero HTTP calls) + 403/409/422 surface tests.
+    │   │   ├── edit_template_test.go    # PATCH body shape + draft-in-place vs fork-on-edit summary + 404 / 403 / 422 tests.
+    │   │   ├── publish_template_test.go # POST body shape + 1-line confirmation + 404 / 403 / network-error tests.
+    │   │   ├── deprecate_template_test.go # POST body shape + 1-line confirmation + 400 cannot-deprecate-draft + 403 tests.
+    │   │   ├── start_test.go            # T2 — POST body + step body render + OPACITY regression (leaked future-step ids in wire JSON MUST NOT reach stdout) + operation_call verify hint render + --json envelope + 400/404/network + parseParamFlags matrix + decodeNextStepResponse routing.
+    │   │   ├── next_test.go             # T2 — explicit --verify-response yes/no/escalate single POST + interactive 422-prompt-retry loop (incl. invalid-answer re-prompt + escalate) + OPACITY regression on the /next response + operation_call verify pass/fail + RunCompletedResponse render + 403 NotRunAssigneeError + 422-non-required (mismatch) doesn't enter prompt loop + --json + bad UUID + bad answer.
+    │   │   ├── abort_test.go            # T2 — TTY-mock prompt-for-reason + non-TTY exit 1 + empty-prompted-reason exit 1 + 403 NotRunAssigneeError + 404 + --json + happy path with wire-body assertion.
+    │   │   ├── reassign_test.go         # T2 — POST body + 403 (operator at admin gate) + 400 RunAlreadyTerminalError + 404 + bad UUID + empty --to + --json envelope.
+    │   │   └── runs_test.go             # T2 — 7-column table render (incl. 8-char RUN_ID truncation) + JSON full-UUIDs + operator-omits-assignee-query + admin-with-assignee + empty list one-liner + 403 + bad --status / --limit + OPACITY (no leaked nested step body) + listRunsParams pointer-omission matrix.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
     │                          #   (the 5th G9.1-T6 verb, `meho targets discover`, lives in targets/discover.go.)
-    │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
-    │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
+    │       ├── vault.go          # NewRootCmd + ConnectorID const + per-package renderRequestError (auth-ladder + *dispatch.APIResponseError); transport now lives in `cli/internal/dispatch` (G0.12-T16 #1274).
+    │       ├── dispatch.go       # Alias CallResult/callRequestBody to dispatch types + `var conn = dispatch.New(ConnectorID)` (transport owned by dispatch.Connector after G0.12-T16 #1274).
     │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
@@ -840,17 +927,53 @@ narrow-waist contract.
 
 ### HTTP shape
 
-All three verbs route through `api.NewAuthedClient(...)` for bearer
-injection + 401-refresh-retry. The shared `doAuthedRequest` helper in
-`operation.go` builds the request manually (rather than using the
-generated `ClientWithResponses`) because the openapi spec types the
-three routes' responses as `dict[str, Any]`; the generated `JSON200`
-is `*map[string]interface{}` which doesn't expose the typed
+All three verbs route through `api.NewAuthedClient(...)` and call the
+generated typed client directly (G0.12-T2 #1260 — Initiative #1118
+CLI hygiene migration). Per-verb request helpers (`getGroups`,
+`getSearch`, `postCall`) build the typed params/body structs
+(`api.GetGroupsApiV1OperationsGroupsGetParams`,
+`api.GetSearchApiV1OperationsSearchGetParams`,
+`api.CallOperationBody`), invoke the `*WithResponse` methods on the
+embedded `*api.ClientWithResponses`, run a one-shot 401-refresh dance
+on the `*api.AuthedClient.Refresh` hook (mirroring
+`AuthedClient.GetHealth`), and parse the 200 body into the
+hand-written response struct. Non-2xx outcomes wrap as the local
+`*apiResponseError` sentinel that `renderRequestError` extracts
+(`errors.As`) to pick the right `output.RenderError` category
+(401→`auth_expired`, other non-2xx→`unexpected_response`, transport
+failures→`unreachable`).
+
+Response models stay hand-typed (`GroupSummary` + `GroupsResponse`,
+`SearchHit` + `SearchResponse`, `CallResult`) because the FastAPI
+surface types these routes' responses as `dict[str, Any]`; the
+generator therefore emits the response as
+`*map[string]interface{}`, which doesn't expose the typed
 `OperationGroupSummary` / `OperationSearchHit` / `OperationResult`
-shapes the renderer needs. Hand-written structs (`GroupSummary`,
-`SearchHit`, `CallResult`) mirror the backend Pydantic models
-one-for-one; backend tests + CLI tests lock the contract on both
-sides.
+shapes the renderer needs. Promoting the FastAPI return to a typed
+model so the generator picks it up is a separate backend Task
+explicitly out of scope for the consumer-side Initiative #1118.
+
+For `call`, the `target` field uses the bare-string oneOf shape
+via `api.CallOperationBody_Target.FromCallOperationBodyTarget0`
+(G0.13-T2 #1132 — the forward-preferred form that round-trips
+through the `query_topology` / `query_audit` read surfaces). The
+CLI never emits the dict shape — the `fqdn` override is an MCP-
+handler use case, not an operator-CLI use case. When `--target` is
+omitted, `body.Target = nil` so the wire emits `"target": null`,
+which the dispatcher accepts for typed handlers that resolve their
+own context.
+
+The package-local `operationsAPI` interface in `operation.go`
+defines the minimal slice of `api.ClientWithResponsesInterface` the
+three verbs consume (three `*WithResponse` methods + `Refresh`) so
+`client_test.go` can substitute a tiny `fakeOperationsClient`
+without reaching for the full ~140-method generated interface.
+`*api.AuthedClient` satisfies the seam directly: it embeds
+`*ClientWithResponses` (which provides the three `*WithResponse`
+calls) and defines `Refresh` of its own. The test fake records the
+typed params/body each verb passes and pops canned responses from
+per-verb queues to drive the 401-dance and error-classification
+scenarios.
 
 ### Exit codes
 
@@ -922,8 +1045,8 @@ under G0.3-T6 (#257).
   renders the merged candidate `NAME / HOST / PORT / CONFIDENCE`
   table plus a `SKIPPED / REASON` table for connectors that
   contributed nothing. Read-only — it never creates `targets` rows;
-  the operator reviews and runs `meho targets create`
-  (auto-registration is v0.2.next). `--seed-target` scopes discovery
+  the operator reviews and runs `meho targets import`
+  (one-shot auto-registration is not yet available). `--seed-target` scopes discovery
   to one already-registered target's reach; it is resolved
   tenant-scoped server-side, so a cross-tenant seed name 404s like a
   typo. Documented in depth under "Topology verbs" (the verb is part
@@ -941,17 +1064,24 @@ under G0.3-T6 (#257).
 
 ### HTTP shape + error envelopes
 
-All three verbs route through `api.NewAuthedClient(...)` for bearer
-injection + one-shot 401-refresh-retry, mirroring the
-`meho operation` sibling. The shared `doAuthedRequest` helper in
-`targets.go` builds the request manually (rather than using the
-generated `ClientWithResponses`) because the target verbs need
-fine-grained 4xx classification: 404 carries the resolver's
+`list` / `describe` / `probe` / `discover` route through the
+generated `api.ClientWithResponses` typed client (G0.12-T14 #1272),
+wrapped by `api.AuthedClient` for the bearer + one-shot
+401-refresh-retry. Each verb's runner reads the typed response
+envelope's `JSON200`/`StatusCode()`/`Body` fields directly — no
+hand-written `json.Unmarshal` step — so consumer-side struct drift
+(the G0.12 root cause documented on Initiative #1118) can't recur.
+The targets-specific error-classification ladder lives in
+`renderHTTPStatus` (in `targets.go`): 404 carries the resolver's
 structured `{"error": "no_target", "query": "...", "matches": [...]}`
 envelope, 409 carries `ambiguous_target` with colliding names, and
-501 carries the "no connector registered" detail. The hand-written
-`renderHTTPError` ladder classifies each status into the right
-`output.StructuredError` category.
+501 carries the "no connector registered" detail.
+
+`import` keeps its own untyped HTTP plumbing
+(`doAuthedRequest` / `httpDoer` / local `httpError`) in `import.go`
+because the YAML-to-API mapping emits a sparse `map[string]any`
+body to preserve the partial-PATCH + extras-spill semantics — see
+the comment block on `httpDoer` for the rationale.
 
 ### Exit codes
 
@@ -1042,13 +1172,21 @@ prints that verbatim with the handle hint intact, consistent with the
 ### HTTP shape + exit codes
 
 Identical to the `meho operation` surface (the verbs are pre-scoped
-wrappers over the same route): bearer injection + one-shot
-401-refresh-retry via `api.NewAuthedClient`, hand-written
-`CallResult` / `callRequestBody` structs mirroring the backend
-Pydantic models (duplicated per package to avoid the cmd/* import
-cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
-status=ok, `1` status=error/denied (via the `errOpError` sentinel),
-`2` auth_expired, `3` unreachable, `4` unexpected_response.
+wrappers over the same route): the shared `cli/internal/dispatch`
+package owns the authed transport (lazy `*api.AuthedClient` over the
+generated typed `*WithResponse` helpers) including the one-shot
+401-refresh-retry; `CallResult` / `CallRequestBody` are exported
+from the dispatch package and aliased verbatim in each vendor's
+`dispatch.go` so the per-verb pretty-printers continue referencing the
+unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
+`vmware`, `harbor`, `nsx`, `hetzner-robot`, `holodeck`, `pfsense`,
+`gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
+`vcf-logs`, `vcf-operations`) share **one** transport implementation
+instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
+`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
+(via the `errOpError` sentinel re-exported from
+`dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
+`4` unexpected_response.
 
 ## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 
@@ -1133,30 +1271,47 @@ discipline `meho targets list --limit` applies.
 ### Reserved flags (every verb)
 
 - `--json` — emit the raw envelope to stdout instead of the human
-  render. Stable schemas: `refresh` → `RefreshResult`;
-  `dependents`/`dependencies` → `[]Node`; `path` →
-  `Path` or literal `null` (the unreachable answer, emitted
-  verbatim so jq consumers see one contract); `annotate` →
-  `TopologyEdge` (the 201 response shape); `unannotate` →
+  render. Stable schemas (all are now the generated typed shapes
+  per G0.12-T15 #1273): `refresh` → `api.RefreshResult`;
+  `dependents`/`dependencies` → `[]api.TopologyNode`; `path` →
+  `api.TopologyPath` or literal `null` (the unreachable answer,
+  emitted verbatim so jq consumers see one contract); `annotate` →
+  `api.TopologyEdge` (the 201 response shape); `unannotate` →
   `{"deleted": "<edge_id>"}` on success; `list-edges` →
-  `[]TopologyEdge`.
+  `[]api.TopologyEdge`.
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL `meho login` recorded).
 
 ### HTTP shape + exit codes
 
-Same in-package `resolveBackplane` / `doAuthedRequest` /
-`renderRequestError` trio every sibling verb tree carries (the
-shared-helper-vs-import-cycle reason `kb.go` documents — Initiative
-#363 names a `cli/internal/api_client/topology.go`, but the codebase
-convention supersedes that path; the intent is satisfied in-package).
-`renderHTTPError` adds the topology-specific 409 `ambiguous_node`
-classifier (names the colliding kinds + the `--node-kind` remedy) and
-reuses the resolver's structured 404 near-miss formatter for
-`refresh`. Exit codes: `0` ok (including empty closure / no drift /
-no path — all operationally meaningful, never 404), `2` auth_expired,
-`3` unreachable, `4` unexpected_response (404 / 409 / malformed),
-`5` insufficient_role (403; backend names the required role).
+G0.12-T15 #1273 migrated the verb tree off the hand-rolled
+`doAuthedRequest` + duplicated-struct pattern to the generated
+`api.ClientWithResponses` typed surface. Every verb's request helper
+now goes through the package-local `newAuthedClient` (which installs
+the 1 MiB transport-layer response-body cap via a `capRoundTripper`
+HTTP-client wrapper — the T12 #1270 inline-cap pattern, kept local
+to this verb tree until the cap settles into
+`api.AuthedClientOptions`) and the generic `retryOn401[R]` helper
+(one-shot bearer refresh on 401, transparent to the caller). The
+response is the generated `*WithResponse` envelope; the verb branches
+on `resp.StatusCode()`, forwards 4xx/5xx bodies to
+`renderHTTPStatus`, and consumes `resp.JSON200` / `resp.JSON201`
+directly.
+
+`renderHTTPStatus` carries the topology-specific 409
+`ambiguous_node` classifier (names the colliding kinds + the
+`--node-kind` remedy) and reuses the resolver's structured 404
+near-miss formatter for `refresh`. The 409 auto-row-deletion 409 on
+`unannotate` is intercepted by `renderUnannotateDeleteError` so the
+operator sees the server's `detail.message` verbatim (the
+annotate-over-auto remediation guidance) rather than a raw HTTP
+dump.
+
+Exit codes: `0` ok (including empty closure / no drift / no path —
+all operationally meaningful, never 404), `2` auth_expired, `3`
+unreachable, `4` unexpected_response (404 / 409 / malformed body /
+cap-fired transport), `5` insufficient_role (403; backend names the
+required role).
 
 ## Server-driven discovery (`internal/discovery/`)
 
@@ -1640,6 +1795,15 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      the access token (RFC 9068 §2.2.1 requires it).
   5. The `meho-admins` top-level group + an admin user joined to
      it, with a password set via `/users/{id}/reset-password`.
+  6. Optional client scope `offline_access` on the MCP client only —
+     the realm's built-in `offline_access` scope is attached to
+     `meho-mcp-client` as **optional** (not default — only flows that
+     ask for a refresh token mint one). The CLI device-code client
+     (`meho-cli`) deliberately does **not** get it: RFC 8628
+     device-code clients re-run the device dance rather than hold a
+     long-lived refresh token, and a stolen device-code refresh token
+     has worse blast-radius than re-prompting the operator. Closes
+     the W7 wall of `deploy/values-examples/README.md` (#912).
 
 ### Idempotency
 
@@ -1652,6 +1816,10 @@ Every step does a "does this exist?" check before mutating:
   skip.
 - Default scopes: `GET /clients/{uuid}/default-client-scopes`;
   missing scope → PUT; already present → skip.
+- Optional scopes: `GET /clients/{uuid}/optional-client-scopes`;
+  missing scope → PUT; already present → skip. Only applied to the
+  MCP client (the CLI client's optional-scope set is left untouched
+  for the RFC 8628 rationale above).
 - Group: `GET /groups?search=<name>` (filtered client-side to exact
   match); missing → POST.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then

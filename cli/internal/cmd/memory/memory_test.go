@@ -17,8 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
 )
@@ -72,6 +75,24 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 func fixedNow() time.Time {
 	return time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 }
+
+// uuidFromString converts a hex UUID string to the generated
+// openapi_types.UUID (= google/uuid.UUID). Helper exists so test
+// fixtures stay readable rather than carrying a parse+abort line
+// per row.
+func uuidFromString(t *testing.T, hex string) openapi_types.UUID {
+	t.Helper()
+	id, err := uuid.Parse(hex)
+	if err != nil {
+		t.Fatalf("uuidFromString %q: %v", hex, err)
+	}
+	return id
+}
+
+// timePtr returns a pointer to a time literal, used to build
+// fixture rows for the generated `api.MemoryEntry.ExpiresAt`
+// (`*time.Time`).
+func timePtr(t time.Time) *time.Time { return &t }
 
 // ---------------------------------------------------------------
 // Helpers — pure functions exercised first because the verbs build
@@ -313,12 +334,6 @@ func TestTruncateRuneAware(t *testing.T) {
 	}
 }
 
-func TestPathEscapePreservesSlugChars(t *testing.T) {
-	if got := pathEscape("k8s.rollout-note"); got != "k8s.rollout-note" {
-		t.Errorf("PathEscape stripped legal slug chars; got %q", got)
-	}
-}
-
 func TestLoadBodyInline(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetIn(bytes.NewBufferString(""))
@@ -391,61 +406,6 @@ func TestConfirmPromptYesNo(t *testing.T) {
 	}
 }
 
-func TestBuildRecallPathBasic(t *testing.T) {
-	got := buildRecallPath(ScopeUserTenant, "wine-preference", "")
-	want := "/api/v1/memory/user-tenant/wine-preference"
-	if got != want {
-		t.Errorf("buildRecallPath: got %q; want %q", got, want)
-	}
-}
-
-func TestBuildRecallPathWithTarget(t *testing.T) {
-	got := buildRecallPath(ScopeTarget, "rollout", "rke2-meho")
-	want := "/api/v1/memory/target/rollout?target_name=rke2-meho"
-	if got != want {
-		t.Errorf("buildRecallPath with target: got %q; want %q", got, want)
-	}
-}
-
-func TestBuildRecallPathEscapesSlug(t *testing.T) {
-	// SLUG_PATTERN admits letters/digits/hyphen/underscore/dot, all
-	// of which url.PathEscape passes through. A space (which would
-	// fail server-side validation but should still escape cleanly)
-	// proves the encoding seam.
-	got := buildRecallPath(ScopeUser, "weird slug", "")
-	if !strings.Contains(got, "weird%20slug") {
-		t.Errorf("expected escaped slug; got %q", got)
-	}
-}
-
-func TestBuildListPathOmitsEmptyFilters(t *testing.T) {
-	got := buildListPath(listOptions{})
-	if got != "/api/v1/memory" {
-		t.Errorf("expected bare path; got %q", got)
-	}
-}
-
-func TestBuildListPathIncludesProvidedFilters(t *testing.T) {
-	got := buildListPath(listOptions{
-		ScopeArg:       "user-tenant",
-		TagArg:         "rollout",
-		SlugPatternArg: "wine",
-		IncludeExpired: true,
-		LimitArg:       50,
-	})
-	for _, want := range []string{
-		"scope=user-tenant",
-		"tag=rollout",
-		"slug_pattern=wine",
-		"include_expired=true",
-		"limit=50",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("buildListPath missing %q; got %q", want, got)
-		}
-	}
-}
-
 func TestScopeFromKindStripsPrefix(t *testing.T) {
 	if got := scopeFromKind("memory-user-tenant"); got != "user-tenant" {
 		t.Errorf("scopeFromKind: got %q", got)
@@ -485,9 +445,123 @@ func TestPluralisePtrRendersNone(t *testing.T) {
 	}
 }
 
+func TestFormatTimePtrNilRendersNone(t *testing.T) {
+	if got := formatTimePtr(nil); got != "(none)" {
+		t.Errorf("nil *time.Time should render '(none)'; got %q", got)
+	}
+}
+
+func TestFormatTimePtrUTC(t *testing.T) {
+	when := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	if got := formatTimePtr(&when); got != "2026-05-26T12:00:00Z" {
+		t.Errorf("expected UTC ISO format; got %q", got)
+	}
+}
+
+func TestListQueryParamsOmitsEmptyFilters(t *testing.T) {
+	got := listQueryParams(listOptions{}, nil)
+	if got.Scope != nil {
+		t.Errorf("expected nil Scope; got %+v", got.Scope)
+	}
+	if got.Tag != nil || got.SlugPattern != nil || got.IncludeExpired != nil || got.Limit != nil {
+		t.Errorf("expected all filters nil; got %+v", got)
+	}
+}
+
+func TestListQueryParamsForwardsFilters(t *testing.T) {
+	scope := ScopeUserTenant
+	got := listQueryParams(listOptions{
+		TagArg:         "rollout",
+		SlugPatternArg: "wine",
+		IncludeExpired: true,
+		LimitArg:       50,
+	}, &scope)
+	if got.Scope == nil || *got.Scope != ScopeUserTenant {
+		t.Errorf("expected scope forwarded; got %+v", got.Scope)
+	}
+	if got.Tag == nil || *got.Tag != "rollout" {
+		t.Errorf("expected tag forwarded; got %+v", got.Tag)
+	}
+	if got.SlugPattern == nil || *got.SlugPattern != "wine" {
+		t.Errorf("expected slug_pattern forwarded; got %+v", got.SlugPattern)
+	}
+	if got.IncludeExpired == nil || !*got.IncludeExpired {
+		t.Errorf("expected include_expired=true; got %+v", got.IncludeExpired)
+	}
+	if got.Limit == nil || *got.Limit != 50 {
+		t.Errorf("expected limit=50; got %+v", got.Limit)
+	}
+}
+
+func TestBuildRecallParamsOmitsEmptyTarget(t *testing.T) {
+	got := buildRecallParams("")
+	if got.TargetName != nil {
+		t.Errorf("expected nil TargetName when empty; got %+v", got.TargetName)
+	}
+}
+
+func TestBuildRecallParamsForwardsTarget(t *testing.T) {
+	got := buildRecallParams("rke2-meho")
+	if got.TargetName == nil || *got.TargetName != "rke2-meho" {
+		t.Errorf("expected target forwarded; got %+v", got.TargetName)
+	}
+}
+
+func TestBuildForgetParamsOmitsEmptyTarget(t *testing.T) {
+	got := buildForgetParams("")
+	if got.TargetName != nil {
+		t.Errorf("expected nil TargetName when empty; got %+v", got.TargetName)
+	}
+}
+
+func TestBuildForgetParamsForwardsTarget(t *testing.T) {
+	got := buildForgetParams("rke2-meho")
+	if got.TargetName == nil || *got.TargetName != "rke2-meho" {
+		t.Errorf("expected target forwarded; got %+v", got.TargetName)
+	}
+}
+
+func TestBuildRecallQueryBodyPinsMemorySource(t *testing.T) {
+	got := buildRecallQueryBody(recallOptions{QueryArg: "wine"}, "")
+	if got.Source == nil || *got.Source != "memory" {
+		t.Errorf("expected source=memory pinned; got %+v", got.Source)
+	}
+	if got.Kind != nil {
+		t.Errorf("expected nil Kind when no kindFilter; got %+v", got.Kind)
+	}
+	if got.Limit != nil {
+		t.Errorf("expected nil Limit when LimitArg=0; got %+v", got.Limit)
+	}
+}
+
+func TestBuildRecallQueryBodyForwardsKindAndLimit(t *testing.T) {
+	got := buildRecallQueryBody(recallOptions{QueryArg: "wine", LimitArg: 25}, "memory-user-tenant")
+	if got.Kind == nil || *got.Kind != "memory-user-tenant" {
+		t.Errorf("expected kind forwarded; got %+v", got.Kind)
+	}
+	if got.Limit == nil || *got.Limit != 25 {
+		t.Errorf("expected limit=25; got %+v", got.Limit)
+	}
+}
+
 // ---------------------------------------------------------------
 // remember
 // ---------------------------------------------------------------
+
+// fakeMemoryEntry builds a typed MemoryEntry fixture used in
+// httptest handlers. Encodes via encoding/json so the wire shape
+// the typed parsers see matches what a real backend would produce.
+func fakeMemoryEntry(scope Scope, slug, body string) api.MemoryEntry {
+	now := time.Now().UTC()
+	return api.MemoryEntry{
+		Scope:     scope,
+		Slug:      slug,
+		Body:      body,
+		Metadata:  map[string]interface{}{},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
 
 func TestRunRememberHappyPath(t *testing.T) {
 	var bodyJSON map[string]any
@@ -502,18 +576,18 @@ func TestRunRememberHappyPath(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		expiresStr := "2026-05-26T12:00:00Z"
-		_ = json.NewEncoder(w).Encode(Entry{
-			ID:        "00000000-0000-0000-0000-000000000001",
-			TenantID:  "00000000-0000-0000-0000-000000000002",
+		entry := api.MemoryEntry{
+			Id:        uuidFromString(t, "00000000-0000-0000-0000-000000000001"),
+			TenantId:  uuidFromString(t, "00000000-0000-0000-0000-000000000002"),
 			Scope:     ScopeUserTenant,
 			Slug:      "wine-preference",
 			Body:      "I prefer dry red wines.",
-			Metadata:  map[string]any{"tags": []string{"food", "pref"}},
-			ExpiresAt: &expiresStr,
-			CreatedAt: "2026-05-19T12:00:00Z",
-			UpdatedAt: "2026-05-19T12:00:00Z",
-		})
+			Metadata:  map[string]interface{}{"tags": []string{"food", "pref"}},
+			ExpiresAt: timePtr(time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)),
+			CreatedAt: time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC),
+			UpdatedAt: time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC),
+		}
+		_ = json.NewEncoder(w).Encode(entry)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -561,8 +635,9 @@ func TestRunRememberOmitsSlugWhenAbsent(t *testing.T) {
 		if err := json.Unmarshal(body, &bodyJSON); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "auto-gen"})
+		_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "auto-gen", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -586,10 +661,11 @@ func TestRunRememberOmitsSlugWhenAbsent(t *testing.T) {
 func TestRunRememberJSONOutEmitsEntry(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{
-			Scope: ScopeUserTenant, Slug: "x", Body: "y",
-		})
+		entry := fakeMemoryEntry(ScopeUserTenant, "x", "y")
+		entry.Id = uuidFromString(t, "00000000-0000-0000-0000-000000000010")
+		_ = json.NewEncoder(w).Encode(entry)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -602,7 +678,7 @@ func TestRunRememberJSONOutEmitsEntry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runRemember --json: %v", err)
 	}
-	var decoded Entry
+	var decoded api.MemoryEntry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -619,8 +695,9 @@ func TestRunRememberSendsExpiresAtFromTTL(t *testing.T) {
 		if err := json.Unmarshal(body, &bodyJSON); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "x"})
+		_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "x", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -662,6 +739,11 @@ func TestRunRememberSendsExpiresAtFromTTL(t *testing.T) {
 // The "explicit null vs absent" assertion uses json.RawMessage so the
 // test sees the literal wire bytes, not the decoded map (which would
 // collapse both shapes to a Go nil interface).
+//
+// The tri-state is the load-bearing reason we kept the
+// `rememberRequest` struct + custom MarshalJSON despite the typed
+// migration — the generated `api.RememberBody` can only express two
+// states (value vs null).
 
 func TestRunRememberPersistEmitsExplicitNullExpiresAt(t *testing.T) {
 	var rawBody json.RawMessage
@@ -669,8 +751,9 @@ func TestRunRememberPersistEmitsExplicitNullExpiresAt(t *testing.T) {
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		rawBody = json.RawMessage(b)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "persisted"})
+		_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "persisted", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -706,8 +789,9 @@ func TestRunRememberOmitsExpiresAtWhenNoPersistAndNoTTL(t *testing.T) {
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		rawBody = json.RawMessage(b)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "auto"})
+		_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "auto", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -903,8 +987,9 @@ func TestRunRememberReadsBodyFromStdin(t *testing.T) {
 		if err := json.Unmarshal(body, &bodyJSON); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "x", Body: "piped"})
+		_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "x", "piped"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -922,6 +1007,39 @@ func TestRunRememberReadsBodyFromStdin(t *testing.T) {
 	}
 }
 
+// TestRunRemember201WithoutPayloadSurfacesUnexpected pins the nil-
+// guard added in the typed migration. A backplane / proxy that
+// returns 201 without the `application/json` Content-Type leaves
+// the generated `JSON201` nil; the verb routes the malformed
+// response through `output.Unexpected` (exit 4) rather than silently
+// emitting `null` or a phantom summary. Mirrors the sibling kb
+// migration's post-iter-2 nil-guard tests.
+func TestRunRemember201WithoutPayloadSurfacesUnexpected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately no Content-Type — the generated parser keys
+		// JSON201 off the json content-type AND a 201 status; both
+		// must hold for JSON201 to populate.
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000099"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runRemember(cmd, rememberOptions{
+		BodyArg: "y", ScopeArg: "user", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected nil-guard error on missing payload")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 201 without a memory entry payload") {
+		t.Errorf("expected nil-guard message; got %q", stderr.String())
+	}
+}
+
 // ---------------------------------------------------------------
 // recall
 // ---------------------------------------------------------------
@@ -934,11 +1052,7 @@ func TestRunRecallByKeyPrintsBody(t *testing.T) {
 				t.Errorf("expected GET; got %s", r.Method)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(Entry{
-				Scope: ScopeUserTenant,
-				Slug:  "wine-preference",
-				Body:  "Prefers dry red.",
-			})
+			_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUserTenant, "wine-preference", "Prefers dry red."))
 		},
 	)
 	srv := httptest.NewServer(mux)
@@ -987,7 +1101,8 @@ func TestRunRecallByKeyJSONOutEmitsEntry(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory/user/wine",
 		func(w http.ResponseWriter, _ *http.Request) {
-			_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "wine", Body: "y"})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(fakeMemoryEntry(ScopeUser, "wine", "y"))
 		},
 	)
 	srv := httptest.NewServer(mux)
@@ -1001,7 +1116,7 @@ func TestRunRecallByKeyJSONOutEmitsEntry(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runRecall --json: %v", err)
 	}
-	var got Entry
+	var got api.MemoryEntry
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -1057,18 +1172,22 @@ func TestRunRecallByQueryHappyPath(t *testing.T) {
 		if err := json.Unmarshal(body, &bodyJSON); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{
-			Hits: []RetrievalHit{
-				{
-					DocumentID: "1",
-					Source:     "memory",
-					SourceID:   "user-tenant:abc:wine",
-					Kind:       "memory-user-tenant",
-					Body:       "I prefer dry red wines.",
-					FusedScore: 0.9,
-				},
-			},
-			QueryDurationMS: 12.5,
+		w.Header().Set("Content-Type", "application/json")
+		hit := api.RetrievalHit{
+			DocumentId:  uuidFromString(t, "00000000-0000-0000-0000-0000000000aa"),
+			TenantId:    uuidFromString(t, "00000000-0000-0000-0000-0000000000bb"),
+			Source:      "memory",
+			SourceId:    "user-tenant:abc:wine",
+			Kind:        "memory-user-tenant",
+			Body:        "I prefer dry red wines.",
+			DocMetadata: map[string]interface{}{},
+			FusedScore:  0.9,
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+		}
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{
+			Hits:            []api.RetrievalHit{hit},
+			QueryDurationMs: 12.5,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -1110,6 +1229,58 @@ func TestRunRecallQueryRejectsBadLimit(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "between 1 and 50") {
 		t.Errorf("expected limit-range message; got %q", stderr.String())
+	}
+}
+
+// TestRunRecallByKey200WithoutPayloadSurfacesUnexpected pins the
+// nil-guard added in the typed migration. Mirrors the kb sibling's
+// post-iter-2 pattern.
+func TestRunRecallByKey200WithoutPayloadSurfacesUnexpected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory/user/wine",
+		func(w http.ResponseWriter, _ *http.Request) {
+			// No Content-Type → JSON200 stays nil.
+			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000099"}`))
+		},
+	)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runRecall(cmd, recallOptions{
+		ScopeSlugArg: "user/wine", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected nil-guard error on missing payload")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a memory entry payload") {
+		t.Errorf("expected nil-guard message; got %q", stderr.String())
+	}
+}
+
+// TestRunRecallByQuery200WithoutPayloadSurfacesUnexpected pins the
+// nil-guard on the retrieve path.
+func TestRunRecallByQuery200WithoutPayloadSurfacesUnexpected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"hits":[]}`)) // no content-type → JSON200 nil
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runRecall(cmd, recallOptions{
+		QueryArg: "wine", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected nil-guard error on missing payload")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a retrieve response payload") {
+		t.Errorf("expected nil-guard message; got %q", stderr.String())
 	}
 }
 
@@ -1263,6 +1434,32 @@ func TestRunForget403SurfacesInsufficientRole(t *testing.T) {
 	}
 }
 
+func TestRunForgetForwardsTargetQueryParam(t *testing.T) {
+	var captured string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory/target/rollout",
+		func(w http.ResponseWriter, r *http.Request) {
+			captured = r.URL.RawQuery
+			w.WriteHeader(http.StatusNoContent)
+		},
+	)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runForget(cmd, forgetOptions{
+		ScopeSlugArg: "target/rollout", TargetArg: "rke2-meho",
+		Confirm: true, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runForget: %v; stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(captured, "target_name=rke2-meho") {
+		t.Errorf("expected target_name in query; got %q", captured)
+	}
+}
+
 // ---------------------------------------------------------------
 // list
 // ---------------------------------------------------------------
@@ -1274,10 +1471,10 @@ func TestRunListHappyPath(t *testing.T) {
 			t.Errorf("expected GET; got %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ListResponse{
-			Entries: []Entry{
-				{Scope: ScopeUser, Slug: "wine", Body: "dry red"},
-				{Scope: ScopeUserTenant, Slug: "k8s.note", Body: "rollout"},
+		_ = json.NewEncoder(w).Encode(api.MemoryListResponse{
+			Entries: []api.MemoryEntry{
+				fakeMemoryEntry(ScopeUser, "wine", "dry red"),
+				fakeMemoryEntry(ScopeUserTenant, "k8s.note", "rollout"),
 			},
 		})
 	})
@@ -1301,8 +1498,9 @@ func TestRunListHappyPath(t *testing.T) {
 func TestRunListJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{
-			Entries: []Entry{{Scope: ScopeUser, Slug: "x", Body: "y"}},
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.MemoryListResponse{
+			Entries: []api.MemoryEntry{fakeMemoryEntry(ScopeUser, "x", "y")},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -1316,7 +1514,7 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runList --json: %v", err)
 	}
-	var resp ListResponse
+	var resp api.MemoryListResponse
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -1328,7 +1526,8 @@ func TestRunListJSONHappyPath(t *testing.T) {
 func TestRunListEmptyResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{Entries: nil})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.MemoryListResponse{Entries: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1349,7 +1548,8 @@ func TestRunListForwardsFilters(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
 		capturedQuery = r.URL.RawQuery
-		_ = json.NewEncoder(w).Encode(ListResponse{})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.MemoryListResponse{})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1379,13 +1579,16 @@ func TestRunListNormalisesScopeWhitespace(t *testing.T) {
 	// Without normalisation runList passed parseScope's preflight
 	// (validScopes lookup trims internally) and then forwarded the
 	// raw " user " back into the query string, producing a 422 on
-	// the FastAPI enum check. Mirrors the recall.go fix shape that
-	// already propagates parseScope's typed return value.
+	// the FastAPI enum check. Mirrors the pre-migration fix shape:
+	// the typed-client path now threads the validated `*Scope` into
+	// `listQueryParams`, so the same regression is structurally
+	// impossible.
 	var capturedQuery string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
 		capturedQuery = r.URL.RawQuery
-		_ = json.NewEncoder(w).Encode(ListResponse{})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.MemoryListResponse{})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1433,6 +1636,28 @@ func TestRunListInvalidScopeFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid --scope") {
 		t.Errorf("expected invalid-scope message; got %q", stderr.String())
+	}
+}
+
+// TestRunList200WithoutPayloadSurfacesUnexpected pins the nil-guard
+// on the list path.
+func TestRunList200WithoutPayloadSurfacesUnexpected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"entries":[]}`)) // no content-type → JSON200 nil
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runList(cmd, listOptions{BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected nil-guard error on missing payload")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a memory list payload") {
+		t.Errorf("expected nil-guard message; got %q", stderr.String())
 	}
 }
 

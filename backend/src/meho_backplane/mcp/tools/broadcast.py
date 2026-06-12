@@ -90,7 +90,7 @@ from meho_backplane.broadcast import (
     OP_CLASS_ENUM,
     AgentAnnouncementEvent,
     InvalidSinceError,
-    get_broadcast_client,
+    get_broadcast_blocking_client,
     list_recent_events_strict,
     publish_agent_announcement,
 )
@@ -155,10 +155,26 @@ async def _handler_recent(
     -- the helper raises a generic domain error so the UI fail-soft
     counterpart can swallow non-RedisError teardowns selectively
     without taking the MCP error vocabulary as a dependency.
+
+    Forward-cursor naming (G0.18-T5 #1358 RDC #789 N4)
+    --------------------------------------------------
+
+    ``cursor`` is the canonical forward-cursor parameter name across
+    every MCP read tool that paginates (audit / topology / targets /
+    operation groups). ``since`` remains accepted as a deprecated
+    alias for backward compatibility with the v0.8.0 wire shape; the
+    two are mutually exclusive (passing both is rejected). New
+    callers SHOULD use ``cursor``.
     """
-    since = arguments.get("since")
+    cursor_arg = arguments.get("cursor")
+    since_arg = arguments.get("since")
+    if cursor_arg is not None and since_arg is not None:
+        raise McpInvalidParamsError(
+            "pass either `cursor` (canonical) or `since` (deprecated alias), not both",
+        )
+    since = cursor_arg if cursor_arg is not None else since_arg
     if since is not None and not isinstance(since, str):
-        raise McpInvalidParamsError("since: must be a string when provided")
+        raise McpInvalidParamsError("cursor: must be a string when provided")
     op_class, principal, target = _extract_filter(arguments)
     raw_limit = arguments.get("limit", 100)
     if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
@@ -185,14 +201,16 @@ register_mcp_tool(
             "Read the operator's tenant's recent broadcast events from "
             "meho:feed:{tenant_id} (Initiative #1090, Task #1091). "
             "Returns {events, next_cursor}. Default window is the last "
-            "30 minutes when 'since' is omitted; pass an ISO-8601 "
+            "30 minutes when 'cursor' is omitted; pass an ISO-8601 "
             "timestamp ('2026-05-25T10:00:00Z') or a Valkey stream "
             "cursor ('1747800000000-0') to override. The 'filter' "
             "object narrows by exact-match op_class / principal "
             "(JWT 'sub') / target (target_name). 'limit' caps the "
             "page at 1..1000 (default 100); the response's "
-            "'next_cursor' round-trips as the next call's 'since' "
-            "for gap-free pagination. Tenant scoping is structural -- "
+            "'next_cursor' round-trips as the next call's 'cursor' "
+            "for gap-free pagination. 'since' is accepted as a "
+            "deprecated alias for 'cursor' (v0.8.0 wire shape) and is "
+            "mutually exclusive with it. Tenant scoping is structural -- "
             "every read targets the operator's own tenant stream; "
             "there is no input that could request another tenant's "
             "events. Payloads inherit the publisher-side redaction "
@@ -202,15 +220,31 @@ register_mcp_tool(
         inputSchema={
             "type": "object",
             "properties": {
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": (
+                        "Forward-pagination cursor. Either an ISO-8601 "
+                        "timestamp ('2026-05-25T10:00:00Z') OR a Valkey "
+                        "stream cursor ('1747800000000-0'). Omit for the "
+                        "last 30 minutes. Canonical name; matches the "
+                        "`cursor` parameter on `query_audit` / "
+                        "`query_topology` / `list_targets`."
+                    ),
+                },
                 "since": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
                     "description": (
-                        "ISO-8601 timestamp ('2026-05-25T10:00:00Z') "
-                        "OR Valkey stream cursor ('1747800000000-0'). "
-                        "Omit for the last 30 minutes."
+                        "DEPRECATED alias for `cursor` (v0.8.0 wire "
+                        "shape). Accepted for backward compatibility; "
+                        "new callers SHOULD use `cursor`. Mutually "
+                        "exclusive with `cursor`; passing both rejects "
+                        "with -32602."
                     ),
+                    "deprecated": True,
                 },
                 "filter": {
                     "type": "object",
@@ -387,8 +421,10 @@ register_mcp_tool(
             "vCenter migration'), or completion summaries ('finished -- "
             "rolled back to snapshot S'). The announcement lands on "
             "the same meho:feed:{tenant_id} stream that audit-driven "
-            "events use, distinguished by event_kind='agent_announcement'; "
-            "other operators read it back via meho.broadcast.recent. "
+            "events use, distinguished by kind='agent_announcement' "
+            "(audit-driven events carry kind='operation' per "
+            "docs/codebase/api-shape-conventions.md §6); other "
+            "operators read it back via meho.broadcast.recent. "
             "'activity' is mandatory (1..500 chars), 'target' and "
             "'scope' are optional free-form attribution, 'phase' is "
             "one of 'start' / 'update' / 'completion' (default "
@@ -557,8 +593,17 @@ async def _xread_or_cancelled(
     *since_cursor* is passed to ``xread`` verbatim; XREAD reads entries
     strictly past the cursor (its "last id seen" semantics are
     exclusive, unlike XRANGE's inclusive ``min``).
+
+    Reads via the long-timeout blocking client
+    (:func:`get_broadcast_blocking_client`, ``socket_timeout=35 s``) so
+    a 30 s BLOCK against a quiet stream returns ``None`` (the natural
+    "nothing for us" branch :func:`_xread_items_or_none` already
+    handles) instead of raising ``redis.TimeoutError`` from the socket
+    layer at 5 s -- the spurious ``feed_error`` shape catalogued in
+    RDC #789 N1 / Initiative #1353 on the SSE surface. See
+    :mod:`meho_backplane.broadcast.client` for the two-client rationale.
     """
-    client = get_broadcast_client()
+    client = get_broadcast_blocking_client()
     try:
         return await client.xread(
             {stream_key: since_cursor},
@@ -720,11 +765,27 @@ async def _handler_watch(
 
     Tenant scoping is structural: ``arguments`` has no ``tenant_id`` field,
     so the stream key is always ``meho:feed:{operator.tenant_id}``.
+
+    Forward-cursor naming (G0.18-T5 #1358 RDC #789 N4)
+    --------------------------------------------------
+
+    ``cursor`` is the canonical forward-cursor parameter name across
+    every MCP read tool that paginates (audit / topology / targets /
+    operation groups / broadcast.recent). ``since_cursor`` remains
+    accepted as a deprecated alias for the v0.8.0 wire shape; the
+    two are mutually exclusive (passing both is rejected). New
+    callers SHOULD use ``cursor``.
     """
-    since_cursor = arguments.get("since_cursor")
+    cursor_arg = arguments.get("cursor")
+    since_cursor_arg = arguments.get("since_cursor")
+    if cursor_arg is not None and since_cursor_arg is not None:
+        raise McpInvalidParamsError(
+            "pass either `cursor` (canonical) or `since_cursor` (deprecated alias), not both",
+        )
+    since_cursor = cursor_arg if cursor_arg is not None else since_cursor_arg
     if not isinstance(since_cursor, str) or not since_cursor:
         raise McpInvalidParamsError(
-            "since_cursor: required, must be a non-empty Valkey stream cursor",
+            "cursor: required, must be a non-empty Valkey stream cursor",
         )
     op_class, principal, target = _extract_filter(arguments)
     timeout_ms = _validate_timeout_ms(arguments.get("timeout_ms"))
@@ -743,7 +804,7 @@ register_mcp_tool(
         name="meho.broadcast.watch",
         description=(
             "Long-poll the operator's tenant broadcast stream for new "
-            "events past 'since_cursor' (Initiative #1090, Task #1093). "
+            "events past 'cursor' (Initiative #1090, Task #1093). "
             "Issues XREAD BLOCK against meho:feed:{tenant_id} with "
             "'timeout_ms' as the block window (default 10000, cap "
             "30000 -- the chassis worker is tied up for up to that long, "
@@ -755,31 +816,51 @@ register_mcp_tool(
             "the last matched one) so a busy-but-filtered tenant still "
             "progresses. Designed for the agent-side discipline loop: "
             "'broadcast_watch -> process -> broadcast_watch with new "
-            "cursor'. Obtain the initial 'since_cursor' from "
-            "'meho.broadcast.recent's 'next_cursor'. The 'filter' object "
-            "narrows by exact-match op_class / principal (JWT 'sub') / "
-            "target (target_name). Tenant scoping is structural -- every "
-            "watch targets the operator's own tenant stream; there is no "
-            "input that could request another tenant's stream. Payloads "
-            "inherit the publisher-side redaction (credential_read + "
-            "audit_query events are already aggregate-only on the stream). "
-            "MCP 'resources/subscribe' (server-push) remains advertised "
-            "as 'false' per backend/src/meho_backplane/mcp/resources/kb.py; "
+            "cursor'. Obtain the initial 'cursor' from "
+            "'meho.broadcast.recent's 'next_cursor'. 'since_cursor' is "
+            "accepted as a deprecated alias for 'cursor' (v0.8.0 wire "
+            "shape) and is mutually exclusive with it. The 'filter' "
+            "object narrows by exact-match op_class / principal "
+            "(JWT 'sub') / target (target_name). Tenant scoping is "
+            "structural -- every watch targets the operator's own tenant "
+            "stream; there is no input that could request another "
+            "tenant's stream. Payloads inherit the publisher-side "
+            "redaction (credential_read + audit_query events are already "
+            "aggregate-only on the stream). MCP 'resources/subscribe' "
+            "(server-push) remains advertised as 'false' per "
+            "backend/src/meho_backplane/mcp/resources/kb.py; "
             "this long-poll is the v0.2 pragmatic shape."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "since_cursor": {
+                "cursor": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 64,
                     "description": (
                         "Valkey stream cursor ('1747800000000-0'). "
-                        "Required. Obtain initial value from "
-                        "meho.broadcast.recent's 'next_cursor'. "
-                        "XREAD reads entries strictly past this cursor."
+                        "Required (either as `cursor` or via the "
+                        "deprecated `since_cursor` alias). Obtain "
+                        "initial value from `meho.broadcast.recent`'s "
+                        "`next_cursor`. XREAD reads entries strictly "
+                        "past this cursor. Canonical name; matches "
+                        "the `cursor` parameter on `query_audit` / "
+                        "`query_topology` / `list_targets`."
                     ),
+                },
+                "since_cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": (
+                        "DEPRECATED alias for `cursor` (v0.8.0 wire "
+                        "shape). Accepted for backward compatibility; "
+                        "new callers SHOULD use `cursor`. Mutually "
+                        "exclusive with `cursor`; passing both rejects "
+                        "with -32602."
+                    ),
+                    "deprecated": True,
                 },
                 "filter": {
                     "type": "object",
@@ -820,7 +901,13 @@ register_mcp_tool(
                     ),
                 },
             },
-            "required": ["since_cursor"],
+            # Either `cursor` (canonical) OR `since_cursor` (deprecated
+            # alias) must be supplied; the handler enforces the XOR
+            # (passing both rejects with -32602).
+            "anyOf": [
+                {"required": ["cursor"]},
+                {"required": ["since_cursor"]},
+            ],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

@@ -20,7 +20,9 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import (
     AmbiguousConnectorResolution,
     NoMatchingConnector,
+    ResolutionLabel,
     resolve_connector,
+    resolve_connector_or_label,
 )
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -49,6 +51,7 @@ __all__ = [
     "NodeKind",
     "OperationResult",
     "ProbeResult",
+    "ResolutionLabel",
     "ResultHandle",
     "TopologyHints",
     "all_connectors",
@@ -58,4 +61,5 @@ __all__ = [
     "register_connector",
     "register_connector_v2",
     "resolve_connector",
+    "resolve_connector_or_label",
 ]

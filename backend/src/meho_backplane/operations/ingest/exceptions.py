@@ -97,6 +97,7 @@ __all__ = [
     "OpIdCollision",
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
+    "UpstreamNotSpecError",
     "VersionMismatchError",
 ]
 
@@ -114,11 +115,73 @@ class InvalidSpecError(ValueError):
 class UnsupportedSpecError(ValueError):
     """The document is structurally valid but ships a flavour the parser doesn't ingest.
 
-    Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, and
-    similar known-unsupported cases. The exception message always
-    names the offending shape so the operator can decide whether to
-    file a v0.2.next request or pre-process the spec.
+    Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, the
+    CLI-side ``docs:`` spec-source shorthand reaching the backend
+    unexpanded, and similar known-unsupported cases. The exception
+    message always names the offending shape so the operator can decide
+    whether to file a v0.2.next request or pre-process the spec. For
+    Swagger 2.0 specifically the message also names the conversion path
+    (convert to OpenAPI 3.x via ``swagger2openapi`` /
+    ``converter.swagger.io`` and re-ingest) so the operator can
+    self-serve a 2.0-only vendor surface such as Harbor 2.x (#1532). For
+    the ``docs:`` shorthand the message names ``$CLAUDE_RDC_DOCS`` as
+    the CLI-side resolution path (#1535).
     """
+
+
+class UpstreamNotSpecError(ValueError):
+    """The upstream URL served non-spec content (HTML developer portal, etc.).
+
+    Raised by :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`'s
+    HTTP fetch path (and the lightweight :func:`read_spec_info_version`
+    sibling) when the response's ``Content-Type`` declares a media type
+    that is not OpenAPI-spec-shaped (e.g. ``text/html``,
+    ``application/octet-stream`` with HTML body). Before this exception,
+    that case fell through to ``_decode_spec`` and surfaced as an opaque
+    ``yaml.YAMLError`` -- "could not decode spec: while scanning for the
+    next token found character that cannot start any token in '<file>',
+    line 33, column 1" -- which is a true statement about the bytes but
+    a useless one for the operator looking at the symptom.
+
+    Concrete trigger: the catalog's ``vmware/9.0`` and ``sddc-manager/9.0``
+    upstream URLs point at the Broadcom Developer Portal landing pages
+    (``https://developer.broadcom.com/xapis/...``), which return HTML
+    documentation, not raw OpenAPI YAML/JSON. The route layer maps this
+    exception onto HTTP 422 (not 400) with a structured
+    ``catalog_entry_upstream_not_spec`` envelope so an operator/agent
+    can branch on the diagnostic without re-parsing the message.
+
+    Attributes
+    ----------
+    upstream_url:
+        The URL that was fetched. Surfaced on the exception so the
+        operator-facing CLI / API can render a complete diagnostic
+        without re-threading the URL from the call site.
+    content_type:
+        The verbatim ``Content-Type`` header value the server returned
+        (e.g. ``"text/html; charset=utf-8"``). ``None`` when the response
+        omitted the header entirely -- still treated as non-spec because
+        every legitimate spec host serves the header.
+
+    Inherits from :class:`ValueError` so callers that already catch
+    parser-shaped errors via ``except ValueError`` keep working. The
+    REST router catches this specifically before the generic
+    ``InvalidSpecError`` → 400 mapping so the 422 wins.
+    """
+
+    def __init__(
+        self,
+        *,
+        upstream_url: str,
+        content_type: str | None,
+    ) -> None:
+        self.upstream_url = upstream_url
+        self.content_type = content_type
+        rendered_ct = content_type if content_type is not None else "<missing>"
+        super().__init__(
+            f"upstream {upstream_url!r} returned non-spec content "
+            f"(Content-Type={rendered_ct!r}); expected OpenAPI YAML or JSON"
+        )
 
 
 class InvalidSchemaError(ValueError):

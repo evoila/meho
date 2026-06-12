@@ -24,7 +24,7 @@ Typed connectors and ingested connectors are both first-class ([CLAUDE.md](../..
 - **Role.** Write verbs (`ingest`, `edit-group`, `edit-op`, `enable`, `disable`) require `tenant_admin`. Read verbs (`list`, `review`) require `operator`. The backplane returns HTTP 403 with the CLI exit code 5 if the wrong role tries a write verb.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
 - **The OpenAPI spec.** A path to a local file (`file:///abs/path/spec.yaml`) or an HTTPS URL the backplane can fetch (`https://vendor.example.com/openapi.yaml`). The CLI also accepts the `docs:<product>-<version>/<spec>.yaml` shorthand that resolves against `$CLAUDE_RDC_DOCS` when set; otherwise the shorthand is passed through for the backplane to resolve against its own checked-in docs corpus.
-- **An LLM client configured for the grouping pass.** Production deploys wire the Anthropic Messages-API adapter via [`IngestionPipelineService(..., llm_client_factory=...)`](../../backend/src/meho_backplane/operations/ingest/pipeline.py). If the adapter is unwired, the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error.
+- **`ANTHROPIC_API_KEY` set for the grouping pass.** As of #1386 the chassis wires a production `LlmClient` at FastAPI lifespan startup: [`build_anthropic_ingest_llm_client`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py) is installed via [`set_llm_client_factory`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py) and reuses `settings.anthropic_api_key` (the same key the agent runtime reads), talking to the Anthropic Messages API directly. So a deploy with the key set groups non-dry-run ingests for real across all three surfaces (REST route, CLI, and the `meho.connector.ingest` MCP tool — they all read the lifespan-wired factory). A deploy that configured **no key** keeps the fail-closed posture: the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error. (Tests inject a deterministic stub via the constructor's `llm_client_factory=` argument.) See [`ingest-llm-key.md`](ingest-llm-key.md) for the deployed-backplane on-ramp — where the key goes in the Helm chart (it renders only under `agent.enabled: true`), how to verify on a live deploy, and the no-key 503 symptom — and [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring) for the symbol-level framing, including the air-gapped/resolver-routing follow-up.
 - **Postgres with pgvector + FTS extensions.** v0.2 ships the `pgvector/pgvector:pg16`-derived chart image; local development uses the testcontainers fixture.
 
 ## Step-by-step
@@ -43,6 +43,73 @@ Vendor specs live in one of three places, in priority order:
 1. **The consumer's checked-in docs corpus** (e.g. `claude-rdc-hetzner-dc/docs/<product>-<version>/`). The maintainer's local clone is the conventional source. Use the `docs:<product>-<version>/<spec>.yaml` shorthand when this applies.
 2. **The vendor's published URL** (e.g. `https://developer.vmware.com/.../vcenter-rest-9.0.yaml`). Use a full `https://` URL.
 3. **A local download.** Use a full `file:///` path.
+
+All three sources assume the vendor *publishes* an OpenAPI document somewhere. If it doesn't, jump to the next section before concluding the connector is un-ingestable.
+
+#### Product publishes no OpenAPI spec
+
+Some products ship **no** OpenAPI document at all — only HTML/Markdown reference docs (Hetzner Robot), or a proprietary management API with no published spec (VCF Fleet / vRSLCM `/lcm/`). For these, `meho connector ingest` is **not** a dead end, and the catalog-miss `next_step` hint on a `state=registered`, 0-operation connector points you here.
+
+The ingest pipeline only ever sees the *bytes* of an OpenAPI 3.x document — it does not care whether a vendor published those bytes or you typed them by hand. So the supported on-ramp is:
+
+1. **Author a minimal OpenAPI 3.x** covering just the operations you need today. You do **not** have to model the vendor's entire API — a handful of ops is enough to unblock an agent workflow, and you can extend the spec and re-ingest later (re-ingest is idempotent on unchanged rows).
+2. **Save it locally** and ingest it with a `file://` URI, exactly as you would a downloaded spec:
+
+   ```bash
+   meho connector ingest \
+     --product hetzner-robot --version 1.0 --impl hetzner-rest \
+     --spec file:///abs/path/hetzner-robot.yaml \
+     --dry-run
+   ```
+
+A minimal worked example for a spec-less product (two ops — list servers, reset one):
+
+```yaml
+# hetzner-robot.yaml
+openapi: 3.0.3
+info:
+  title: Hetzner Robot (hand-authored)
+  version: "1.0"
+paths:
+  /server:
+    get:
+      summary: List dedicated servers
+      operationId: listServers
+      tags: [server]
+      responses:
+        "200":
+          description: A list of servers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /reset/{server_ip}:
+    post:
+      summary: Trigger a hardware reset
+      operationId: resetServer
+      tags: [server]
+      parameters:
+        - name: server_ip
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reset accepted.
+```
+
+`--dry-run` against this file prints `operations: 2 total (2 inserted …)`; drop `--dry-run` to ingest for real, then continue from [Step 2](#step-2--ingest-the-spec). The parser applies the **same** safety heuristic a downloaded spec gets (`GET` → `safe`, `POST` → `caution`, `DELETE` → `dangerous`), so review the staged groups (Step 4) and mark per-op overrides (Step 6) the same way.
+
+Authoring tips:
+
+- Use the verbs and paths the vendor's HTML/Markdown docs already describe, so the ingested `op_id` (e.g. `POST:/reset/{server_ip}`) reads naturally at the agent surface.
+- Give each operation a `summary` and `description` — these feed the LLM grouping pass and the agent's `when_to_use` retrieval, so a one-line `summary` is worth more than a bare path.
+- A bad path-param shape or a malformed `$ref` surfaces under `--dry-run` before any DB write; iterate on the file until the dry-run op count matches what you intended.
+
+> **Why not auto-derive the spec?** Parsing vendor HTML/Markdown into OpenAPI, or deriving ops from a typed client, is a deliberately **deferred** capability ([initiative #1529 out-of-scope](https://github.com/evoila/meho/issues/1529)). A small hand-authored spec is the cheaper answer than an HTML→OpenAPI inference engine — author the ops you need, not the vendor's whole surface. Conform to [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html) or [3.1.1](https://spec.openapis.org/oas/v3.1.1.html); the parser rejects Swagger 2.0 with a conversion-path remedy (see [`connector-catalog.md`](connector-catalog.md)).
 
 Validate the spec before committing to a tenant-wide ingestion:
 
@@ -300,17 +367,17 @@ Resolution path: extend T3 with a per-op `llm_instructions` generation pass that
 
 ### Gap 3 — live-LLM canary validation
 
-**Status:** documented; gated on [Task #467](https://github.com/evoila/meho/issues/467).
+**Status:** the production `LlmClient` is wired at FastAPI lifespan startup (#1386 — `build_anthropic_ingest_llm_client`, reusing `settings.anthropic_api_key`), so the live-LLM canary can run on any deploy / CI runner with `ANTHROPIC_API_KEY` set. The previously-cited [`Task #467`](https://github.com/evoila/meho/issues/467) was [G8.1-T3 audit CLI verbs (CLOSED)](https://github.com/evoila/meho/issues/467), never the chassis adapter. See [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring) for the operator-facing framing.
 
-The canary's acceptance test ships a deterministic stub-LLM that classifies ops by URL-path prefix. The stub keeps the test reproducible and fast but doesn't exercise the production Anthropic adapter's prompt-engineering or retry-policy edges.
+The canary's acceptance test ships a deterministic stub-LLM that classifies ops by URL-path prefix. The stub keeps the test reproducible and fast but doesn't exercise a live Anthropic adapter's prompt-engineering or retry-policy edges.
 
-A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1` but currently skips because [Task #467](https://github.com/evoila/meho/issues/467) (Anthropic chassis adapter) hasn't landed. Once #467 ships:
+A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1`. It skips only when `ANTHROPIC_API_KEY` is absent; with the key set the lifespan-wired `build_anthropic_ingest_llm_client` (#1386) drives the real grouping pass. To exercise it:
 
-1. Re-run the canary with the env var set.
+1. Re-run the canary with the env var set (and `ANTHROPIC_API_KEY` present).
 2. Pick harder queries the path-prefix stub can't trivially classify — snapshot revert, performance-metrics query, host-network atomic mutation.
 3. Compare top-3 hit rate against the stub baseline to verify the live LLM doesn't regress retrieval quality.
 
-**File a Task** in #467's wake; do not block #467 on it.
+Routing the grouping pass through the G11.5 per-tenant model resolver (so air-gapped/no-Anthropic-key deploys can group too) is the remaining follow-up — see [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring).
 
 ## References
 

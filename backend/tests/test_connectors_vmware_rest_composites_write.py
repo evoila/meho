@@ -25,6 +25,7 @@ when the same op_id fires multiple times).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
@@ -32,6 +33,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_patch_composite,
     host_detach_from_vds_composite,
@@ -42,6 +44,37 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_power_bulk_composite,
     vm_snapshot_revert_composite,
 )
+
+
+@pytest.fixture(autouse=True)
+def _prime_preflight_cache() -> Iterator[None]:
+    """Prime the L2 pre-flight cache so handler-direct tests skip the DB walk.
+
+    See the matching fixture in
+    ``test_connectors_vmware_rest_composites_read.py`` for the rationale --
+    the handler-direct tests in this module bypass the dispatcher (and
+    therefore the DB session) but the G0.14-T10 (#1151) pre-flight at
+    the top of each handler would otherwise query
+    :func:`~meho_backplane.operations._lookup.lookup_descriptor`. The
+    dedicated ``test_connectors_vmware_rest_composites_l2_preflight.py``
+    module covers the cache-miss code paths.
+    """
+    _preflight.reset_preflight_cache()
+    _preflight._PREFLIGHT_CACHE.update(
+        {
+            "vmware.composite.vm.create",
+            "vmware.composite.vm.clone",
+            "vmware.composite.vm.snapshot.revert",
+            "vmware.composite.vm.migrate",
+            "vmware.composite.vm.power.bulk",
+            "vmware.composite.host.evacuate",
+            "vmware.composite.host.detach_from_vds",
+            "vmware.composite.cluster.patch",
+        }
+    )
+    yield
+    _preflight.reset_preflight_cache()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

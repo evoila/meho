@@ -75,6 +75,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -149,7 +150,7 @@ class SddcManagerConnector(HttpConnector):
         credentials_loader: SddcCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._creds_cache: dict[str, dict[str, str]] = {}
+        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: SddcCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -211,8 +212,9 @@ class SddcManagerConnector(HttpConnector):
         resolve itself (#1008). Real-operator behaviour is unchanged —
         cold load → cache → reuse.
         """
+        cache_key = target_cache_key(target)
         async with self._creds_lock:
-            cached = self._creds_cache.get(target.name)
+            cached = self._creds_cache.get(cache_key)
             if cached is not None and not is_system_operator(operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
@@ -225,7 +227,7 @@ class SddcManagerConnector(HttpConnector):
                     f"a dict missing required key {exc.args[0]!r}; need "
                     "{'username': str, 'password': str}"
                 ) from exc
-            self._creds_cache[target.name] = raw
+            self._creds_cache[cache_key] = raw
             _log.info(
                 "sddc_manager_credentials_loaded",
                 target=target.name,
@@ -233,19 +235,33 @@ class SddcManagerConnector(HttpConnector):
             )
             return raw
 
-    async def fingerprint(self, target: SddcTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: SddcTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /v1/sddc-managers``.
 
         Reads ``elements[0]`` from the pagination envelope. On transport or
         status failure, returns a non-reachable :class:`FingerprintResult`
         whose ``extras["error"]`` carries the exception class + message —
         same pattern the NSX and vSphere connectors established.
+
+        ``operator`` (optional) is the request-scoped operator forwarded
+        from the probe routes. When provided, the credentials loader
+        reads the per-target Vault secret under that identity — the
+        same code path the dispatch surface uses. ``None`` falls back
+        to a system operator whose placeholder JWT fails closed at the
+        live Vault round-trip. G0.16-T4 (#1306) converged probe +
+        dispatch on this signature; pre-fix the probe path hard-coded
+        the placeholder JWT and surfaced as the v0.8.0 dogfood's
+        ``malformed jwt: must have three parts`` finding on
+        ``vcf9-sddc``.
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
-            payload = await self._get_json(
-                target, "/v1/sddc-managers", operator=synthesise_system_operator()
-            )
+            payload = await self._get_json(target, "/v1/sddc-managers", operator=eff_operator)
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

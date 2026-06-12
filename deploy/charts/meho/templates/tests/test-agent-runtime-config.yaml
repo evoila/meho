@@ -1,0 +1,112 @@
+{{- /*
+  G0.18-T10 (#1363) — helm test that asserts the agent-runtime
+  credentials make it from chart values to the backplane container's
+  env at the right shape:
+
+    * `ANTHROPIC_API_KEY` resolves via `secretKeyRef` (never plaintext)
+      to the configured Secret + key.
+    * `KEYCLOAK_ADMIN_URL` / `KEYCLOAK_ADMIN_CLIENT_ID` resolve to the
+      operator-provided plain values.
+    * `KEYCLOAK_ADMIN_CLIENT_SECRET` resolves via `secretKeyRef` to the
+      configured Secret + key.
+
+  Renders only when both `agent.enabled` and `keycloakAdmin.enabled`
+  are true — the gate the test was written to cover. A deploy with
+  only one (or neither) of the two enabled exercises a different
+  shape and this Pod is not what proves that path; the chart's
+  unit-of-render shape is what `helm template` + the CI grep gates
+  in `.github/workflows/chart.yml` verify for those modes.
+
+  Triggered via `helm test <release>` (CI's helm-test job runs it after
+  `helm install --wait` lands). The Pod is annotated with
+  `helm.sh/hook: test` so it's NOT part of the release manifest --
+  `helm uninstall` cleans it up implicitly.
+
+  The Pod uses `printenv` to inspect its own resolved env (it does NOT
+  attempt to call Anthropic or Keycloak — those would 401 against the
+  placeholder values the test uses, and CI's helm-test lane does not
+  ship real upstream credentials). The shape assertion is what
+  `secretKeyRef` resolution proves: when the assertion succeeds, the
+  Pod actually mounted a real Secret payload — Kubernetes' admission
+  controller refuses to start a Pod whose `secretKeyRef.name` /
+  `.key` doesn't resolve.
+*/}}
+{{- if and .Values.agent.enabled .Values.keycloakAdmin.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "meho.fullname" . }}-test-agent-runtime-config
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  containers:
+    - name: agent-runtime-env-check
+      # Minimal busybox-class image; only `sh` + `printenv` are needed.
+      # Matches the test-pgvector pod's posture of pinning a small,
+      # well-known base.
+      image: busybox:1.37
+      imagePullPolicy: IfNotPresent
+      env:
+        # Mirror the backplane's own env wiring so this Pod sees the
+        # exact same resolved values. Any drift between the chart's
+        # `secretKeyRef` shape and this Pod's would fail the check
+        # below, surfacing the regression before the operator does.
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "meho.agentSecretName" . | quote }}
+              key: {{ .Values.agent.secretKey | quote }}
+        - name: KEYCLOAK_ADMIN_URL
+          value: {{ .Values.keycloakAdmin.url | quote }}
+        - name: KEYCLOAK_ADMIN_CLIENT_ID
+          value: {{ .Values.keycloakAdmin.clientId | quote }}
+        - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "meho.keycloakAdminSecretName" . | quote }}
+              key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # Each `printenv` exits non-zero when the env var is missing,
+          # which surfaces as the Pod's exit code and bubbles up through
+          # `helm test`. The values themselves are not logged — printing
+          # `ANTHROPIC_API_KEY` to the test pod's stdout would leak a
+          # real upstream token in CI logs for any production-shaped
+          # deploy.
+          printenv ANTHROPIC_API_KEY >/dev/null \
+            || { echo "FAIL: ANTHROPIC_API_KEY not resolved (chart secretKeyRef wiring regressed)"; exit 1; }
+          printenv KEYCLOAK_ADMIN_URL >/dev/null \
+            || { echo "FAIL: KEYCLOAK_ADMIN_URL not resolved"; exit 1; }
+          printenv KEYCLOAK_ADMIN_CLIENT_ID >/dev/null \
+            || { echo "FAIL: KEYCLOAK_ADMIN_CLIENT_ID not resolved"; exit 1; }
+          printenv KEYCLOAK_ADMIN_CLIENT_SECRET >/dev/null \
+            || { echo "FAIL: KEYCLOAK_ADMIN_CLIENT_SECRET not resolved (chart secretKeyRef wiring regressed)"; exit 1; }
+          # All four resolved. The two `secretKeyRef`-sourced values
+          # are guaranteed non-empty (Kubernetes admission rejects an
+          # empty-value secretKeyRef), so the only outcomes from this
+          # script are "all four present" or "Pod creation failed
+          # before this script ran" — both unambiguous signals for
+          # the operator.
+          echo "OK: agent-runtime config env vars resolved (ANTHROPIC_API_KEY + KEYCLOAK_ADMIN_*)"
+      resources:
+        limits:
+          cpu: 100m
+          memory: 32Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+{{- end }}

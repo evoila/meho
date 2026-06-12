@@ -91,7 +91,7 @@ def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:
 
     Mirrors :func:`~meho_backplane.audit._resolve_target_id`: the binder
     stores the value as ``str(some_uuid)`` and this reader parses it
-    back. Used for the two graph columns on the MCP audit row:
+    back. Used for the graph columns on the MCP audit row:
 
     * ``mcp_session_id`` — bound by
       :func:`~meho_backplane.mcp.server._bind_mcp_session_id` from the
@@ -102,6 +102,10 @@ def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:
       tool-calls-tool flow only has to ``bind_contextvars`` the parent
       op's audit id for the closure walk (G8.2 recursive-CTE replay) to
       see the edge.
+    * ``target_id`` — bound by
+      :func:`~meho_backplane.targets.resolver.resolve_target` at its
+      single exit point; lands on ``AuditLog.target_id`` for MCP outer-
+      wrapper rows whose handler resolved a target (G0.15-T3 #1212).
 
     Unbound → ``None`` (the chassis-era default for HTTP rows, and the
     v0.2 default for ``parent_audit_id``). A bound value that fails the
@@ -122,6 +126,29 @@ def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:
     except ValueError:
         log.error("mcp_audit_malformed_uuid_contextvar", name=name, value=raw)
         return None
+
+
+def _resolve_str_contextvar(name: str) -> str | None:
+    """Read structlog contextvar *name* and return it when it's a non-empty string.
+
+    Companion to :func:`_resolve_uuid_contextvar` for payload-only string
+    fields. Used for ``target_name`` (G0.15-T3 #1212): the targets
+    resolver binds the canonical name alongside ``target_id`` at its
+    single exit point so the MCP outer-wrapper row carries both the
+    typed id (for joins with ``audit_log_target_id_idx``) and the
+    human-readable name in payload (so ``query_audit target=<name>``
+    on the MCP envelope row finds the same value the inner DISPATCH
+    row records).
+
+    Unbound or non-string → ``None``. The reader is intentionally
+    permissive (no error-level log) because the contextvar is optional
+    by design — most MCP tool calls don't resolve a target, and the
+    absence of a binding for those calls is the correct quiet path.
+    """
+    raw = structlog.contextvars.get_contextvars().get(name)
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw
 
 
 # code-quality-allow: linear fail-closed audit write; the length is a
@@ -193,10 +220,52 @@ async def write_mcp_audit_row(
     if contextvar_payload:
         payload = {**contextvar_payload, **payload}
 
+    # G0.15-T3 #1212 — finding 3: hoist ``principal_name`` /
+    # ``principal_email`` off the validated :class:`Operator` into the
+    # row's payload. The JWT-derived ``name`` / ``email`` claims live on
+    # the Operator (parsed by :func:`~meho_backplane.auth.jwt.verify_jwt`
+    # at request entry); the audit row was previously discarding them.
+    # Without the name a forensic operator looking at one session's rows
+    # can attribute every call to ``operator_sub`` (the OIDC sub UUID)
+    # but cannot tell "who is ``6e776fc1-…``" without a Keycloak lookup.
+    # The schema has no typed column for the name / email in v0.2; the
+    # canonical sink is ``audit_log.payload`` (the JSON column), which
+    # :mod:`meho_backplane.audit_query` already surfaces verbatim on the
+    # ``AuditEntry`` row. Use ``setdefault`` so a caller that explicitly
+    # bound a different ``principal_name`` via the ``audit_*`` contextvar
+    # convention (e.g. a future delegation-aware path) wins on collision.
+    if operator.name is not None:
+        payload.setdefault("principal_name", operator.name)
+    if operator.email is not None:
+        # ``EmailStr`` is a ``str`` subclass; coerce to plain ``str`` so
+        # the JSON encoder doesn't have to special-case the pydantic
+        # type and so a payload round-tripped through ``json.dumps`` /
+        # ``json.loads`` (the JSON column on portable dialects) keeps a
+        # stable type identity.
+        payload.setdefault("principal_email", str(operator.email))
+
+    # G0.15-T3 #1212 — finding 5: hoist ``target_name`` from the
+    # contextvar the targets resolver binds at its single exit point.
+    # The typed ``target_id`` column gets the same value via the
+    # ``_resolve_uuid_contextvar`` read below — both halves land
+    # together so ``query_audit target=<name>`` finds the MCP outer-
+    # wrapper row alongside the inner DISPATCH row. Unset when the
+    # tool didn't resolve a target (the resolver never ran for this
+    # request), which is the correct quiet path.
+    target_name = _resolve_str_contextvar("target_name")
+    if target_name is not None:
+        payload.setdefault("target_name", target_name)
+
     # Graph columns off contextvars (G8.2-T2 #1010) — real columns, not
     # payload keys; see :func:`_resolve_uuid_contextvar` for bind sources.
+    # G0.15-T3 #1212 — finding 5: ``target_id`` joins the read; the
+    # ``targets`` resolver already binds it (G0.3-T4) and the DISPATCH
+    # layer already lands the same value on its row, so reading it here
+    # restores symmetry between the MCP envelope row and the inner
+    # DISPATCH row.
     agent_session_id = _resolve_uuid_contextvar("mcp_session_id")
     parent_audit_id = _resolve_uuid_contextvar("parent_audit_id")
+    target_id = _resolve_uuid_contextvar("target_id")
 
     log = structlog.get_logger(__name__)
     if audit_id is None:
@@ -209,6 +278,7 @@ async def write_mcp_audit_row(
             operator_sub=operator.sub,
             actor_sub=resolve_actor_sub(),
             tenant_id=operator.tenant_id,
+            target_id=target_id,
             agent_session_id=agent_session_id,
             parent_audit_id=parent_audit_id,
             method=method,

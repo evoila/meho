@@ -360,6 +360,84 @@ keycloak:
   # Keycloak client secret (v0.2 wiring; v0.1 uses ESO directly).
   clientSecretSyncFromVault: secret/meho/keycloak/client_secret
 
+# Agent-runtime LLM credentials (G11.1 #803). The bounded tool-use loop
+# in `meho_backplane.agent.run` authenticates to Anthropic with the
+# `ANTHROPIC_API_KEY` env var; the seam's model factory is fail-closed
+# (`agent/run.py:default_model_factory` raises rather than starting a
+# loop with no credentials), so leaving this disabled keeps the feature
+# off without any other behaviour change — `/api/v1/agent-runs` returns
+# the same "no credentials" surface it did before this block existed.
+#
+# The chart wires `ANTHROPIC_API_KEY` as a `secretKeyRef` env var (never
+# a plaintext chart value), mirroring the Postgres / Keycloak-client-secret
+# precedent. Either bring your own Kubernetes Secret and reference it by
+# name + key, or set `eso.agent.enabled: true` to render an ExternalSecret
+# that materialises one from Vault (mirrors `eso.keycloak`). Unset / empty
+# `secretName` + `eso.agent.enabled: false` → the chart renders no env
+# wiring and the backplane's fail-closed surface stays in place.
+agent:
+  # -- Whether to wire `ANTHROPIC_API_KEY` into the backplane Deployment.
+  # Default `false`: agent-runtime endpoints fail-closed at first
+  # invocation (no behaviour change vs. a chart that doesn't ship this
+  # block). Flip to `true` and provide either an operator-managed Secret
+  # (set `secretName` / `secretKey` below) or an ESO-rendered one
+  # (`eso.agent.enabled: true`) for the env var to surface.
+  enabled: false
+  # -- Name of the Kubernetes Secret holding the Anthropic API key. The
+  # chart references it by name only — sync is the consumer's GitOps
+  # responsibility (or, opt-in, ESO via `eso.agent`). Required and
+  # non-empty when `agent.enabled: true`.
+  secretName: ""
+  # -- Key within `secretName` whose value is the API key. Default `api_key`
+  # matches the ESO target rendered by `eso.agent` when that path is
+  # enabled, so operators who opt into both don't have to reconcile names.
+  secretKey: api_key
+
+# Keycloak Admin API credentials (G11.2 #803). The
+# `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what
+# gates agent-principal registration (`POST /api/v1/agent-principals`);
+# the feature is "configured iff all three" `KEYCLOAK_ADMIN_*` envs are
+# non-empty (`meho_backplane.features._agent_runtime_block`). Any of
+# the three unset → the endpoint returns `503 keycloak_admin_not_configured`
+# without behavioural drift vs. a chart that doesn't ship this block.
+#
+# `url` and `clientId` are non-secret operator config. `clientSecret`
+# is a confidential credential and is wired exclusively as a
+# `secretKeyRef` — never as a plaintext chart value or env value.
+# Either bring your own Kubernetes Secret (set `clientSecret.secretName`
+# / `clientSecret.secretKey`) or set `eso.keycloakAdmin.enabled: true`
+# to render an ExternalSecret that materialises one from Vault. See
+# `docs/cross-repo/keycloak-agent-client.md` for the realm-side
+# `meho-admin` service-account client setup.
+keycloakAdmin:
+  # -- Whether to wire the three `KEYCLOAK_ADMIN_*` env vars into the
+  # backplane Deployment. Default `false`: agent-principal endpoints
+  # return `503 keycloak_admin_not_configured` (no behaviour change vs.
+  # a chart that doesn't ship this block).
+  enabled: false
+  # -- Admin REST API base URL for the Keycloak realm managing MEHO
+  # principals, e.g. `https://keycloak.example.com/admin/realms/meho`.
+  # Plain env (`KEYCLOAK_ADMIN_URL`) — not a secret. Required and
+  # non-empty when `keycloakAdmin.enabled: true`.
+  url: ""
+  # -- `client_id` of the confidential Keycloak client backing the Admin
+  # REST API (suggested `meho-admin`; see
+  # `docs/cross-repo/keycloak-agent-client.md` § Step 1). Plain env
+  # (`KEYCLOAK_ADMIN_CLIENT_ID`) — not a secret. Required and non-empty
+  # when `keycloakAdmin.enabled: true`.
+  clientId: ""
+  clientSecret:
+    # -- Name of the Kubernetes Secret holding the admin client secret.
+    # The chart references it by name only — sync is the consumer's
+    # GitOps responsibility (or, opt-in, ESO via `eso.keycloakAdmin`).
+    # Required and non-empty when `keycloakAdmin.enabled: true`.
+    secretName: ""
+    # -- Key within `secretName` whose value is the admin client secret.
+    # Default `client_secret` matches the ESO target rendered by
+    # `eso.keycloakAdmin` when that path is enabled, so operators who
+    # opt into both don't have to reconcile names.
+    secretKey: client_secret
+
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is explicitly v0.2 per Goal #11 spec.
@@ -536,6 +614,47 @@ eso:
     # Deployment env — set this `true` to verify the sync end-to-end
     # before the v0.2 federation wiring lands.
     enabled: false
+    remoteProperty: client_secret
+  agent:
+    # -- Render an ExternalSecret for the agent-runtime Anthropic API
+    # key. When `true`, the chart materialises a `<release>-agent`
+    # Secret keyed `api_key` (default — overridable via
+    # `agent.secretKey`) from
+    # `<eso.agent.remoteKey | default "<vault.paths.kv>/agent">`. To
+    # actually wire the env var into the Deployment, also set
+    # `agent.enabled: true` and either leave `agent.secretName: ""`
+    # (chart picks the ESO target name automatically) or point
+    # `agent.secretName` at this rendered Secret's name. Independent
+    # of `eso.enabled: true` — when ESO isn't installed cluster-wide,
+    # this stays `false` and the operator manages the Secret directly.
+    enabled: false
+    # -- Vault KV path holding the Anthropic API key value. Empty →
+    # derive from `<vault.paths.kv>/agent` at render time.
+    remoteKey: ""
+    # -- Property within the remote KV entry that holds the API key.
+    # Must match `agent.secretKey` (default `api_key`) so the
+    # Deployment's `secretKeyRef.key` resolves.
+    remoteProperty: api_key
+  keycloakAdmin:
+    # -- Render an ExternalSecret for the Keycloak admin client secret
+    # (`KEYCLOAK_ADMIN_CLIENT_SECRET`). When `true`, the chart
+    # materialises a `<release>-keycloak-admin` Secret keyed
+    # `client_secret` (default — overridable via
+    # `keycloakAdmin.clientSecret.secretKey`) from
+    # `<eso.keycloakAdmin.remoteKey | default "<vault.paths.kv>/keycloak/admin_client_secret">`.
+    # To actually wire the env var into the Deployment, also set
+    # `keycloakAdmin.enabled: true` and either leave
+    # `keycloakAdmin.clientSecret.secretName: ""` (chart picks the ESO
+    # target name automatically) or point it at this rendered Secret's
+    # name. Independent of `eso.enabled: true`.
+    enabled: false
+    # -- Vault KV path holding the admin client secret value. Empty →
+    # derive from `<vault.paths.kv>/keycloak/admin_client_secret` at
+    # render time.
+    remoteKey: ""
+    # -- Property within the remote KV entry that holds the admin
+    # client secret. Must match `keycloakAdmin.clientSecret.secretKey`
+    # (default `client_secret`).
     remoteProperty: client_secret
 
 networkPolicy:

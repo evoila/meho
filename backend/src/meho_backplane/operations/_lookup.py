@@ -12,6 +12,9 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   encoding contract and the v1-style backward-compatible fallback.
 * :func:`lookup_descriptor` -- tenant-scoped-then-global descriptor
   lookup. Returns ``None`` if no enabled descriptor matches.
+* :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
+  presence probe. Used only to classify a non-dispatchable sub-op as
+  *present-but-disabled* versus *truly absent*; never used to dispatch.
 * :func:`count_known_ops` -- count of enabled descriptors for a given
   ``(product, version, impl_id)``. Returned in the ``unknown_op`` error
   payload so the operator has a "did you mean…" signal without the
@@ -28,12 +31,16 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 
 __all__ = [
+    "connector_class_registered",
     "connector_exists",
     "count_known_ops",
+    "descriptor_exists_any_state",
+    "dispatch_product",
     "lookup_descriptor",
     "parse_connector_id",
 ]
@@ -84,6 +91,43 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
     return product, version, head
 
 
+def dispatch_product(*, product: str, version: str, impl_id: str) -> str:
+    """Return the product key the dispatch/query surface keys on for this connector.
+
+    The persistence-layer natural key on
+    :class:`~meho_backplane.db.models.EndpointDescriptor` /
+    :class:`~meho_backplane.db.models.OperationGroup` is the free-form
+    ``(product, version, impl_id)`` triple the ingest caller supplies.
+    The dispatch + discovery surface, however, never sees that triple
+    directly: it receives a ``connector_id`` string and recovers the
+    product via :func:`parse_connector_id`, which derives it from the
+    first hyphen-segment of ``impl_id`` (``"vrli-rest-9.0" -> "vrli"``).
+
+    For most connectors the supplied ``product`` already equals the
+    parser-derived one (``vmware`` / ``vmware-rest``), so this is a
+    no-op. For the VCF-family long↔short splits the two diverge — the
+    connector class registers under the long form
+    (``product="vcf-logs"``) while the dispatcher derives the short form
+    (``"vrli"``) from ``impl_id="vrli-rest"``. Rows persisted under the
+    long form are then invisible to every ``connector_exists`` /
+    ``search_operations`` / ``list_operation_groups`` probe (which key on
+    the short, parser-derived form), so the catalog reports the connector
+    ``registered, 0 ops`` even though the rows exist (the listing's
+    round-trip integrity gate in
+    :func:`~meho_backplane.operations.ingest.list_connectors._resolves_through_dispatcher`
+    drops them). claude-rdc-hetzner-dc#1136.
+
+    Returning the parser-derived product gives the ingest path a single
+    point to reconcile the supplied product against the spelling the
+    dispatcher will look the rows up under, so persistence and dispatch
+    agree. The same lossless round-trip
+    :func:`~meho_backplane.operations._lookup.connector_class_registered`
+    already relies on: render ``connector_id``, re-parse, take the
+    product.
+    """
+    return parse_connector_id(f"{impl_id}-{version}")[0]
+
+
 async def lookup_descriptor(
     *,
     tenant_id: UUID,
@@ -131,6 +175,51 @@ async def lookup_descriptor(
             )
         )
         return result.scalar_one_or_none()
+
+
+async def descriptor_exists_any_state(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+) -> bool:
+    """Return whether a descriptor row exists for the op id, **ignoring** ``is_enabled``.
+
+    The ``is_enabled``-agnostic sibling of :func:`lookup_descriptor`,
+    used **only to classify** a sub-op that :func:`lookup_descriptor`
+    could not resolve. It never returns a descriptor and is never used
+    to dispatch -- a disabled op stays non-dispatchable. Its sole job is
+    to tell *present-but-disabled* (a row exists, ``is_enabled = false``)
+    apart from *truly absent* (no row at all), so the composite pre-flight
+    can emit ``composite_l2_disabled`` (remediation: re-enable the op)
+    rather than ``composite_l2_missing`` (remediation: ingest the catalog)
+    for a deploy whose L2 surface is ingested-but-disabled (#1601).
+
+    Scoping mirrors :func:`lookup_descriptor`'s tenant-then-global
+    visibility: a row counts when it is this tenant's
+    (``tenant_id == tenant_id``) **or** built-in / global
+    (``tenant_id IS NULL``). A single ``LIMIT 1`` existence probe over
+    that union -- the caller has already established (via
+    :func:`lookup_descriptor` returning ``None``) that no *enabled* row
+    matches, so the only open question is presence in any state.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                (EndpointDescriptor.tenant_id == tenant_id)
+                | (EndpointDescriptor.tenant_id.is_(None)),
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+                EndpointDescriptor.op_id == op_id,
+            )
+            .limit(1)
+        )
+        return result.first() is not None
 
 
 async def count_known_ops(
@@ -220,3 +309,57 @@ async def connector_exists(
             .limit(1)
         )
         return group_hit.first() is not None
+
+
+def connector_class_registered(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Return whether a v2 connector *class* is registered for the parsed triple.
+
+    The discriminator behind the "registered but not ingested" signal.
+    :func:`connector_exists` probes only DB rows (``endpoint_descriptor`` /
+    ``operation_group``); a connector whose class is registered via
+    :func:`~meho_backplane.connectors.registry.register_connector_v2` but
+    has not yet had operations ingested / typed-registered has *zero* DB
+    rows, so ``connector_exists`` returns ``False`` for it. That case is
+    not "unknown connector" — it is "known class, awaiting ingest". This
+    helper tells the two apart so the meta-tools can return an
+    operator-actionable ``connector_not_ingested`` hint instead of an
+    opaque unknown-connector error.
+
+    *(product, version, impl_id)* is the triple
+    :func:`parse_connector_id` derived from the caller's ``connector_id``.
+    The v2 registry is keyed on the *registration* triple, which for most
+    connectors equals the parsed triple but for SDDC differs (registry
+    ``product="sddc-manager"`` vs parsed ``product="sddc"``). To match the
+    exact rows ``GET /api/v1/connectors`` labels ``state="registered"``
+    (see :func:`~meho_backplane.operations.ingest.list_connectors._class_side_only_items`),
+    each registry entry is rendered to its ``connector_id`` and re-parsed;
+    a registry entry counts as a hit only when its re-parsed triple equals
+    the caller's. This mirrors the listing's lossless-round-trip contract
+    (#773) so a ``connector_not_ingested`` answer here implies a
+    ``state="registered"`` row there, and vice versa.
+
+    v1-compat shim entries (the registry's ``(product, "", "")`` rows the
+    v1 :func:`~meho_backplane.connectors.registry.register_connector`
+    writes) are skipped: an empty ``version`` / ``impl_id`` is a
+    resolver-internal compatibility detail, never a separately registered
+    connector, and never the source of a ``state="registered"`` listing
+    row.
+
+    Registry-only (in-memory, process-local), so no DB round-trip — the
+    caller has already established (via :func:`connector_exists`) that the
+    DB has no rows for the triple.
+    """
+    for _reg_product, reg_version, reg_impl_id in all_connectors_v2():
+        if not reg_version or not reg_impl_id:
+            # v1-compat shim (product, "", "") — not a registered connector.
+            continue
+        connector_id = f"{reg_impl_id}-{reg_version}"
+        parsed_product, parsed_version, parsed_impl_id = parse_connector_id(connector_id)
+        if (parsed_product, parsed_version, parsed_impl_id) == (product, version, impl_id):
+            return True
+    return False

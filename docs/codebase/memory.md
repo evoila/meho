@@ -177,18 +177,60 @@ are the real DB column values.
 ### Read path — search (`search_memories`)
 
 1. Translate the optional `MemoryScope` arg into a `kind` filter.
-2. Call `meho_backplane.retrieval.retriever.retrieve` with
-   `source='memory'` and `kind=...`. The retriever runs a hybrid
-   BM25 + cosine query, fuses with Reciprocal Rank Fusion, and
-   SELECTs the full `documents` row for the top-fused ids.
-3. The `RetrievalHit` model carries every `documents` column the
+2. Build a `metadata_filters` dict from the RBAC predicate
+   (`_metadata_filters_for_scope`). User-flavoured scopes
+   (`USER` / `USER_TENANT` / `USER_TARGET`) push
+   `{"user_sub": operator.sub}` into the substrate;
+   tenant/target-flavoured scopes pass `None` (within-tenant
+   RBAC is unconditional, and the substrate's `tenant_id`
+   predicate already enforces the tenant boundary).
+3. Call `meho_backplane.retrieval.retriever.retrieve` with
+   `source='memory'`, `kind=...`, and `metadata_filters=...`. The
+   retriever runs a hybrid BM25 + cosine query, fuses with
+   Reciprocal Rank Fusion, and SELECTs the full `documents` row
+   for the top-fused ids. The `metadata_filters` dict is
+   translated to a PG `documents.doc_metadata @> :jsonb`
+   containment predicate that fires *before* the
+   50-candidate-per-signal budget is allocated — pre-migration
+   the budget could be burned on RBAC-invisible rows belonging
+   to other operators, returning an under-filled or empty result
+   even when matching memories existed deeper in the corpus.
+4. The `RetrievalHit` model carries every `documents` column the
    downstream caller needs — including `created_at` /
    `updated_at` — so memory does not re-query the table.
-4. For each hit, `_hit_to_search_result` runs an RBAC post-filter
-   on `user_sub` (the retriever has no concept of user scoping),
-   drops expired rows, and projects to a `MemoryEntrySearchHit`
-   that passes the substrate timestamps through to `entry.created_at`
-   / `entry.updated_at` verbatim.
+5. For each hit, `_hit_to_search_result` extracts the
+   `MemoryEntry` fields, drops expired rows (range predicate;
+   see "Expiry note" below), and projects to a
+   `MemoryEntrySearchHit` that passes the substrate timestamps
+   through to `entry.created_at` / `entry.updated_at` verbatim.
+   RBAC is **not** rechecked here — the push-down at step 3
+   guarantees the rows are already operator-visible.
+
+**Cross-scope (`scope=None`) fan-out (G4.4-T2 / #1179).** The
+substrate's `metadata_filters` is flat `@>` containment; it
+cannot express the conditional "user_sub must match for
+user-flavoured kinds, no predicate for tenant/target-flavoured
+kinds" predicate in a single call. `search_memories` resolves
+this by issuing one `retrieve` per visible `MemoryScope` and
+merging the per-call ranked lists on `fused_score` descending.
+RRF is rank-based and scale-invariant, so per-call scores live
+in the same `[0, 2/(RRF_K+1)]` envelope and cross-kind
+comparison is a total-order sort without renormalisation. The
+cost is a fixed 5× retrieve-volume increase on the cross-scope
+path; correctness (no candidate-budget burn on invisible rows)
+wins over volume on a workload that's already off the request
+hot path.
+
+**Expiry note.** `expires_at > now()` is a *range* predicate
+and the T1 substrate (#1177) only expresses scalar containment
+via `@>`. `expires_at` therefore stays as a post-retrieval
+filter in `_hit_to_search_result` until a future Initiative
+broadens the substrate to support range predicates. The
+substrate-minimalism postulate forbids broadening T1's shape
+for one consumer; the `MEMORY_USER_DEFAULT_TTL_DAYS` setting
+plus the daily expiry reaper (`memory/expiry.py`) keep the
+expired-row pool small enough that the post-retrieval drop is
+a tolerable cost in practice.
 
 **G0.9.1-T4 (#776) fix.** Before v0.3.2 the search path substituted
 `EPOCH = datetime(1970, 1, 1, tzinfo=UTC)` for both timestamps and
@@ -218,8 +260,12 @@ marker.
   `search_memories`. Returns a `RetrievalHit` list with the full
   ORM row's fields, including the timestamps.
 * `meho_backplane.memory.rbac.MemoryRbacResolver` — the scope ×
-  role matrix. Applied at write boundaries and as a post-filter
-  on retrieval hits.
+  role matrix. Applied at write boundaries and at the
+  `list_memories` in-process filter. `search_memories` no longer
+  consults the resolver post-retrieval; G4.4-T2 (#1179) pushed
+  the `user_sub` predicate into the substrate via
+  `metadata_filters` so the SQL layer eliminates RBAC-invisible
+  rows before the candidate budget is allocated.
 * `meho_backplane.memory.expiry` — background reaper for rows past
   `doc_metadata.expires_at`. The read-side filter in
   `list_memories` / `search_memories` masks expired rows in the
@@ -247,9 +293,16 @@ marker.
   exercises PG-only operators (`@@`, `<=>`); the unit tests mock
   the retrieve helper and the PG-real contract lives in
   `tests/acceptance/test_g51_memory_canary.py`.
-* The MCP `add_to_memory` schema names the body field `content` while
-  the REST + KB schemas use `body` — sibling task #779 (G0.9.1-T7)
-  closes that asymmetry separately. Out of scope here.
+* The MCP `add_to_memory` body field underwent a rename
+  `content` -> `body` to align with `add_to_knowledge` and the REST
+  `POST /api/v1/memory` body schema. G0.9.1-T7 (#779) shipped the
+  rename; G0.13-T4 (#1134) retro-fitted the missing CHANGELOG and
+  release-body callout against the actual release window (v0.6.0, not
+  v0.3.2 as the original task's AC targeted) and added a one-cycle
+  compatibility shim. v0.6.x accepts both fields: `body` is canonical
+  and wins when both are supplied; `content` is a deprecated alias
+  that fires a structured `add_to_memory_field_deprecated` warning
+  log line with `replacement="body"`. The shim is dropped in v0.7.
 * Non-`user` scopes have no default-TTL gate by design (per #624's
   narrow scope). A future Task widening it should change the
   `scope is not MemoryScope.USER` branch in `memory/ttl.py` and add

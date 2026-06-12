@@ -45,19 +45,28 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import (
+    FetchMore,
+    FetchMoreDrillIn,
+    FetchMoreNativePagination,
     FingerprintResult,
+    PaginationHint,
     ProbeResult,
     ResultHandle,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.jsonflux.query.engine import QueryEngine
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
 from meho_backplane.operations.dispatcher import set_default_reducer
-from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.jsonflux_reducer import (
+    JsonFluxReducer,
+    _query_sample,
+    _sample_from_tail,
+)
 from meho_backplane.operations.reducer import PassThroughReducer, Reducer
 from meho_backplane.settings import get_settings
 
@@ -194,6 +203,173 @@ async def test_materialize_handle_for_under_row_over_byte_threshold() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sample ordering — head (default) vs tail (G0.19-T1 #1479)
+# ---------------------------------------------------------------------------
+
+
+def _register_ordered_table(engine: QueryEngine, n: int) -> None:
+    """Register an ``n``-row table whose ``seq`` column is the row order.
+
+    ``seq`` ascends with registration order so an assertion can name the
+    expected head / tail rows without depending on DuckDB's (unguaranteed)
+    scan order for a bare ``SELECT``.
+    """
+    engine.register(
+        "result",
+        [{"seq": i, "line": f"line-{i}"} for i in range(n)],
+        unwrap="auto",
+    )
+
+
+def test_query_sample_default_returns_head() -> None:
+    """``_query_sample`` without ``from_tail`` returns the first N rows.
+
+    The order-agnostic default: a Vault key list or topology set has no
+    "more recent" end, so the head sample is the right preview. Pins the
+    pre-#1479 behaviour so the tail path is strictly additive.
+    """
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 20)
+        sample = _query_sample(engine, 5)
+    finally:
+        engine.close()
+
+    assert [row["seq"] for row in sample] == [0, 1, 2, 3, 4]
+
+
+def test_query_sample_from_tail_returns_most_recent_in_chronological_order() -> None:
+    """``_query_sample(from_tail=True)`` returns the LAST N rows, oldest-first.
+
+    The #1479 fix: a ``k8s.logs(tail=500)`` reduce must preview the
+    most-recent lines (the bottom of the window), not the oldest five
+    (health-probe noise). The slice is the tail of the collection,
+    re-sorted ascending so it reads like the bottom of a ``kubectl logs``
+    window rather than reversed.
+    """
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 20)
+        sample = _query_sample(engine, 5, from_tail=True)
+    finally:
+        engine.close()
+
+    # The five most-recent rows (16..19 plus 15), in chronological order.
+    assert [row["seq"] for row in sample] == [15, 16, 17, 18, 19]
+
+
+def test_query_sample_zero_size_returns_empty_in_both_modes() -> None:
+    """``sample_size <= 0`` short-circuits to ``[]`` regardless of ``from_tail``."""
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 10)
+        assert _query_sample(engine, 0) == []
+        assert _query_sample(engine, 0, from_tail=True) == []
+    finally:
+        engine.close()
+
+
+def test_sample_from_tail_resolves_only_the_tail_ordering() -> None:
+    """``_sample_from_tail`` is True only for ``{"sample": "tail"}``.
+
+    Every other shape — no context, no hint, a non-dict value, a dict
+    without ``sample``, or a different ``sample`` value — resolves to the
+    head-first default. The hint is purely additive.
+    """
+    assert _sample_from_tail({"result_ordering": {"sample": "tail"}}) is True
+
+    assert _sample_from_tail(None) is False
+    assert _sample_from_tail({}) is False
+    assert _sample_from_tail({"result_ordering": None}) is False
+    assert _sample_from_tail({"result_ordering": {"sample": "head"}}) is False
+    assert _sample_from_tail({"result_ordering": {}}) is False
+    # Malformed (non-dict) value must not raise — falls back to head.
+    assert _sample_from_tail({"op_id": "x", "result_ordering": "tail"}) is False
+
+
+async def test_reduce_tail_op_samples_most_recent_lines() -> None:
+    """A tail-ordered op's reduce surfaces the most-recent rows inline.
+
+    The agent-facing acceptance path for a ``k8s.logs``-shaped response:
+    the reducer materializes the >threshold ``lines`` collection and the
+    inline ``sample`` carries the **most-recent** lines (the requested
+    tail) rather than the oldest. This is the inline "obtain the requested
+    tail" reachability the #1479 DoD requires for log-shaped ops.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    # Oldest-first, like k8s.logs ``lines``: line-0 is the oldest.
+    lines = [f"line-{i:03d}" for i in range(495)]
+    payload = {"lines": lines}
+    context = {"op_id": "k8s.logs", "result_ordering": {"sample": "tail"}}
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert handle.total_rows == 495
+    # The inline sample is the five MOST-RECENT lines, chronological.
+    sample_values = [row["value"] for row in reduced["sample"]]
+    assert sample_values == [
+        "line-490",
+        "line-491",
+        "line-492",
+        "line-493",
+        "line-494",
+    ]
+    # The handle's sample_rows preview agrees with the inlined summary.
+    assert handle.sample_rows is not None
+    assert [dict(row)["value"] for row in handle.sample_rows] == sample_values
+
+
+async def test_reduce_without_ordering_hint_keeps_oldest_first_sample() -> None:
+    """No ``result_ordering`` hint → the sample stays head-first (oldest).
+
+    Backwards-compat guard: an op that never declared the hint behaves
+    exactly as it did before #1479 — the first N rows of the collection.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    lines = [f"line-{i:03d}" for i in range(495)]
+    payload = {"lines": lines}
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.logs"})
+
+    assert handle is not None
+    sample_values = [row["value"] for row in reduced["sample"]]
+    assert sample_values == [
+        "line-000",
+        "line-001",
+        "line-002",
+        "line-003",
+        "line-004",
+    ]
+
+
+async def test_reduce_leaves_string_shaped_payload_untouched() -> None:
+    """A string-shaped op output (e.g. ``k8s.exec``) is not reduced.
+
+    Regression guard (#1479 AC4): ``k8s.exec`` returns
+    ``{stdout: str, stderr: str, exit_code, ...}`` — no list-shaped
+    collection — so ``_detect_collection`` finds nothing and the reducer
+    passes the payload through verbatim with ``handle is None``. The tail-
+    ordering work must not start reducing string-shaped streams (whose
+    per-stream byte cap is a separate concern enforced in the handler).
+    """
+    reducer = JsonFluxReducer(row_threshold=0)  # force-reduce any collection
+    # A huge stdout string must still pass through: it is not a list.
+    payload = {
+        "stdout": "x" * 200_000,
+        "stderr": "",
+        "exit_code": 0,
+        "timed_out": False,
+        "truncated": False,
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.exec"})
+
+    assert handle is None, "string-shaped exec output must not materialize a handle"
+    assert reduced is payload, "pass-through must return the exact input payload object"
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher integration — broken reducer → connector_error
 # ---------------------------------------------------------------------------
 
@@ -254,7 +430,7 @@ class _NoOpVaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -392,4 +568,584 @@ async def test_reducer_exception_yields_connector_error_via_dispatcher(
     assert rows[0].payload["result_status"] == "error"
 
     assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
+
+
+# ---------------------------------------------------------------------------
+# G0.15-T8 (#1219) — fetch_more envelope + audit-row handle metadata
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_carries_fetch_more_unavailable_branches_without_context() -> None:
+    """Every reducing-response handle ships a ``fetch_more`` block.
+
+    With no ``pagination_hint`` in the reducer context, **both** branches
+    return ``available=False`` with a non-empty rationale -- the contract
+    is self-documenting regardless of whether a hint exists. This pins
+    the v0.7.x state where the drill-in route is deferred to v0.8/0.9
+    and most ops don't yet register a ``pagination_hint``.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"id": f"row-{i}", "label": f"item-{i}"} for i in range(60)]
+    payload = {"results": rows}
+
+    _reduced, handle = await reducer.reduce(payload, None)
+
+    assert handle is not None
+    assert isinstance(handle.fetch_more, FetchMore)
+    assert isinstance(handle.fetch_more.drill_in, FetchMoreDrillIn)
+    assert handle.fetch_more.drill_in.available is False
+    assert handle.fetch_more.drill_in.rationale, (
+        "the drill_in branch must carry a non-empty rationale explaining the workaround"
+    )
+    # The unavailable branch names the narrower-params workaround (G0.20-T7
+    # #1507: no spill happened because there is no tenant in the bare
+    # reduce context), carries the machine-readable reason (#1629), and
+    # leaves the available-only fields empty.
+    assert "narrower" in handle.fetch_more.drill_in.rationale.lower()
+    assert handle.fetch_more.drill_in.reason == "no_tenant_context"
+    assert handle.fetch_more.drill_in.mcp_tool is None
+    assert handle.fetch_more.drill_in.example_call is None
+    assert handle.fetch_more.drill_in.expires_at is None
+
+    assert isinstance(handle.fetch_more.native_pagination, FetchMoreNativePagination)
+    assert handle.fetch_more.native_pagination.available is False
+    assert handle.fetch_more.native_pagination.params is None
+    assert handle.fetch_more.native_pagination.example_next_call is None
+    assert handle.fetch_more.native_pagination.rationale, (
+        "native_pagination must carry a rationale when available=False"
+    )
+
+
+async def test_handle_fetch_more_native_pagination_populated_from_context_hint() -> None:
+    """``context['pagination_hint']`` populates the ``native_pagination`` branch verbatim.
+
+    The reducer accepts both the validated :class:`PaginationHint` and a
+    plain dict shape (the dispatcher reads ``llm_instructions`` as
+    primitive JSON). Both paths produce ``available=True`` with the
+    hint's ``params`` + ``example_next_call`` copied through.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"vm": f"vm-{i}", "power": "on"} for i in range(80)]
+    payload = {"value": rows}
+    hint_dict = {
+        "params": {
+            "continue_token": "Server-emitted cursor.",
+            "label_selector": "k8s label selector.",
+        },
+        "example_next_call": {
+            "tool": "call_operation",
+            "args": {"op_id": "k8s.pod.list", "params": {"all_namespaces": True}},
+        },
+    }
+
+    # Dict path (the dispatcher's natural shape).
+    _reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "k8s.pod.list", "pagination_hint": hint_dict}
+    )
+
+    assert handle is not None
+    native = handle.fetch_more.native_pagination
+    assert native.available is True
+    assert native.params is not None and dict(native.params) == hint_dict["params"]
+    assert (
+        native.example_next_call is not None
+        and dict(native.example_next_call) == hint_dict["example_next_call"]
+    )
+
+    # Validated-instance path (callers that wire PaginationHint themselves).
+    hint = PaginationHint.model_validate(hint_dict)
+    _r2, handle2 = await reducer.reduce(
+        payload, None, {"op_id": "k8s.pod.list", "pagination_hint": hint}
+    )
+    assert handle2 is not None
+    assert handle2.fetch_more.native_pagination.available is True
+    assert dict(handle2.fetch_more.native_pagination.params or {}) == hint_dict["params"]
+
+
+async def test_handle_fetch_more_malformed_pagination_hint_falls_back_to_unavailable() -> None:
+    """A malformed ``pagination_hint`` dict does not raise; the reducer logs and falls back.
+
+    A reduce-time exception would otherwise convert into a
+    ``connector_error`` ``OperationResult`` via the dispatcher's
+    ``_reduce_or_error`` guard -- failing a real read because an
+    operator-facing metadata field had a typo is the wrong fail mode.
+    The validation surfaces at op-registration time when a connector
+    author writes the hint as a :class:`PaginationHint` literal there.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"id": i} for i in range(60)]
+    payload = {"results": rows}
+
+    # ``params`` must be a dict; the connector author typoed.
+    bad_hint = {"params": "not-a-dict", "example_next_call": {"tool": "x"}}
+    _reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "broken.op", "pagination_hint": bad_hint}
+    )
+
+    assert handle is not None
+    native = handle.fetch_more.native_pagination
+    assert native.available is False, (
+        "a malformed hint must collapse to the unavailable branch -- "
+        "raising would lose the user-visible read result"
+    )
+    assert native.rationale, "unavailable branch must still carry a rationale"
+
+
+# ---------------------------------------------------------------------------
+# G0.20-T7 (#1507) — spill to the read-back store + drill-in availability
+# ---------------------------------------------------------------------------
+
+
+class _FakeStore:
+    """In-memory stand-in for :class:`ResultHandleStore` the reducer spills into.
+
+    Records every ``spill`` call so a test can assert the full rows (not
+    just the inline sample) were persisted, and serves them back through
+    ``fetch_window`` so the round-trip is exercised without Valkey.
+    """
+
+    def __init__(self) -> None:
+        self.spills: list[dict[str, Any]] = []
+        self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    async def spill(
+        self,
+        *,
+        tenant_id: Any,
+        operator_sub: str,
+        handle_id: Any,
+        op_id: str | None,
+        rows: list[dict[str, Any]],
+        total_rows: int,
+        ttl_seconds: int,
+        max_rows: int,
+    ) -> bool:
+        stored = rows[:max_rows]
+        self.spills.append(
+            {
+                "tenant_id": str(tenant_id),
+                "operator_sub": operator_sub,
+                "handle_id": str(handle_id),
+                "op_id": op_id,
+                "stored_rows": len(stored),
+                "total_rows": total_rows,
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        self._rows[(str(tenant_id), str(handle_id))] = stored
+        return bool(stored)
+
+
+async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
+    """A reducing dispatch spills the full set and marks drill-in available.
+
+    The #1507 acceptance path in isolation: with a tenant + operator in
+    context, the reducer persists the FULL 60-row set (not the 5-row
+    sample) to the store and the handle's ``fetch_more.drill_in`` flips to
+    ``available=True`` naming the ``result_query`` tool, an
+    ``example_call`` carrying the handle id, and an ``expires_at``.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}", "v": i} for i in range(60)]
+    payload = {"results": rows}
+    context = {
+        "op_id": "vault.kv.list.bulk",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    _reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    # The FULL set was spilled, keyed by the handle id, not just the sample.
+    assert len(store.spills) == 1
+    spill = store.spills[0]
+    assert spill["stored_rows"] == 60
+    assert spill["total_rows"] == 60
+    assert spill["handle_id"] == str(handle.handle_id)
+    assert spill["operator_sub"] == "op-a"
+    assert spill["ttl_seconds"] == handle.ttl_seconds
+
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    assert drill_in.reason is None, "#1629: the reason field is no-spill-only"
+    assert drill_in.mcp_tool == "result_query"
+    assert drill_in.example_call is not None
+    assert drill_in.example_call["tool"] == "result_query"
+    assert drill_in.example_call["args"]["handle_id"] == str(handle.handle_id)
+    assert drill_in.expires_at is not None
+    assert "result_query" in drill_in.rationale
+
+
+async def test_reduce_without_tenant_skips_spill_and_stays_unavailable() -> None:
+    """No tenant in context → no spill, drill-in stays unavailable.
+
+    A non-dispatch reduce (or an operator with no tenant) cannot key the
+    spill, so the store is untouched and the handle keeps the
+    narrower-params workaround branch — exactly the pre-#1507 behaviour,
+    now with the explicit ``no_tenant_context`` reason (#1629).
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+
+    _reduced, handle = await reducer.reduce(
+        {"results": rows}, None, {"op_id": "x", "operator_sub": "op-a"}
+    )
+
+    assert handle is not None
+    assert store.spills == []
+    assert handle.fetch_more.drill_in.available is False
+    assert handle.fetch_more.drill_in.reason == "no_tenant_context"
+    assert handle.fetch_more.drill_in.mcp_tool is None
+
+
+async def test_reduce_with_malformed_tenant_id_reports_no_tenant_context() -> None:
+    """A tenant_id that does not parse as a UUID is unusable context (#1629).
+
+    The spill cannot be keyed, so the store stays untouched and the
+    drill-in branch carries the same ``no_tenant_context`` reason as the
+    absent-tenant case — the operator-facing taxonomy stays two-valued.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+    context = {"op_id": "x", "operator_sub": "op-a", "tenant_id": "not-a-uuid"}
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert store.spills == []
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "no_tenant_context"
+
+
+async def test_reduce_store_rejection_reports_result_store_unavailable() -> None:
+    """A store that cannot persist the rows yields the store reason (#1629).
+
+    The Valkey-backed store is fail-open: ``spill`` returns ``False`` on
+    an unreachable backend / rejected write instead of raising. The
+    reduce must still ship the inline sample, and the drill-in branch
+    must say *why* paging is unavailable — ``result_store_unavailable``,
+    not the ambiguous catch-all the RDC cycle-8 ``k8s.logs tail=300``
+    operators hit.
+    """
+
+    class _DownStore:
+        async def spill(self, **_kwargs: Any) -> bool:
+            return False
+
+    reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert reduced["row_count"] == 60
+    assert len(reduced["sample"]) == 5, "the inline sample must still ship"
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "result_store_unavailable"
+    assert "store" in drill_in.rationale.lower()
+    assert "narrower" in drill_in.rationale.lower()
+    assert drill_in.mcp_tool is None
+    assert drill_in.example_call is None
+
+
+async def test_reduce_spill_capped_reports_truncated_tail() -> None:
+    """A spill capped below total reports the truncation in the rationale."""
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=40)
+    rows = [{"id": i} for i in range(60)]
+    context = {
+        "op_id": "x",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert store.spills[0]["stored_rows"] == 40
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    # The rationale flags that only the first 40 of 60 rows are retrievable.
+    assert "40" in drill_in.rationale
+    assert "60" in drill_in.rationale
+
+
+# ---------------------------------------------------------------------------
+# #1629 — k8s.logs tail=300 diagnosis repro (RDC cycle-8, reported as a
+# #1507 regression; attribution disproved here)
+# ---------------------------------------------------------------------------
+
+
+def _k8s_logs_payload(line_count: int) -> dict[str, Any]:
+    """The exact response shape ``k8s_logs`` returns for ``tail=N``.
+
+    A flat dict whose ``lines`` list sits NEXT TO scalar keys — none of
+    the reducer's priority envelope keys (``value`` / ``results`` / ...)
+    match, so collection detection must fall through to the
+    largest-list branch and report ``source_key="lines"``, exactly what
+    the RDC cycle-8 consumer saw.
+    """
+    return {
+        "pod": "argocd-server-7d8f9c-x2x9z",
+        "namespace": "argocd",
+        "container": "argocd-server",
+        "lines": [f"2026-05-31T10:00:{i % 60:02d} log line {i}" for i in range(line_count)],
+        "truncated": False,
+    }
+
+
+async def test_k8s_logs_shape_with_tenant_context_spills_and_pages() -> None:
+    """The consumer's ``tail=300`` repro against a healthy store: NO shape gap.
+
+    Diagnosis evidence for #1629 acceptance criterion 1: the full
+    ``k8s.logs`` response shape (scalar siblings + a 300-element
+    ``lines`` list + the tail ordering hint) reduces, spills, and flips
+    drill-in available under a tenant-scoped context. The #1507 spill
+    infrastructure handles the k8s.logs shape correctly — the RDC
+    cycle-8 ``handle: null`` cannot be a k8s.logs-shape gap, leaving a
+    runtime skip (store or context) as the only candidates, both of
+    which now self-identify via ``drill_in.reason``.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "rdc-operator",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_ordering": {"sample": "tail"},
+    }
+
+    reduced, handle = await reducer.reduce(_k8s_logs_payload(300), None, context)
+
+    assert handle is not None, "a reducing k8s.logs response always mints a handle"
+    assert reduced["row_count"] == 300
+    assert reduced["total"] == 300
+    assert reduced["source_key"] == "lines"
+    assert len(reduced["sample"]) == 5
+    # Tail ordering: the sample is the five most-recent lines.
+    assert reduced["sample"][-1]["value"].endswith("log line 299")
+    # The full 300 rows were spilled and the drill-in teaches the page-back.
+    assert len(store.spills) == 1
+    assert store.spills[0]["stored_rows"] == 300
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    assert drill_in.reason is None
+    assert drill_in.mcp_tool == "result_query"
+
+
+async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
+    """The hardened #1629 envelope for the consumer's actual failure mode.
+
+    Same ``tail=300`` payload, but the spill store cannot persist —
+    the only no-spill branch reachable on a real authenticated dispatch
+    (``Operator.tenant_id`` / ``sub`` are required fields, so the
+    tenant-context branch cannot fire there). The 5-of-300 sample still
+    ships, and the response now says *why* it cannot be paged instead
+    of silently omitting the read-back route.
+    """
+
+    class _DownStore:
+        async def spill(self, **_kwargs: Any) -> bool:
+            return False
+
+    reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "rdc-operator",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_ordering": {"sample": "tail"},
+    }
+
+    reduced, handle = await reducer.reduce(_k8s_logs_payload(300), None, context)
+
+    assert handle is not None
+    assert reduced["row_count"] == 300
+    assert len(reduced["sample"]) == 5
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "result_store_unavailable"
+    assert "store" in drill_in.rationale.lower()
+
+
+async def _set_shaped_handler(
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level handler returning a 60-row set so JsonFluxReducer materializes."""
+    del target, params
+    return {"results": [{"k": f"k-{i}", "v": i} for i in range(60)]}
+
+
+@pytest.fixture
+async def _registered_set_shaped_op(
+    stub_embedding_service: AsyncMock,
+) -> AsyncIterator[None]:
+    """Register the connector + a typed op the audit-hoist test dispatches.
+
+    Returns a 60-row payload so the production-default
+    :class:`JsonFluxReducer` actually materializes a handle (the
+    fixture used by other dispatcher tests returns a 1-row payload
+    that passes through). The op_id is intentionally distinct so it
+    doesn't share state with :func:`_registered_typed_op`.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list.bulk",
+        handler=_set_shaped_handler,
+        summary="List many secrets.",
+        description="List many secrets.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    yield
+
+
+async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
+    _registered_set_shaped_op: None,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A reducing dispatch hoists ``handle_id`` / ``total_rows`` / ``sample_rows_returned``.
+
+    G0.15-T8 (#1219). After the reducer materializes, the dispatcher
+    derives the audit-payload hoist dict via
+    ``_handle_metadata_for_audit(handle)`` and threads it through
+    ``audit_and_broadcast_safe(..., handle_metadata=...)`` →
+    ``write_audit_row(..., handle_metadata=...)`` →
+    ``_build_audit_payload(..., handle_metadata=...)``, where
+    ``payload.update(handle_metadata)`` merges the three keys onto the
+    ``audit_log.payload`` JSON. A consumer reading the audit row
+    attributes *"what the agent saw"* (the handle id + total rows +
+    the bounded sample size) without joining against the reducer's
+    in-memory state.
+    """
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.list.bulk",
+            target=_FakeTarget(),
+            params={"path": "/secret"},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", (
+        f"expected ok; got status={result.status!r} error={result.error!r}"
+    )
+    assert result.handle is not None, "a 60-row response must materialize through JsonFluxReducer"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "vault.kv.list.bulk")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["result_status"] == "ok"
+    assert payload["handle_id"] == str(result.handle.handle_id)
+    assert payload["total_rows"] == 60
+    assert payload["sample_rows_returned"] == 5
+
+    # The broadcast event also fired.
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "ok"
+
+
+async def _tail_log_handler(
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level handler returning a 200-line oldest-first ``lines`` set.
+
+    Mirrors ``k8s.logs``' output: ``lines`` is chronological (line-000 is
+    the oldest, line-199 the most recent). 200 lines clears the 50-row
+    materialization threshold so the dispatch path reduces it.
+    """
+    del target, params
+    return {"lines": [f"line-{i:03d}" for i in range(200)]}
+
+
+@pytest.fixture
+async def _registered_tail_ordered_op(
+    stub_embedding_service: AsyncMock,
+) -> AsyncIterator[None]:
+    """Register a typed op carrying ``llm_instructions.result_ordering = tail``.
+
+    Exercises the dispatcher → reducer ordering wiring end to end: the
+    descriptor's ``llm_instructions`` slot is what
+    ``_result_ordering_from_descriptor`` lifts into the reducer context.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="k8s.logs.like",
+        handler=_tail_log_handler,
+        summary="Fetch many log lines.",
+        description="Fetch many log lines.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        llm_instructions={"result_ordering": {"sample": "tail"}},
+        embedding_service=stub_embedding_service,
+    )
+    yield
+
+
+async def test_reducing_dispatch_honours_result_ordering_tail_hint(
+    _registered_tail_ordered_op: None,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A tail-ordered op dispatched end-to-end samples the most-recent lines.
+
+    G0.19-T1 (#1479). The descriptor's
+    ``llm_instructions["result_ordering"] = {"sample": "tail"}`` is lifted
+    by ``dispatcher._result_ordering_from_descriptor`` into
+    ``reducer_context["result_ordering"]``; ``JsonFluxReducer`` then samples
+    the tail. This proves the whole wire — not just the reducer in
+    isolation — surfaces the requested tail to the agent.
+    """
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="k8s.logs.like",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", (
+        f"expected ok; got status={result.status!r} error={result.error!r}"
+    )
+    assert result.handle is not None, "a 200-line response must materialize a handle"
+    assert result.handle.total_rows == 200
+    assert result.handle.sample_rows is not None
+    sample_values = [dict(row)["value"] for row in result.handle.sample_rows]
+    assert sample_values == [
+        "line-195",
+        "line-196",
+        "line-197",
+        "line-198",
+        "line-199",
+    ], "the dispatched tail-ordered op must surface the most-recent lines inline"

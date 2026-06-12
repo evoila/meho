@@ -328,6 +328,45 @@ Conservative resource defaults (`requests: {cpu: 100m, memory: 256Mi}`,
 of the v0.1 chassis (authn/authz traffic + synchronous audit-write fanout);
 tune limits up for higher-throughput deployments.
 
+### Full values reference
+
+The complete operator-facing values surface. These two tables are the
+authoritative reference (the README links here rather than duplicating
+them).
+
+**Operator-required** (MUST be set; the schema rejects empty defaults):
+
+| Path | Type | Notes |
+| --- | --- | --- |
+| `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
+| `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
+| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
+| `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
+| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
+| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
+| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
+| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
+| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
+| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
+| `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
+| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
+
+**Common operator overrides** (safe defaults provided; tune as needed):
+
+| Path | Default | Notes |
+| --- | --- | --- |
+| `replicaCount` | `1` | Single-replica baseline. |
+| `image.repository` | `ghcr.io/evoila/meho` | OCI repo from the image pipeline. |
+| `image.pullPolicy` | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never`. |
+| `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
+| `ingress.className` | `""` | Cluster default IngressClass when empty. |
+| `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
+| `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
+| `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
+| `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
+| `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
+
 ### `values.schema.json` typed contract
 
 The chart ships a **JSON Schema draft-07** contract for `values.yaml`
@@ -605,23 +644,73 @@ re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697).
 
+### Merge queue (#769)
+
+`ci.yml` triggers on `merge_group` in addition to `pull_request` and
+`push`. The `merge_group` event fires when a PR is admitted to the
+GitHub merge queue and runs the full check matrix against the
+**synthesised merge commit** — PR head + current `main` tip + any
+PRs ahead in the queue. A merge that would break `main` fails in the
+queue and never reaches `main`, ending the inherited-red episodes from
+2026-05-20/21 where cancelled post-merge CI allowed broken combinations
+to land silently.
+
+Merge-queue setup (admin action, separate from this code change):
+
+1. Enable "Require merge queue" in the repository's branch-protection
+   ruleset for `main` (Settings → Rules → Branches → protect main →
+   add "Require merge queue" rule, or via
+   `gh api -X PUT repos/evoila/meho/rulesets/14556458 ...`).
+2. Configure merge-queue required checks. The full set required by
+   branch protection on `main` spans four workflows; mirror the same
+   set in the merge-queue ruleset so the queue enforces the same bar
+   against the actual merge result, not just the PR's own head:
+   - From `ci.yml`: `Python (ruff + mypy + pytest)`,
+     `Python (integration testcontainers)`,
+     `Go (golangci-lint + go test)`,
+     `Helm (lint + template + kubeconform)`.
+   - From `security-scan.yml`: `Semgrep SAST`.
+   - From `secret-scan.yml`: `TruffleHog Secret Scan`.
+   - From `dependency-license-check.yml`: `Python License Check`,
+     `NPM License Check`. Both jobs no-op via `hashFiles()` when the
+     PR doesn't touch a manifest, so they report cheap green on
+     unrelated PRs — but they MUST run on every queue admission so
+     branch protection's required-context list stays satisfiable.
+3. The `merge_group` triggers in `ci.yml`, `security-scan.yml`,
+   `secret-scan.yml`, and `dependency-license-check.yml` are the
+   code-side prerequisite for step 2 — without each sibling workflow
+   subscribing to `merge_group`, its required context would never
+   report on queue runs and the queue would hang on missing checks.
+
+Concurrency note: `cancel-in-progress` is conditional on
+`github.event_name != 'merge_group'`. A cancelled queue check causes
+the merge attempt to fail and the PR falls out of the queue — so
+merge-queue runs are never cancelled. PR force-pushes and rapid main
+commits still cancel their own prior runs as before.
+
 ### Matrix
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 3 --dist loadscope` (excludes `tests/integration/`; `--cov=meho_backplane --cov-report=xml` only on push-to-main via `COVERAGE_CORE=sysmon`, PEP 669 backend; PRs skip `--cov` to stay fast — #726, #739) -> upload `python-coverage` artefact |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 6 --dist loadscope` (excludes `tests/integration/`; `COVERAGE_CORE=sysmon --cov=meho_backplane --cov-report=xml` on **both push and PR** — the per-test re-embedding cost that made `--cov` prohibitive on PRs was eliminated in #799; sysmon PEP 669 backend — #739) -> upload `python-coverage` artefact |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-Each job runs on its own `meho-runners-ci` runner. `python-lint-test`,
-`go-lint-test`, and `helm-lint-template` carry a 10-minute
-`timeout-minutes`; `python-integration` carries 60 minutes for the
-container-pull + DinD spin-up + testcontainers sweep (xdist
-loadgroup parallelisation to bring it well under cap tracked in #564).
-Wall-clock for a green PR is the slowest job's elapsed time because
-the four jobs never block each other — `python-integration` typically
-dominates and is the dispatch surface for the Goal #11 budget
+`python-lint-test` runs on `meho-runners-ci-heavy` (dedicated ARC scale
+set, 6000m requests=limits, max 5 pods — #761 / rdc-gitops#55). The
+other three jobs (`python-integration`, `go-lint-test`,
+`helm-lint-template`) run on the dense `meho-runners-ci` pool (4-core).
+`python-lint-test` carries a 20-minute `timeout-minutes` (retuned from
+the legacy 50-min cap after #799 dropped the unit-job wall to ~9 min;
+the hard cap stays well above the observed wall for hang detection while
+the perf-budget-guard step enforces the 10-min Goal #11 budget at the
+PR level). `go-lint-test` and `helm-lint-template` carry 10 minutes;
+`python-integration` carries 60 minutes for the container-pull + DinD
+spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
+in #564). Wall-clock for a green PR is the slowest job's elapsed time
+because the four jobs never block each other — `python-integration`
+typically dominates and is the dispatch surface for the Goal #11 budget
 conversation.
 
 ### Fail-loud posture
@@ -669,17 +758,23 @@ SonarCloud scan. The workflow name (`CI`) and the artefact name
 workflows — changing either side without the other would silently lose
 coverage reporting in SonarCloud.
 
-`--cov` is gated to push events only (#726): on PRs, the merge gate
-stays fast and SonarCloud's new-code coverage widget shows "no data"
-until the branch lands on `main`. The Clean-as-You-Code model tolerates
-the one-merge delay because `main` always carries fresh data and
-`quality-gate.yml` is whole-job `continue-on-error`. `COVERAGE_CORE=sysmon`
-(#739) swaps coverage.py's default C tracer for the PEP 669
-`sys.monitoring` backend (Python 3.12+, supported by coverage.py 7.4+;
-the lockfile pins 7.14). Sysmon's event-driven model removes most of
-the per-line tracing tax; line/branch counts are identical to the
-ctrace baseline within ±1% by construction, so the SonarCloud signal
-is unaffected.
+`--cov` runs on **both push and PR** as of the post-#799 state. #726
+originally gated `--cov` to push-only on the belief that pytest-cov
+was the unit job's dominant cost; the #771 diagnostic (#793) disproved
+that — the real cost was per-test descriptor re-embedding (fixed in
+#799), not coverage instrumentation. With the embedding re-fetch
+eliminated and sysmon's overhead, `--cov` adds only ~1 min (pytest
+~8m33s with cov vs ~7m35s without; run 26245676016), so the unit job
+stays ~9.3 min — under the Goal #11 10-min budget — while PRs gain
+SonarCloud Clean-as-You-Code new-code-coverage decoration on every PR
+instead of updating one merge late. The `quality-gate.yml` whole-job
+`continue-on-error` means a missing or late artefact never blocks a
+merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
+tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
+supported by coverage.py 7.4+; the lockfile pins 7.14). Sysmon's
+event-driven model removes most of the per-line tracing tax; line
+counts matched the C tracer exactly (2913/11832 in both), so the
+SonarCloud signal is unaffected.
 
 ### Fork-PR guard
 
@@ -711,8 +806,8 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
-# To mirror the push-mode CI coverage run (Python 3.12+):
-# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 \
+# To mirror the CI coverage run (both push and PR, Python 3.12+):
+# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 \
 #     --ignore=tests/integration --cov=meho_backplane --cov-report=xml tests/)
 
 # Go

@@ -4,15 +4,27 @@
 """Observability ops -- ``k8s.event.list``.
 
 G3.2-T4 (#324) of Initiative #320. The "what's recently happened?"
-read-only op layered on top of the T1 / T2 / T5 base substrate:
+read-only op layered on top of the T1 / T2 / T5 base substrate.
+G0.17-T1 (#1330) converged the request shape onto the workload list
+ops' base (``namespace`` XOR ``all_namespaces`` + ``label_selector``)
+so the operator's "show me all Warning events cluster-wide" question
+maps to a single ``{all_namespaces: true, field_selector: 'type=Warning'}``
+call instead of an N-namespace client-side loop.
 
-* ``k8s.event.list [--namespace X] [--field-selector ...] [--limit N]`` --
-  ``CoreV1Api.list_namespaced_event``. Returns recent events ordered
-  most-recent-first (descending ``last_seen``). Default ``limit=50``;
-  ``--field-selector`` is forwarded verbatim to the K8s API so the
-  operator can apply server-side filters like
-  ``type=Warning,involvedObject.kind=Pod`` without the connector
-  re-encoding the syntax.
+* ``k8s.event.list [--namespace X | --all-namespaces]
+  [--label-selector ...] [--field-selector ...] [--limit N]`` --
+  ``CoreV1Api.list_namespaced_event`` (per-namespace) /
+  ``CoreV1Api.list_event_for_all_namespaces`` (cluster-wide). Returns
+  recent events ordered most-recent-first (descending ``last_seen``).
+  Default ``limit=50``; ``--field-selector`` and ``--label-selector``
+  are forwarded verbatim to the K8s API so the operator can apply
+  server-side filters like ``type=Warning,involvedObject.kind=Pod``
+  without the connector re-encoding the syntax.
+
+The op deliberately omits ``continue_token`` -- unlike pod / deployment
+list, the most-recent-first contract means paging is expressed as
+"narrow the ``field_selector``", not "walk a cursor". The omission is
+documented on :data:`K8S_EVENT_LIST_PAGINATION_HINT`.
 
 The event surface lives in its own module (rather than alongside the
 configmap ops in :mod:`ops_config`) for two reasons:
@@ -35,8 +47,10 @@ fixtures without booting an event loop.
 
 References
 ----------
-* Parent task: G3.2-T4 (#324).
+* Parent task: G3.2-T4 (#324); request-shape parity: G0.17-T1 (#1330).
 * Parent Initiative: G3.2 (#320), kubernetes-asyncio typed connector.
+* Conventions doc: ``docs/codebase/api-shape-conventions.md`` §10
+  (intra-connector list-op request-shape parity).
 * k8s Event API: https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/event-v1/
 * ``kubernetes_asyncio.CoreV1Api``:
   https://github.com/tomplus/kubernetes_asyncio/blob/master/kubernetes_asyncio/docs/CoreV1Api.md
@@ -49,6 +63,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
+from meho_backplane.connectors.kubernetes.ops_listparams import (
+    ALL_NAMESPACES_PARAM,
+    FIELD_SELECTOR_PARAM,
+    LABEL_SELECTOR_PARAM,
+    NAMESPACE_PARAM,
+    NAMESPACE_XOR_ALL_NAMESPACES,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import CoreV1Event
@@ -241,22 +262,23 @@ def sort_event_rows_recent_first(
 # ---------------------------------------------------------------------------
 
 
-_NAMESPACE_PARAM_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "pattern": r"\S",
-    "description": "Namespace to list within.",
-}
-
-
+#: ``k8s.event.list`` parameter schema. Adopts the shared
+#: ``namespace`` XOR ``all_namespaces`` namespace selector (G0.17-T1
+#: #1330) and the ``label_selector`` forwarding knob. Keeps the
+#: event-specific ``field_selector`` example wording and the bounded
+#: ``limit`` with its event-tuned ``default`` + ``maximum``. The
+#: ``continue_token`` knob is **deliberately omitted** -- the
+#: handler's client-side recency-sort + truncation contract
+#: supersedes server-side paging here; see
+#: :data:`K8S_EVENT_LIST_PAGINATION_HINT`.
 K8S_EVENT_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "namespace": _NAMESPACE_PARAM_SCHEMA,
+        "namespace": NAMESPACE_PARAM,
+        "all_namespaces": ALL_NAMESPACES_PARAM,
+        "label_selector": LABEL_SELECTOR_PARAM,
         "field_selector": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": r"\S",
+            **FIELD_SELECTOR_PARAM,
             "description": (
                 "K8s field selector forwarded server-side. "
                 "Examples: 'type=Warning', "
@@ -277,7 +299,7 @@ K8S_EVENT_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["namespace"],
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -331,16 +353,78 @@ K8S_EVENT_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``k8s.event.list`` does not surface a server-side ``_continue``
+#: token through this connector -- ``limit`` truncates the
+#: most-recent-first sort, so paging across older events is done by
+#: narrowing ``field_selector`` / ``label_selector`` (event type /
+#: involved object / source component / labels on the involved object)
+#: rather than walking a cursor. G0.15-T8 (#1219). The hint documents
+#: that contract so consumers don't reach for ``continue_token`` here
+#: as they would on pod / deployment lists; the curated
+#: ``example_next_call`` is a cluster-wide warning sweep (G0.17-T1
+#: #1330) -- the canonical motivating operator question for the
+#: ``all_namespaces`` knob.
+K8S_EVENT_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "field_selector": (
+            "K8s field-selector string. Common narrowings: "
+            "'type=Warning' (operator-actionable events only), "
+            "'involvedObject.kind=Pod', 'involvedObject.name=<pod>', "
+            "'source.component=<controller>'. Multiple filters "
+            "comma-separated."
+        ),
+        "label_selector": (
+            "K8s label-selector string applied to the event's own "
+            "metadata.labels (events typically inherit labels from "
+            "the involved object). Forwarded server-side."
+        ),
+        "namespace": "Switch to a different namespace's event feed.",
+        "all_namespaces": (
+            "List events across every namespace the kubeconfig can "
+            "read; mutually exclusive with ``namespace``."
+        ),
+        "limit": (
+            f"Cap rows per response (default {DEFAULT_EVENT_LIMIT}, "
+            f"capped at {MAX_EVENT_LIMIT}). Sort + truncate keeps the "
+            "N most-recent."
+        ),
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.event.list",
+            "params": {
+                "all_namespaces": True,
+                "field_selector": "type=Warning",
+                "limit": 50,
+            },
+        },
+    },
+}
+
+
 K8S_EVENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Call when the operator asks 'what's recently happened in "
-        "<namespace>?', 'why did this pod restart?', or 'are there "
-        "any warnings?'. Rows are sorted most-recent-first; pair with "
-        "``field_selector='type=Warning'`` to scope the answer to "
-        "operator-actionable signals."
+        "Call when the operator asks 'what's recently happened?', "
+        "'why did this pod restart?', or 'are there any warnings?'. "
+        "Rows are sorted most-recent-first; pair with "
+        "``field_selector='type=Warning'`` to scope to operator-"
+        "actionable signals. Use ``all_namespaces=true`` for the "
+        "cluster-wide 'kubectl get events -A' question; use "
+        "``namespace=<X>`` to scope to one namespace."
     ),
     "parameter_hints": {
-        "namespace": ("Required. The Kubernetes namespace whose events to list."),
+        "namespace": "Required unless ``all_namespaces`` is true.",
+        "all_namespaces": (
+            "Pass true for cluster-wide event listings (the "
+            "'kubectl get events -A' question); mutually exclusive "
+            "with ``namespace``."
+        ),
+        "label_selector": (
+            "Optional. K8s label-selector syntax (e.g. "
+            "``app=argocd-server``, ``app in (frontend,backend)``); "
+            "forwarded server-side."
+        ),
         "field_selector": (
             "Optional. K8s field-selector string forwarded server-side "
             "(e.g. 'type=Warning', 'involvedObject.kind=Pod'). Multiple "
@@ -358,8 +442,11 @@ K8S_EVENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "first_seen_seconds, last_seen_seconds}], 'total': <int>}. "
         "``type`` is 'Normal' or 'Warning'; ``count`` is how many "
         "times the event has fired; ``last_seen_seconds`` is how "
-        "long ago the event was last observed."
+        "long ago the event was last observed. Each row carries "
+        "its own ``namespace`` so cross-namespace rows under "
+        "``all_namespaces=true`` stay distinguishable."
     ),
+    "pagination_hint": K8S_EVENT_LIST_PAGINATION_HINT,
 }
 
 
@@ -367,18 +454,21 @@ EVENT_OPS: tuple[KubernetesOp, ...] = (
     KubernetesOp(
         op_id="k8s.event.list",
         handler_attr="k8s_event_list",
-        summary="List recent Kubernetes events in a namespace, most-recent-first.",
+        summary="List recent Kubernetes events most-recent-first; per-namespace or cluster-wide.",
         description=(
-            "Calls ``CoreV1Api.list_namespaced_event(namespace, "
-            "field_selector=..., limit=...)`` and projects each Event "
-            "into {name, namespace, type, reason, message, "
-            "involved_object: {kind, name, namespace}, source, count, "
+            "Calls ``CoreV1Api.list_namespaced_event(namespace, ...)`` "
+            "(per-namespace) or "
+            "``CoreV1Api.list_event_for_all_namespaces(...)`` "
+            "(``all_namespaces=true``) and projects each Event into "
+            "{name, namespace, type, reason, message, involved_object: "
+            "{kind, name, namespace}, source, count, "
             "first_seen_seconds, last_seen_seconds}. Rows are sorted "
             "most-recent-first by ``last_seen_seconds`` before "
             "``limit`` truncates the tail, so the kept rows are "
             "deterministically the N most-recent events. "
-            "``field_selector`` is forwarded verbatim to the K8s API "
-            "(e.g. 'type=Warning', 'involvedObject.kind=Pod'). "
+            "``field_selector`` (e.g. 'type=Warning', "
+            "'involvedObject.kind=Pod') and ``label_selector`` are "
+            "forwarded verbatim to the K8s API. "
             f"Default limit {DEFAULT_EVENT_LIMIT}, capped at "
             f"{MAX_EVENT_LIMIT}. Read-only."
         ),

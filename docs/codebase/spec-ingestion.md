@@ -33,8 +33,11 @@ The pipeline is broken into work items per Initiative #389:
   each op to a group in batches of 50. Proposed groups land
   `review_status='staged'`; each per-op `group_id` is set in the same
   transaction as the audit row. The LLM is injected as the
-  :class:`LlmClient` Protocol; production T5 wires the chassis
-  Anthropic adapter, tests inject a deterministic stub.
+  :class:`LlmClient` Protocol; tests inject a deterministic stub, and
+  FastAPI lifespan startup wires the production Anthropic-backed client
+  (#1386) — see [LLM-client wiring](#llm-client-wiring) below for the
+  `ANTHROPIC_API_KEY` requirement that gates non-dry-run `--catalog`
+  ingest on deployed backplanes.
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
@@ -90,6 +93,70 @@ All T1–T8 substrate work merged to `main` before T9 (#409); the
 pipeline is shipped and ready for per-G3.x consumer Initiatives
 to drive ingestion against their target vendor surfaces.
 
+### Catalog-driven REST ingest (G0.14-T9 / #1150)
+
+`POST /api/v1/connectors/ingest` accepts a second request shape
+beyond the explicit-quadruple `(product, version, impl_id, specs[])`:
+a body of `{"catalog_entry": "<product>/<version>"}` resolves the
+catalog entry server-side (`load_catalog().get(product, version)`)
+and routes through the same `_run_ingest_with_http_mapping` path as
+if the caller had supplied the resolved quadruple. The two shapes
+are mutually exclusive — a `@model_validator(mode="after")` on
+`IngestRequest` rejects mixed bodies with `catalog_entry_conflict`
+(422) and empty bodies with `ingest_request_underspecified` (422)
+per the T11 [error-message-shape](error-message-shape.md) convention.
+
+Why server-side: a REST-native agent runtime (no shell-out to the
+CLI) needs an actionable REST surface that mirrors the discoverable
+`GET /api/v1/connectors/catalog` shape. Before #1150, only the CLI
+could resolve a catalog entry; the REST endpoint required the
+already-resolved quadruple. Moving the resolver server-side means
+the CLI's `--catalog` flag is now a thin shell that POSTs the
+catalog-driven body shape directly — one canonical resolution
+path, no client-side catalog cache to drift against the server's
+package data.
+
+The four pre-fetch catalog-side validation outcomes
+(`catalog_entry_malformed`, `catalog_entry_not_found`,
+`catalog_entry_typed_connector`, `catalog_entry_templated_upstream`)
+ship through `build_catalog_entry_*_detail` helpers in
+`error_envelopes.py` so the REST 422 envelope can't drift from any
+future MCP equivalent (same shared-builder pattern G0.9.1-T5 / #777
+used for `VersionMismatchError`).
+
+The fifth catalog-side outcome surfaces at fetch time:
+`catalog_entry_upstream_not_spec` (G0.15-T2 / #1211). The catalog's
+`vmware/9.0` and `sddc-manager/9.0` upstream URLs point at Broadcom
+Developer Portal landing pages -- HTML, not raw OpenAPI YAML/JSON --
+so the route's `httpx.get` succeeds with a 2xx response whose
+`Content-Type` is `text/html`. Before #1211 the bytes fell through to
+the YAML decoder and surfaced as `could not decode spec: while
+scanning for the next token found character that cannot start any
+token in '<file>', line 33, column 1` (HTML doctype at line 1,
+opening tags around line 33) -- a true statement about the bytes but
+a useless one for the operator. `_load_spec_bytes` in `openapi.py`
+now inspects `Content-Type` against an allow-list
+(`application/json`, `application/yaml`,
+`application/x-yaml`, `text/yaml`, `text/x-yaml`, `text/plain` for
+`raw.githubusercontent.com` mirrors) and raises
+`UpstreamNotSpecError` -- caught in the route and mapped to HTTP 422
+with the `build_catalog_entry_upstream_not_spec_detail` envelope
+(catalog reference, upstream URL, Content-Type, remediation: fetch
+the spec manually, pass via the explicit-quadruple shape).
+Explicit-quadruple requests that hit the same trap get the bare
+`build_upstream_not_spec_detail` envelope without the
+`catalog_entry` field.
+
+The catalog's `notes` on the two affected entries carry the
+"HTML-portal upstream; manual ingest required" warning, mirroring
+the `harbor/2.x` Swagger-2.0 precedent. The only other
+`spec_info_version: null` catalog entries (`nsx/4.2`, `vault/1.x`,
+`k8s/1.x`, `bind9/9.x`) refuse the catalog-driven shape earlier --
+NSX via `catalog_entry_templated_upstream` (the URL is FQDN-templated),
+the three typed connectors via `catalog_entry_typed_connector`
+(`upstream: null`) -- so they never reach the fetch path that
+`UpstreamNotSpecError` guards.
+
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
 groups them; T4 gates dispatchability behind operator review; T6
@@ -144,12 +211,22 @@ enable workflow over the T6 REST routes.
 
 ### T7 (admin MCP tools) at a glance
 
-`backend/src/meho_backplane/mcp/tools/connector_admin.py` registers
-seven MCP tools at module import:
+The admin MCP tools register at module import across two files, split
+by responsibility so neither grows past the code-quality file-size
+budget:
+
+* `backend/src/meho_backplane/mcp/tools/connector_ingest.py` — the
+  two ingest-pipeline tools (`ingest` + `ingest_status`).
+* `backend/src/meho_backplane/mcp/tools/connector_admin.py` — the six
+  review / edit / state-machine tools.
+* `backend/src/meho_backplane/mcp/tools/_connector_shared.py` — the
+  `connector_id` / `tenant_id` schema snippets, op-class strings, and
+  the JSON-safe serialiser both tool modules import.
 
 | Tool | Required role | Wraps |
 |------|---------------|-------|
-| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
+| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` (+ `IngestJobRegistry` on async) |
+| `meho.connector.ingest_status` | `operator` | `IngestJobRegistry.get()` |
 | `meho.connector.list` | `operator` | `list_ingested_connectors()` |
 | `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
 | `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
@@ -182,16 +259,58 @@ arguments` key-presence checks so omitted fields never reach
 indistinguishable from an omission with `arguments.get(...)`). Only
 fields the operator explicitly named are forwarded.
 
-The `ingest` handler additionally maps `VersionMismatchError` and
-`UncoveredVersionLabel` to JSON-RPC `-32602 Invalid Params` with
-the structured detail on `error.data` (G0.9.1-T5 #777). Both
-exceptions describe caller-input mistakes — the operator's `version`
-label disagrees with the supplied spec, or falls outside every
-registered class's advertised range — so `-32602` is the right code
-(not `-32603 Internal Error`, which the pre-fix generic catch-all
-emitted). The structured `data` payload is built by the shared
-helpers in `operations/ingest/error_envelopes.py` so the REST 422
-detail and the MCP `error.data` member share one source of truth.
+**Async offload on the MCP path (G3.5-T2 #1531).** `meho.connector.ingest`
+carries the same #1303 async-202 offload the REST route has: with
+`async=true` (and `dry_run=false`) the handler creates a job row in the
+shared `IngestJobRegistry`, fires the pipeline off the request via
+`asyncio.create_task`, and returns an `IngestJobHandle` immediately —
+well inside the agent's tool-call deadline. The agent polls
+`meho.connector.ingest_status` with the returned `job_id` until the
+status is `succeeded` (carries the final ingestion + grouping counts),
+`degraded` (the pipeline ran but persisted nothing dispatchable —
+carries the counts **and** `error_class="ingested_not_dispatchable"` +
+`error`; see "Dispatchability postcondition" below), or `failed`
+(the pipeline raised — carries `error_class` + `error`). Because both surfaces
+share `get_job_registry()`, a run started over MCP is poll-able over
+the REST `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and
+vice versa. `dry_run=true` and `async` unset keep the inline shape —
+the pipeline runs on the request and the full `IngestResponse` returns
+synchronously (no regression for small-spec / CI callers). This
+parallels the `meho.agents.run` + `meho.agents.run_status` async
+precedent (#811).
+
+The `ingest` handler additionally maps **every typed `SpecError`
+sibling** to JSON-RPC `-32602 Invalid Params` with the structured
+detail on `error.data` **on the inline path**: `VersionMismatchError`
+and `UncoveredVersionLabel` (the G0.9.1-T5 #777 originals),
+`UpstreamNotSpecError`, `UnsupportedSpecError`, `InvalidSpecError`,
+`InvalidSchemaError`, `OpIdCollision`, and `LlmOutputInvalid` (#1534).
+Each describes a caller-input mistake — the operator's `version` label
+disagrees with the supplied spec, the URL served HTML instead of a
+spec, the document is the wrong OpenAPI flavour or structurally
+invalid, two ops collide on an `op_id`, or the grouping LLM returned
+invalid output — so `-32602` is the right code (not `-32603 Internal
+Error`). Before #1534 only the first two were caught here; the other
+six fell through to the dispatcher's generic `except Exception` and
+surfaced as a bare `-32603 "internal error: <ClassName>"` with the
+diagnostic message discarded — while the REST surface already attached
+the detail for all of them, so this closes the MCP↔REST asymmetry.
+(#1534's REST detail was still the bare `str(exc)` string for the
+five parser-family siblings; #1610 upgraded that 400 to the same
+structured envelopes, so both surfaces now ship the builders' dicts.)
+The structured `data` payload is built by the shared helpers in
+`operations/ingest/error_envelopes.py` (one `build_*_detail` per
+class) so the REST 4xx detail and the MCP `error.data` member share
+one source of truth; the MCP-side dispatch table that maps each class
+to its builder lives in `mcp/tools/_connector_shared.py`
+(`SPEC_ERROR_TYPES` + `raise_invalid_params_for_spec_error`), and the
+REST-side five-way 400 dispatch lives in
+`api/v1/connectors_ingest.py` (`_spec_error_http_exception`, #1610;
+the 422-mapped siblings keep their per-class `except` arms). On the
+**async** path the handle has already returned by the time the
+pipeline raises, so the same failures surface via `error` /
+`error_class` on the `ingest_status` poll response instead (the
+trade-off the REST async path also makes).
 
 ## Key types
 
@@ -265,6 +384,28 @@ subclass that adds the auth path. The shim makes the connector
 resolvable through the v2 registry so spec ingestion can proceed
 before the per-product Initiative work lands.
 
+Two operator-facing surfaces flag an unreplaced shim:
+
+* **Dispatch-time** (G0.23-T1 #1627) — the shim's
+  `NotImplementedError` maps to the structured
+  `connector_unsupported` error with
+  `extras.cause='unreplaced_auto_shim'` (see
+  `docs/codebase/error-message-shape.md`).
+* **Enable-time** (G0.23-T4 #1630) — `ReviewService.edit_op` with
+  `is_enabled=True` probes `resolved_auto_shim_class()` (same
+  module): a resolver replay against the op's `(product, version)`
+  label that returns the winning class's name when the production
+  tie-break ladder would still land on a `GenericRestConnector`
+  subclass. The PATCH `…/operations/{op_id}` route then returns 200
+  with `warnings=[{code='unreplaced_auto_shim', connector_class,
+  message}]` (it returned 204 before #1630), the
+  `meho.connector.edit_op` MCP tool mirrors the same `warnings`
+  list, and `meho connector edit-op --enable` prints
+  `warning (unreplaced_auto_shim): …` to stderr. Advisory only —
+  the flag is still set (a shim-backed op may be pre-enabled ahead
+  of its subclass landing), and resolver misses/ties fail soft to
+  "no warning" rather than blocking the write.
+
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
 G0.9-T9 (#741) pre-flight that the operator's `version` label is
@@ -301,12 +442,19 @@ the originating operator's identity); the same instance is reused
 across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
-chassis can lazy-resolve it; the default factory raises
-`LlmClientUnavailable` and the REST layer maps it onto HTTP 503. T5
-(#405) replaces the default with the production Anthropic-Messages-
-API adapter. The `embedding_service` parameter is the test seam to
-inject `AsyncMock` so unit tests don't pull the fastembed ONNX
-model from huggingface.co.
+chassis can lazy-resolve it; the fail-closed default factory raises
+`LlmClientUnavailable` and the REST layer maps it onto HTTP 503.
+FastAPI lifespan startup installs the production factory
+(`build_anthropic_ingest_llm_client`) via `set_llm_client_factory` (in
+`api/v1/connectors_ingest.py`), reusing `settings.anthropic_api_key`
+(#1386) — so a deploy with the key set groups for real, and a keyless
+deploy keeps the 503. See
+[LLM-client wiring](#llm-client-wiring)
+for the operator-facing framing and the resolver-routing follow-up.
+
+The `embedding_service` parameter is the test seam to inject
+`AsyncMock` so unit tests don't pull the fastembed ONNX model from
+huggingface.co.
 
 `ingest(..., dry_run=True)` short-circuits both the DB writes and
 the LLM call: parses every spec and returns the parser's
@@ -341,32 +489,117 @@ the major version surface as `VersionMismatchError` with
 `kind="multi_spec_inconsistent"`. Specs missing `info.version`
 entirely skip the check (older spec dialects keep ingesting).
 
+**Catalog-driven opt-in: `spec_info_versions_compatible` (G0.16-T5
+#1307).** Some catalog rows carry a `version` label that is
+semantically distinct from the spec's `info.version` (the GitHub
+REST catalog row's `version="3"` is the product-line label
+github.com calls the API; the live OpenAPI spec's `info.version`
+is `1.1.4`, regenerated daily on `rest-api-description/main`). For
+these rows the catalog declares a compatibility range
+(`spec_info_versions_compatible: ["1.x.x"]`); the catalog-entry
+resolver in `api/v1/connectors_ingest.py` passes it through to
+`IngestionPipelineService.ingest(spec_info_versions_compatible=...)`,
+which forwards it to `_validate_spec_versions`. Per-spec
+classification then bypasses the verbatim/major-band check for any
+spec whose `info.version` matches a pattern in the range, emitting
+`connector_ingest_version_label_decoupled` so the audit trail still
+records the decision. See
+[`docs/cross-repo/connector-catalog.md`](../cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible)
+for the field definition and pattern syntax.
+
+**Manual `--spec` opt-in: `IngestRequest.spec_info_versions_compatible`
+(T1 #1646).** The explicit-quadruple shape carries the same opt-in as
+an optional body field (`meho connector ingest
+--spec-info-versions-compatible <band>`, repeatable or comma-separated)
+so a self-versioning vendor spec ingests on the manual path too — no
+catalog row required. The motivating case
+(claude-rdc-hetzner-dc#1136): the version-stable vRLI `/api/v2`
+surface reports `info.version="v2"` while the seeded `VcfLogsConnector`
+label is `9.0`; ingesting under `--version 9.0
+--spec-info-versions-compatible 2.x` decouples the cross-check (`v2`
+normalizes to `2`, inside the `2.x` → `>=2,<3` band) while the
+class-range pre-flight stays green (`9.0` ∈ `>=9.0,<10.0`). The route
+folds the body field together with the catalog-resolved band into the
+single value it hands `IngestionPipelineService.ingest` — the two are
+mutually exclusive (`IngestRequest` rejects a body that sets both
+`catalog_entry` and `spec_info_versions_compatible` with
+`catalog_entry_conflict`). Each entry is a glob (`2.x` / `9.0.x`) or a
+PEP 440 specifier set (`>=2,<3`); the field validator rejects any other
+shape (a bare `v2`, a typo) at request-validation time, so the operator
+gets the diagnostic before any spec is fetched. Omitting the field
+keeps the historical strict check — the opt-in is explicit, never
+default.
+
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 
 The REST route at `POST /api/v1/connectors/ingest` and the MCP
-`meho.connector.ingest` tool both need to surface
-`VersionMismatchError` and `UncoveredVersionLabel` as caller-input
-validation errors carrying structured diagnostic detail (expected-
-vs-received versions, the list of advertised
-`supported_version_range` strings) so the operator — or the agent
-acting on the operator's behalf — can self-correct without re-
-prompting.
+`meho.connector.ingest` tool both need to surface the typed
+`SpecError` siblings as caller-input validation errors carrying
+structured diagnostic detail (expected-vs-received versions, the
+list of advertised `supported_version_range` strings, the detected
+content type, the colliding `op_id`s, the failing grouping pass)
+so the operator — or the agent acting on the operator's behalf —
+can self-correct without re-prompting. Each builder returns a stable
+snake-case `detail` classifier plus a `message` (`str(exc)`), and
+the type-specific machine-resolvable fields on top.
 
-* `build_version_mismatch_detail(exc)` — REST embeds the returned
-  dict in the `HTTPException(status_code=422).detail` field; MCP
-  embeds it in the JSON-RPC `error.data` member (spec §5.1).
-* `build_uncovered_version_label_detail(exc)` — MCP-only for now;
-  REST emits `str(exc)` for backward compatibility but can switch
-  to the structured builder later without changing the wire shape
-  in a non-additive way.
+The MCP inline path catches the full sibling set (the `except
+SPEC_ERROR_TYPES` arm in
+`meho_backplane.mcp.tools.connector_ingest`), and
+`raise_invalid_params_for_spec_error` (in
+`mcp/tools/_connector_shared.py`) dispatches each class to its
+builder before raising `McpInvalidParamsError(str(exc),
+data=detail)` — surfaced as JSON-RPC `-32602` with the detail on
+`error.data` (spec §5.1). The REST sync route catches the five
+parser-family siblings in one `except` arm and dispatches them
+through `_spec_error_http_exception` (in
+`api/v1/connectors_ingest.py`, #1610) onto an
+`HTTPException(400, detail=<builder dict>)` — the same envelopes on
+the `detail` key; the 422-mapped siblings (`VersionMismatchError`,
+`UncoveredVersionLabel`, `UpstreamNotSpecError`) keep their earlier
+per-class `except` arms. The eight siblings and their builders:
 
-Pre-G0.9.1-T5 (#777) the MCP path had no typed handling for either
-exception — both fell through to the dispatcher's generic
-`except Exception` arm in `meho_backplane.mcp.server`, which
-surfaced `-32603 "internal error: VersionMismatchError"` and
-discarded the (already-detailed) exception message. The shared
+* `build_version_mismatch_detail(exc)` — `VersionMismatchError`.
+  REST embeds the returned dict in the
+  `HTTPException(status_code=422).detail` field; MCP embeds it in
+  the JSON-RPC `error.data` member.
+* `build_uncovered_version_label_detail(exc)` —
+  `UncoveredVersionLabel`. MCP carries the structured detail; REST
+  emits `str(exc)` for backward compatibility but can switch to the
+  structured builder later without changing the wire shape in a
+  non-additive way.
+* `build_upstream_not_spec_detail(...)` — `UpstreamNotSpecError`
+  (the #1211 builder, explicit-quadruple variant for the always-
+  explicit MCP path). Names the upstream URL and the detected
+  `content_type` that wasn't a spec (e.g. an HTML login page).
+* `build_unsupported_spec_detail(exc)` — `UnsupportedSpecError`
+  (wrong OpenAPI flavour / unsupported dialect).
+* `build_invalid_spec_detail(exc)` — `InvalidSpecError`
+  (structurally invalid root document).
+* `build_invalid_schema_detail(exc)` — `InvalidSchemaError`
+  (a broken `$ref` or invalid embedded JSON Schema — the narrower
+  domain, dispatched before `InvalidSpecError`).
+* `build_op_id_collision_detail(exc)` — `OpIdCollision`. Adds the
+  machine-resolvable colliding `op_id`s plus `product` / `version`
+  / `impl_id` and the existing-vs-incoming `spec_source`.
+* `build_llm_output_invalid_detail(exc)` — `LlmOutputInvalid`.
+  Surfaces `pass_name` (`propose_groups` / `assign_ops`) and
+  deliberately omits the verbatim `raw_output` (debug-log material,
+  not operator-facing).
+
+The first two are the G0.9.1-T5 (#777) originals; the remaining six
+complete the pattern in #1534. Pre-#1534 the MCP path caught only
+`VersionMismatchError` / `UncoveredVersionLabel` — the other six
+fell through to the dispatcher's generic `except Exception` arm in
+`meho_backplane.mcp.server`, surfaced `-32603 "internal error:
+<ClassName>"`, and discarded the (already-detailed) exception
+message while REST had attached its detail all along. The shared
 builders sit in `operations/ingest/error_envelopes.py` so the REST
-422 body and the MCP `-32602` `data` member can't drift again.
+4xx body and the MCP `-32602` `data` member stay one source of
+truth, and the `SPEC_ERROR_TYPES` tuple co-located with
+`raise_invalid_params_for_spec_error` keeps the `except` target and
+the isinstance dispatch in lockstep — adding a sibling means
+touching both, so the two surfaces can't drift.
 
 ### `list_ingested_connectors()` (`ingest/list_connectors.py`)
 
@@ -391,11 +624,24 @@ The renamer "list_*ingested*_connectors" is now misleading and is a
 follow-up cleanup; the function lists every connector with at least
 one visible :class:`OperationGroup` row.
 
+Since G0.23-T5 (#1636) the op rollup also splits enabled-vs-total,
+mirroring the group rollup's `CASE WHEN` technique:
+`enabled_operation_count` counts the rows whose per-op `is_enabled`
+flag is set (the dispatchable subset) while `operation_count` stays
+the total over the same unfiltered `source_kind` universe. The two
+`enabled_*` fields count different axes — `enabled_group_count`
+buckets groups by `review_status`; `enabled_operation_count` reads
+the per-op dispatchability bit — so an operator (or an LLM browsing
+the catalog) can tell "~2,211 ops ingested" from "the fraction
+actually callable" on a `vmware-rest-9.0` row without drilling into
+`/review`.
+
 Class-side registrations from the v2 connector registry that have
 no DB-side state yet (T5 #733 — "State 0.5" connectors registered
 via `register_connector_v2` but without any rows in
 `operation_group` / `endpoint_descriptor`) are unioned into the
-response with `group_count: 0, operation_count: 0` and
+response with every count zeroed (`group_count: 0,
+operation_count: 0, enabled_operation_count: 0`) and
 `state: "registered"` so operators see `connector registered ⇒
 visible in list` but the agent knows the dispatcher won't resolve
 calls against them yet. Class-only rows are always built-in
@@ -445,6 +691,153 @@ Regression test:
 asserts the contract over a seeded DB that includes a stale-rename
 row and a class-side-only opless connector.
 
+#### `next_step` workflow-completion hint (G0.13-T3 / #1133, G0.18-T8 / #1361)
+
+`state="registered"` rows carry a `next_step: NextStep` object that
+points at the verb that closes the workflow gap surfaced by the
+v0.6.0 RDC dogfood (signal 11: half-registered connectors fail
+lookup with no in-product hint about what verb closes the workflow).
+`state="ingested"` rows set `next_step` to `null` because the
+dispatcher already resolves operations against them — there is no
+operator action remaining.
+
+The hint comes from `_next_step_for_registered` in `list_connectors.py`.
+It consults the connector-spec catalog (`ingest/catalog.py`, #743) and
+branches on the catalog entry's declarative
+`catalog_ingest: "supported" | "spec-only"` field (default
+`"supported"`; the VCF-family rows opt into `"spec-only"` —
+G0.18-T8 / #1361, RDC #789 N8). Three branches:
+
+* **Catalog hit, `catalog_ingest="supported"`** — verb points at
+  `meho connector ingest --catalog <product>/<version>`. Rationale
+  says the spec is available in the catalog. The CLI's
+  `meho connector ingest --catalog ...` form (G0.7-T5 / #405) drives
+  the rest of the workflow.
+* **Catalog hit, `catalog_ingest="spec-only"`** — verb points at the
+  explicit-quadruple manual-mode form `meho connector ingest
+  --product <p> --version <v> --impl <i> --spec <concrete-openapi-uri>`
+  using the catalog's native `(product, version, impl_id)` triple.
+  Rationale calls out that the catalog row exists but its upstream
+  is HTML-portal or fqdn-templated, so a `--catalog` POST would
+  422 on the route's `catalog_entry_upstream_not_spec` /
+  `catalog_entry_templated_upstream` branches — the operator must
+  fetch the raw OpenAPI spec from the appliance themselves. The
+  three VCF-family rows (`vmware/9.0`, `sddc-manager/9.0`, `nsx/4.2`)
+  ride this branch; the previous "spec available in catalog; run
+  ingest" hint over-promised for all three. The triple matches what
+  the operator would have used after a successful `--catalog`
+  resolve, so the verb still copies-and-runs once the operator
+  sources the spec URI.
+* **Catalog miss** — verb points at `meho connector ingest --product
+  <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
+  `<p>` is the **registry** product (the spelling the connector class
+  registers under, e.g. `vcf-logs`), not the parser-derived short one.
+  Rationale calls out the missing catalog entry so the operator knows
+  they need to source the OpenAPI spec themselves. Manual mode is the
+  same path G0.7-T5 already supports for one-off / not-yet-curated specs
+  (see `ingest.go`'s mode dispatch). The registry product is the right
+  spelling because the ingest write path keys two safety steps on the
+  supplied `--product` — `check_version_covered_by_registered_class`
+  (the version-coverage pre-flight) and `ensure_connector_class_registered`
+  — so the registry product is what lets them find the real
+  `VcfLogsConnector`; the short `vrli` would miss it, synthesise a
+  redundant `AutoShim_vrli_*`, and make the coverage pre-flight vacuous.
+  Register-time row reconciliation then persists the rows under the
+  dispatch product regardless (see "Product-slug reconciliation" below),
+  so the verb still round-trips to a dispatchable ingest. (Emitting the
+  registry product while the row advertised `product="vrli"` *was* the
+  claude-rdc-hetzner-dc#1136 false-success **before** that reconciliation
+  existed — the reconciliation is what closes it, not switching the verb
+  to the short product.)
+
+The **catalog lookup** uses the **registry's** `(product, version)`,
+not the parser-derived shortening. The SDDC case is canonical: the
+catalog stores `product="sddc-manager"`, the listing emits
+`product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
+because that is what `meho connector ingest --catalog ...` resolves
+against. Looking up the parsed product would always miss for SDDC. Both
+the catalog-hit and catalog-miss branches emit a registry-side
+`--product` (the catalog-native triple, or the registry product) so the
+operator's ingest matches the registered class; register-time row
+reconciliation is what keeps the resulting connector dispatchable.
+
+#### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
+
+The VCF-family connectors register their class under a *long* product
+(`VcfLogsConnector.product = "vcf-logs"`) while the dispatch/query
+surface derives a *short* product from the connector_id
+(`parse_connector_id("vrli-rest-9.0") -> "vrli"`) — the same long↔short
+split SDDC carries (`sddc-manager` vs `sddc`), and the six splits are
+`hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
+`vcf-fleet/fleet`, `vcf-logs/vrli`, `vcf-operations/vrops`.
+
+A manual `--spec` ingest persists `endpoint_descriptor` /
+`operation_group` rows keyed on the **operator-supplied** product, but
+the dispatch/query surface (`connector_exists` /
+`search_operations` / `list_operation_groups`) keys on the short,
+parser-derived product. Ingesting under the long product therefore
+landed rows the dispatcher never queried — the listing's round-trip
+integrity gate dropped them and the catalog reported
+`registered, 0 ops` even though the rows existed.
+
+`register_ingested_operations` reconciles this: it normalises the row
+product to the dispatch-canonical spelling
+(`_reconciled_row_product` → `dispatch_product` in
+`operations/_lookup.py`) before persisting descriptors, and the
+pipeline's grouping pass keys on the same spelling so descriptors and
+groups agree. The version-coverage pre-flight and the auto-shim
+registration deliberately stay on the **supplied** (registry) product
+so the coverage check finds the real `VcfLogsConnector` class and no
+redundant shim is synthesised. For aligned connectors
+(`vmware`/`vmware-rest`) the normalisation is a no-op. Regression
+coverage:
+`tests/test_operations_register_ingested.py::test_ingest_under_registry_product_persists_dispatchable_rows`
+(parametrised over all six splits) and
+`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`
+(the verb round-trip).
+
+#### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
+
+A background pipeline coroutine that returns without raising is **not**
+sufficient evidence the ingest succeeded: it can persist rows under a
+mis-keyed product (above), leaving nothing dispatchable. `run_ingest_job`
+(`ingest/jobs.py`) therefore consults a `dispatchability_check` closure
+(the route's `connector_exists` probe under the parser-derived natural
+key, scoped to the originating tenant) before flipping the job to
+`succeeded`. The job ends `degraded` carrying
+`error_class="ingested_not_dispatchable"` and the counts that landed
+when the run is genuinely non-dispatchable — either `inserted_count == 0`
+on a connector the probe cannot resolve (an empty/first-run spec), or
+`inserted_count > 0` yet the probe returns `False` (the mis-keyed-product
+case). Crucially, the zero-insert branch is **not** unconditional: a
+benign idempotent re-run skips every op (`_upsert.upsert_one_operation`
+returns `"skipped"`, so `inserted_count == 0`) on an already-dispatchable
+connector, and the probe keeps that `succeeded` rather than flipping a
+no-op re-run into a non-zero CLI failure. A probe that *raises* fails
+open to `succeeded` (a transient DB blip must not strand or degrade a
+completed pipeline). Regression coverage:
+`tests/test_operations_ingest_jobs.py`.
+
+If `load_catalog()` raises `CatalogError` at listing time (only
+possible mid-test-monkeypatch or mid-reload — startup parse failures
+crash the lifespan), the helper degrades to the manual-mode
+rationale rather than 500ing the route. A `next_step_catalog_load_failed`
+log line is emitted so the observability trail flags the degraded
+path.
+
+Regression tests:
+`tests/test_api_v1_connectors_ingest.py::test_list_registered_row_carries_catalog_next_step_hint`
+(catalog-hit / `supported` branch incl. SDDC's registry-vs-parsed
+asymmetry),
+`::test_list_registered_row_spec_only_catalog_entry_points_at_spec`
+(catalog-hit / `spec-only` branch — pins the explicit-quadruple
+`--spec` verb + the upstream-shape rationale for VCF-family rows;
+G0.18-T8 / #1361),
+`::test_list_registered_row_without_catalog_entry_points_at_manual_mode`
+(catalog-miss branch), and
+`::test_list_ingested_row_omits_next_step_hint`
+(ingested-row contract: field present, value `null`).
+
 ### API request / response models (`ingest/api_schemas.py`)
 
 The shared Pydantic-v2 surface T5 (CLI), T6 (REST), and T7 (MCP) all
@@ -461,6 +854,20 @@ consume so the wire contract is defined once:
   for DB-backed rows the dispatcher can resolve and `"registered"`
   for class-side-only rows the dispatcher cannot resolve yet — see
   the listing-integrity contract section above.
+  `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
+  completion hint: a `NextStep` object (verb + rationale) on
+  `state="registered"` rows, `null` on `state="ingested"` rows — see
+  the next-step hint section above.
+  `ConnectorListItem.enabled_operation_count` (G0.23-T5 / #1636)
+  splits the op rollup enabled-vs-total next to the existing
+  `operation_count` — naming mirrors the `*_group_count` family
+  (unprefixed = total, `enabled_`-prefixed = subset), kept additive
+  so existing `operation_count` consumers don't break.
+* `NextStep` (G0.13-T3 / #1133) — `{verb, rationale}` pair surfaced
+  on `state="registered"` rows. `verb` is a copy/pasteable
+  `meho connector ingest ...` invocation; `rationale` is one
+  sentence explaining why that verb is the right next step
+  (catalog-hit vs catalog-miss).
 * `EditGroupBody` / `EditOpBody` — PATCH bodies for the per-group
   and per-op edit verbs. Pydantic enforces the bounded enum for
   `safety_level` and the empty-body rejection lands as a service-
@@ -477,16 +884,40 @@ to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
 (`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
 /enable`, `POST /disable`) require `tenant_admin`. Tenant scoping
 derives from the JWT — there is no body / query parameter that can
-override the operator's tenant. Cross-tenant probes surface as 404
-`ConnectorNotFoundError`, not 403 — same conflation `ReviewService`
-uses to keep the operator-facing failure surface uniform.
+override the operator's tenant.
+
+Both read paths apply the same "operator's-tenant rows + built-ins
+(`tenant_id IS NULL`)" scope: the listing query does it via a
+single `WHERE tenant_id IS NULL OR tenant_id = X` clause, and
+`ReviewService.get_review_payload` mirrors it through a two-pass
+lookup (own-tenant probe first, then built-in fallback when the
+caller's tenant_id matches `operator.tenant_id`). G0.13-T5 (#1135)
+landed the review-route fallback after the v0.6.0 RDC dogfood
+flagged that every global connector in the catalog returned 404
+on review even though the listing surfaced them. Cross-tenant
+probes (`tenant_id` ≠ operator's own) still surface as 404
+`ConnectorNotFoundError` — same conflation `ReviewService` uses
+to keep the operator-facing failure surface uniform and stop
+status-code differential from enumerating other tenants.
+
+The PATCH editing routes (`/groups`, `/operations`) deliberately
+keep their single-pass lookup against the operator's `tenant_id`:
+"do tenant_admins get to edit built-ins?" is a policy choice
+distinct from the read-visibility bug, and the route gate is
+`tenant_admin`-only — built-in writes already have an explicit
+MCP / CLI affordance (`ReviewService` accepts `tenant_id=None`
+under the `TENANT_ADMIN` role).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
 round-trip through URL routing intact. The route module's
-`set_llm_client_factory(factory)` helper lets the production
-bootstrap (G0.7-T5) install the Anthropic adapter and lets tests
-inject deterministic stubs.
+`set_llm_client_factory(factory)` helper is the wire-up seam the
+FastAPI lifespan startup calls to install the production
+:class:`LlmClient` adapter (`build_anthropic_ingest_llm_client`,
+#1386); tests call it too with a deterministic stub. The route reads
+the active factory via the `get_llm_client_factory` dependency — see
+[LLM-client wiring](#llm-client-wiring)
+for the operator-facing framing.
 
 ### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
 
@@ -506,11 +937,55 @@ version-gate steps but returns the spec's `info.version` string
 pipeline can fail the spec-vs-label check in milliseconds rather
 than after spending CPU on a 2,000-op spec walk.
 
+## Security: SSRF and local-file guard (G0.16-T8, #95)
+
+`_load_spec_bytes` (the fetch sink shared by `parse_openapi` and
+`read_spec_info_version`) enforces two invariants before any network
+activity:
+
+1. **Scheme allowlist.** Only `https://` is accepted on the
+   network-facing ingest path. `http://`, `file://`, and bare filesystem
+   paths are rejected with `InvalidSpecError`. The restriction covers both
+   the REST `POST /api/v1/connectors/ingest` and the MCP
+   `meho.connector.ingest` tool, both of which are `TENANT_ADMIN`-gated.
+
+2. **Pre-connect destination guard (`_assert_fetchable_remote_url`).** Before
+   opening any socket, the hostname is resolved with `socket.getaddrinfo`
+   and every returned address is checked against the private / loopback /
+   link-local / ULA / reserved ranges using `ipaddress`. Any candidate IP in
+   `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+   `169.254.0.0/16` (cloud metadata), `::1`, `fc00::/7`, or `fe80::/10` is
+   rejected before the transport opens a connection.
+
+3. **Per-hop redirect re-validation.** `_fetch_spec_bytes` (invoked by
+   `_load_spec_bytes` when no content is uploaded) uses
+   `follow_redirects=False`, resolves each `Location` against the current
+   URL (`urljoin`, so relative hops aren't wrongly rejected), and calls
+   `_assert_fetchable_remote_url` on the resolved target before issuing the
+   next request. A redirect from a public host to a private IP is rejected
+   at the hop — the private-target socket is never opened.
+
+4. **Response size cap.** The response body is streamed and rejected if it
+   exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
+   internal endpoint from exhausting pod memory.
+
+5. **Oracle-free error messages.** Error messages never echo the
+   operator-supplied URI or OS-level error text. Error text is
+   intentionally terse and path-free.
+
+Pre-#95: `http`/`https` URIs were fetched with `follow_redirects=True` and
+no IP check; `file://` URIs and bare paths were read via `Path(...).read_bytes()`;
+OS errors were echoed verbatim. The fix removes the filesystem branch from this
+network-facing function entirely.
+
 ## Control flow
 
 ```text
 parse_openapi
-├─ _load_spec_bytes        # file:// or http(s)://; httpx with a 30s timeout
+├─ _load_spec_bytes        # CLI-uploaded content (capped) OR https:// fetch
+│  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
+│  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
+│  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
 ├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations
@@ -529,6 +1004,16 @@ parameter_schema is self-contained enough for the dispatcher's
 JSON-Schema validator to validate the immediate parameter shape;
 deeper schema dereferencing (chasing nested `$ref`s) is the
 dispatcher's concern (G0.6-T5 + T2's tracking of `components.schemas`).
+
+The four supported component buckets are: `#/components/schemas/*`,
+`#/components/parameters/*` (vi-json.yaml's shared `moId`),
+`#/components/responses/*` (the GitHub REST spec's 1.9k shared
+response envelopes — `accepted`, `not_found`, `validation_failed`
+etc), and `#/components/requestBodies/*` (parity bucket for future
+vendor specs; not yet used in the v0.x catalogue). Each opts in via
+a separate kwarg on `resolve_shallow_ref`; `parse_openapi` threads
+all four dicts uniformly so the full pipeline never trips the
+opt-out branch.
 
 ### T2 control flow
 
@@ -634,8 +1119,171 @@ pulled in. The parser tolerates partial / underspecified docs and
 relies on T4's review queue to surface ambiguities to a human before
 operations go live.
 
+## Async ingest mode (G0.16-T1 / #1303; MCP carry G3.5-T2 / #1531)
+
+`POST /api/v1/connectors/ingest` defaults to `async=true`: the route
+fires the pipeline off the request thread via `asyncio.create_task`
+and returns `202 Accepted` + a job handle:
+
+```json
+{
+  "job_id": "0c4b7e8f-...",
+  "status": "running",
+  "poll_url": "/api/v1/connectors/ingest/jobs/0c4b7e8f-..."
+}
+```
+
+Operators poll the handle for completion:
+
+```text
+GET /api/v1/connectors/ingest/jobs/{job_id}
+→ 200 + IngestJobStatusResponse
+```
+
+The polling response carries the originating request descriptors,
+lifecycle timestamps, and -- on completion -- one of:
+
+* `status="succeeded"` + populated `ingestion` (+ optional `grouping`)
+* `status="failed"` + `error_class` + capped `error` message
+
+`status="running"` leaves both clusters `None`. Clients branch on
+`status` rather than checking presence.
+
+**Why async by default.** The OpenAPI ingest path is the escape
+hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
+operators reach for it when the curated daily-driver doesn't cover
+what they need and they're willing to handle vendor-shape responses.
+Real-world vendor specs are large: `vmware/9.0.0.0` is 7.55 MB / 1275
+typed REST ops, and a synchronous ingest call blocks the event loop
+for ~30 s in the register + LLM-grouping phases -- past the kubelet
+liveness probe deadline (default 25 s). RDC #771 Finding 20 caught
+the pod restart in production; G0.16-T1 (#1303) replaced the
+synchronous default with the 202 + job-handle shape so an operator
+reaching for the escape hatch doesn't kill the pod.
+
+**`dry_run=true` stays synchronous.** The parse-only leg is the
+fast path (~30 s walltime for the same vmware spec, but with no DB
+or LLM hops and steady event-loop yields between operations). It
+returns the legacy `IngestResponse` at 200 with `grouping=None`.
+
+**`async=false` keeps the legacy blocking shape.** Small-spec
+callers (CI tests with ≤ 100-op fixtures, ad-hoc shell scripts, the
+v0.8.x clients that pre-date the async shape) opt into the
+synchronous path by setting `async=false` in the request body. The
+domain-error → HTTP-status mapping documented at the route
+(`UpstreamNotSpecError` → 422, `VersionMismatchError` → 422,
+`LlmClientUnavailable` → 503, etc.) is only available on this path;
+the async path surfaces those failures via `error_class` on the
+polling response instead.
+
+**Job storage is process-local.** The `IngestJobRegistry` keeps
+in-memory rows in an `OrderedDict` behind an `asyncio.Lock`,
+bounded at 256 terminal jobs (oldest evicted first; live jobs
+exempt). A pod restart blows the registry away on purpose -- a job
+whose pod died was never going to finish. Durable cross-restart
+jobs are a v0.9 follow-up (the same migration that lands
+operator-cancellable jobs).
+
+**The Go CLI consumes the handle (G0.22-T4 / #1609).** `meho
+connector ingest` (`cli/internal/cmd/connector/ingest.go`) treats
+202 as a first-class success: by default it polls the job to a
+terminal status every 2s and renders the same summary / `--json`
+`IngestResponse` shape the sync 200 path renders, so script
+consumers see one stable success document regardless of how the
+backplane ran the pipeline; `--no-wait` exits 0 with the handle
+instead. A failed job renders `error_class` + the capped `error`
+as `unexpected_response` (exit 4); a 404 on the poll (pod restart /
+eviction) tells the operator to check `meho connector list`
+**before** re-running ingest. Pre-#1609 CLIs rendered the 202
+itself as a fatal `unexpected_response`, which baited operators
+into retrying and double-ingesting. `--dry-run` is unaffected
+(always sync, see above), and `--no-wait --dry-run` is rejected
+client-side.
+
+**The MCP surface shares the offload (G3.5-T2 / #1531).** The
+`meho.connector.ingest` admin MCP tool carries the same async shape:
+`async=true` (with `dry_run=false`) creates a job in the **same**
+`IngestJobRegistry` (via `get_job_registry()`), fires the pipeline off
+the request with `asyncio.create_task`, and returns an `IngestJobHandle`
+inside the agent's tool-call deadline; the agent polls
+`meho.connector.ingest_status` (which reads the registry through the
+same accessor) until the job is `succeeded` / `failed`. Because both
+surfaces resolve the one process-wide registry, a job started over MCP
+is poll-able over `GET /api/v1/connectors/ingest/jobs/{job_id}` and
+vice versa. The MCP path defaults `async=false` (inline) so existing
+small-spec / CI callers are unaffected; it is the agent-facing surface
+that real vendor specs blocked past the tool-call timeout before this
+carry. See the "T7 (admin MCP tools) at a glance" section above for
+the per-tool wiring + the inline-vs-async error-surface split.
+
+## LLM-client wiring
+
+The grouping pass (T3, `run_llm_grouping` in
+`operations/ingest/llm_groups.py`) needs an injected `LlmClient`
+Protocol implementation. The chassis exposes the wire-up seam
+(`set_llm_client_factory` in
+[`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py))
+and a fail-closed default (`default_llm_client_factory` in
+[`operations/ingest/pipeline.py`](../../backend/src/meho_backplane/operations/ingest/pipeline.py)).
+As of #1386, **FastAPI lifespan startup wires a production
+`LlmClient`**: `build_anthropic_ingest_llm_client` (in
+[`operations/ingest/anthropic_client.py`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py))
+reuses `settings.anthropic_api_key` — the same key the agent runtime
+reads — and the same `_split_model_id(settings.agent_default_model)`
+prefix handling, talking to the Anthropic Messages API directly (the
+one-shot `system + user -> raw JSON` shape the grouping pass wants,
+rather than the pydantic-ai `Model` the agent loop uses).
+
+Operationally this means non-dry-run ingest of an un-grouped
+connector — whether via the CLI (`meho connector ingest --catalog
+<product>/<version>`), the REST route
+(`POST /api/v1/connectors/ingest`), or the admin MCP tool
+(`meho.connector.ingest`) — **groups successfully on a deploy with
+`ANTHROPIC_API_KEY` set**. All three surfaces read the same
+lifespan-wired factory: the REST route via the
+`get_llm_client_factory` dependency, the MCP tool by calling
+`get_llm_client_factory()` directly (it does not pin the default), and
+the CLI through the REST route. A deploy that configured **no key**
+keeps the fail-closed posture: `build_anthropic_ingest_llm_client`
+raises `LlmClientUnavailable`, which the route maps onto HTTP 503 and
+the CLI / MCP surfaces render as their own operator-facing variant.
+CI / unit tests inject a deterministic stub via
+`IngestionPipelineService(..., llm_client_factory=...)` (or
+`set_llm_client_factory(...)`) so the grouping pass stays hermetic.
+
+The `composite_l2_missing` error envelope
+(`operations/_errors.py:result_composite_l2_missing`) surfaces a
+catalog-ingest command as the escape hatch from a missing L2 sub-op;
+that escape hatch now completes the ingest when the key is set, and
+its envelope text names the `ANTHROPIC_API_KEY` requirement (and the
+503 a keyless deploy still gets) so operators know the prerequisite.
+
+**Out of scope (#1386).** The grouping pass talks to Anthropic
+directly rather than routing through the G11.5 per-tenant model
+resolver (Bedrock / vLLM / VCF PAIF, egress-aware). Ingest grouping is
+a build-time operator action with no per-tenant tier or egress context
+today, and the resolver returns pydantic-ai `Model`s shaped for the
+agent tool-use loop, not the `generate_json` seam — so routing ingest
+through it is a separate, larger change. A keyless air-gapped deploy
+(agent runtime on an on-prem backend, no Anthropic key) therefore still
+gets the 503 on `--catalog` grouping until that work lands.
+
 ## Known issues
 
+* **`--catalog` ingest grouping requires `ANTHROPIC_API_KEY`.** The
+  grouping pass reuses the agent runtime's Anthropic key (wired at
+  lifespan startup, #1386 — see
+  [LLM-client wiring](#llm-client-wiring) above). A deploy that set no
+  key fails closed with 503 / `LlmClientUnavailable`. Air-gapped
+  deploys that route the agent runtime to an on-prem backend (no
+  Anthropic key) cannot group spec ingests until grouping is routed
+  through the G11.5 resolver — tracked as the out-of-scope follow-up
+  noted above.
+* **Async-mode jobs don't survive pod restart.** The G0.16-T1
+  `IngestJobRegistry` lives in process memory. A pod restart
+  during a long-running ingest leaves the operator's client
+  polling 404 on a job that won't resume. v0.9 follow-up: persist
+  job rows in Postgres and resume on pod startup.
 * **Parameter name + location collision.** When an op has two params
   with the same `name` in different `in` locations (e.g. `cluster` as
   path **and** as query), the flat-object representation loses one.
@@ -643,16 +1291,35 @@ operations go live.
   never use this combination. T2 will log a warning if it spots a
   collision after upsert.
 * **Other-bucket `$ref` rejected.** `$ref:
-  "#/components/requestBodies/X"`, `$ref:
-  "#/components/responses/X"`, `$ref: "#/components/headers/X"`
-  raise `UnsupportedSpecError`. Not used by any currently-targeted
-  vendor spec (vcenter.yaml, vi-json.yaml, NSX, SDDC Manager);
-  defer until a real spec needs them. (T11 / #501 landed the
-  `#/components/parameters/*` resolver — see the T8 paragraph
-  above and `docs/architecture/spec-ingestion.md` §T1.)
+  "#/components/headers/X"`, `$ref: "#/components/securitySchemes/X"`,
+  `$ref: "#/components/links/X"`, `$ref:
+  "#/components/callbacks/X"`, and `$ref: "#/components/examples/X"`
+  raise `UnsupportedSpecError` when they appear in a parser-traversed
+  slot. None of these buckets are used by a currently-targeted vendor
+  spec in a parser-traversed position (most appear inside
+  `responses.<code>.headers.<name>` or `content.<media>.examples`,
+  which the parser doesn't walk); defer until a real spec needs them.
+  G3.11-T7 #1241 landed the `#/components/responses/*` and
+  `#/components/requestBodies/*` resolvers (unblocked the GitHub REST
+  spec's live ingest); T11 #501 landed the
+  `#/components/parameters/*` resolver — see the T8 paragraph above
+  and `docs/architecture/spec-ingestion.md` §T1.
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
+* **Swagger 2.0 rejected with an actionable remedy.** A spec declaring
+  `swagger: "2.0"` (no `openapi` key) raises `UnsupportedSpecError`
+  whose message names the conversion path — convert to OpenAPI 3.x
+  (`swagger2openapi` / `converter.swagger.io`) and re-ingest the 3.x
+  output. The parser stays 3.x-only on purpose: the maintained 2.0→3.0
+  converters are Node/web-service tools (`swagger2openapi`/oas-kit,
+  `converter.swagger.io`), and an in-house converter is a large
+  correctness surface the review queue can't backstop, so the
+  documented decision (#1532) is to reject-with-remedy rather than
+  convert in-process. The `harbor/2.x` catalog row and
+  [`harbor-onboarding.md`](../cross-repo/harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion)
+  carry the operator-facing conversion runbook for the exemplar
+  2.0-only surface.
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
@@ -672,6 +1339,10 @@ operations go live.
 * Issue #741 — G0.9-T9 `UncoveredVersionLabel` pre-flight.
 * Issue #777 — G0.9.1-T5 shared error-envelope builders + MCP `-32602`
   mapping for `VersionMismatchError` / `UncoveredVersionLabel`.
+* Issue #1303 — G0.16-T1 async ingest mode (202 + job handle, in-memory
+  `IngestJobRegistry`). The "Async ingest mode" section above is the
+  authoritative shape; the issue body carries the consumer-side
+  pod-restart repro.
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Initiative #772 — G0.9.1 v0.3.2 dogfood hardening (the rollup that
   parents #777).

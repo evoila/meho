@@ -5,12 +5,11 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -31,8 +30,8 @@ func newShowCmd() *cobra.Command {
 		Use:   "show <name>",
 		Short: "Fetch one agent definition by name",
 		Long: "show calls GET /api/v1/agents/{name} and renders the " +
-			"definition as a key-value summary (or the full Entry JSON " +
-			"with --json). A 404 means the name doesn't exist in your " +
+			"definition as a key-value summary (or the full AgentDefinitionRead " +
+			"JSON with --json). A 404 means the name doesn't exist in your " +
 			"tenant — the route conflates cross-tenant probes with " +
 			"genuine absence so existence is never leaked.",
 		Args:          cobra.ExactArgs(1),
@@ -47,7 +46,7 @@ func newShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw AgentDefinitionRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -71,31 +70,29 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := getEntry(cmd.Context(), backplaneURL, opts.Name)
+	resp, err := getDefinition(cmd.Context(), backplaneURL, opts.Name)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printEntrySummary(cmd.OutOrStdout(), entry)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printDefinitionSummary(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildShowPath assembles the GET path. Exposed for unit tests so URL
-// encoding of names with dots / hyphens stays covered.
-func buildShowPath(name string) string {
-	return "/api/v1/agents/" + url.PathEscape(name)
-}
-
-func getEntry(ctx context.Context, backplaneURL, name string) (*Entry, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildShowPath(name), nil)
+func getDefinition(ctx context.Context, backplaneURL, name string) (*api.ShowAgentApiV1AgentsNameGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent show response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ShowAgentApiV1AgentsNameGetResponse, error) {
+			return authed.ShowAgentApiV1AgentsNameGetWithResponse(ctx, name, nil)
+		},
+		func(r *api.ShowAgentApiV1AgentsNameGetResponse) int { return r.StatusCode() },
+	)
 }

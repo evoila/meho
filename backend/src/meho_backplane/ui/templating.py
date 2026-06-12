@@ -44,10 +44,11 @@ the candidate, but the factory below leaves the choice open).
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from starlette.requests import Request
 
 from meho_backplane import __version__
 from meho_backplane.ui.paths import templates_dir
@@ -100,6 +101,48 @@ def get_jinja_env() -> Environment:
     return _ENV
 
 
+def _ui_session_context_processor(request: Request) -> dict[str, Any]:
+    """Surface the active BFF session's tenant into every UI template.
+
+    G0.15-T9 (#1217) — the operator-console header chip used to render a
+    hard-coded "(sign in to choose)" placeholder regardless of whether
+    the operator had already authenticated. The fix moves the chip's
+    data source onto the same :class:`UISessionContext` the middleware
+    already attaches to ``request.state.ui_session``: the JWT's
+    ``tenant_id`` claim is the operator's default tenant and is
+    auto-selected at session-create time, so by the time any UI route
+    renders a page the tenant is already known.
+
+    The context processor exposes one variable to every Jinja render:
+
+    * ``session_tenant`` -- a ``dict`` carrying ``id`` / ``slug`` /
+      ``name``, or ``None`` when the request hit a surface where the
+      session middleware hasn't bound a context (the auth surfaces
+      themselves, e.g. ``/ui/auth/login`` -- the operator is by
+      definition not signed in there). ``base.html``'s header chip
+      conditionally renders the tenant name when this dict is present
+      and falls back to a neutral "Sign in" link otherwise.
+
+    Synchronous by Starlette contract: context processors execute
+    inside the synchronous ``Jinja2Templates.TemplateResponse`` call;
+    asynchronous processors are explicitly not supported (see
+    https://www.starlette.io/templates/). The lookup here is a pure
+    attribute read off ``request.state`` -- the middleware already
+    paid the DB round-trip on its way in, so the processor itself
+    issues zero IO.
+    """
+    session_ctx = getattr(request.state, "ui_session", None)
+    if session_ctx is None:
+        return {"session_tenant": None}
+    return {
+        "session_tenant": {
+            "id": str(session_ctx.tenant_id),
+            "slug": session_ctx.tenant_slug,
+            "name": session_ctx.tenant_name,
+        },
+    }
+
+
 def get_templates() -> Jinja2Templates:
     """Return the lazily-constructed :class:`Jinja2Templates` wrapper.
 
@@ -117,12 +160,21 @@ def get_templates() -> Jinja2Templates:
       surface templates can reverse route names instead of hard-coding
       ``href=`` strings.
 
+    The wrapper also runs :func:`_ui_session_context_processor` per
+    render so ``base.html`` (and any surface template inheriting it)
+    sees the active BFF session's tenant on every page without each
+    route having to thread ``tenant_name`` / ``tenant_slug`` through
+    its context dict (G0.15-T9 #1217).
+
     Module-level cache (rather than :func:`functools.lru_cache`) so the
     type checker sees the concrete return type without ``cast``.
     """
     global _TEMPLATES
     if _TEMPLATES is None:
-        _TEMPLATES = Jinja2Templates(env=get_jinja_env())
+        _TEMPLATES = Jinja2Templates(
+            env=get_jinja_env(),
+            context_processors=[_ui_session_context_processor],
+        )
     return _TEMPLATES
 
 

@@ -5,25 +5,47 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// Summary mirrors the backend ConnectorListItem Pydantic model
-// (operations/ingest/api_schemas.py) verbatim: one row per ingested
-// connector with parsed coordinates + tenant scope + per-status group
-// counts + bulk op count for the operator's overview table. The full
-// per-op detail comes from `meho connector review <id>`.
+// listEntry mirrors all 13 fields of the backend ConnectorListItem
+// Pydantic model (operations/ingest/api_schemas.py): one row per
+// listed connector with parsed coordinates + tenant scope +
+// per-status group counts + the operation rollup — `operation_count`
+// total vs `enabled_operation_count` dispatchable subset (#1636) —
+// plus the dispatchability `state` ("ingested" = DB-backed, resolves
+// through the dispatcher; "registered" = v2-registry entry without
+// descriptor rows yet, #773) and the `next_step` remediation hint
+// shipped on registered rows (#1133). The full per-op detail comes
+// from `meho connector review <id>`. Keep the field set complete:
+// the `--json` path re-marshals this struct (not the raw response
+// body), so any ConnectorListItem field missing here silently
+// vanishes from machine-readable output — `encoding/json.Unmarshal`
+// ignores unknown keys. TestListEntryDecodesCanonical pins the
+// fixture⇄struct direction with DisallowUnknownFields.
 //
-// Named `Summary` (rather than `ConnectorListItem`) inside the
-// `connector` package to satisfy the revive/stutter rule —
-// `connector.ConnectorListItem` is the linter's least-favourite
-// double; `connector.Summary` reads naturally at the call site.
+// Kept as a package-private decode shape (not surfaced through the
+// generated `api.*` types) because the FastAPI list endpoint
+// deliberately returns `dict[str, list[dict[str, object]]]` instead
+// of declaring a `response_model=ConnectorListResponse` — the route
+// dumps each item via `model_dump(mode="json")` so per-row
+// `tenant_id` UUIDs render as strings (see
+// `backend/src/meho_backplane/api/v1/connectors_ingest.py:list_endpoint`).
+// oapi-codegen reflects the lack of `response_model` as
+// `JSON200 *map[string][]map[string]interface{}`, which is harder to
+// drive than a hand-typed decode against the raw `Body` bytes. The
+// transport / auth / 401-refresh path still routes through the
+// generated `*WithResponse` method — this struct is just the JSON
+// schema for the body.
 //
 // Note: the canonical payload has no `review_status` field. The
 // review state is per-group (some groups can be staged while others
@@ -35,22 +57,42 @@ import (
 // `tenant_id` is a UUID for tenant-curated connectors and JSON `null`
 // for built-in connectors. Pointer-to-string so we can distinguish
 // "field absent" from "empty string" in the rendered table.
-type Summary struct {
-	ConnectorID        string  `json:"connector_id"`
-	Product            string  `json:"product"`
-	Version            string  `json:"version"`
-	ImplID             string  `json:"impl_id"`
-	TenantID           *string `json:"tenant_id"`
-	GroupCount         int     `json:"group_count"`
-	StagedGroupCount   int     `json:"staged_group_count"`
-	EnabledGroupCount  int     `json:"enabled_group_count"`
-	DisabledGroupCount int     `json:"disabled_group_count"`
-	OperationCount     int     `json:"operation_count"`
+type listEntry struct {
+	ConnectorID           string    `json:"connector_id"`
+	Product               string    `json:"product"`
+	Version               string    `json:"version"`
+	ImplID                string    `json:"impl_id"`
+	TenantID              *string   `json:"tenant_id"`
+	GroupCount            int       `json:"group_count"`
+	StagedGroupCount      int       `json:"staged_group_count"`
+	EnabledGroupCount     int       `json:"enabled_group_count"`
+	DisabledGroupCount    int       `json:"disabled_group_count"`
+	OperationCount        int       `json:"operation_count"`
+	EnabledOperationCount int       `json:"enabled_operation_count"`
+	State                 string    `json:"state"`
+	NextStep              *nextStep `json:"next_step"`
 }
 
-// ListResponse is the envelope for GET /api/v1/connectors.
-type ListResponse struct {
-	Connectors []Summary `json:"connectors"`
+// nextStep mirrors the backend NextStep Pydantic model (same module):
+// the self-describing hint shipped on `state="registered"` rows —
+// the `meho connector ingest ...` verb that closes the workflow plus
+// the rationale for why that verb applies. The listEntry field is
+// pointer-typed because the backend ships JSON `null` on every
+// `state="ingested"` row (nothing left for the operator to do), and
+// `null` must decode to nil — same null-vs-absent discipline as
+// `TenantID` above.
+type nextStep struct {
+	Verb      string `json:"verb"`
+	Rationale string `json:"rationale"`
+}
+
+// connectorListEnvelope is the package-private decode shape for the
+// `{"connectors": [...]}` envelope the list endpoint returns. The
+// envelope is wrapped (rather than a bare list) so future paging
+// fields can land non-breakingly, mirroring the GET /catalog list
+// shape; see the route's docstring for the reasoning.
+type connectorListEnvelope struct {
+	Connectors []listEntry `json:"connectors"`
 }
 
 // validStatuses pins the allowed --status values. `all` is the
@@ -129,6 +171,10 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	}
 	result, err := getList(cmd.Context(), backplaneURL, opts.Status)
 	if err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -138,25 +184,56 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	return nil
 }
 
-func getList(ctx context.Context, backplaneURL, status string) (*ListResponse, error) {
-	path := "/api/v1/connectors"
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. `all` is omitted from the wire (the backplane's
+// `Literal | None` default reads the absence as "no filter"); any
+// other status passes through as the typed enum value.
+func listQueryParams(status string) *api.ListEndpointApiV1ConnectorsGetParams {
+	params := &api.ListEndpointApiV1ConnectorsGetParams{}
 	if status != "" && status != "all" {
-		q := url.Values{}
-		q.Set("status", status)
-		path += "?" + q.Encode()
+		v := api.ListEndpointApiV1ConnectorsGetParamsStatus(status)
+		params.Status = &v
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+	return params
+}
+
+// getList drives the typed-client list endpoint with a one-shot
+// 401-retry (mirrors `api.AuthedClient.GetHealth`'s contract for
+// /api/v1/health). Non-2xx surfaces as *httpResponseError so the
+// caller routes the body through renderHTTPStatus; transport-layer
+// errors propagate verbatim.
+//
+// The list endpoint deliberately returns
+// `dict[str, list[dict[str, object]]]` (no `response_model`), so the
+// typed envelope's `JSON200` is an untyped map; we decode the raw
+// `*Response.Body` bytes into the package-private
+// connectorListEnvelope shape so per-row helpers stay typed.
+func getList(ctx context.Context, backplaneURL, status string) (*connectorListEnvelope, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := decodeJSON(raw, "connector list", &out); err != nil {
+	params := listQueryParams(status)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListEndpointApiV1ConnectorsGetResponse, error) {
+			return authed.ListEndpointApiV1ConnectorsGetWithResponse(ctx, params)
+		},
+		func(r *api.ListEndpointApiV1ConnectorsGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	var out connectorListEnvelope
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, fmt.Errorf("decode connector list response: %w", err)
 	}
 	return &out, nil
 }
 
-func printListTable(w io.Writer, status string, r *ListResponse) {
+func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
 	if len(r.Connectors) == 0 {
 		fmt.Fprintf(w, "0 connector(s) with status=%s\n", status)
 		return

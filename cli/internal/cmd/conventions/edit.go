@@ -8,33 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// updateRequest mirrors the backend ConventionUpdate pydantic model
-// (PATCH /api/v1/conventions/{slug}). Pydantic v2's
-// `model_fields_set` distinguishes "field absent from JSON" from "field
-// present with null", and the route handler applies only the
-// explicitly-set keys to the ORM row. Each field is a pointer so an
-// omitted CLI flag is left out of the JSON body via omitempty.
-//
-// `slug` and `kind` are absent from this struct by design — they're
-// not in the PATCH surface. Renaming a convention is delete + recreate
-// (the audit log and history rows reference the old slug); changing a
-// convention's kind in-place would silently change its preamble-
-// inclusion behaviour (operational → reference would disappear from
-// every future preamble without an audit signal), so the substrate
-// rejects it.
-type updateRequest struct {
-	Title    *string `json:"title,omitempty"`
-	Body     *string `json:"body,omitempty"`
-	Priority *int    `json:"priority,omitempty"`
-}
 
 // newEditCmd returns the `meho conventions edit` command.
 //
@@ -154,8 +136,9 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 	if err != nil {
 		// buildEditRequest may surface either a CLI-level validation
 		// error (unexpected category) or an upstream HTTP error
-		// (rendered via renderRequestError already in $EDITOR mode).
-		// Distinguish by checking for our editorAbortError sentinel.
+		// (rendered via renderRequestError / renderHTTPStatus in
+		// $EDITOR mode). Distinguish by checking for our sentinel
+		// wrappers.
 		var abort *editorAbortError
 		if errors.As(err, &abort) {
 			// Editor mode aborted (editor failure or empty buffer).
@@ -168,7 +151,12 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 		if errors.As(err, &preflight) {
 			// Show-side fetch failed (404 / 401 / transport); render
 			// using the standard ladder so 404 carries the backend's
-			// convention_not_found detail.
+			// convention_not_found detail. A non-2xx HTTP response on
+			// the show fetch surfaces as a showHTTPError wrapped here.
+			var he *showHTTPError
+			if errors.As(preflight.cause, &he) {
+				return renderHTTPStatus(cmd, backplaneURL, he.StatusCode, he.Body, opts.JSONOut)
+			}
 			return renderRequestError(cmd, backplaneURL, preflight.cause, opts.JSONOut)
 		}
 		return output.RenderError(cmd.ErrOrStderr(),
@@ -183,9 +171,18 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 			output.Unexpected("edit produced an empty PATCH body"), opts.JSONOut)
 	}
 
-	conv, err := patchEdit(cmd.Context(), backplaneURL, opts.Slug, *req)
+	resp, err := patchEdit(cmd.Context(), backplaneURL, opts.Slug, *req)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
+	}
+	var conv api.Convention
+	if err := json.Unmarshal(resp.Body, &conv); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode conventions edit response: %v", err)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), conv)
@@ -194,7 +191,8 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %s\n", "kind:", conv.Kind)
 	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %d\n", "priority:", conv.Priority)
 	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %s\n", "title:", conv.Title)
-	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %s\n", "updated_at:", conv.UpdatedAt)
+	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %s\n", "updated_at:",
+		conv.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(cmd.OutOrStdout(), "%-14s %d bytes\n", "body:", len(conv.Body))
 	return nil
 }
@@ -222,15 +220,15 @@ func (e *editFetchError) Unwrap() error { return e.cause }
 
 // buildEditRequest assembles the PATCH body from the flag set or from
 // $EDITOR depending on which mode the operator invoked. Returns the
-// populated updateRequest or an error.
+// populated ConventionUpdate body or an error.
 //
 // Split from runEdit so the field-selection logic stays unit-testable
 // without standing up an httptest.Server in every test.
-func buildEditRequest(cmd *cobra.Command, backplaneURL string, opts editOptions) (*updateRequest, error) {
+func buildEditRequest(cmd *cobra.Command, backplaneURL string, opts editOptions) (*api.ConventionUpdate, error) {
 	anyFlagSet := opts.titleSet || opts.bodySet || opts.prioritySet
 
 	if anyFlagSet {
-		req := &updateRequest{}
+		req := &api.ConventionUpdate{}
 		if opts.titleSet {
 			t := opts.Title
 			req.Title = &t
@@ -269,26 +267,27 @@ func buildEditRequest(cmd *cobra.Command, backplaneURL string, opts editOptions)
 	if trimmed == strings.TrimRight(current.Body, "\r\n") {
 		return nil, &editorAbortError{reason: "edited body is unchanged; aborting without API call"}
 	}
-	req := &updateRequest{Body: &trimmed}
+	req := &api.ConventionUpdate{Body: &trimmed}
 	return req, nil
 }
 
 func patchEdit(
 	ctx context.Context,
 	backplaneURL, slug string,
-	body updateRequest,
-) (*Convention, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal conventions edit request: %w", err)
-	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "PATCH", buildShowPath(slug), raw)
+	body api.ConventionUpdate,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Convention
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode conventions edit response: %w", err)
-	}
-	return &out, nil
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.UpdateConventionApiV1ConventionsSlugPatch(
+				ctx,
+				slug,
+				&api.UpdateConventionApiV1ConventionsSlugPatchParams{},
+				body,
+			)
+		},
+	)
 }

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +39,7 @@ from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
     resolve_target,
+    resolve_target_by_id,
 )
 
 
@@ -336,3 +338,192 @@ async def test_resolve_target_exact_name_duplicate_raises_ambiguous() -> None:
     assert detail["error"] == "ambiguous_target"
     assert detail["query"] == "dup-name"
     assert len(detail["matches"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Soft-delete filter (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_excludes_soft_deleted_by_name() -> None:
+    """A soft-deleted target is invisible to the resolver by exact name.
+
+    G0.14-T4 (#1145): the resolver filters ``deleted_at IS NULL`` on
+    the exact-name probe so a re-creation under the same name does
+    not collide with the tombstone (CLI cache referencing the
+    deleted name surfaces the standard 404 with near-misses,
+    matching the resolver's contract).
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="retired",
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+
+    async with sessionmaker() as session:
+        session.add(deleted)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError):
+            await resolve_target(session, tenant_id, "retired")
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_excludes_soft_deleted_by_alias() -> None:
+    """A soft-deleted target's alias is also invisible to the resolver.
+
+    G0.14-T4 (#1145): the alias step filters ``deleted_at IS NULL``
+    so an alias on a retired row does not shadow a live re-creation
+    that re-uses the alias.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="retired-with-alias",
+        aliases=["legacy-name"],
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+
+    async with sessionmaker() as session:
+        session.add(deleted)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError):
+            await resolve_target(session, tenant_id, "legacy-name")
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_near_misses_exclude_soft_deleted() -> None:
+    """Near-miss suggestions only include live targets.
+
+    G0.14-T4 (#1145): an operator typo-correcting against a recently
+    deleted target should not be pointed at the tombstone — only
+    live near-misses surface in the 404 ``matches`` field.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="rke2-infra",
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+    live = _make_target(
+        tenant_id=tenant_id,
+        name="rke2-infra-k8s",
+        product="ssh",
+        host="10.0.0.2",
+    )
+
+    async with sessionmaker() as session:
+        session.add_all([deleted, live])
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError) as exc_info:
+            await resolve_target(session, tenant_id, "rke2")
+
+    matches = exc_info.value.detail["matches"]
+    names = {m["name"] for m in matches}
+    assert names == {"rke2-infra-k8s"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_target_by_id — the approval-queue resume path (G11.7-T1 #1401)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_returns_live_row() -> None:
+    """A live row resolves by id within the tenant."""
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    target = _make_target(
+        tenant_id=tenant_id, name="prod-vault", product="vault", host="vault.prod.invalid"
+    )
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_id, target_id)
+
+    assert result is not None
+    assert result.id == target_id
+    assert result.name == "prod-vault"
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_wrong_tenant_returns_none() -> None:
+    """Cross-tenant id is invisible — returns None (tenant isolation)."""
+    sessionmaker = get_sessionmaker()
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    target = _make_target(tenant_id=tenant_a, name="a-only", product="ssh", host="10.0.0.1")
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_b, target_id)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_missing_returns_none() -> None:
+    """An unknown id returns None rather than raising."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, uuid.uuid4(), uuid.uuid4())
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_soft_deleted_returns_none() -> None:
+    """A soft-deleted target resolves to None — fail closed on resume.
+
+    A target tombstoned between approval-request and approval-decision
+    must not be revived on the resume re-dispatch; the caller gets None
+    and the dispatch fails closed (structured connector error).
+    """
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    target = _make_target(
+        tenant_id=tenant_id,
+        name="retired-target",
+        product="ssh",
+        host="10.0.0.9",
+        deleted_at=datetime.now(UTC),
+    )
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_id, target_id)
+
+    assert result is None

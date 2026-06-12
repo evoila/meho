@@ -18,24 +18,30 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/agent"
 	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
 	"github.com/evoila/meho/cli/internal/cmd/approvals"
+	"github.com/evoila/meho/cli/internal/cmd/argocd"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/conventions"
+	"github.com/evoila/meho/cli/internal/cmd/docs"
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
 	"github.com/evoila/meho/cli/internal/cmd/holodeck"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
+	"github.com/evoila/meho/cli/internal/cmd/keycloak"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
 	"github.com/evoila/meho/cli/internal/cmd/migrate"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
+	"github.com/evoila/meho/cli/internal/cmd/runbook"
+	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
+	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
@@ -156,6 +162,34 @@ func newRootCmd() *cobra.Command {
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
 
+	// G4.5-T5 (#1524) -- the `meho docs` tree for Initiative #1518
+	// (the meho-docs add-on). One verb: `docs search` wraps the
+	// /api/v1/search_docs route (T3, #1521) for federated
+	// vendor-document retrieval. The tree compiles into every binary
+	// but is gated on the tenant-provisioned `meho-docs` capability
+	// (T1, #1519): `docs.NewRootCmd` reads the capability from the
+	// stored token's JWT claim and, when absent, marks the parent
+	// Hidden and makes every verb refuse with a typed
+	// `addon_not_provisioned` error — true absence for an
+	// unprovisioned tenant. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `docs` parent.
+	root.AddCommand(docs.NewRootCmd())
+
+	// G12.5-T1 (#1318) -- runbook template authoring verbs
+	// (list-templates / show-template / draft-template / edit-template /
+	// publish-template / deprecate-template) for Initiative #1200.
+	// Wraps the six /api/v1/runbooks/templates routes shipped by
+	// G12.2-T3 (#1297). T1 ships the chassis + template verbs; T2
+	// (#1319) extends with the five run verbs (start / next / abort /
+	// reassign / runs). Read verbs (list-templates) are operator-level;
+	// show-template is tenant_admin with the post-completion carve-out
+	// (#1309); write verbs (draft/edit/publish/deprecate) require
+	// tenant_admin. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `runbook`
+	// parent.
+	root.AddCommand(runbook.NewRootCmd())
+
 	// G7.1-T3 (#315) -- conventions verbs (list / show / create / edit /
 	// delete / history) for Initiative #229 (tenant conventions). Wraps
 	// the six /api/v1/conventions routes shipped by G7.1-T2 (#314).
@@ -212,6 +246,15 @@ func newRootCmd() *cobra.Command {
 	// server-side. Registered before registerDynamicSubcommands so the
 	// backplane manifest cannot shadow the built-in `approvals` parent.
 	root.AddCommand(approvals.NewRootCmd())
+
+	// G11.3-T5 (#826) -- scheduled-trigger admin verbs (list / create /
+	// cancel) for Initiative #804. Wraps the T5 REST surface
+	// (/api/v1/scheduler/triggers routes). list is operator-level; create
+	// and cancel require tenant_admin. Tenant scoping is enforced
+	// server-side via the JWT; tenant_admin callers may use --tenant to
+	// act cross-tenant. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `scheduler` parent.
+	root.AddCommand(scheduler.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=
@@ -372,6 +415,47 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `gcloud` parent.
 	root.AddCommand(gcloud.NewRootCmd())
+
+	// G3.13-T3 (#1395) -- keycloak-admin-26.x operator alias verbs for
+	// Initiative #1388. The verb tree pre-bakes connector_id=
+	// "keycloak-admin-26.x" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on every
+	// invocation. The connector authenticates to the Keycloak Admin REST
+	// API with a Vault-sourced admin credential (the admin-vs-operator
+	// split — see docs/cross-repo/keycloak-onboarding.md), distinct from
+	// the operator's OIDC token. Ships the 6 read-only ops (realm get,
+	// client list/get, client-scope list, user list, role-mapping get)
+	// registered by G3.13-T1..T2 (#1393/#1394); the write surface is the
+	// deferred approval-gated T4 follow-up (#1406). Distinct from the
+	// `admin keycloak ...` deployer-onramp subtree (#791). Registered
+	// before registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `keycloak` parent.
+	root.AddCommand(keycloak.NewRootCmd())
+
+	// G0.22-T4 (#1580) -- secret-broker-1.x operator alias verb for
+	// Initiative #581. `meho secret move` pre-bakes connector_id=
+	// "secret-broker-1.x" on top of the existing /api/v1/operations/call
+	// dispatcher route and dispatches the synthetic secret.move broker op
+	// (#1577). The move is references-not-values: the operator names
+	// --from / --to '<kind>:<ref>' references and a --reason; the value is
+	// read, transferred, and re-written entirely server-side and never
+	// crosses the command line or the op params. The verb is change-class
+	// (requires approval) and surfaces status=awaiting_approval verbatim.
+	root.AddCommand(secret.NewRootCmd())
+
+	// G3.12-T3 (#1392) -- argocd-api-3.x operator alias verbs for
+	// Initiative #1387. The verb tree pre-bakes connector_id=
+	// "argocd-api-3.x" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on every
+	// invocation. The connector authenticates to the ArgoCD server REST
+	// API with a Vault-sourced bearer token (the operator's OIDC token is
+	// never forwarded to ArgoCD — see docs/cross-repo/argocd-onboarding.md).
+	// Ships the 6 read-only ops (app list/get/diff/resource-tree,
+	// appproject list, repo list) registered by G3.12-T2 (#1442); the
+	// write surface (sync / refresh) is a deferred approval-gated
+	// follow-up. Registered before registerDynamicSubcommands so the
+	// backplane manifest cannot shadow the built-in `argocd` parent.
+	root.AddCommand(argocd.NewRootCmd())
 
 	// G3.7-T9 (#852) -- hetzner-rest-2026.04 operator alias verbs for
 	// Initiative #370. The verb tree pre-bakes connector_id=

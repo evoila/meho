@@ -6,9 +6,11 @@ package conventions
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -106,8 +108,14 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	if err := callDelete(cmd.Context(), backplaneURL, opts.Slug); err != nil {
+	resp, err := callDelete(cmd.Context(), backplaneURL, opts.Slug)
+	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	// Backend returns 204 No Content on success; anything else is an
+	// error category routed through the standard renderer.
+	if resp.StatusCode != http.StatusNoContent {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
 	}
 	result := deleteResult{Slug: opts.Slug, Status: "deleted"}
 	if opts.JSONOut {
@@ -117,9 +125,19 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	return nil
 }
 
-func callDelete(ctx context.Context, backplaneURL, slug string) error {
-	// doAuthedRequest returns (nil, nil) on a 204; the success signal
-	// is the absence of an error.
-	_, err := doAuthedRequest(ctx, backplaneURL, "DELETE", buildShowPath(slug), nil)
-	return err
+func callDelete(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.DeleteConventionApiV1ConventionsSlugDelete(
+				ctx, slug, &api.DeleteConventionApiV1ConventionsSlugDeleteParams{},
+			)
+		},
+	)
 }

@@ -219,3 +219,102 @@ def test_mcp_require_session_id_non_truthy_stays_false(
         assert get_settings().mcp_require_session_id is False
     finally:
         get_settings.cache_clear()
+
+
+def test_result_handle_max_spill_rows_defaults_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``RESULT_HANDLE_MAX_SPILL_ROWS`` → the 10000 field default."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("RESULT_HANDLE_MAX_SPILL_ROWS", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_handle_max_spill_rows == 10000
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_handle_max_spill_rows_env_override_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``RESULT_HANDLE_MAX_SPILL_ROWS`` flows through ``get_settings()``.
+
+    Regression guard for the wiring gap where the field was declared on
+    :class:`Settings` but never read from the environment, so the
+    documented operator override was a silent no-op and the 10000 default
+    always won.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_SPILL_ROWS", "250000")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_handle_max_spill_rows == 250000
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T6 #1080 — AGENT_RUNS_DISABLED_TENANTS UUID validation
+# ---------------------------------------------------------------------------
+
+
+# Whitespace tolerated; trailing comma -> empty chunk skipped; doubled
+# commas tolerated (the gate parser already skips empties so the
+# validator's accept-set matches it exactly).
+_UUID_A = "11111111-1111-1111-1111-111111111111"
+_UUID_B = "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",  # default / "no tenants disabled"
+        _UUID_A,
+        f"{_UUID_A},{_UUID_B}",
+        f"  {_UUID_A}  ,  {_UUID_B}  ",
+        f"{_UUID_A},",
+        f",,{_UUID_A},,",
+    ],
+)
+def test_agent_runs_disabled_tenants_accepts_uuid_csv(raw: str) -> None:
+    """Valid CSVs of UUIDs (including the empty default) construct without raising.
+
+    CR iter-3 B1 (G11.5-T6 #1080) — fail-fast at startup when the
+    kill-switch list is malformed, but tolerate the empty value (the
+    documented default) and benign whitespace / separator artefacts so
+    the validator's accept-set is exactly the gate parser's accept-set
+    in :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`.
+    """
+    settings = Settings(
+        **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        agent_runs_disabled_tenants=raw,
+    )
+    assert settings.agent_runs_disabled_tenants == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-a-uuid",
+        "11111111-1111-1111-1111-111111111111,nope",
+        "abc123",
+        "11111111-1111-1111-1111-11111111111",  # one digit short
+    ],
+)
+def test_agent_runs_disabled_tenants_rejects_non_uuid(raw: str) -> None:
+    """Any non-UUID entry fails :class:`Settings` construction with a clear message.
+
+    CR iter-3 B1 — a malformed UUID in ``AGENT_RUNS_DISABLED_TENANTS``
+    would otherwise survive startup and silently match nothing at
+    gate-evaluation time, leaving the deploy thinking it's
+    kill-switched when it isn't. Eager validation at construction time
+    surfaces the typo with the offending entry quoted in the error
+    message so the operator can fix the env var from the failure text
+    alone.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            agent_runs_disabled_tenants=raw,
+        )
+    assert "AGENT_RUNS_DISABLED_TENANTS" in str(exc_info.value)

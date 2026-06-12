@@ -176,6 +176,15 @@ register_mcp_tool(
             "properties": {
                 "name": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    # Mirror :data:`meho_backplane.auth.agent_principals._NAME_PATTERN`
+                    # at the schema layer so the documented alphabet is enforced
+                    # before the service layer's regex check fires. Pairs
+                    # ``meho.agent_principals.register.name`` with
+                    # ``meho.agents.create.name`` (which already enforces the
+                    # pattern), per RDC #789 N4 / G0.18-T5 #1358.
+                    "pattern": r"^[A-Za-z0-9_\-\.]+$",
                     "description": (
                         "Agent identity name (letters, digits, hyphen, "
                         "underscore, dot). The Keycloak clientId will be "
@@ -184,6 +193,8 @@ register_mcp_tool(
                 },
                 "owner_sub": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
                     "description": (
                         "OIDC sub of the principal who owns this agent "
                         "(kill-switch owner). Defaults to the caller's sub."

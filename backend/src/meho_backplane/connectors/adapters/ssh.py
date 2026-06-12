@@ -43,6 +43,7 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import FingerprintResult
 
@@ -78,12 +79,20 @@ class SshConnector(Connector):
     """
 
     def __init__(self) -> None:
-        # Maps target.name → (SSHClientConnection, last_used monotonic timestamp).
-        self._connections: dict[str, tuple[asyncssh.SSHClientConnection, float]] = {}
+        # Maps the tenant-unique ``(tenant_id, id)`` cache key
+        # (``target_cache_key``) → (SSHClientConnection, last_used monotonic
+        # timestamp). Keyed on the tuple rather than ``target.name``: two
+        # tenants may legitimately own same-named targets on different
+        # hosts (names are unique only per ``(tenant_id, name)``), and a
+        # name-keyed pool would hand tenant B the live connection tenant A
+        # opened to A's host — a cross-tenant misroute and credential leak
+        # (evoila/meho#1682).
+        self._connections: dict[tuple[str, str], tuple[asyncssh.SSHClientConnection, float]] = {}
         # Short-lived lock protecting only _connections and _connect_locks dicts.
         self._pool_lock = asyncio.Lock()
-        # Per-target connect locks — SSH handshakes for distinct targets run in parallel.
-        self._connect_locks: dict[str, asyncio.Lock] = {}
+        # Per-target connect locks — SSH handshakes for distinct targets run
+        # in parallel. Keyed on the same tenant-unique tuple as the pool.
+        self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def _auth_config(self, target: Target) -> dict[str, Any]:
         """Extract auth kwargs from ``target.secret_ref``.
@@ -115,35 +124,36 @@ class SshConnector(Connector):
         and within the idle TTL. Slow path: acquires the per-target connect
         lock, evicts stale/closed entries, and opens a fresh connection.
         """
+        cache_key = target_cache_key(target)
         # Fast path: check without acquiring any lock.
-        entry = self._connections.get(target.name)
+        entry = self._connections.get(cache_key)
         if entry is not None:
             conn, last_used = entry
             now = time.monotonic()
             if not conn.is_closed() and (now - last_used) <= _POOL_TTL_S:
-                self._connections[target.name] = (conn, now)
+                self._connections[cache_key] = (conn, now)
                 return conn
 
         # Get or create the per-target connect lock.
         async with self._pool_lock:
-            if target.name not in self._connect_locks:
-                self._connect_locks[target.name] = asyncio.Lock()
-            t_lock = self._connect_locks[target.name]
+            if cache_key not in self._connect_locks:
+                self._connect_locks[cache_key] = asyncio.Lock()
+            t_lock = self._connect_locks[cache_key]
 
         async with t_lock:
             # Double-check under per-target lock.
             now = time.monotonic()
-            entry = self._connections.get(target.name)
+            entry = self._connections.get(cache_key)
             if entry is not None:
                 conn, last_used = entry
                 if not conn.is_closed() and (now - last_used) <= _POOL_TTL_S:
-                    self._connections[target.name] = (conn, now)
+                    self._connections[cache_key] = (conn, now)
                     return conn
                 # Evict closed or idle-expired entry.
                 if not conn.is_closed():
                     conn.close()
                     await conn.wait_closed()
-                del self._connections[target.name]
+                del self._connections[cache_key]
 
             auth_kwargs = await self._auth_config(target)
             conn = await asyncssh.connect(
@@ -154,7 +164,7 @@ class SshConnector(Connector):
                 password=auth_kwargs.get("password"),
                 known_hosts=None,
             )
-            self._connections[target.name] = (conn, time.monotonic())
+            self._connections[cache_key] = (conn, time.monotonic())
             logger.info("ssh_connected", target=target.name, host=target.host)
             return conn
 

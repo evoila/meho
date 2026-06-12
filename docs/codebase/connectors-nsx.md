@@ -1,10 +1,10 @@
-# Connector: nsx (NSX 4.x)
+# Connector: nsx (NSX 4.x + VCF-9 9.x)
 
 ## Overview
 
 The `nsx` connector is the hand-rolled `HttpConnector` subclass that
 dispatches ingested NSX REST operations under the
-`(product="nsx", version="4.2", impl_id="nsx-rest")` registry triple.
+`(product="nsx", version="9.0", impl_id="nsx-rest")` registry triple.
 G3.5-T1 (#613) shipped the skeleton -- session-cookie / XSRF auth,
 fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) adds
 the **operator-review curation substrate**: the 9 read-only core
@@ -13,14 +13,27 @@ hints + the `apply_nsx_core_curation` helper that the operator
 review step calls against the G0.7-ingested connector. CLI verbs +
 MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
 
+**VCF-9 version renumber (#1530).** NSX-T 4.x was renumbered onto the
+VCF train at VCF 9.0 -- a live VCF-9 appliance reports NSX 9.0.x and
+the vendor spec carries `info.version` in the 9.x scheme (observed
+`9.1.0.0`). The class pin tracks the VCF-9-aligned `"9.0"` line and
+`supported_version_range` was widened to `">=4.0,<10.0"` so a single
+class covers both the standalone NSX-T 4.x line and the VCF-9 9.x
+line. Dispatch and the ingest version-range pre-flight key on the
+`SpecifierSet`, not the class pin, so the one class resolves every
+label in the band. Same renumber posture `VmwareRestConnector` took
+for the vSphere 8.x -> 9.0 jump.
+
 Source: `backend/src/meho_backplane/connectors/nsx/`.
 
 ## Key types
 
 - **`NsxConnector`** (`connector.py`) -- `HttpConnector` subclass.
-  Class attributes: `product="nsx"`, `version="4.2"`,
-  `impl_id="nsx-rest"`, `supported_version_range=">=4.0,<5.0"`,
-  `priority=1`. The priority outranks a future
+  Class attributes: `product="nsx"`, `version="9.0"`,
+  `impl_id="nsx-rest"`, `supported_version_range=">=4.0,<10.0"`,
+  `priority=1`. The version pin tracks the VCF-9-aligned product line
+  (#1530); the widened range keeps the standalone NSX-T 4.x line
+  dispatchable through the same class. The priority outranks a future
   `GenericRestConnector` auto-shim (priority=0) defensively if both
   somehow register for the same triple.
 - **`NsxTargetLike`** (`session.py`) -- runtime-checkable Protocol
@@ -69,12 +82,14 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.nsx` triggers the
    module-level
-   `register_connector_v2(product="nsx", version="4.2", impl_id="nsx-rest", cls=NsxConnector)`
+   `register_connector_v2(product="nsx", version="9.0", impl_id="nsx-rest", cls=NsxConnector)`
    call.
-3. The registry's v2 table now resolves `("nsx", "4.2", "nsx-rest")`
+3. The registry's v2 table now resolves `("nsx", "9.0", "nsx-rest")`
    to `NsxConnector`. The G0.7 auto-shim's idempotency check (in
    `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
+   The resolver binds a target by `supported_version_range`
+   membership, so a 4.x or 9.x fingerprinted target both bind here.
 
 ### Per-target session
 
@@ -148,7 +163,7 @@ instead of hammering NSX's audit log.
 `execute(target, op_id, params)` synthesises a minimal `Operator`
 (nil-UUID tenant_id + `sub="system:nsx-rest-connector-shim"`) and
 delegates to `meho_backplane.operations.dispatch` with
-`connector_id="nsx-rest-4.2"`. Pre-G0.6 chassis routes that still
+`connector_id="nsx-rest-9.0"`. Pre-G0.6 chassis routes that still
 invoke `Connector.execute` directly reach the dispatcher through
 this shim; post-G0.6 callers (the `/api/v1/operations/call` route,
 MCP `call_operation`, the CLI verbs once #615 lands) construct a
@@ -189,8 +204,8 @@ concern, same posture vSphere takes for proactive refresh.
 ## Operator-review curation flow (G3.5-T2)
 
 The `core_ops.py` constants land the operator-review side of the
-G0.7 ingest. After a G0.7 ingest of `nsx-4.2/policy.yaml` +
-`manager.yaml` lands the full NSX descriptor set in the
+G0.7 ingest. After a G0.7 ingest of the NSX `policy.yaml` +
+`manager.yaml` corpus lands the full NSX descriptor set in the
 `endpoint_descriptor` table (every row `is_enabled=False`,
 `source_kind='ingested'`), the operator runs:
 
@@ -200,6 +215,19 @@ from meho_backplane.operations.ingest import ReviewService
 
 review_service = ReviewService(operator)
 await apply_nsx_core_curation(review_service, tenant_id=None)
+```
+
+Ingested ops land under the **operator-supplied** `version` label,
+so a VCF-9 spec ingested as `version="9.1.0.0"` produces
+`connector_id="nsx-rest-9.1.0.0"` rather than the class pin's
+`nsx-rest-9.0` (#1530). `apply_nsx_core_curation` takes a
+`connector_id` keyword (default `NSX_CONNECTOR_ID = "nsx-rest-9.0"`)
+so the operator passes the id the ingest actually produced:
+
+```python
+await apply_nsx_core_curation(
+    review_service, tenant_id=None, connector_id="nsx-rest-9.1.0.0"
+)
 ```
 
 The helper drives the substrate through three substrate calls per
@@ -221,7 +249,7 @@ posture `edit_group` takes for `when_to_use`).
 
 ## Known issues
 
-- The full G0.7 ingest of `nsx-4.2/policy.yaml` + `manager.yaml` is
+- The full G0.7 ingest of the NSX `policy.yaml` + `manager.yaml` is
   operator-driven via `meho connector ingest` (the runbook lives at
   `docs/cross-repo/g35-nsx-canary.md`). The env-gated canary
   acceptance test that automates the live two-spec ingest in CI is a

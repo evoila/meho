@@ -4,10 +4,12 @@
 package targets
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -245,7 +248,7 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 
 	p, err := buildLivePlan(cmd.Context(), doer, entries, opts.Update)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 
 	// Default mode: duplicates abort the whole import.
@@ -265,7 +268,7 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 	}
 
 	if err := executePlan(cmd.Context(), doer, p); err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	return renderApplyResult(cmd, p, opts.JSONOut)
 }
@@ -423,7 +426,32 @@ func buildOfflinePlan(entries []map[string]any, _ bool) *plan {
 // tests pass a closure that drives an httptest.Server, sidestepping
 // the auth/token-store machinery (which would otherwise require
 // staging a fake $XDG_CONFIG_HOME with a stub credentials file).
+//
+// `import.go` keeps its own untyped HTTP plumbing (rather than the
+// generated typed client every sibling verb now uses) because the
+// YAML-to-API mapping in entryToCreateBody / entryToUpdateBody emits
+// a sparse `map[string]any` body to preserve the partial-PATCH /
+// extras-spill semantics — coercing through `api.TargetCreate` /
+// `api.TargetUpdate` would either send unspecified fields as
+// pydantic defaults (overwriting rich existing state on a partial
+// patch — the PR #362 regression that motivated the sparse-body
+// fix) or require per-field option plumbing for every patchable
+// column. The untyped path is the smaller blast radius for v0.2.
 type httpDoer func(ctx context.Context, method, path string, body []byte) ([]byte, error)
+
+// httpError carries a non-2xx response from the import-path HTTP
+// plumbing so renderRequestError can map it to the right exit-code
+// class. Not exported and not shared with the verb-side typed-client
+// renderHTTPStatus, which acts on the typed response envelope's
+// (statusCode, body) pair directly.
+type httpError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
 
 // authedDoer adapts doAuthedRequest to the httpDoer shape with the
 // backplane URL pre-bound.
@@ -431,6 +459,111 @@ func authedDoer(backplaneURL string) httpDoer {
 	return func(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 		return doAuthedRequest(ctx, backplaneURL, method, path, body)
 	}
+}
+
+// doAuthedRequest issues a single HTTP request against the backplane
+// with bearer injection + one-shot 401-refresh-retry. Returns the
+// response body bytes (already drained) on a 2xx outcome, or an
+// *httpError when the backplane returned a non-2xx, or an error
+// categorised by api.IsTokenNotFound / api.IsNoRefreshToken / generic
+// transport so renderRequestError can pick the right StructuredError
+// category.
+//
+// Mirrors cli/internal/cmd/operation/operation.go::doAuthedRequest.
+// Kept independent of the operation package for the import-cycle
+// reason called out on resolveBackplane.
+func doAuthedRequest(
+	ctx context.Context,
+	backplaneURL, method, path string,
+	body []byte,
+) ([]byte, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	httpClient := authed.HTTPClient()
+	bearer := authed.AccessToken()
+	if bearer == "" {
+		return nil, errMissingAccessToken
+	}
+
+	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		// One-shot refresh + retry, mirroring api.AuthedClient.GetHealth
+		// and operation/operation.go doAuthedRequest.
+		if rerr := authed.Refresh(ctx); rerr != nil {
+			resp.Body.Close() //nolint:errcheck
+			return nil, rerr
+		}
+		resp.Body.Close() //nolint:errcheck
+		bearer = authed.AccessToken()
+		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	if readErr != nil {
+		return nil, fmt.Errorf("read response: %w", readErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+	}
+	return raw, nil
+}
+
+// sendRequest is the bottom of the stack: build the http.Request,
+// stamp bearer + content headers, fire it. Split out so the
+// 401-refresh-retry path in doAuthedRequest can reuse the same body
+// bytes without re-marshalling.
+func sendRequest(
+	ctx context.Context,
+	client *http.Client,
+	backplaneURL, method, path, bearer string,
+	body []byte,
+) (*http.Response, error) {
+	fullURL := backplaneURL + path
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return client.Do(req)
+}
+
+// renderImportRequestError translates an error from one of the
+// import-path HTTP helpers (`doAuthedRequest`, `buildLivePlan`,
+// `executePlan`) into the right output.StructuredError category. The
+// HTTP-failure case routes through the same renderHTTPStatus the
+// verb-side helpers use (same 401/403/404/409/501 ladder); the
+// transport / auth-state cases delegate to the shared
+// renderRequestError. Errors from `listExistingNames` /
+// `executePlan` arrive wrapped in `fmt.Errorf(... "%w", ...)`; we
+// use `errors.As` to unwrap to the underlying *httpError.
+func renderImportRequestError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
+	var he *httpError
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.StatusCode, []byte(he.Body), jsonOut)
+	}
+	return renderRequestError(cmd, backplaneURL, err, jsonOut)
 }
 
 // buildLivePlan partitions entries against the live backplane:

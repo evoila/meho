@@ -371,9 +371,26 @@ traversal verbs keep G9.1's silent-on-miss contract (empty result,
 not an exception) — opting traversal into the stricter raise-on-miss
 contract is explicitly out of scope for G9.2-T2.
 
-The root is always included at depth 0, so callers distinguish "node
-exists but has no dependents" (one-element list) from "node does not
-exist in this tenant" (empty list).
+The root is always included at depth 0, so a tracked node with no
+dependents returns the one-element `[root]`. G0.18-T4 (#1357,
+RDC #789 N2) changed the not-found contract: an anchor with no
+matching `graph_node` row in the tenant raises
+`NodeNotFoundError` (resolved up front via
+`resolvers.resolve_node`) rather than returning `[]`. Pre-G0.18-T4
+the empty list conflated "tracked, nothing depends on me" with
+"anchor isn't in the graph at all," and the pre-destructive
+blast-radius use case mis-read the empty list as "safe to
+delete" — a SEV-3 false-negative for every registered non-k8s
+target (auto-discovery is k8s-only today; only
+`KubernetesConnector` overrides `discover_topology`). The REST
+front maps the exception to `404 node_untracked`; the MCP front
+returns the typed `{kind, status: "node_untracked", name,
+nodes: []}` envelope. The CLI's `formatNotFound` renders the
+operator-actionable "register / refresh the target or annotate
+the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
+contract — `None` is the recoverable "no route" answer for a
+single-anchor walk and is structurally distinct from "this anchor
+isn't in the graph."
 
 ### Path search
 
@@ -783,11 +800,17 @@ SSE / Slack feed.
 
 1. Validate `kind` against `_GRAPH_NODE_KINDS` (raise
    `InvalidNodeKindError` *before* any DB read).
-2. `async with session.begin()` — one transaction wraps the
-   lookup + upsert + audit write.
-3. Look up the existing row for the `(tenant_id, kind, name)` unique
+2. Pre-allocate `audit_id = uuid.uuid4()` (chassis "audit-id
+   pre-allocation" pattern shared with `refresh` / `annotate` —
+   the same uuid is threaded into the `audit_log` row and the
+   `graph_node_history` row so the temporal-query verbs can join
+   history back against audit to recover the causing principal).
+3. `async with session.begin()` — one transaction wraps the
+   lookup + upsert + history write + audit write.
+4. Look up the existing row for the `(tenant_id, kind, name)` unique
    tuple (the `graph_node_tenant_kind_name_idx` index). Found
-   → merge the four manual-seed property keys (`note`,
+   → capture `node_snapshot(existing)` as `before` *first*, then
+   merge the four manual-seed property keys (`note`,
    `evidence_url`, `seeded_by`, `seeded_at`) onto the existing JSONB
    (auto-discovered keys like `status`, `phase` are preserved),
    refresh `last_seen`, and promote `discovered_by` to the operator
@@ -796,17 +819,42 @@ SSE / Slack feed.
    with `discovered_by=operator.sub`, `target_id=None` (manual seeds
    never adopt onto a target — only the refresh service does that),
    `properties={note, evidence_url, seeded_by, seeded_at}`,
-   `first_seen = last_seen = now`.
-4. Add one `audit_log` row in the same session
+   `first_seen = last_seen = now`; `before` is `None`.
+5. Diff-on-write hook (G9.3-T2 #857; create_node side added by
+   G0.18-T6 #1359). Call `record_node_change` to add one
+   `graph_node_history` row per *meaningful* call (CREATED on fresh
+   insert; UPDATED on promotion or property change). An idempotent
+   re-seed with the same `(note, evidence_url)` and no promotion is
+   heartbeat-only (the `seeded_at` ISO timestamp and `last_seen`
+   change every call regardless of intent) and skips the emit per
+   `_create_node_is_meaningful` — same heartbeat-strip discipline
+   `annotate._annotate_curated_is_meaningful` and
+   `refresh._update_existing_node`'s `is_meaningful_update` use.
+   The row carries the pre-allocated `audit_id` from step 2.
+6. Add one `audit_log` row in the same session
    (`method="CREATE_NODE"`, `path="topology.create_node"`,
    `payload={op_id, op_class:"write", node_id, kind, name,
    was_created, note, evidence_url}`, `target_id` = the seeded
    node's own `target_id` when non-null, else `None`).
-5. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
+7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
    set explicitly because the `.create_node` suffix is not in
    `_WRITE_SUFFIXES`; same rationale as `.annotate` /
    `.unannotate`). Publish is fail-open: a publish exception is
    logged, never raised.
+
+**Manual seeds are visible to `kind=history` / `kind=timeline`.**
+Before G0.18-T6 (#1359) the create_node hook wrote audit_log +
+broadcast but no `graph_node_history` row, so `query_topology
+kind=history <manually-seeded-node>` returned empty and
+`kind=timeline` omitted the seed even though it surfaced in
+`query_audit` — an audit-vs-graph-history asymmetry first surfaced
+in RDC #789 finding F-A. The hook now emits one history row per
+meaningful call so both verbs reflect manual seeds the same way
+they reflect auto-refresh changes. The atomicity contract
+`history.py` documents holds: a failure anywhere in the
+`session.begin()` block rolls the live row, the history row, and
+the audit row back together — the graph and the history table
+can never disagree about which mutations committed.
 
 **Idempotency invariant.** A repeat call with the same
 `(kind, name)` always returns `was_created=False` after the first
@@ -938,6 +986,22 @@ Load-bearing details:
   candidate kinds echoed in `detail` so the caller can re-issue with
   an explicit `kind`. Used by the four read verbs and by `POST /edges`
   / `GET /edges` when an endpoint name is ambiguous.
+- **Untracked anchor (closure verbs).** G0.18-T4 (#1357, RDC #789
+  N2). `find_dependents` / `find_dependencies` resolve the anchor
+  up front via `resolvers.resolve_node`; a `NodeNotFoundError`
+  surfaces as HTTP **404 `node_untracked`** with the requested
+  `name` (and `kind` when supplied) in `detail`. Distinct slug
+  from the annotate flow's `node_not_found` because the operator
+  action diverges: closure → "register / refresh the target or
+  annotate the relationship"; annotate → "seed the endpoint via
+  `meho.topology.create_node`". The OpenAPI spec declares both
+  the 404 and 409 shapes on the `dependents` / `dependencies`
+  routes via a shared `_CLOSURE_RESPONSES` constant so the
+  generated CLI / SDK pick up both error envelopes. Pre-G0.18-T4
+  the routes returned `[]` for an untracked anchor, conflating
+  it with the tracked-no-deps case and feeding the
+  blast-radius-as-safe-to-delete false-negative the RDC dogfood
+  cycle caught.
 - **Depth/hop ceilings.** The route caps `depth` at 64 and `max_hops`
   at 32 at the HTTP boundary (over the service defaults of 16 / 8) so
   a hostile query param cannot ask the recursive CTE to walk an
@@ -1151,15 +1215,18 @@ Load-bearing details:
   (1..32) mirror the API's `Query(le=...)` ceilings and fail fast
   client-side so the operator sees the constraint instead of a 422,
   matching the `meho targets list --limit` precedent.
-- **Tenant boundary surfaces as the not-found / empty / null
+- **Tenant boundary surfaces as the not-found / 404 / null
   shape.** A cross-tenant target on `refresh` → resolver 404
   (`unexpected_response`, exit 4, near-misses surfaced). A
-  cross-tenant node name on `dependents`/`dependencies` → empty list
-  → the "no node named …" line (exit 0). A cross-tenant endpoint on
-  `path` → `null` → the no-path line (exit 0). The CLI never
-  distinguishes "exists in another tenant" from "does not exist" —
-  the backend already collapses them, and the CLI render preserves
-  that.
+  cross-tenant node name on `dependents`/`dependencies` → **404
+  `node_untracked`** (G0.18-T4 #1357; `unexpected_response`, exit 4,
+  CLI renders "not tracked in the topology graph — run `meho
+  topology refresh` or `annotate`"). Distinct from `no_target`
+  because the operator action diverges (register the target vs.
+  refresh the topology). A cross-tenant endpoint on `path` →
+  `null` → the no-path line (exit 0). The CLI never distinguishes
+  "exists in another tenant" from "does not exist" — the backend
+  already collapses them, and the CLI render preserves that.
 - **`path` returns `TopologyPath | null`.** A literal JSON `null`
   (HTTP 200) is the unreachable / missing-endpoint answer. `getPath`
   decodes into a nil `*Path` (the CLI's local mirror type; distinct

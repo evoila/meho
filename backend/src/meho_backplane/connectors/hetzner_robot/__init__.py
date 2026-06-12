@@ -50,6 +50,19 @@ register_connector_v2(
     cls=HetznerRobotConnector,
 )
 
+# G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
+# out so a target with ``version=None`` (fresh, unfingerprinted, no
+# operator-asserted version yet) resolves to this connector through
+# the resolver's ``versioned_over_wildcard`` step rather than 501-ing
+# with ``no_connector``. The versioned entry above always wins when
+# both are present (resolver tie-break step 1).
+register_connector_v2(
+    product="hetzner-robot",
+    version="",
+    impl_id="",
+    cls=HetznerRobotConnector,
+)
+
 __all__ = [
     "ROBOT_CONNECTOR_ID",
     "ROBOT_CORE_GROUPS",

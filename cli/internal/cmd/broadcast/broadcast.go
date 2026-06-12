@@ -17,23 +17,32 @@
 // shape as `meho audit` / `meho targets` / `meho retrieval`. RBAC at
 // the backend rejects non-`tenant_admin` callers with HTTP 403; the
 // verb renders this as `insufficient_role`.
+//
+// G0.12-T6 #1264 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of the backend Pydantic
+// models. Every verb here drives the generated
+// `api.ClientWithResponses` surface directly: `api.NewAuthedClient`
+// wires the bearer + lazy 401-refresh editor onto the embedded
+// `ClientWithResponses`, and the verbs call the typed
+// `*WithResponse` methods
+// (`ListOverridesApiV1BroadcastOverridesGetWithResponse`,
+// `CreateOverrideApiV1BroadcastOverridesPostWithResponse`,
+// `DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse`).
+// Consumer-side struct drift — the #1069 root cause — can't recur
+// because we now consume `api.BroadcastOverrideRead` and produce
+// `api.BroadcastOverrideCreate` directly.
 package broadcast
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -78,99 +87,67 @@ func newOverridesCmd() *cobra.Command {
 	return cmd
 }
 
-// Entry mirrors the backend `BroadcastOverrideRead` Pydantic model
-// (`backend/src/meho_backplane/api/v1/broadcast_overrides.py`). Hand-
-// written rather than aliased to a generated client type so the
-// broadcast package stays decoupled from oapi-codegen churn -- same
-// stance as the audit / targets / retrieval packages.
-//
-// `ScopeField` and `ScopeValue` are `*string` so the JSON round-trip
-// preserves the explicit-null wire shape (an op-wide rule has both
-// fields null).
-type Entry struct {
-	ID           string  `json:"id"`
-	TenantID     string  `json:"tenant_id"`
-	OpIDPattern  string  `json:"op_id_pattern"`
-	ScopeField   *string `json:"scope_field"`
-	ScopeValue   *string `json:"scope_value"`
-	Detail       string  `json:"detail"`
-	CreatedBySub string  `json:"created_by_sub"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
+// httpResponseError carries a non-2xx status from a typed-client
+// `*WithResponse` call up to the verb's renderer. The typed-client
+// surface returns non-2xx responses in-band on the `(*Response, nil)`
+// tuple (transport-layer failures come back on the `(nil, err)`
+// tuple instead) — we lift the HTTP-failure case to an error type so
+// the call sites can use a single `if err != nil` branch and
+// `errors.As` routes the right way (HTTP status → `renderHTTPStatus`,
+// everything else → `renderTransportError`). See `routeRequestError`.
+type httpResponseError struct {
+	statusCode int
+	body       []byte
 }
 
-// CreateRequest mirrors the backend `BroadcastOverrideCreate` Pydantic
-// model. Optional fields use `*string` so the JSON round-trip omits
-// them rather than sending an explicit null when the caller didn't
-// supply a value.
-type CreateRequest struct {
-	OpIDPattern string  `json:"op_id_pattern"`
-	ScopeField  *string `json:"scope_field,omitempty"`
-	ScopeValue  *string `json:"scope_value,omitempty"`
-	Detail      string  `json:"detail"`
+func (e *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.statusCode, trimmedBody(e.body))
 }
 
-// errNoBackplaneConfigured mirrors the cli/internal/cmd/audit/audit.go
-// shape. Re-declared here to avoid the import cycle the cmd → cmd/audit
-// → cmd path would create.
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane configured; run `meho login <url>` or pass --backplane"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
+// routeRequestError is the single dispatcher every verb feeds an
+// error from `listOverrides` / `createOverride` / `deleteOverride`
+// into. The error is either an `*httpResponseError` (the backplane
+// responded with a non-2xx status) or a transport-layer failure
+// (network, refresh-impossible, etc.); we route the former through
+// `renderHTTPStatus` and the latter through `renderTransportError`.
+func routeRequestError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
+	var he *httpResponseError
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, jsonOut)
 	}
-	cfg, err := auth.LoadConfig()
+	return renderTransportError(cmd, backplaneURL, err, jsonOut)
+}
+
+// newAuthedClient builds an `api.AuthedClient` and surfaces its
+// construction-time errors as the right `output.StructuredError`
+// category (auth_expired when no token was ever stored, else
+// unexpected_response with the underlying error wrapped). Splits the
+// boilerplate every verb here used to duplicate inline.
+func newAuthedClient(
+	ctx context.Context,
+	cmd *cobra.Command,
+	backplaneURL string,
+	jsonOut bool,
+) (*api.AuthedClient, error) {
+	client, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
 	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
+		return nil, renderClientError(cmd, backplaneURL, err, jsonOut)
 	}
-	return normaliseURL(cfg.BackplaneURL)
+	return client, nil
 }
 
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
-}
-
-// renderRequestError classifies a request error into the right
-// StructuredError category. Maps the broadcast-overrides REST
-// surface's status codes:
-//
-//   - 401 (refresh failed) → auth_expired.
-//   - 403 → insufficient_role.
-//   - 404 → unexpected with "broadcast override not found"
-//     (cross-tenant probes land here per the backend's
-//     no-existence-leak posture).
-//   - 409 → unexpected with the duplicate-rule message.
-//   - 422 → unexpected with the FastAPI validation envelope.
-//   - Other 4xx/5xx → unexpected with the raw body.
-//   - Pure transport errors → unreachable.
-func renderRequestError(
+// renderClientError maps `api.NewAuthedClient` failures onto the
+// structured-error envelope. `IsTokenNotFound` is the "operator
+// never ran meho login" sentinel and surfaces as auth_expired with a
+// `meho login` hint; anything else is a build-time failure of the
+// authed transport itself (token store unreadable, etc.) and
+// surfaces as unexpected_response so the operator sees the cause.
+func renderClientError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
@@ -185,6 +162,23 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
+	return output.RenderError(cmd.ErrOrStderr(),
+		output.Unexpected(fmt.Sprintf("build authed client for %s: %v", backplaneURL, err)),
+		jsonOut,
+	)
+}
+
+// renderTransportError maps a generated-client call's transport-layer
+// error (network failure, refresh-impossible after a 401) onto the
+// right structured-error category. The typed-client surface returns
+// `(nil, err)` for these; non-2xx HTTP responses arrive as
+// `(*Response, nil)` and are routed through `renderHTTPStatus` instead.
+func renderTransportError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
 	if api.IsNoRefreshToken(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -194,23 +188,36 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-func renderHTTPError(
+// renderHTTPStatus maps a non-2xx HTTP status from the typed-client
+// response onto the right structured-error category. Mirrors the
+// pre-migration `renderHTTPError` shape:
+//
+//   - 401 → AuthExpired
+//   - 403 → InsufficientRole(detail) -- the backend's own detail
+//     string surfaces, not a hardcoded message.
+//   - 404 → Unexpected(detail) -- list/set on an older backplane
+//     (route missing) and remove on a missing/cross-tenant id both
+//     hit this path; the backend's own detail
+//     (`broadcast_override_not_found` for remove) round-trips
+//     cleanly.
+//   - 409 → Unexpected(detail) -- duplicate-rule rejection.
+//   - 422 → Unexpected("invalid request: <body>")
+//   - other non-2xx → Unexpected("call <url>: HTTP N: <body>")
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := trimmedBody(body)
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -221,154 +228,72 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetail(body, bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
-		// Surface the backend's own `detail` instead of hard-coding
-		// "broadcast override not found": for `list` / `set` (which
-		// don't carry an id in the path), a 404 means "route doesn't
-		// exist on this backplane" -- typically because the operator
-		// is talking to an older deploy that hasn't shipped T4 yet.
-		// `remove`'s 404 carries `broadcast_override_not_found`
-		// detail; both shapes round-trip cleanly through
-		// `decodeDetailString`.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetail(body, bodyStr)),
 			jsonOut,
 		)
 	case http.StatusConflict:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetail(body, bodyStr)),
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("invalid request: %s", he.Body)),
+			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
 }
 
-type detailEnvelope struct {
-	Detail json.RawMessage `json:"detail"`
+// trimmedBody renders a response body for inclusion in an error
+// envelope: trims trailing whitespace, surfaces a placeholder when
+// the backend returned an empty body so the operator-facing string
+// is never just "HTTP 500:".
+func trimmedBody(body []byte) string {
+	s := string(body)
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last == ' ' || last == '\n' || last == '\r' || last == '\t' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	if s == "" {
+		return "(empty body)"
+	}
+	return s
 }
 
-func decodeDetailString(body string) string {
-	var env detailEnvelope
-	if err := json.Unmarshal([]byte(body), &env); err == nil {
+// decodeDetail extracts the FastAPI `{"detail": "..."}` envelope's
+// string payload from a response body, falling back to the trimmed
+// body when the envelope can't be decoded. Pre-migration this lived
+// in `decodeDetailString`; the typed-client error path still receives
+// raw bytes so the same shape applies. `fallback` is the
+// already-trimmed body so the empty-body placeholder ("(empty body)")
+// flows through unchanged. FastAPI's `detail` can be either a
+// string (HTTPException) or a nested object (422-style validation
+// envelope); the string-shape case is the operator-friendly one we
+// surface, anything else gets the raw-body fallback.
+func decodeDetail(body []byte, fallback string) string {
+	var env struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &env); err == nil {
 		var s string
 		if jerr := json.Unmarshal(env.Detail, &s); jerr == nil && s != "" {
 			return s
 		}
 	}
-	return strings.TrimSpace(body)
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection and one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on 2xx, or an *httpError on
-// non-2xx, or an error categorised by api.IsTokenNotFound /
-// api.IsNoRefreshToken / generic transport.
-//
-// 204 No Content yields an empty body without error -- DELETE is the
-// only verb that hits this path.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-const responseBodyCap int64 = 1 << 20
-
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-func pathEscape(segment string) string {
-	return url.PathEscape(segment)
-}
-
-func strDerefOrDash(s *string) string {
-	if s == nil || *s == "" {
-		return "-"
-	}
-	return *s
+	return fallback
 }

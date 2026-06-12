@@ -158,7 +158,8 @@ def harbor_core_addr() -> Iterator[str]:
     # Late import: transitively probes Docker socket on import.
     from testcontainers.core.container import DockerContainer
     from testcontainers.core.network import Network
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     db_image = os.environ.get("MEHO_TEST_HARBOR_DB_IMAGE", "goharbor/harbor-db:v2.11.0")
     redis_image = os.environ.get("MEHO_TEST_HARBOR_REDIS_IMAGE", "redis:7-alpine")
@@ -218,7 +219,7 @@ def harbor_core_addr() -> Iterator[str]:
 
     try:
         # Give DB time to reach ready state before starting core.
-        wait_for_logs(db_container, "PostgreSQL init process complete", timeout=30)
+        wait_for_log_message(db_container, "PostgreSQL init process complete", timeout=30)
     except Exception:
         # Some harbor-db images don't log this line; fall through and
         # let core fail-fast if the DB isn't ready.
@@ -234,7 +235,7 @@ def harbor_core_addr() -> Iterator[str]:
 
     try:
         try:
-            wait_for_logs(core_container, "HTTP proxy is up", timeout=60)
+            wait_for_log_message(core_container, "HTTP proxy is up", timeout=60)
         except Exception:
             # Fall back: poll the /api/v2.0/systeminfo endpoint directly.
             host = core_container.get_container_host_ip()
@@ -304,6 +305,7 @@ class _HarborTarget:
 
     def __post_init__(self) -> None:
         self.id = uuid.uuid4()
+        self.tenant_id = uuid.uuid4()
         self.preferred_impl_id: str | None = None
 
         class _FP:

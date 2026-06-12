@@ -34,6 +34,13 @@
 #       smoke-tested the spec; PEP 440 when present. null until a connector's
 #       spec has actually been ingest-verified through MEHO (these are
 #       empirical values, not guesses -- populate on first verified ingest).
+#   spec_info_versions_compatible -- optional opt-in compatibility range for
+#       label-vs-spec ingest. List of patterns -- glob (`"1.x"`, `"9.0.x"`)
+#       or PEP 440 specifier set (`">=1.0,<2.0"`). When set, the validator
+#       passes an ingest whose spec `info.version` matches any pattern even
+#       if it differs from the catalog `version` label. Used when the
+#       catalog `version` is a product-line label divergent from the spec's
+#       documentation version (G0.16-T5 #1307 -- gh/3 vs `info.version=1.x.x`).
 #   sha256                       -- advisory content hash MEHO smoke-tested
 #       against; optional, not enforced. null until smoke-tested.
 #   notes                        -- operator context: sharp edges, version
@@ -49,14 +56,42 @@ entries:
     upstream:
       - "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
       - "https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): the Broadcom Developer Portal
+    # landing pages above still serve text/html (rechecked
+    # 2026-05-31), so catalog-driven ingest 422s
+    # ``catalog_entry_upstream_not_spec``. Operators must fetch the
+    # raw specs from the appliance and pass via the explicit-
+    # quadruple ``--spec`` shape; ``GET /api/v1/connectors``
+    # surfaces that via the ``next_step`` hint.
+    catalog_ingest: spec-only
     spec_info_version: null
+    # G0.16-T6 Finding H (#1312). vSphere ships its spec under the
+    # explicit-quadruple ``info.version="9.0.0.0"`` form while the
+    # catalog ``version`` is the product-line label ``"9.0"``. The
+    # PEP-440 prefix-match in ``_classify_version_match`` already
+    # treats ``9.0`` ↔ ``9.0.0.0`` as "exact" (release tuple ``(9, 0)``
+    # is a prefix of ``(9, 0, 0, 0)``), so this declaration is
+    # belt-and-suspenders: when an operator pinned both the catalog
+    # label and a slightly different explicit-quadruple variant, the
+    # compatibility hint says "9.0.x" is the band the catalog covers.
+    # Pairs with T5 (#1307)'s gh-rest entry where the divergence is
+    # load-bearing (catalog "3" vs spec "1.1.4"; PEP-440 prefix-match
+    # alone would reject). Per api-shape-conventions.md §9.
+    spec_info_versions_compatible:
+      - "9.0.x"
     sha256: null
     notes: >-
       Generic-ingested. vSphere publishes two specs that merge under one
       connector triple: vcenter.yaml (modern REST automation API, ~961 paths)
       and vi-json.yaml (Performance Manager, snapshots, host ops, ~2,195
       paths). Both are served by the appliance at https://<vcenter-fqdn>/ and
-      mirrored on the Broadcom Developer Portal (links above). spec_info_version
+      mirrored on the Broadcom Developer Portal (links above). SHARP EDGE:
+      the upstream URLs above are HTML developer-portal landing pages, not
+      raw OpenAPI YAML/JSON, so catalog-driven ingest via
+      `meho connector ingest --catalog vmware/9.0` returns HTTP 422
+      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
+      specs manually from the appliance (https://<vcenter-fqdn>/api/...)
+      and pass them via the explicit-quadruple shape. spec_info_version
       pending the first MEHO-verified ingest. See #743 / connector-ingestion.md.
 
   - product: sddc-manager
@@ -65,12 +100,23 @@ entries:
     requires_connector_class: SddcManagerConnector
     upstream:
       - "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): same Broadcom Developer Portal
+    # text/html landing page as vmware/9.0 (rechecked 2026-05-31);
+    # catalog-driven ingest 422s. Operators fetch from the appliance
+    # and pass via ``--spec``.
+    catalog_ingest: spec-only
     spec_info_version: null
     sha256: null
     notes: >-
       Generic-ingested. The SDDC Manager API is served by the appliance at
       https://<sddc-manager-fqdn>/v1/ and documented on the Broadcom Developer
-      Portal (link above). spec_info_version pending first verified ingest.
+      Portal (link above). SHARP EDGE: the upstream URL above is an HTML
+      developer-portal landing page, not raw OpenAPI YAML/JSON, so
+      catalog-driven ingest via
+      `meho connector ingest --catalog sddc-manager/9.0` returns HTTP 422
+      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
+      spec manually from the appliance and pass it via the explicit-
+      quadruple shape. spec_info_version pending first verified ingest.
       See #743.
 
   - product: harbor
@@ -89,19 +135,90 @@ entries:
       OpenAPI-3-converted, MEHO-verified ingest. See #743 / harbor-onboarding.md.
 
   - product: nsx
-    version: "4.2"
+    version: "9.0"
     impl_id: nsx-rest
     requires_connector_class: NsxConnector
     upstream:
       - "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml"
-      - "https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/"
+      - "https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): the first upstream is fqdn-
+    # templated (placeholder ``<nsx-mgr-fqdn>``); the second is the
+    # Broadcom Developer Portal text/html landing page. Neither
+    # supports catalog-driven ingest server-side. Operators fetch
+    # from the appliance and pass via ``--spec``.
+    catalog_ingest: spec-only
+    # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
+    # a live VCF-9 appliance reports NSX 9.0.x and serves a spec
+    # whose info.version is in the 9.x scheme (e.g. 9.1.0.0). The
+    # catalog version label tracks the VCF-9-aligned "9.0" product
+    # line; NsxConnector's supported_version_range (">=4.0,<10.0")
+    # keeps the standalone NSX-T 4.x line dispatchable through the
+    # same class. The 9.x band is declared compatible so an operator
+    # who ingests under the appliance's finer 9.x info.version clears
+    # the spec/label gate without a catalog hand-edit.
+    spec_info_versions_compatible:
+      - "9.x.x"
     spec_info_version: null
     sha256: null
     notes: >-
       Generic-ingested. NSX Manager serves the OpenAPI spec at
       /api/v1/spec/openapi/nsx_api.yaml (appliance-served, fqdn-templated);
-      the Broadcom Developer Portal mirrors the reference. spec_info_version
-      pending first verified ingest. See #743.
+      the Broadcom Developer Portal mirrors the reference. NSX-T 4.x was
+      renumbered onto the VCF train at VCF 9.0 (#1530) -- a VCF-9 appliance
+      reports NSX 9.0.x and the spec's info.version is in the 9.x scheme;
+      NsxConnector covers both 4.x and 9.x via supported_version_range
+      ">=4.0,<10.0". spec_info_version pending first verified ingest.
+      See #743 / #1530.
+
+  - product: gh
+    version: "3"
+    impl_id: gh-rest
+    requires_connector_class: GitHubRestConnector
+    upstream:
+      - "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json"
+    spec_info_version: "1.1.4"
+    # G0.16-T5 (#1307): catalog version "3" is the product-line label;
+    # the spec's info.version tracks the OpenAPI description's own
+    # documentation versioning (currently 1.1.4, growing). Without this
+    # opt-in the validator's spec_label_mismatch fires on every upstream
+    # 1.x bump until an operator hand-edits the catalog. The compat
+    # range accepts the full 1.x band -- once GitHub publishes a 2.x
+    # description an operator decides whether to extend this range,
+    # cut a new catalog row, or take action specific to the bump.
+    spec_info_versions_compatible:
+      - "1.x.x"
+    sha256: null
+    notes: >-
+      Generic-ingested. GitHub REST API (Apache-2.0, machine-generated
+      from production at https://github.com/github/rest-api-description).
+      The upstream is OpenAPI 3.0.3 -- direct-resolvable
+      raw.githubusercontent.com JSON (not HTML-portal-templated like
+      vmware/9.0), so it works with the G0.14-T9 #1182 {catalog_entry}
+      server-resolve flow without preprocessing. spec_info_version
+      1.1.4 observed 2026-05-27 against the main branch tip; ~784 paths
+      grouped into ~49 tags (repos, pulls, issues, actions, projects,
+      releases, ...). VERSION-FIELD CONVENTION (G3.11-T8 #1242): the
+      version field stores the digit-prefix form "3" (Resolution A as
+      of 2026-05-27), matching the registry triple
+      ("gh", "3", "gh-rest"). The dispatcher's parse_connector_id pins
+      version to ^[0-9][A-Za-z0-9._]*$ (rejects "v3"), so the catalog
+      and registry must agree on the digit form for the (product,
+      version, impl_id) tuple lookup to resolve cleanly. The upstream
+      label "v3" -- which is what github.com itself calls the API in
+      its own docs -- is preserved in FingerprintResult.version and in
+      docs/cross-repo/github-connector.md (G3.11-T6) for operator
+      recognition. Auth shape: GitHub App installation tokens
+      (preferred, machine-identity, audit-attributable) or fine-grained
+      PAT fallback -- see docs/cross-repo/github-app-credential.md
+      (G3.11-T2) and docs/cross-repo/github-connector.md (G3.11-T6).
+      VERSION-BUMP PROCEDURE: upstream pins the rest-api-description
+      repo's main branch (not a release tag) because the public release
+      cadence lags by years (v2.1.0 was published 2022-10; the spec is
+      regenerated daily on main from production). Refresh
+      spec_info_version + ingest output on operator-cadenced re-ingest
+      (typically quarterly, or when a CI canary detects info.version
+      drift). The spec is large (~10 MB JSON); ingest takes ~30
+      seconds against an operator-class machine.
 
   # --- Typed connectors (Layer 1: hand-coded; no spec ingestion) ---
 

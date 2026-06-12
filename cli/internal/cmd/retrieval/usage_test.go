@@ -10,82 +10,77 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// TestBuildUsageURLDefaults — default --since=30d / --surface=all /
+const testTenantUUID = "11111111-2222-3333-4444-555555555555"
+
+// TestUsageQueryParamsDefaults — default --since=30d / --surface=all /
 // no --tenant produces the canonical wire shape: the explicit
 // `surface=all` rather than an omitted param (load-bearing for the
 // backplane's audit + observability traces — they record the
 // operator's intent rather than an absent param).
-func TestBuildUsageURLDefaults(t *testing.T) {
-	got := buildUsageURL("https://meho.test", usageOptions{
-		Since: "30d", Surface: "all",
-	})
-	u, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+func TestUsageQueryParamsDefaults(t *testing.T) {
+	params := usageQueryParams(usageOptions{Since: "30d", Surface: "all"})
+	if params.Since == nil || *params.Since != "30d" {
+		t.Errorf("since: got %v want 30d", params.Since)
 	}
-	if u.Path != "/api/v1/retrieve/usage" {
-		t.Errorf("path: got %q want /api/v1/retrieve/usage", u.Path)
+	if params.Surface == nil ||
+		*params.Surface != api.UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll {
+		t.Errorf("surface: got %v", params.Surface)
 	}
-	q := u.Query()
-	if q.Get("since") != "30d" {
-		t.Errorf("since: got %q", q.Get("since"))
-	}
-	if q.Get("surface") != "all" {
-		t.Errorf("surface: got %q", q.Get("surface"))
-	}
-	if q.Has("tenant_filter") {
-		t.Errorf("tenant_filter should be omitted when --tenant is unset")
+	if params.TenantFilter != nil {
+		t.Errorf("tenant_filter should be omitted when --tenant is unset; got %v",
+			params.TenantFilter)
 	}
 }
 
-// TestBuildUsageURLTenantPropagated — --tenant <uuid> survives the
-// URL build verbatim under the `tenant_filter` query-param name the
-// backplane route signature pins.
-func TestBuildUsageURLTenantPropagated(t *testing.T) {
-	tenantUUID := "11111111-2222-3333-4444-555555555555"
-	got := buildUsageURL("https://meho.test", usageOptions{
-		Since: "7d", Surface: "kb", Tenant: tenantUUID,
+// TestUsageQueryParamsTenantPropagated — --tenant <uuid> survives the
+// params build verbatim and parses cleanly into the generated UUID
+// type the backend route signature pins.
+func TestUsageQueryParamsTenantPropagated(t *testing.T) {
+	params := usageQueryParams(usageOptions{
+		Since: "7d", Surface: "kb", Tenant: testTenantUUID,
 	})
-	u, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+	if params.TenantFilter == nil {
+		t.Fatalf("tenant_filter should be set when --tenant is non-empty")
 	}
-	if u.Query().Get("tenant_filter") != tenantUUID {
+	if params.TenantFilter.String() != testTenantUUID {
 		t.Errorf("tenant_filter: got %q want %q",
-			u.Query().Get("tenant_filter"), tenantUUID)
+			params.TenantFilter.String(), testTenantUUID)
 	}
-	if u.Query().Get("since") != "7d" {
-		t.Errorf("since: got %q want 7d", u.Query().Get("since"))
+	if params.Since == nil || *params.Since != "7d" {
+		t.Errorf("since: got %v want 7d", params.Since)
 	}
-	if u.Query().Get("surface") != "kb" {
-		t.Errorf("surface: got %q want kb", u.Query().Get("surface"))
+	if params.Surface == nil ||
+		*params.Surface != api.UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb {
+		t.Errorf("surface: got %v want kb", params.Surface)
 	}
 }
 
-// TestBuildUsageURLEmptyTenantOmitted — passing an empty --tenant
+// TestUsageQueryParamsEmptyTenantOmitted — passing an empty --tenant
 // value must NOT land as `tenant_filter=` on the wire (the
 // backplane parser rejects the explicit-empty case with 422). The
 // flag default is empty string, so this is the load-bearing common
 // path: a bare `meho retrieval usage` invocation omits the param
 // entirely.
-func TestBuildUsageURLEmptyTenantOmitted(t *testing.T) {
-	got := buildUsageURL("https://meho.test", usageOptions{
+func TestUsageQueryParamsEmptyTenantOmitted(t *testing.T) {
+	params := usageQueryParams(usageOptions{
 		Since: "30d", Surface: "all", Tenant: "",
 	})
-	u, _ := url.Parse(got)
-	if u.Query().Has("tenant_filter") {
+	if params.TenantFilter != nil {
 		t.Errorf("empty tenant: tenant_filter should be omitted; got %q",
-			u.Query().Get("tenant_filter"))
+			params.TenantFilter.String())
 	}
 }
 
@@ -94,7 +89,8 @@ func TestBuildUsageURLEmptyTenantOmitted(t *testing.T) {
 // ships `since`/`until`/`surfaces`/`tenant_id`/`buckets`/
 // `total_searches`, with `tenant_id` nullable. Decoding drift here
 // surfaces as a Major-class wire-contract failure on the next
-// `meho retrieval usage` round-trip.
+// `meho retrieval usage` round-trip. Validates that the generated
+// `api.UsageReport` decodes the documented JSON shape cleanly.
 func TestUsageReportDecodesCanonical(t *testing.T) {
 	raw := []byte(`{
 		"since": "2026-04-16T00:00:00Z",
@@ -119,13 +115,13 @@ func TestUsageReportDecodesCanonical(t *testing.T) {
 		],
 		"total_searches": 9
 	}`)
-	var got UsageReport
+	var got api.UsageReport
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode UsageReport: %v", err)
 	}
-	if got.TenantID != nil {
+	if got.TenantId != nil {
 		t.Errorf("tenant_id: should decode nil for cross-tenant; got %v",
-			got.TenantID)
+			got.TenantId)
 	}
 	if got.TotalSearches != 9 {
 		t.Errorf("total_searches: got %d want 9", got.TotalSearches)
@@ -136,8 +132,11 @@ func TestUsageReportDecodesCanonical(t *testing.T) {
 	if got.Buckets[0].SearchCount != 7 || got.Buckets[0].DistinctOperators != 3 {
 		t.Errorf("first bucket: %+v", got.Buckets[0])
 	}
-	if got.Buckets[0].ActionConversionPct != 71.43 {
-		t.Errorf("action_conversion_pct decode lost precision: got %v",
+	// `action_conversion_pct` is `float32` on the generated type —
+	// the decoder rounds 71.43 to the nearest float32. Compare with
+	// a small epsilon to dodge the float-printing surprise.
+	if got.Buckets[0].ActionConversionPct < 71.42 || got.Buckets[0].ActionConversionPct > 71.44 {
+		t.Errorf("action_conversion_pct decode drifted: got %v",
 			got.Buckets[0].ActionConversionPct)
 	}
 	if len(got.Surfaces) != 3 || got.Surfaces[0] != "kb" {
@@ -157,15 +156,15 @@ func TestUsageReportDecodesTenantScoped(t *testing.T) {
 		"buckets": [],
 		"total_searches": 0
 	}`)
-	var got UsageReport
+	var got api.UsageReport
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode tenant-scoped UsageReport: %v", err)
 	}
-	if got.TenantID == nil || *got.TenantID == "" {
-		t.Fatalf("tenant_id should decode non-nil; got %v", got.TenantID)
+	if got.TenantId == nil {
+		t.Fatalf("tenant_id should decode non-nil; got %v", got.TenantId)
 	}
-	if *got.TenantID != "11111111-2222-3333-4444-555555555555" {
-		t.Errorf("tenant_id: got %q", *got.TenantID)
+	if got.TenantId.String() != testTenantUUID {
+		t.Errorf("tenant_id: got %q", got.TenantId.String())
 	}
 }
 
@@ -174,9 +173,11 @@ func TestUsageReportDecodesTenantScoped(t *testing.T) {
 // running `meho retrieval usage` on a brand-new tenant doesn't think
 // the verb hung silently.
 func TestPrintUsageTableEmptyBuckets(t *testing.T) {
-	r := &UsageReport{
-		Since:    "2026-04-16T00:00:00Z",
-		Until:    "2026-05-16T00:00:00Z",
+	since := time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 16, 0, 0, 0, 0, time.UTC)
+	r := &api.UsageReport{
+		Since:    since,
+		Until:    until,
 		Surfaces: []string{"kb", "memory", "operations"},
 		Buckets:  nil,
 	}
@@ -203,17 +204,24 @@ func TestPrintUsageTableEmptyBuckets(t *testing.T) {
 // readable table because printUsageTable re-sorts. The test
 // confirms that property by feeding rows out of order.
 func TestPrintUsageTableHappyPath(t *testing.T) {
-	tenantUUID := "11111111-2222-3333-4444-555555555555"
-	r := &UsageReport{
-		Since:    "2026-04-16T00:00:00Z",
-		Until:    "2026-05-16T00:00:00Z",
+	var tenantUUID openapi_types.UUID
+	if err := tenantUUID.UnmarshalText([]byte(testTenantUUID)); err != nil {
+		t.Fatalf("parse tenant UUID: %v", err)
+	}
+	since := time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 5, 16, 0, 0, 0, 0, time.UTC)
+	d14 := openapi_types.Date{Time: time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC)}
+	d15 := openapi_types.Date{Time: time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC)}
+	r := &api.UsageReport{
+		Since:    since,
+		Until:    until,
 		Surfaces: []string{"kb", "memory"},
-		TenantID: &tenantUUID,
-		Buckets: []UsageBucket{
+		TenantId: &tenantUUID,
+		Buckets: []api.DailyUsageBucket{
 			// Deliberately out-of-order: the renderer must sort.
-			{Date: "2026-05-15", Surface: "memory", SearchCount: 2, DistinctOperators: 1, ActionConversionPct: 100.0},
-			{Date: "2026-05-14", Surface: "kb", SearchCount: 5, DistinctOperators: 2, ActionConversionPct: 60.0},
-			{Date: "2026-05-15", Surface: "kb", SearchCount: 7, DistinctOperators: 3, ActionConversionPct: 71.43},
+			{Date: d15, Surface: "memory", SearchCount: 2, DistinctOperators: 1, ActionConversionPct: 100.0},
+			{Date: d14, Surface: "kb", SearchCount: 5, DistinctOperators: 2, ActionConversionPct: 60.0},
+			{Date: d15, Surface: "kb", SearchCount: 7, DistinctOperators: 3, ActionConversionPct: 71.43},
 		},
 		TotalSearches: 14,
 	}
@@ -221,7 +229,7 @@ func TestPrintUsageTableHappyPath(t *testing.T) {
 	printUsageTable(&buf, r)
 	out := buf.String()
 	for _, want := range []string{
-		"tenant: " + tenantUUID,
+		"tenant: " + testTenantUUID,
 		"surfaces: kb,memory",
 		"total searches: 14",
 		"2026-05-14", "2026-05-15",
@@ -236,16 +244,6 @@ func TestPrintUsageTableHappyPath(t *testing.T) {
 	// output and check ordering by index.
 	if idx14, idx15 := strings.Index(out, "2026-05-14"), strings.Index(out, "2026-05-15"); idx14 == -1 || idx15 == -1 || idx14 > idx15 {
 		t.Errorf("render should sort buckets ascending by date; got:\n%s", out)
-	}
-}
-
-// TestUsageHTTPErrorString — Error() format pins the renderer's
-// input shape (used by renderUsageError fallthrough and surfaced
-// inside the unexpected_response detail).
-func TestUsageHTTPErrorString(t *testing.T) {
-	he := &usageHTTPError{StatusCode: 400, Body: "malformed since"}
-	if he.Error() != "HTTP 400: malformed since" {
-		t.Fatalf("usageHTTPError format: got %q", he.Error())
 	}
 }
 
@@ -279,10 +277,10 @@ func TestSurfaceFlagValidatorRejectsUnknown(t *testing.T) {
 // TestGetUsageRoundTripWithMockServer — pins the wire contract
 // between T5 (backend) and T5b (this CLI). The CLI GETs
 // /api/v1/retrieve/usage, validates the query params land verbatim,
-// and decodes the canonical UsageReport. Used for the JSON contract
-// sanity check that doesn't require a live backplane — true
-// end-to-end coverage lives in the acceptance smoke against a
-// real backplane.
+// and decodes the canonical UsageReport via the generated typed
+// client. Used for the JSON contract sanity check that doesn't
+// require a live backplane — true end-to-end coverage lives in the
+// acceptance smoke against a real backplane.
 func TestGetUsageRoundTripWithMockServer(t *testing.T) {
 	srv := mockUsageBackplane(t, map[string]mockUsageHandler{
 		"GET /api/v1/retrieve/usage": func(w http.ResponseWriter, r *http.Request) {
@@ -295,12 +293,18 @@ func TestGetUsageRoundTripWithMockServer(t *testing.T) {
 			if r.URL.Query().Has("tenant_filter") {
 				t.Errorf("tenant_filter should be absent on default call")
 			}
-			writeUsageJSON(t, w, 200, UsageReport{
-				Since:    "2026-04-16T00:00:00Z",
-				Until:    "2026-05-16T00:00:00Z",
+			writeUsageJSON(t, w, 200, api.UsageReport{
+				Since:    time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC),
+				Until:    time.Date(2026, 5, 16, 0, 0, 0, 0, time.UTC),
 				Surfaces: []string{"kb", "memory", "operations"},
-				Buckets: []UsageBucket{
-					{Date: "2026-05-15", Surface: "kb", SearchCount: 3, DistinctOperators: 2, ActionConversionPct: 66.67},
+				Buckets: []api.DailyUsageBucket{
+					{
+						Date:                openapi_types.Date{Time: time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC)},
+						Surface:             "kb",
+						SearchCount:         3,
+						DistinctOperators:   2,
+						ActionConversionPct: 66.67,
+					},
 				},
 				TotalSearches: 3,
 			})
@@ -309,23 +313,29 @@ func TestGetUsageRoundTripWithMockServer(t *testing.T) {
 	defer srv.Close()
 	primeUsageToken(t, srv.URL)
 
-	got, err := getUsage(context.Background(), srv.URL, usageOptions{
+	resp, err := getUsage(context.Background(), srv.URL, usageOptions{
 		Since: "30d", Surface: "all",
 	})
 	if err != nil {
 		t.Fatalf("getUsage: %v", err)
 	}
-	if got.TotalSearches != 3 || len(got.Buckets) != 1 {
-		t.Fatalf("unexpected report: %+v", got)
+	if resp.StatusCode() != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode())
 	}
-	if got.Buckets[0].SearchCount != 3 {
-		t.Errorf("bucket: got %+v", got.Buckets[0])
+	if resp.JSON200 == nil {
+		t.Fatalf("JSON200 should be populated on a JSON 200 response")
+	}
+	if resp.JSON200.TotalSearches != 3 || len(resp.JSON200.Buckets) != 1 {
+		t.Fatalf("unexpected report: %+v", resp.JSON200)
+	}
+	if resp.JSON200.Buckets[0].SearchCount != 3 {
+		t.Errorf("bucket: got %+v", resp.JSON200.Buckets[0])
 	}
 }
 
 // TestGetUsage403MapsToInsufficientRole — backplane 403 (the
 // tenant_filter_requires_tenant_admin case) propagates as a
-// *usageHTTPError with StatusCode=403; renderUsageError routes it
+// typed response with StatusCode=403; renderHTTPStatus routes it
 // to insufficient_role with the body surfaced. The operator gets
 // the "ask tenant_admin for the role grant" hint rather than a
 // generic "network down" fallback. Load-bearing for issue #464
@@ -343,25 +353,30 @@ func TestGetUsage403MapsToInsufficientRole(t *testing.T) {
 	defer srv.Close()
 	primeUsageToken(t, srv.URL)
 
-	_, err := getUsage(context.Background(), srv.URL, usageOptions{
+	cmd, _, stderr := newRunCmd(t)
+	err := runUsage(cmd, usageOptions{
 		Since: "30d", Surface: "all",
-		Tenant: "11111111-2222-3333-4444-555555555555",
+		Tenant:            testTenantUUID,
+		BackplaneOverride: srv.URL,
 	})
 	if err == nil {
 		t.Fatalf("expected 403 error; got nil")
 	}
-	var he *usageHTTPError
-	if !errors.As(err, &he) || he.StatusCode != 403 {
-		t.Fatalf("expected *usageHTTPError 403; got %T %v", err, err)
+	if !strings.Contains(stderr.String(), "insufficient_role") {
+		t.Errorf("expected insufficient_role classification; got %q", stderr.String())
 	}
-	if !strings.Contains(he.Body, "tenant_filter_requires_tenant_admin") {
-		t.Errorf("403 body should carry the backplane detail; got %q", he.Body)
+	if !strings.Contains(stderr.String(), "tenant_filter_requires_tenant_admin") {
+		t.Errorf("403 body should carry the backplane detail; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 5 {
+		t.Errorf("expected ExitCode 5 (insufficient_role); got %v", err)
 	}
 }
 
-// TestGetUsage400MapsToUnexpectedWithBody — backplane 400 (the
-// malformed --since case) propagates as a *usageHTTPError with
-// StatusCode=400; renderUsageError routes it to
+// TestGetUsage400MapsToUnexpected — backplane 400 (the
+// malformed --since case) propagates as a typed response with
+// StatusCode=400; renderHTTPStatus routes it to
 // unexpected_response with the body surfaced verbatim so the
 // operator sees the actionable backend hint ("not a valid
 // duration"). Load-bearing for issue #464 acceptance criterion 6.
@@ -375,56 +390,57 @@ func TestGetUsage400MapsToUnexpected(t *testing.T) {
 	defer srv.Close()
 	primeUsageToken(t, srv.URL)
 
-	_, err := getUsage(context.Background(), srv.URL, usageOptions{
+	cmd, _, stderr := newRunCmd(t)
+	err := runUsage(cmd, usageOptions{
 		Since: "tomorrow", Surface: "all",
+		BackplaneOverride: srv.URL,
 	})
 	if err == nil {
 		t.Fatalf("expected 400 error; got nil")
 	}
-	var he *usageHTTPError
-	if !errors.As(err, &he) || he.StatusCode != 400 {
-		t.Fatalf("expected *usageHTTPError 400; got %T %v", err, err)
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
 	}
-	if !strings.Contains(he.Body, "not a valid duration") {
-		t.Errorf("400 body should carry the backplane detail; got %q", he.Body)
+	if !strings.Contains(stderr.String(), "not a valid duration") {
+		t.Errorf("400 body should carry the backplane detail; got %q", stderr.String())
 	}
 }
 
-// TestGetUsageDecodeErrorClassifiable — a 200 OK with garbage JSON
-// body must classify as JSON syntax (renderUsageError routes to
-// unexpected_response). Without this branch a contract drift
-// between T5 (backend) and T5b (CLI) would surface as
-// "your network is down".
-func TestGetUsageDecodeErrorClassifiable(t *testing.T) {
+// TestRunUsageRejects200WithoutJSONPayload pins the JSON200
+// nil-guard for the usage verb. A 200 with a missing or mistyped
+// Content-Type leaves resp.JSON200 nil; without the guard,
+// printUsageTable's nil-or-empty branch prints "(no buckets — zero
+// searches in the window)" — actively misleading (conflated with a
+// genuinely-empty window). Route to output.Unexpected (exit 4)
+// instead.
+func TestRunUsageRejects200WithoutJSONPayload(t *testing.T) {
 	srv := mockUsageBackplane(t, map[string]mockUsageHandler{
-		"GET /api/v1/retrieve/usage": func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(200)
-			// Malformed JSON — triggers a decode error.
-			_, _ = w.Write([]byte(`{"since": "2026-`))
+		"GET /api/v1/retrieve/usage": func(w http.ResponseWriter, _ *http.Request) {
+			// Deliberately omit Content-Type so the generated parser
+			// leaves JSON200 nil.
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("not-json"))
 		},
 	})
 	defer srv.Close()
 	primeUsageToken(t, srv.URL)
 
-	_, err := getUsage(context.Background(), srv.URL, usageOptions{
-		Since: "30d", Surface: "all",
+	cmd, _, stderr := newRunCmd(t)
+	err := runUsage(cmd, usageOptions{
+		Since: "30d", Surface: "all", BackplaneOverride: srv.URL,
 	})
 	if err == nil {
-		t.Fatalf("expected decode error; got nil")
+		t.Fatalf("expected error on 200 without JSON payload")
 	}
-	var syntaxErr *json.SyntaxError
-	var unmarshalErr *json.UnmarshalTypeError
-	if !errors.As(err, &syntaxErr) &&
-		!errors.As(err, &unmarshalErr) &&
-		!errors.Is(err, http.ErrBodyReadAfterClose) {
-		// The wrapped error should be a JSON syntax error. We
-		// accept either the typed sentinel or
-		// io.ErrUnexpectedEOF (the standard EOF surface for
-		// truncated JSON streams).
-		if !strings.Contains(err.Error(), "decode usage response") {
-			t.Errorf("expected decode error wrap; got %T %v", err, err)
-		}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a usage report payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
 	}
 }
 
@@ -482,6 +498,7 @@ func primeUsageToken(t *testing.T, backplaneURL string) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
 	cfg := filepath.Join(dir, "meho", "config.json")
 	if err := os.MkdirAll(filepath.Dir(cfg), 0o700); err != nil {
 		t.Fatalf("mkdir config: %v", err)

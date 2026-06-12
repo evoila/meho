@@ -1,0 +1,43 @@
+# A hand-authored minimal OpenAPI 3.0.3 spec for a product whose vendor
+# publishes no OpenAPI document at all (the #1533 / ci-07 on-ramp). It
+# covers just the two ops an operator needs to dispatch — list servers
+# and reset one — and is the worked example in
+# docs/cross-repo/connector-ingestion.md §"Product publishes no OpenAPI
+# spec". Modelled on Hetzner Robot (HTML/Markdown docs only).
+openapi: 3.0.3
+info:
+  title: Hetzner Robot (hand-authored)
+  version: "1.0"
+paths:
+  /server:
+    get:
+      summary: List dedicated servers
+      description: Returns every dedicated server on the account.
+      operationId: listServers
+      tags:
+        - server
+      responses:
+        "200":
+          description: A list of servers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /reset/{server_ip}:
+    post:
+      summary: Trigger a hardware reset
+      description: Sends a reset signal to the server addressed by server_ip.
+      operationId: resetServer
+      tags:
+        - server
+      parameters:
+        - name: server_ip
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reset accepted.

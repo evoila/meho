@@ -23,7 +23,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 import httpx
@@ -31,6 +31,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -55,6 +56,8 @@ class _StubTarget:
     port: int | None
     secret_ref: str | None
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    id: UUID = field(default_factory=lambda: UUID(int=1))
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -74,12 +77,16 @@ _TARGET_A = _StubTarget(
     host="vrops-a.test.invalid",
     port=443,
     secret_ref="vcf-operations/vrops-a",
+    id=UUID(int=0xA),
+    tenant_id=UUID(int=0),
 )
 _TARGET_B = _StubTarget(
     name="vrops-b",
     host="vrops-b.test.invalid",
     port=443,
     secret_ref="vcf-operations/vrops-b",
+    id=UUID(int=0xB),
+    tenant_id=UUID(int=0),
 )
 
 
@@ -298,7 +305,64 @@ async def test_credentials_cache_isolates_per_target() -> None:
     assert a["username"] == "svc-vrops-a"
     assert b["username"] == "svc-vrops-b"
     assert call_log == ["vrops-a", "vrops-b"]
-    assert cache.cached_targets == frozenset({"vrops-a", "vrops-b"})
+    assert cache.cached_targets == frozenset(
+        {target_cache_key(_TARGET_A), target_cache_key(_TARGET_B)}
+    )
+
+
+@pytest.mark.asyncio
+async def test_credentials_cache_isolates_same_name_across_tenants() -> None:
+    """Two same-named targets in DIFFERENT tenants get distinct cache entries.
+
+    Regression guard for #1642: keying the cache on ``target.name`` alone
+    collapsed same-named targets across tenants onto one entry, so one
+    tenant could be served another tenant's cached credential. The cache
+    is keyed on the tenant-unique ``(tenant_id, id)`` tuple instead.
+    """
+    load_count = 0
+
+    async def _counting_loader(target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
+        nonlocal load_count
+        load_count += 1
+        # Username encodes the tenant so a cross-tenant cache hit is
+        # observable in the returned credential, not just the load count.
+        return {"username": f"svc-{target.tenant_id}", "password": "pass"}
+
+    # Same NAME, same id-shape, but two different tenants.
+    tenant_one = _StubTarget(
+        name="shared-name",
+        host="appliance-one.test.invalid",
+        port=443,
+        secret_ref="vcf/shared-name",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="shared-name",
+        host="appliance-two.test.invalid",
+        port=443,
+        secret_ref="vcf/shared-name",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    cache = CredentialsCache(_counting_loader, product_label="vrops")
+    creds_one = await cache.get(tenant_one, _make_operator())
+    creds_two = await cache.get(tenant_two, _make_operator())
+
+    # Each tenant triggered its own load — no cross-tenant cache hit.
+    assert load_count == 2
+    assert creds_one["username"] == f"svc-{tenant_one.tenant_id}"
+    assert creds_two["username"] == f"svc-{tenant_two.tenant_id}"
+    assert creds_one != creds_two
+    assert cache.cached_targets == frozenset(
+        {target_cache_key(tenant_one), target_cache_key(tenant_two)}
+    )
+
+    # Same-tenant re-fetch is a cache HIT — behaviour unchanged.
+    creds_one_again = await cache.get(tenant_one, _make_operator())
+    assert load_count == 2
+    assert creds_one_again == creds_one
 
 
 @pytest.mark.asyncio
@@ -307,7 +371,7 @@ async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
     await cache.get(_TARGET_A, _make_operator())
     await cache.get(_TARGET_B, _make_operator())
     await cache.invalidate(_TARGET_A)
-    assert cache.cached_targets == frozenset({"vrops-b"})
+    assert cache.cached_targets == frozenset({target_cache_key(_TARGET_B)})
 
 
 @pytest.mark.asyncio

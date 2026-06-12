@@ -1,0 +1,400 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks authoring editor: draft + edit a runbook template.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1383 (T2). The tenant_admin
+  authoring surface — a structured, repeatable step editor that builds a
+  valid RunbookTemplateBody and POSTs it to /ui/runbooks/new (create) or
+  /ui/runbooks/{slug}/edit (edit/fork). The handler calls the same service
+  the REST surface uses; client-side validation here is convenience, the
+  server is the source of truth.
+
+  Alpine model:
+    * Top-level fields: slug (new only), title, description, target_kind.
+    * steps[]: the discriminated-union step tree, hydrated from
+      ``initial_steps_json`` (one blank step on a fresh new; the existing
+      steps on an edit). Add / remove / reorder mutate this array.
+    * On submit, the whole step tree is JSON-serialised into the hidden
+      ``steps`` form field so the union shape survives the round-trip; the
+      params/expect JSON textareas are passed through as raw strings and
+      parsed server-side.
+
+  CodeMirror 6 + HTMX preview: see ``_step_fields.html`` (each step's body
+  textarea is CM-enhanced and carries a debounced HTMX preview POST). The CM
+  bundle + the per-step init script are loaded in ``{% block scripts %}``.
+
+  CSRF: the submit form + every step's preview POST echo ``X-CSRF-Token`` via
+  ``hx-headers``; the token is minted on render (cookie set) and re-minted on
+  every error / fork re-render so subsequent HTMX calls carry a live token.
+
+  Context variables:
+    mode              -- "new" | "edit"
+    slug              -- str (locked on edit; the model's slug on new)
+    title/description/target_kind -- str: prefilled top-level fields
+    initial_steps_json -- str: JSON array hydrating the Alpine ``steps`` model
+    submit_url        -- str: POST target (/ui/runbooks/new | .../{slug}/edit)
+    submit_label      -- str: button label
+    error_message     -- str | None: inline error banner copy
+    fork_notice       -- dict | None: {slug, source_version, new_version,
+                         in_flight_run_count} surfaced after a fork-on-edit
+    csrf_token        -- str
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ page_title }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  x-data="runbookEditor({
+    mode: '{{ mode }}',
+    initialSteps: {{ initial_steps_json | safe }},
+    slug: {{ slug | tojson }},
+    title: {{ title | tojson }},
+    description: {{ description | tojson }},
+    targetKind: {{ target_kind | tojson }}
+  })"
+>
+  {# ---------- Header ---------- #}
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <a href="/ui/runbooks" class="btn btn-ghost btn-sm" aria-label="Back to runbooks catalog">
+        &larr; Catalog
+      </a>
+      <h1 class="text-2xl font-semibold">
+        {% if mode == "edit" %}Edit <span class="font-mono">{{ slug }}</span>{% else %}New runbook{% endif %}
+      </h1>
+    </div>
+  </header>
+
+  {# ---------- Error banner ---------- #}
+  {% if error_message %}
+  <div role="alert" class="alert alert-error text-sm" aria-live="assertive">
+    <span>{{ error_message }}</span>
+  </div>
+  {% endif %}
+
+  {# ---------- Fork notice (edit of a published template forked a draft) ---------- #}
+  {% if fork_notice %}
+  <div role="status" class="alert alert-info text-sm" aria-live="polite">
+    <div>
+      <p class="font-semibold">Forked a new draft</p>
+      <p>
+        Editing the published template forked a new draft
+        (<span class="font-mono">v{{ fork_notice.new_version }}</span>) from
+        <span class="font-mono">{{ fork_notice.slug }} v{{ fork_notice.source_version }}</span>.
+        That source version still has
+        <strong>{{ fork_notice.in_flight_run_count }}</strong>
+        in-flight run{{ "" if fork_notice.in_flight_run_count == 1 else "s" }}.
+      </p>
+    </div>
+  </div>
+  {% endif %}
+
+  {# ---------- Client-side validation summary ---------- #}
+  <div role="alert" class="alert alert-warning text-sm" x-show="validationErrors().length > 0"
+       x-cloak aria-live="polite">
+    <ul class="list-disc pl-4">
+      <template x-for="err in validationErrors()" x-bind:key="err">
+        <li x-text="err"></li>
+      </template>
+    </ul>
+  </div>
+
+  {# ---------- Form ---------- #}
+  <form
+    id="runbook-editor-form"
+    hx-post="{{ submit_url }}"
+    hx-target="#runbook-editor-form"
+    hx-swap="none"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+    x-on:submit="syncSteps()"
+    x-bind:hx-disabled-elt="validationErrors().length > 0 ? 'find button[type=submit]' : null"
+  >
+    {# Top-level fields #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body space-y-3 py-4">
+        {% if mode == "new" %}
+        <label class="form-control">
+          <div class="label py-0">
+            <span class="label-text font-medium">Slug</span>
+            <span class="label-text-alt opacity-60">lowercase, dots/hyphens, required</span>
+          </div>
+          <input type="text" name="slug" class="input input-bordered input-sm font-mono"
+                 x-model="slug" pattern="[a-z]([a-z0-9.\-]*[a-z0-9])?"
+                 placeholder="rotate-cluster-cert" autocomplete="off" required
+                 aria-label="Template slug" />
+          <div class="label py-0" x-show="slugError()">
+            <span class="label-text-alt text-error" x-text="slugError()"></span>
+          </div>
+        </label>
+        {% else %}
+        {# Slug is locked on edit — the path is the source of truth. #}
+        <input type="hidden" name="slug" value="{{ slug }}" />
+        {% endif %}
+
+        <label class="form-control">
+          <div class="label py-0"><span class="label-text font-medium">Title</span></div>
+          <input type="text" name="title" class="input input-bordered input-sm"
+                 x-model="title" placeholder="Rotate the cluster certificate"
+                 autocomplete="off" required aria-label="Template title" />
+        </label>
+
+        <label class="form-control">
+          <div class="label py-0"><span class="label-text font-medium">Description</span></div>
+          <textarea name="description" class="textarea textarea-bordered textarea-sm" rows="2"
+                    x-model="description" placeholder="What this runbook does and when to run it."
+                    required aria-label="Template description"></textarea>
+        </label>
+
+        <label class="form-control max-w-md">
+          <div class="label py-0">
+            <span class="label-text font-medium">Target kind</span>
+            <span class="label-text-alt opacity-60">optional</span>
+          </div>
+          <input type="text" name="target_kind" class="input input-bordered input-sm font-mono"
+                 x-model="targetKind" placeholder="vmware.vcenter" autocomplete="off"
+                 aria-label="Template target kind" />
+        </label>
+      </div>
+    </div>
+
+    {# Hidden serialised step tree — populated on submit by syncSteps(). #}
+    <input type="hidden" name="steps" x-model="stepsJson" />
+
+    {# Steps #}
+    <div class="space-y-4 mt-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-semibold">
+          Steps <span class="text-sm font-normal opacity-60" x-text="'(' + steps.length + ')'"></span>
+        </h2>
+        <button type="button" class="btn btn-outline btn-sm" x-on:click="addStep()">
+          + Add step
+        </button>
+      </div>
+
+      <template x-for="(step, idx) in steps" x-bind:key="idx">
+        {% include "runbooks/_step_fields.html" %}
+      </template>
+    </div>
+
+    {# Actions #}
+    <div class="flex items-center justify-end gap-3 mt-4">
+      <a href="/ui/runbooks" class="btn btn-ghost btn-sm">Cancel</a>
+      <button type="submit" class="btn btn-primary btn-sm">{{ submit_label }}</button>
+    </div>
+  </form>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{#-
+  CodeMirror 6 IIFE bundle (vendored, SHA256-pinned in VENDOR.md) exposing the
+  ``CM`` global: CM.EditorView, CM.EditorState, CM.basicSetup, CM.markdown,
+  CM.keymap, CM.defaultKeymap, CM.historyKeymap, CM.indentWithTab. Same wiring
+  as the KB editor (#872). Alpine is loaded globally by base.html.
+-#}
+<script src="/ui/static/src/vendor/codemirror-bundle.min.js" defer></script>
+<script defer>
+(function () {
+  "use strict";
+
+  // ----- Alpine model factory -----
+  // Registered before Alpine initialises (alpine:init) so the x-data
+  // ``runbookEditor(...)`` call in the template resolves. The component owns
+  // the discriminated-union step tree and serialises it on submit.
+  document.addEventListener("alpine:init", function () {
+    window.Alpine.data("runbookEditor", function (cfg) {
+      return {
+        mode: cfg.mode,
+        slug: cfg.slug || "",
+        title: cfg.title || "",
+        description: cfg.description || "",
+        targetKind: cfg.targetKind || "",
+        steps: cfg.initialSteps && cfg.initialSteps.length ? cfg.initialSteps : [blankStep()],
+        stepsJson: "[]",
+
+        addStep() {
+          this.steps.push(blankStep());
+        },
+        removeStep(idx) {
+          if (this.steps.length > 1) {
+            this.steps.splice(idx, 1);
+          }
+        },
+        moveStep(idx, delta) {
+          var target = idx + delta;
+          if (target < 0 || target >= this.steps.length) {
+            return;
+          }
+          var moved = this.steps.splice(idx, 1)[0];
+          this.steps.splice(target, 0, moved);
+        },
+
+        // Serialise the step tree into the hidden form field. Called on
+        // submit so the POST carries the full discriminated-union shape.
+        syncSteps() {
+          this.stepsJson = JSON.stringify(this.steps);
+        },
+
+        // ---- Client-side validation (convenience; server re-validates) ----
+        slugError() {
+          if (this.mode !== "new") {
+            return "";
+          }
+          var s = (this.slug || "").trim();
+          if (!s) {
+            return "Slug is required.";
+          }
+          if (!/^[a-z](?:[a-z0-9.\-]*[a-z0-9])?$/.test(s)) {
+            return "Slug must be lowercase letters/digits/dots/hyphens.";
+          }
+          return "";
+        },
+        stepIdError(idx) {
+          var id = (this.steps[idx].id || "").trim();
+          if (!id) {
+            return "Step id is required.";
+          }
+          if (!/^[a-z][a-z0-9\-]{0,63}$/.test(id)) {
+            return "Lowercase letters, digits, hyphens (no dots), ≤64 chars.";
+          }
+          for (var i = 0; i < this.steps.length; i++) {
+            if (i !== idx && (this.steps[i].id || "").trim() === id) {
+              return "Duplicate step id.";
+            }
+          }
+          return "";
+        },
+        validationErrors() {
+          var errs = [];
+          var slugErr = this.slugError();
+          if (slugErr) {
+            errs.push(slugErr);
+          }
+          if (!(this.title || "").trim()) {
+            errs.push("Title is required.");
+          }
+          if (!(this.description || "").trim()) {
+            errs.push("Description is required.");
+          }
+          if (!this.steps.length) {
+            errs.push("A runbook needs at least one step.");
+          }
+          for (var i = 0; i < this.steps.length; i++) {
+            var idErr = this.stepIdError(i);
+            if (idErr) {
+              errs.push("Step " + (i + 1) + ": " + idErr);
+            }
+            collectSubstitutionErrors(this.steps[i], i, errs);
+          }
+          return errs;
+        },
+      };
+    });
+  });
+
+  function blankStep() {
+    return {
+      id: "",
+      title: "",
+      body: "",
+      type: "manual",
+      op_id: "",
+      params: "{}",
+      verify: { type: "confirm", prompt: "", op_id: "", params: "{}", expect: "{}" },
+    };
+  }
+
+  // The substitution allowlist mirrors the server's validate_substitutions:
+  // only ${run.target} and ${run.params.X} (X = [a-z_][a-z0-9_]*) are legal.
+  var SUBST = /\$\{([^}]*)\}/g;
+  var PARAM = /^run\.params\.[a-z_][a-z0-9_]*$/;
+  function collectSubstitutionErrors(step, idx, errs) {
+    var strings = [step.body || ""];
+    if (step.type === "operation_call") {
+      strings.push(step.params || "");
+    }
+    if (step.verify && step.verify.type === "operation_call") {
+      strings.push(step.verify.params || "", step.verify.expect || "");
+    }
+    for (var s = 0; s < strings.length; s++) {
+      var m;
+      SUBST.lastIndex = 0;
+      while ((m = SUBST.exec(strings[s])) !== null) {
+        var inner = m[1];
+        if (inner !== "run.target" && !PARAM.test(inner)) {
+          errs.push("Step " + (idx + 1) + ": disallowed substitution " + m[0]);
+        }
+      }
+    }
+  }
+
+  // ----- CodeMirror enhancement of step body textareas -----
+  // Each ``.runbook-step-body`` textarea gets a CM 6 view mounted next to it;
+  // the textarea is hidden but stays the form/x-model source. CM writes the
+  // doc back into the textarea on every change and dispatches an ``input``
+  // event so both Alpine's x-model and the HTMX preview trigger fire — the
+  // same sync the KB editor uses.
+  function enhanceTextarea(ta) {
+    if (typeof CM === "undefined" || ta.dataset.cmMounted === "1") {
+      return;
+    }
+    ta.dataset.cmMounted = "1";
+    var holder = document.createElement("div");
+    holder.className = "border-base-300 rounded-box overflow-auto border font-mono text-sm";
+    ta.parentNode.insertBefore(holder, ta);
+    ta.classList.add("sr-only");
+    ta.setAttribute("tabindex", "-1");
+
+    var view = new CM.EditorView({
+      state: CM.EditorState.create({
+        doc: ta.value,
+        extensions: [
+          CM.basicSetup,
+          CM.markdown(),
+          CM.keymap.of([CM.indentWithTab].concat(CM.defaultKeymap, CM.historyKeymap)),
+          CM.EditorView.updateListener.of(function (update) {
+            if (update.docChanged) {
+              ta.value = update.state.doc.toString();
+              ta.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          }),
+        ],
+      }),
+      parent: holder,
+    });
+    ta._cmView = view;
+  }
+
+  function scanBodies() {
+    if (typeof CM === "undefined") {
+      return;
+    }
+    document.querySelectorAll(".runbook-step-body").forEach(enhanceTextarea);
+  }
+
+  // Initial scan once the DOM (and Alpine's x-for) has rendered, plus a
+  // rescan after HTMX settles new content and after Alpine adds a step.
+  function init() {
+    scanBodies();
+  }
+  if (document.readyState !== "loading") {
+    // base.html scripts are deferred, so the DOM is parsed; give Alpine a
+    // tick to render the x-for steps before the first scan.
+    setTimeout(init, 0);
+  } else {
+    document.addEventListener("DOMContentLoaded", function () { setTimeout(init, 0); });
+  }
+  document.body.addEventListener("htmx:afterSettle", scanBodies);
+  // Re-scan when a step is added/removed (Alpine re-renders the x-for).
+  document.addEventListener("click", function (e) {
+    if (e.target && e.target.closest && e.target.closest("#runbook-editor-form, [x-on\\:click]")) {
+      setTimeout(scanBodies, 0);
+    }
+  });
+})();
+</script>
+{% endblock %}

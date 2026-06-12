@@ -163,10 +163,28 @@ flow is the only auth_model; loader is live; consumer confirmed
 
 State 0.5 = `register_connector_v2` called but no ops registered yet.
 Since [T5 #733](https://github.com/evoila/meho/issues/733), these
-connectors surface in `GET /api/v1/connectors` with
-`group_count: 0, operation_count: 0` (built-in, `tenant_id: null`)
+connectors surface in `GET /api/v1/connectors` with every count
+zeroed (`group_count: 0, operation_count: 0,
+enabled_operation_count: 0`; built-in, `tenant_id: null`)
 so operators see `connector registered ⇒ visible in list` rather
 than waiting for the first ingested or typed op to land.
+
+The discovery meta-tools agree with the listing on this state. Since
+[#1482](https://github.com/evoila/meho/issues/1482),
+`list_operation_groups` / `search_operations` raise a typed
+`ConnectorNotIngestedError` for a State-0.5 connector_id instead of the
+opaque unknown-connector error: over MCP it is a `-32602` carrying
+`error.data.reason="connector_not_ingested"` and the same
+`meho connector ingest …` `next_step` hint the `state="registered"`
+listing row emits; over REST it is a `404` with a structured `detail`
+of the same shape. A genuinely unknown connector_id stays
+distinguishable (`reason="unknown_connector"` over MCP, plain-string
+`detail` over REST), so an agent can self-correct "run ingest" without
+confusing it with "no such connector". The
+registered-vs-unknown discriminator is
+[`connector_class_registered`](../../backend/src/meho_backplane/operations/_lookup.py)
+(in-memory v2-registry probe, no DB round-trip); the shared hint is
+[`next_step_for_registered_connector`](../../backend/src/meho_backplane/operations/ingest/list_connectors.py).
 
 ## Why this is hard to get right
 

@@ -33,6 +33,7 @@ the test routes in production — the documented contract is that
 import os
 from functools import lru_cache
 from typing import Final
+from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -160,6 +161,22 @@ class Settings(BaseModel):
         fail-closed quickly rather than starve request capacity. The
         v0.1 dogfood load is per-request login, so the timeout governs
         worst-case request latency directly.
+    vault_scheduler_token:
+        Static Vault token the **scheduler** authenticates with to read
+        agent ``client_credentials`` secrets (G0.19-T2 #1478). The
+        scheduler is operator-less — it has no Keycloak JWT to forward to
+        Vault's JWT/OIDC auth method — so it reads under its own service
+        identity instead. A token bound to a narrow policy that grants
+        read on ``scheduler_agent_vault_path_pattern`` (default
+        ``secret/data/agents/*/credentials``) is the lowest-friction
+        service identity: it reuses the ``hvac.Client(token=…)`` primitive
+        with no AppRole ``secret_id`` bootstrap. Default ``""`` (unset)
+        leaves Vault-sourced scheduling inoperative; the scheduler then
+        falls back to the env-var path
+        (:attr:`scheduler_agent_secret_env_pattern`). Never logged; never
+        surfaced in API responses. Operators wanting AppRole instead of a
+        static token can wrap a Vault Agent sidecar that writes the token
+        to this env var — additive, no code change.
     database_url:
         SQLAlchemy URL for the PostgreSQL database, e.g.
         ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
@@ -204,6 +221,27 @@ class Settings(BaseModel):
         ``docs/cross-repo/keycloak-agent-client.md``. The claim is
         **optional** — tokens that carry no claim resolve to ``user``
         (graceful fallback for all pre-G11.2 human-operator tokens).
+    jwt_capabilities_claim_name:
+        Name of the JWT claim that carries the tenant-provisioned
+        capability keys (a JSON array of strings) added by G4.5-T1
+        (#1519). Default ``capabilities``. Drives the MCP capability
+        gate (:class:`~meho_backplane.mcp.registry.ToolDefinition`'s
+        ``required_capability``). The claim is **optional** — tokens
+        that carry no claim (or a malformed value) resolve to the empty
+        set, so capability-gated tools are simply absent for that
+        operator (fail-closed). Override only when the realm exposes the
+        capability list under a different attribute.
+    jwt_platform_admin_claim_name:
+        Name of the JWT claim that carries the cross-tenant
+        ``platform_admin`` flag (a JSON boolean). Default
+        ``platform_admin``. The flag is orthogonal to
+        :class:`~meho_backplane.auth.operator.TenantRole` and marks a
+        genuine platform / cross-tenant operator. The claim is
+        **optional** and **fail-closed** — tokens that carry no claim
+        (or a malformed value) resolve to ``False``, so every existing
+        token and every agent / service principal is non-platform-admin
+        unless a realm explicitly grants the claim. Override only when
+        the realm exposes the flag under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -304,6 +342,22 @@ class Settings(BaseModel):
         Default 24 matches the locked v0.2 decision-3 contract. T3
         (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
         on every publish; T1 only carries the knob.
+    result_handle_max_spill_rows:
+        Upper bound on how many rows the reducer spills into the
+        :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
+        when materializing a large set-shaped response (G0.20-T7 #1507).
+        The full set is what the ``result_query`` MCP read-back tool
+        serves, but a pathological op could return millions of rows and
+        blow the per-key Valkey value size — so the spill is capped here
+        and the handle records both the stored count and the true total
+        so a reader can tell the tail was truncated. Bounds the store's
+        footprint on the row axis; the handle's ``ttl_seconds`` bounds it
+        on the time axis (Valkey enforces the TTL server-side, so the
+        store cannot grow without bound). Default 10000 covers every
+        realistic connector list response with headroom; operators with
+        genuinely larger sets raise it via
+        ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
+        :func:`get_settings`'s cache.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -541,6 +595,26 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    bedrock_region:
+        AWS region the Bedrock backend builder
+        (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
+        constructs its provider against (G11.5-T2 #1076). Empty (the
+        default) defers to boto3's region-resolution chain
+        (``AWS_DEFAULT_REGION`` / ``AWS_REGION`` / shared profile); set
+        ``BEDROCK_REGION`` to pin the region explicitly when none of
+        those sources is wired (local dev, ad-hoc smoke tests).
+        Credentials follow the same boto3 chain (env vars / IRSA role
+        / EC2 instance profile / shared profile) — the backplane does
+        not surface AWS-credential settings of its own. A no-region,
+        no-credentials deployment that routes a tier to Bedrock
+        fail-closes at first agent invocation with an ``AgentRunError``
+        wrapping the underlying ``NoRegionError`` / auth error.
+    bedrock_default_model:
+        Pinned Bedrock model id the Converse loop uses when no per-tier
+        override is set. A full Bedrock id including the geo-prefix and
+        ``-v1:0`` suffix (e.g. ``us.anthropic.claude-sonnet-4-5-v1:0``),
+        never an alias — same posture as :attr:`agent_default_model`.
+        Set via ``BEDROCK_DEFAULT_MODEL``.
     agent_sync_timeout_seconds:
         Server-side timeout for a *synchronous* agent invocation
         (G11.1-T4 #811). A sync ``POST /api/v1/agents/{name}/run`` blocks
@@ -550,18 +624,161 @@ class Settings(BaseModel):
         the surface holds an HTTP connection open for a short interactive
         run before degrading to the pollable shape. Set via
         ``AGENT_SYNC_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds:
+        Overall wall-clock cap on the agent runtime's wait for a
+        ``requires_approval`` operation's decision broadcast event
+        (G11.1-T9 #1117). When an in-loop ``call_operation`` returns
+        ``awaiting_approval``, the wrapped tool subscribes to
+        ``approval.{approved,rejected}`` on the per-tenant Valkey stream
+        and blocks until the decision arrives, this cap elapses, or the
+        run is cancelled. Default 1800s = 30 minutes: long enough for
+        human review across timezone-distant teams without tying up an
+        agent loop indefinitely on a forgotten request. Set via
+        ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    approval_allow_self_approval:
+        Self-approval break-glass switch (G11.7-T1 #1401). Default
+        ``False`` (fail-closed): the operator who requested a parked
+        approval may not approve their own request — requester !=
+        approver is enforced in
+        :func:`~meho_backplane.operations.approval_queue.approve_request`,
+        so a compromised or careless single account cannot both ask for
+        and grant a privileged connector write. Set
+        ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for an audited
+        single-operator break-glass deployment; the self-approval still
+        writes its decision audit row, so the use is forensically
+        visible. Reject is always allowed regardless of this flag — an
+        operator withdrawing their own pending request is never a
+        privilege escalation.
+    openai_api_key:
+        Bearer token the OpenAI-compatible backend builder
+        (G11.5-T3 #1077) authenticates with. Empty (the default) is
+        fail-closed: a deploy whose policy never routes any tier to an
+        OpenAI-compat backend never reads the value, so the default
+        single-tenant Anthropic shape keeps working with no extra env
+        var. Set via ``OPENAI_API_KEY`` for OpenAI SaaS, the on-prem
+        proxy's bearer token for VCF PAIF, or any non-empty value for
+        local vLLM/Ollama (most expect *some* string but don't enforce
+        it). The builder reads this **once** at construction time per
+        invocation, so rotating the key requires a resolver rebuild.
+    openai_base_url:
+        Endpoint base URL the OpenAI-compatible backend builder targets.
+        Empty (the default) routes to the OpenAI SaaS endpoint
+        (``api.openai.com``). A non-empty value points at an on-prem
+        endpoint: vLLM exposes ``http://<host>:8000/v1``, Ollama
+        ``http://<host>:11434/v1``, VCF Private AI Foundation a
+        deploy-specific path under
+        ``/api/v1/compatibility/openai/v1/``. The value is passed
+        verbatim to :class:`pydantic_ai.providers.openai.OpenAIProvider`,
+        which then constructs an underlying ``AsyncOpenAI`` client. Set
+        via ``OPENAI_BASE_URL``. The setting is per-deploy: tenants
+        that route to *different* on-prem endpoints construct their
+        backend builders explicitly via
+        :func:`~meho_backplane.agent.models.openai_compat_backend_builder`
+        rather than the settings-driven default.
+    openai_default_model:
+        Pinned model id the OpenAI-compatible backend uses when an
+        ``AgentDefinition`` does not override it. Full provider-qualified
+        id (``openai:gpt-4o-mini`` for OpenAI SaaS;
+        ``openai:meta-llama/Llama-3.1-8B-Instruct`` for a vLLM-hosted
+        Llama, etc. — pydantic_ai's :class:`OpenAIChatModel` accepts the
+        bare model name and the ``openai:`` prefix is stripped when
+        present). Same posture as ``agent_default_model``: a full id,
+        never a moving alias, so model swaps are deliberate config
+        pushes. Set via ``OPENAI_DEFAULT_MODEL``.
+    agent_budget_degrade_threshold:
+        Fraction of a per-identity budget window's limit at which the
+        graceful-degradation policy (G11.5-T6 #1080) downgrades the
+        resolved tier one step before the model is built. Default
+        ``0.8`` per Initiative #806 ("at 80% drop to a cheaper tier; at
+        100% refuse"). Set via ``AGENT_BUDGET_DEGRADE_THRESHOLD``. The
+        downgrade ladder is INVESTIGATE → SUMMARIZE → TRIAGE; TRIAGE
+        cannot downgrade further (it is the cheapest tier) and is
+        allowed to run until the hard cap fires. Values outside
+        ``[0, 1)`` are rejected.
+    agent_runs_disabled_global:
+        Global kill switch (G11.5-T6 #1080). When ``true``, every agent
+        run is refused before any model is resolved or any DB row is
+        created, raising
+        :class:`~meho_backplane.agent.run.BudgetExceededError`. Default
+        ``false``. Set via ``AGENT_RUNS_DISABLED_GLOBAL``. The
+        operator's emergency stop for an in-flight cost runaway when
+        per-identity caps are not enough. Per-tenant gating is
+        ``agent_runs_disabled_tenants``; per-identity gating is
+        ``identity_budget.request_limit=0`` (set via the consumption
+        service's ``set_limits``).
+    agent_runs_disabled_tenants:
+        Comma-separated tenant UUIDs whose agent runs are kill-
+        switched (G11.5-T6 #1080). Case-insensitive; whitespace
+        between values ignored. An empty string (the default) means no
+        tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    vcf_paif_base_url:
+        Base URL of the VCF Private AI Foundation OpenAI-compatible
+        endpoint (G11.5-T4 #1078), **including** the fixed sub-path
+        ``/api/v1/compatibility/openai/v1/`` PAIF mounts the API under
+        (Broadcom developer docs — see
+        :data:`~meho_backplane.agent.models.VCF_PAIF_OPENAI_COMPAT_BASE_PATH`).
+        Example: ``https://pais.airgap.local/api/v1/compatibility/openai/v1/``.
+        Empty (the default) is fail-closed: a deploy whose policy
+        never routes any tier to PAIF never reads the value. Set via
+        ``VCF_PAIF_BASE_URL``. Per-tenant routing to *different* PAIF
+        appliances uses
+        :func:`~meho_backplane.agent.models.vcf_paif_backend_builder`
+        directly rather than this single-knob default.
+    vcf_paif_model:
+        Pinned model id the PAIF backend uses when an
+        ``AgentDefinition`` does not override it. Full provider-qualified
+        id (``openai:meta-llama/Llama-3.1-8B-Instruct`` /
+        ``openai:mistralai/Mixtral-8x7B-Instruct``, etc. — pydantic_ai's
+        :class:`OpenAIChatModel` strips the ``openai:`` prefix). Set via
+        ``VCF_PAIF_MODEL``.
+    vcf_paif_oidc_token_url:
+        The IdP token endpoint the bundled OIDC token provider POSTs
+        the ``client_credentials`` grant against. Example (Keycloak):
+        ``https://kc.airgap.local/realms/<realm>/protocol/openid-connect/token``.
+        Empty is fail-closed for a deploy that registered the PAIF
+        backend. Set via ``VCF_PAIF_OIDC_TOKEN_URL``.
+    vcf_paif_oidc_client_id:
+        OIDC client id registered with the IdP for the backplane →
+        PAIF integration. Set via ``VCF_PAIF_OIDC_CLIENT_ID``.
+    vcf_paif_oidc_client_secret:
+        OIDC client secret. Sourced upstream from Vault / external-
+        secret / sealed-secret the same way ``ANTHROPIC_API_KEY`` is
+        wired today; **never** logged. Set via
+        ``VCF_PAIF_OIDC_CLIENT_SECRET``.
+    vcf_paif_oidc_scope:
+        Optional ``scope`` to include in the OIDC token request.
+        Empty (the default) sends no scope parameter — most IdPs
+        accept this for ``client_credentials`` and issue a default
+        scope. Deployments with fine-grained scope enforcement set
+        this to the value the IdP expects. Set via
+        ``VCF_PAIF_OIDC_SCOPE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
-        ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
-        the MCP 2025-06-18 Streamable HTTP transport explicitly permits
-        servers to not require sessions, and MEHO only needs the id for
-        audit correlation, so a missing header falls back to a fresh
-        single-call ``uuid4()``. Flip ``MCP_REQUIRE_SESSION_ID=true``
-        in deployments that mandate every agent call carry a stable
-        session id (compliance environments that forbid synthetic
-        single-call ids); a missing/empty header then returns a
-        JSON-RPC ``-32600`` Invalid Request before dispatch, so no
-        audit row is written for the rejected call.
+        ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
+        **Strictly gates enforcement, not capture.** Capture is
+        unconditional: any request that includes a parseable
+        ``Mcp-Session-Id`` header has the value bound to the structlog
+        contextvar and lands on
+        ``audit_log.agent_session_id`` regardless of this knob (so
+        G8.2 audit-replay lights up automatically on default deploys
+        for any client that sends the header — Claude Code does, by
+        default). Default ``False``: a missing or malformed header is
+        accepted, the audit row's ``agent_session_id`` lands as NULL,
+        and the call proceeds. Flip ``MCP_REQUIRE_SESSION_ID=true`` in
+        deployments that mandate every agent call carry a session id
+        (compliance environments); a missing/empty header then returns
+        a JSON-RPC ``-32600`` Invalid Request before dispatch, so no
+        audit row is written for the rejected call. A
+        present-but-malformed header is **not** a rejection — the
+        client did send a session id (just an unparseable one), so the
+        require contract is satisfied at the transport layer; the row
+        gets a NULL ``agent_session_id`` and structlog logs the
+        malformation as a warning so the misbehaving client is
+        observable. The current value is reported as
+        ``"enforced"`` / ``"always"`` on ``GET /api/v1/health`` via
+        :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+        so operators can confirm the deploy's audit-replay capture
+        state without diffing env vars.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -572,6 +789,8 @@ class Settings(BaseModel):
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
+    jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
+    jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -610,6 +829,7 @@ class Settings(BaseModel):
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
+    vault_scheduler_token: str = Field(default="", repr=False)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -626,6 +846,7 @@ class Settings(BaseModel):
         min_length=1,
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
+    result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
@@ -640,6 +861,31 @@ class Settings(BaseModel):
     # elevation windows are typically hours, not days.
     grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     grant_expiry_enabled: bool = True
+    # G11.7-T1 #1401 -- self-approval break-glass. Default False is
+    # fail-closed: the operator who requested a parked approval may not
+    # also approve it (requester != approver, enforced in
+    # ``approval_queue.approve_request``). Set
+    # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for an audited
+    # single-operator break-glass deployment; every self-approval still
+    # writes its decision audit row, so the break-glass use is forensically
+    # visible.
+    approval_allow_self_approval: bool = False
+    # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
+    # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine, etc.) can disable the in-tree reaper without
+    # patching code.
+    #
+    # The default tick (30s) + the default lease TTL (60s) give a
+    # worker two heartbeat windows of slack before reclaim -- a
+    # transient ~20s GC pause / network blip does not cost a run. The
+    # MAX_PER_TICK bound (50) keeps a post-outage backlog from
+    # monopolising one Postgres backend; a 500-row backlog drains
+    # across ~10 ticks.
+    agent_run_reaper_enabled: bool = True
+    agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
+    agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -670,6 +916,24 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
+    # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
+    # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
+    # the ``[bedrock]`` extra. ``bedrock_region`` empty (the default)
+    # defers to boto3's standard region-resolution chain
+    # (``AWS_DEFAULT_REGION`` / ``AWS_REGION`` / shared profile);
+    # ``boto3`` credentials follow the same chain (env vars / IRSA
+    # role / instance profile / shared profile). Set ``BEDROCK_REGION``
+    # to pin a region explicitly when the chain would otherwise miss
+    # (no env var + no IRSA, e.g. local dev). ``bedrock_default_model``
+    # is the pinned full Bedrock model id (geo-prefixed, ``-v1:0``-
+    # suffixed) the loop uses when an ``AgentDefinition`` doesn't
+    # override it. Like ``agent_default_model``, never a moving alias.
+    bedrock_region: str = ""
+    bedrock_default_model: str = Field(
+        default="us.anthropic.claude-sonnet-4-5-v1:0",
+        min_length=1,
+    )
     # G11.1-T4 #811 — server-side timeout for a *synchronous* agent run.
     # A sync ``POST /api/v1/agents/{name}/run`` blocks up to this many
     # seconds; a run still going at the deadline converts to async (the
@@ -677,7 +941,165 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.1-T9 #1117 — overall wall-clock cap on the agent runtime's wait
+    # for a ``requires_approval`` operation's decision broadcast event.
+    # When an in-loop ``call_operation`` returns ``awaiting_approval``, the
+    # wrapped tool subscribes to ``approval.{approved,rejected}`` on the
+    # per-tenant Valkey stream and blocks until the decision arrives, this
+    # cap elapses, or the run is cancelled. Default 1800s = 30 minutes:
+    # long enough for human review across timezone-distant teams without
+    # tying up an agent loop indefinitely on a forgotten request. Set via
+    # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # G11.5-T3 #1077 — OpenAI-compatible backend configuration for the
+    # agent runtime's multi-provider resolver. Sources the credentials
+    # the settings-driven default OpenAI backend builder consumes; tenants
+    # that need a different base_url / api_key per backend construct
+    # their builders via ``openai_compat_backend_builder(...)`` explicitly
+    # and never touch these settings. Empty defaults are fail-closed: a
+    # deploy whose policy never registers an OpenAI-compat backend reads
+    # none of these knobs (the bare ``Anthropic``-only path is unchanged).
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    openai_default_model: str = Field(default="openai:gpt-4o-mini", min_length=1)
+    # G11.5-T6 #1080 — pre-execution budget enforcement knobs. The
+    # threshold is the fraction of a window's limit at which the
+    # graceful-degradation policy fires: at or above this ratio the
+    # runtime downgrades the resolved tier one step (INVESTIGATE →
+    # SUMMARIZE → TRIAGE) before resolving, so a high-cost backend
+    # stops getting picked while there is still some headroom. Default
+    # 0.8 mirrors the Initiative #806 acceptance criteria ("at 80% drop
+    # to a cheaper tier; at 100% refuse"). Set via
+    # ``AGENT_BUDGET_DEGRADE_THRESHOLD``; values outside [0, 1) are
+    # rejected (0 = always-degrade, useless; ≥1 = never-degrade, defeats
+    # the point — use the global kill switch for "no agent runs" instead).
+    agent_budget_degrade_threshold: float = Field(default=0.8, ge=0, lt=1)
+    # G11.5-T6 #1080 — global kill switch. When ``true``, every
+    # ``AgentInvoker.run`` / ``run_scheduled`` / ``stream_events`` call
+    # is refused before any model is resolved or any DB row is created,
+    # raising :class:`~meho_backplane.agent.run.BudgetExceededError`.
+    # Default ``false``. Set via ``AGENT_RUNS_DISABLED_GLOBAL`` — the
+    # operator's emergency stop for an in-flight cost runaway when
+    # per-identity caps are not enough. Per-tenant gating is the
+    # comma-separated ``AGENT_RUNS_DISABLED_TENANTS`` list below;
+    # per-identity gating is ``identity_budget.request_limit=0`` (which
+    # the consumption service already exposes via ``set_limits``).
+    agent_runs_disabled_global: bool = False
+    # G11.5-T6 #1080 — per-tenant kill switch. Comma-separated tenant
+    # UUIDs (case-insensitive, whitespace ignored). A run whose
+    # operator's ``tenant_id`` matches any value here is refused
+    # exactly like the global switch. An empty string (the default) is
+    # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_runs_disabled_tenants: str = ""
+    # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
+    # air-gapped enterprise target: OpenAI-compatible wire format under
+    # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
+    # bearer auth (the bundled provider runs the OAuth ``client_credentials``
+    # grant against the IdP's token endpoint). Empty defaults are
+    # fail-closed: a deploy whose policy never registers the PAIF
+    # backend reads none of these knobs. Multi-PAIF deploys (per-tenant
+    # routing to different appliances) construct their builders via
+    # ``vcf_paif_backend_builder(...)`` explicitly and never touch
+    # these settings.
+    vcf_paif_base_url: str = ""
+    vcf_paif_model: str = Field(default="openai:meta-llama/Llama-3.1-8B-Instruct", min_length=1)
+    vcf_paif_oidc_token_url: str = ""
+    vcf_paif_oidc_client_id: str = ""
+    vcf_paif_oidc_client_secret: str = Field(default="", repr=False)
+    vcf_paif_oidc_scope: str = ""
+    # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
+    # bounds how often the loop scans for due triggers; the default
+    # (30 s) is the consumer-doc-accepted granularity for cron triggers
+    # (one minute is the finest cron-expression boundary, so a 30 s
+    # tick guarantees the trigger fires inside its minute window). The
+    # ``enabled`` flag mirrors the MEMORY_EXPIRY / TOPOLOGY_HISTORY_PRUNE
+    # shape so operators using an external scheduler can opt out.
+    scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
+    scheduler_enabled: bool = True
+    # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
+    # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
+    # wants ``(client_id, client_secret)``; the scheduler resolves
+    # ``client_id`` from the trigger's :class:`AgentDefinition.identity_ref`
+    # and resolves the secret **Vault-first** (see
+    # :func:`meho_backplane.scheduler.credentials.resolve_agent_credentials`):
+    # it reads the agent's secret from Vault at
+    # ``scheduler_agent_vault_path_pattern`` under the scheduler's static
+    # service token (:attr:`vault_scheduler_token`), and falls back to an
+    # environment variable derived from this pattern only when the Vault
+    # read yields nothing. ``{client_id}`` is substituted at fire time and
+    # the result is uppercased + non-alphanumeric chars replaced with
+    # underscores so an ``identity_ref`` like ``agent:reporter`` resolves
+    # to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
+    #
+    # The env-var path is the documented **fallback / break-glass**: an
+    # operator can wire an agent secret into the backplane pod's env (Helm
+    # secret / external-secrets / sealed-secret) the same way
+    # ``ANTHROPIC_API_KEY`` is wired when Vault is unavailable. The
+    # Vault-first path is what makes an API-registered agent schedulable
+    # with no pod env var + no redeploy: registration persists the
+    # Keycloak secret to Vault at ``scheduler_agent_vault_path_pattern``
+    # (see :meth:`AgentPrincipalService.register`) and the scheduler reads
+    # it straight back.
+    scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
+    # The Vault KV-v2 *API* path (mount + ``data/`` infix + logical path)
+    # where agent ``client_credentials`` secrets live. Registration writes
+    # here; the scheduler reads here -- both via ``vault_path_for_client_id``,
+    # so the two cannot diverge. ``{client_id}`` is substituted with the
+    # **sanitised, UPPER-CASED** identity_ref (non-alphanumeric chars to
+    # ``_``, then ``upper()``), e.g. ``agent:ops-writer`` ->
+    # ``secret/data/agents/AGENT_OPS_WRITER/credentials`` -- not the raw
+    # ``agent:ops-writer`` key. The default addresses the ``secret/``
+    # KV-v2 mount; the leading ``secret/data/`` is the raw API path Vault's
+    # HTTP surface uses, which the read/write helpers split into hvac's
+    # ``(mount_point, logical_path)`` form.
+    scheduler_agent_vault_path_pattern: str = Field(
+        default="secret/data/agents/{client_id}/credentials"
+    )
+    # G11.3-T3 #824 — event-outbox drain loop cadence. 10 s default
+    # mirrors the consumer doc's accepted-latency target (the
+    # LISTEN/NOTIFY wake hint drops the typical latency to sub-second;
+    # this is the polled fall-back when no listener is connected).
+    # ``enabled`` mirrors SCHEDULER_ENABLED so operators using an
+    # external orchestrator (or running tests without the drain) opt out.
+    event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    event_drain_enabled: bool = True
     mcp_require_session_id: bool = False
+    #: Absolute URL of the external vendor-document corpus search
+    #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
+    #: forwarded operator JWT. Empty ("") means the add-on is not
+    #: configured; the federation client
+    #: (:func:`~meho_backplane.auth.corpus.search_corpus`) fails closed
+    #: with :class:`~meho_backplane.auth.corpus.CorpusUnavailable` (→ 503
+    #: at the T3 route) rather than returning a silent empty result.
+    corpus_url: str = ""
+    #: Optional RFC 8707 resource indicator (``aud``) the corpus binds
+    #: the forwarded token to. Empty ("") forwards no audience.
+    corpus_audience: str = ""
+    #: Bound on the corpus HTTP request (connect / read / write), in
+    #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
+    #: blocking the event loop.
+    corpus_timeout_seconds: float = Field(default=10.0, gt=0)
+    #: Whether the ``search_docs`` route (T3, #1521) must reject a query
+    #: that carries no product/version filter (REQUIRE_FILTERS). Default
+    #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
+    #: transport in this Task.
+    corpus_require_filters: bool = True
+    #: Application-layer tenant-scope guard for the agent-supplied
+    #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
+    #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
+    #: an operator's KV calls must stay within — defense-in-depth *behind*
+    #: the Vault ``meho-mcp`` policy, not a replacement for it
+    #: (``docs/codebase/connectors-vault-tenant-scope.md``). When a caller
+    #: requests a ``path`` outside their rendered prefix the handler raises
+    #: :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
+    #: *before* the hvac call. **Empty (the default) disables the guard** —
+    #: the shipped deploy convention scopes per operator ``sub``
+    #: (``secret/data/targets/<sub>/*``, ``connector-vault-policy.md`` §2),
+    #: not per tenant, so enforcing a hard tenant prefix unconditionally
+    #: would break every existing call; a deploy whose KV layout *is*
+    #: tenant-partitioned opts in by setting e.g. ``"tenant-{tenant_id}/"``.
+    #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
+    vault_kv_tenant_scope_prefix: str = ""
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -723,6 +1145,81 @@ class Settings(BaseModel):
             )
         return value
 
+    @field_validator("scheduler_agent_secret_env_pattern")
+    @classmethod
+    def _scheduler_secret_pattern_must_substitute_client_id(cls, value: str) -> str:
+        """Reject env-var patterns that don't substitute ``{client_id}``.
+
+        Pulled up to :class:`Settings` construction so three otherwise-
+        silent failure shapes surface at pod startup rather than at
+        first scheduled fire:
+
+        * **Pattern lacks ``{client_id}``** (typo / copy-paste error):
+          ``str.format`` returns the literal pattern, every agent
+          resolves to the same env-var key, all scheduled runs share
+          one secret. Cross-tenant principal-credential bleed.
+        * **Pattern uses positional ``{0}`` instead of named
+          ``{client_id}``**: ``str.format(client_id=...)`` raises
+          :class:`KeyError` on first fire. The precondition gate logs
+          ``scheduler_credentials_unresolved`` and skips forever.
+        * **Pattern has unbalanced braces**: ``str.format`` raises
+          :class:`ValueError` on first fire. Same skip-forever path.
+
+        Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_database_url_must_be_async` -- a misconfigured env var
+        should fail the import chain immediately with an actionable
+        message, not days later under load.
+        """
+        if "{client_id}" not in value:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
+                f"'{{client_id}}' so each agent resolves to its own env var; "
+                f"got: {value!r}"
+            )
+        try:
+            value.format(client_id="TEST_CLIENT_ID")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
+                f"str.format pattern; got: {value!r}"
+            ) from exc
+        return value
+
+    @field_validator("agent_runs_disabled_tenants")
+    @classmethod
+    def _agent_runs_disabled_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Reject ``AGENT_RUNS_DISABLED_TENANTS`` entries that aren't UUIDs.
+
+        Pulled up to :class:`Settings` construction so a typo'd env var
+        fails the pod start rather than silently matching nothing at
+        gate-evaluation time (the kill switch is supposed to fire, and a
+        deploy that thinks it's kill-switched but isn't is the worst-
+        case outcome). Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_scheduler_secret_pattern_must_substitute_client_id`:
+        misconfigured env vars surface at import time with an
+        actionable message that names the offending entry.
+
+        Empty values (the documented default, "no tenants disabled")
+        and blank-separator artefacts (trailing comma, double comma)
+        are tolerated -- the gate parser at
+        :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
+        skips empty chunks already, and this validator mirrors that
+        leniency so the validator's accept-set is exactly the
+        gate's accept-set.
+        """
+        for chunk in (part.strip() for part in value.split(",")):
+            if not chunk:
+                continue
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"AGENT_RUNS_DISABLED_TENANTS entries must be UUIDs; got {chunk!r}"
+                ) from exc
+        return value
+
 
 # Flat env-var -> Settings constructor, one kwarg per field: the length is
 # the field count, not branching complexity (McCabe is trivial). Extracting
@@ -764,6 +1261,14 @@ def get_settings() -> Settings:
             "JWT_PRINCIPAL_KIND_CLAIM_NAME",
             "principal_kind",
         ),
+        jwt_capabilities_claim_name=os.environ.get(
+            "JWT_CAPABILITIES_CLAIM_NAME",
+            "capabilities",
+        ),
+        jwt_platform_admin_claim_name=os.environ.get(
+            "JWT_PLATFORM_ADMIN_CLAIM_NAME",
+            "platform_admin",
+        ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),
         keycloak_admin_client_secret=os.environ.get("KEYCLOAK_ADMIN_CLIENT_SECRET", "").strip(),
@@ -792,6 +1297,7 @@ def get_settings() -> Settings:
         vault_timeout_seconds=float(
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
+        vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -811,6 +1317,9 @@ def get_settings() -> Settings:
         ),
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
+        ),
+        result_handle_max_spill_rows=int(
+            os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
@@ -836,6 +1345,23 @@ def get_settings() -> Settings:
         grant_expiry_enabled=parse_bool_env(
             os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
         ),
+        # G11.7-T1 #1401 — fail-closed default: self-approval forbidden
+        # unless this break-glass switch is explicitly enabled.
+        approval_allow_self_approval=parse_bool_env(
+            os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
+        ),
+        agent_run_reaper_enabled=parse_bool_env(
+            os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),
+        ),
+        agent_run_reaper_tick_interval_seconds=int(
+            os.environ.get("AGENT_RUN_REAPER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        agent_run_reaper_max_per_tick=int(
+            os.environ.get("AGENT_RUN_REAPER_MAX_PER_TICK", "50"),
+        ),
+        agent_run_lease_ttl_seconds=int(
+            os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
@@ -859,10 +1385,72 @@ def get_settings() -> Settings:
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
         ),
+        bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
+        bedrock_default_model=os.environ.get(
+            "BEDROCK_DEFAULT_MODEL",
+            "us.anthropic.claude-sonnet-4-5-v1:0",
+        ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
+        ),
+        agent_approval_wait_timeout_seconds=float(
+            os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
+        ),
+        openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+        openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),
+        openai_default_model=os.environ.get(
+            "OPENAI_DEFAULT_MODEL",
+            "openai:gpt-4o-mini",
+        ),
+        agent_budget_degrade_threshold=float(
+            os.environ.get("AGENT_BUDGET_DEGRADE_THRESHOLD", "0.8"),
+        ),
+        agent_runs_disabled_global=parse_bool_env(
+            os.environ.get("AGENT_RUNS_DISABLED_GLOBAL"),
+        ),
+        agent_runs_disabled_tenants=os.environ.get(
+            "AGENT_RUNS_DISABLED_TENANTS",
+            "",
+        ),
+        vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
+        vcf_paif_model=os.environ.get(
+            "VCF_PAIF_MODEL",
+            "openai:meta-llama/Llama-3.1-8B-Instruct",
+        ),
+        vcf_paif_oidc_token_url=os.environ.get("VCF_PAIF_OIDC_TOKEN_URL", "").strip(),
+        vcf_paif_oidc_client_id=os.environ.get("VCF_PAIF_OIDC_CLIENT_ID", "").strip(),
+        vcf_paif_oidc_client_secret=os.environ.get("VCF_PAIF_OIDC_CLIENT_SECRET", "").strip(),
+        vcf_paif_oidc_scope=os.environ.get("VCF_PAIF_OIDC_SCOPE", "").strip(),
+        scheduler_tick_interval_seconds=int(
+            os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        scheduler_enabled=parse_bool_env(
+            os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        scheduler_agent_secret_env_pattern=os.environ.get(
+            "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
+            "MEHO_AGENT_SECRET_{client_id}",
+        ),
+        scheduler_agent_vault_path_pattern=os.environ.get(
+            "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
+            "secret/data/agents/{client_id}/credentials",
+        ),
+        event_drain_tick_interval_seconds=int(
+            os.environ.get("EVENT_DRAIN_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        event_drain_enabled=parse_bool_env(
+            os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
         ),
+        corpus_url=os.environ.get("CORPUS_URL", "").strip(),
+        corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
+        corpus_timeout_seconds=float(
+            os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
+        ),
+        corpus_require_filters=parse_bool_env(
+            os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
+        ),
+        vault_kv_tenant_scope_prefix=os.environ.get("VAULT_KV_TENANT_SCOPE_PREFIX", "").strip(),
     )

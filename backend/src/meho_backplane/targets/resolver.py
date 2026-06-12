@@ -7,8 +7,8 @@
 a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 §G3 and the consumer's #110 fix) is:
 
-1. Exact name match for the tenant — ``WHERE tenant_id = ? AND name = ?``.
-   If unique, return immediately.
+1. Exact name match for the tenant — ``WHERE tenant_id = ? AND name = ?
+   AND deleted_at IS NULL``. If unique, return immediately.
 2. Element-equality alias match — ``query = ANY(aliases)`` on PostgreSQL,
    Python-side set-membership on other dialects (SQLite dev/test path).
    The consumer's #110 incident showed that substring matching caused
@@ -19,6 +19,13 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
    the candidates in the ``matches`` field.
 4. If step 1 or 2 returns more than one row (defensive — the unique index
    prevents it under normal conditions), raise :exc:`AmbiguousTargetError`.
+
+Every clause filters ``deleted_at IS NULL`` so soft-deleted targets
+(G0.14-T4 #1145) are invisible to the resolver. The DELETE handler
+stamps ``deleted_at`` and lets the row stay queryable from the
+:attr:`AuditLog.target_id` soft-FK, but every dispatch / probe /
+list / CLI verb that goes through the resolver sees the row as
+"not found" with the live near-misses surfaced exactly as before.
 
 Dialect portability
 -------------------
@@ -47,9 +54,14 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.targets.schemas import TargetSummary
+from meho_backplane.targets.schemas import TargetSummary, project_target_to_summary
 
-__all__ = ["AmbiguousTargetError", "TargetNotFoundError", "resolve_target"]
+__all__ = [
+    "AmbiguousTargetError",
+    "TargetNotFoundError",
+    "resolve_target",
+    "resolve_target_by_id",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -95,6 +107,10 @@ class AmbiguousTargetError(HTTPException):
         )
 
 
+# code-quality-allow: function-size — linear three-phase resolver
+# (exact → alias → near-miss) where each phase consumes the prior's None
+# result and the trailing bind requires the resolved row; decomposition
+# forces sentinel returns or raise-mid-helper.
 async def resolve_target(
     session: AsyncSession,
     tenant_id: UUID,
@@ -134,16 +150,21 @@ async def resolve_target(
     # (unique index violation repaired mid-flight, or a restored backup with
     # a relaxed constraint) raise AmbiguousTargetError (409) rather than
     # leaking MultipleResultsFound as an unhandled 500.
+    # ``deleted_at IS NULL`` filter (G0.14-T4 #1145) excludes soft-deleted
+    # rows so a re-creation under the same name does not collide with a
+    # tombstone, and a stale CLI cache referencing a deleted name resolves
+    # to the standard 404 (rather than returning the deleted row).
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == tenant_id,
         TargetORM.name == query,
+        TargetORM.deleted_at.is_(None),
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
     if len(exact_hits) == 1:
         target = exact_hits[0]
     elif len(exact_hits) > 1:
-        summaries = [_to_summary(t) for t in exact_hits]
+        summaries = [project_target_to_summary(t) for t in exact_hits]
         _log.warning(
             "ambiguous_exact_name",
             tenant_id=str(tenant_id),
@@ -160,7 +181,7 @@ async def resolve_target(
         if len(alias_hits) == 1:
             target = alias_hits[0]
         elif len(alias_hits) > 1:
-            summaries = [_to_summary(t) for t in alias_hits]
+            summaries = [project_target_to_summary(t) for t in alias_hits]
             _log.warning(
                 "ambiguous_target",
                 tenant_id=str(tenant_id),
@@ -172,7 +193,7 @@ async def resolve_target(
     if target is None:
         # Step 3: near-miss for 404 detail.
         near = await _near_misses(session, tenant_id, query)
-        summaries = [_to_summary(t) for t in near]
+        summaries = [project_target_to_summary(t) for t in near]
         _log.info(
             "target_not_found",
             tenant_id=str(tenant_id),
@@ -181,10 +202,56 @@ async def resolve_target(
         )
         raise TargetNotFoundError(query, summaries)
 
-    # Single exit point — bind target_id for AuditMiddleware (G0.3-T4).
-    structlog.contextvars.bind_contextvars(target_id=str(target.id))
+    # Single exit point — bind target_id for AuditMiddleware (G0.3-T4) and
+    # target_name for the MCP outer-wrapper row's payload (G0.15-T3 #1212).
+    # The HTTP audit middleware writes only the typed target_id column; the
+    # MCP path additionally drops the canonical name into payload so
+    # ``query_audit target=<name>`` matches the MCP envelope row as well as
+    # the inner DISPATCH row. Binding here — the single canonical exit
+    # point of name-or-alias resolution — keeps the value consistent with
+    # the resolved row's identity (aliases collapse to the canonical name).
+    structlog.contextvars.bind_contextvars(
+        target_id=str(target.id),
+        target_name=target.name,
+    )
     _log.info("target_resolved", target_id=str(target.id), name=target.name)
     return target
+
+
+async def resolve_target_by_id(
+    session: AsyncSession,
+    tenant_id: UUID,
+    target_id: UUID,
+) -> TargetORM | None:
+    """Load a live :class:`TargetORM` row by id, tenant-scoped.
+
+    The approval-queue resume path (G11.7-T1 #1401) stores only the
+    target's ``id`` on the :class:`~meho_backplane.db.models.ApprovalRequest`
+    row, not the full target object. On approve the REST route must
+    re-hydrate the target so a write op whose handler reads
+    ``target.host`` / ``target.name`` / ``target.fqdn`` resolves the
+    correct connector + target instead of silently dispatching against
+    ``target=None``.
+
+    Distinct from :func:`resolve_target` (name-or-alias) — this is the
+    id-keyed lookup the resume path needs. The ``deleted_at IS NULL``
+    filter mirrors the resolver's soft-delete discipline (G0.14-T4
+    #1145): a target soft-deleted between request and approval resolves
+    to ``None`` so the caller fails closed (the re-dispatch returns a
+    structured ``denied`` result and never executes) rather than
+    reviving a tombstoned target or dispatching against ``target=None``.
+
+    Returns ``None`` when no live row matches the id in *tenant_id* (the
+    caller decides how to surface the miss); cross-tenant ids are
+    invisible by the WHERE clause.
+    """
+    stmt = select(TargetORM).where(
+        TargetORM.id == target_id,
+        TargetORM.tenant_id == tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 async def _alias_match(
@@ -192,18 +259,27 @@ async def _alias_match(
     tenant_id: UUID,
     query: str,
 ) -> list[TargetORM]:
-    """Return targets whose ``aliases`` contain *query* as an exact element."""
+    """Return live targets whose ``aliases`` contain *query* as an exact element.
+
+    ``deleted_at IS NULL`` filter (G0.14-T4 #1145) excludes soft-deleted
+    rows so an alias on a retired target does not shadow a live re-creation
+    holding the same alias.
+    """
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
         stmt = select(TargetORM).where(
             TargetORM.tenant_id == tenant_id,
+            TargetORM.deleted_at.is_(None),
             text(":q = ANY(aliases)").bindparams(q=query),
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
-    # Non-PG (SQLite dev/test): load all tenant targets, filter in Python.
+    # Non-PG (SQLite dev/test): load all live tenant targets, filter in Python.
     # Aliases is a list[str] column; element-equality is a Python `in` check.
-    stmt = select(TargetORM).where(TargetORM.tenant_id == tenant_id)
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
     result = await session.execute(stmt)
     return [t for t in result.scalars().all() if query in t.aliases]
 
@@ -213,7 +289,12 @@ async def _near_misses(
     tenant_id: UUID,
     query: str,
 ) -> list[TargetORM]:
-    """Return up to 5 near-miss targets for the 404 ``matches`` field."""
+    """Return up to 5 live near-miss targets for the 404 ``matches`` field.
+
+    ``deleted_at IS NULL`` filter (G0.14-T4 #1145) keeps near-miss
+    suggestions to live targets only so an operator typo-correcting
+    against a recent deletion is not pointed at the tombstone.
+    """
     conn = await session.connection()
     prefix = f"{query}%"
     if conn.dialect.name == "postgresql":
@@ -221,6 +302,7 @@ async def _near_misses(
             select(TargetORM)
             .where(
                 TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
                 or_(
                     TargetORM.name.ilike(prefix),
                     text("EXISTS (SELECT 1 FROM unnest(aliases) AS a WHERE a ILIKE :p)").bindparams(
@@ -236,19 +318,10 @@ async def _near_misses(
             select(TargetORM)
             .where(
                 TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
                 TargetORM.name.ilike(prefix),
             )
             .limit(5)
         )
     result = await session.execute(stmt)
     return list(result.scalars().all())
-
-
-def _to_summary(t: TargetORM) -> TargetSummary:
-    return TargetSummary(
-        id=t.id,
-        name=t.name,
-        aliases=tuple(t.aliases),
-        product=t.product,
-        host=t.host,
-    )

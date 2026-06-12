@@ -7,9 +7,9 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.136.3",
-    "uvicorn[standard]>=0.48.0",
+    "uvicorn[standard]>=0.49.0",
     "pydantic[email]>=2.13.4",
-    "structlog>=24.1",
+    "structlog>=26.1.0",
     "prometheus-client>=0.20",
     "authlib>=1.3",
     "httpx>=0.27",
@@ -21,10 +21,10 @@ dependencies = [
     "defusedxml>=0.7.1",
     "pgvector>=0.3,<1.0",
     "fastembed>=0.7,<1.0",
-    "kubernetes-asyncio>=35.0.1,<36",
-    "redis>=5,<8",
+    "kubernetes-asyncio>=36.1.0,<37",
+    "redis>=8.0.0,<9",
     "tenacity>=9.0",
-    "asyncssh>=2.18,<3.0",
+    "asyncssh>=2.23.1,<3.0",
     "packaging>=24.0",
     "python-frontmatter>=1.3.0",
     "jinja2>=3.1.6",
@@ -33,14 +33,46 @@ dependencies = [
     "pyarrow>=21.0.0",
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
-    "pydantic-ai-slim[anthropic]>=1.102.0",
+    # ``[anthropic]`` brings the Anthropic SDK + the
+    # :class:`pydantic_ai.models.anthropic.AnthropicModel` provider; the
+    # G11.1 default tier path runs through it (see G11.1-T1 #808 +
+    # G11.5-T1 #1075). ``[bedrock]`` (G11.5-T2 #1076) adds boto3 +
+    # :class:`pydantic_ai.models.bedrock.BedrockConverseModel` so a
+    # tenant policy that routes a tier to AWS Bedrock can build the
+    # backend. ``[openai]`` (G11.5-T3 #1204) adds the OpenAI SDK +
+    # :class:`pydantic_ai.models.openai.OpenAIChatModel` so the same
+    # resolver shape can route to OpenAI SaaS / vLLM / Ollama via
+    # ``OpenAIProvider(base_url=...)``. All three extras live on the
+    # same pin so the version sweep stays monotonic.
+    "pydantic-ai-slim[anthropic,bedrock,openai]>=1.106.0",
+    "croniter>=6.2.2",
+    "markdown-it-py[linkify]>=4.2.0",
+    "pygments>=2.18",
+    "python-multipart>=0.0.32",
+    # G11.4-T3 (#1072) -- Tier-2 free-text NER redaction. Both pins are
+    # the 2026-03-15 release (the most recent at task-file time); the
+    # version is also called out in the issue body. Loaded **lazily**
+    # by :mod:`meho_backplane.redaction.presidio` so a Tier-1-only
+    # policy never imports them at runtime (the dep is still installed
+    # but stays untouched until a policy with a ``tier2`` block fires).
+    "presidio-analyzer==2.2.362",
+    "presidio-anonymizer==2.2.362",
+    # G3.11-T1 (#1221) — GitHub App authentication mints a 10-minute
+    # RS256 JWT (claims iat/exp/iss) and exchanges it for an
+    # installation token. PyJWT's ``jwt.encode(payload, key,
+    # algorithm="RS256")`` is the documented path; the ``[crypto]``
+    # extra pulls the ``cryptography`` backend (already a dev dep, but
+    # the extra makes the runtime requirement explicit at install time
+    # so a slim wheel install doesn't fail at first ``encode`` call).
+    # No stdlib alternative exists for RS256 signing.
+    "pyjwt[crypto]>=2.13.0,<3",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "ruff>=0.15.14",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.16",
     "mypy>=2.1.0",
     "cryptography>=42.0",
     "respx>=0.21",
@@ -107,6 +139,7 @@ select = [
 "tests/test_mcp_resource_tenant_feed.py" = ["F811"]
 "tests/test_mcp_resource_tenant_conventions.py" = ["F811"]
 "tests/test_mcp_initialize_instructions.py" = ["F811"]
+"tests/test_mcp_capability_gating.py" = ["F811"]
 # A005 flags any module name that matches a stdlib module by short name,
 # regardless of package path. These two are namespaced under
 # `meho_backplane.*` and are never imported as bare `operator` / `logging`,
@@ -247,6 +280,17 @@ ignore_missing_imports = true
 module = ["asyncssh.*"]
 ignore_missing_imports = true
 
+# pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.
+# Used by :mod:`meho_backplane.ui.routes.memory.render` for the
+# server-side Markdown code-block syntax highlighter; the call sites
+# are scoped to one module so the untyped surface stays narrow.
+# ``markdown-it-py`` itself ships ``py.typed``, no override needed.
+# Drop this override if upstream ships stubs (``types-Pygments`` is
+# available on PyPI but would add a build-time dep).
+[[tool.mypy.overrides]]
+module = ["pygments", "pygments.*"]
+ignore_missing_imports = true
+
 # defusedxml (G3.7-T2 #847) ships no ``py.typed`` marker as of 0.7.1.
 # Used by :mod:`meho_backplane.connectors.pfsense.ops_read` to parse the
 # pfSense ``config.xml`` safely (XXE-hardened drop-in for the stdlib
@@ -303,9 +347,48 @@ ignore_missing_imports = true
 module = ["meho_backplane.jsonflux.*"]
 disable_error_code = ["type-arg", "attr-defined"]
 
+# ``croniter`` ships without type stubs (no ``types-croniter`` exists
+# at the version we pin, 6.2.2+). The scheduler loop / cron module
+# imports it for cron-expression parsing; under the repo's strict
+# mypy config (no ``--ignore-missing-imports`` flag), the bare import
+# fails with ``Library stubs not installed for "croniter"``. Match
+# the pattern the ``tabulate`` / ``asyncssh`` overrides above use.
+[[tool.mypy.overrides]]
+module = ["croniter.*"]
+ignore_missing_imports = true
+
+# Microsoft Presidio (G11.4-T3 #1072) ships ``py.typed`` markers in
+# recent releases, but the ``presidio_analyzer.nlp_engine`` and
+# ``presidio_anonymizer.entities`` submodules expose APIs whose
+# parameter types resolve to ``Any`` under strict mode (the
+# ``NlpEngineProvider`` config dict and the ``OperatorConfig`` params
+# are deliberately untyped on the upstream surface). The Tier-2
+# adapter module (:mod:`meho_backplane.redaction.presidio`) localises
+# every Presidio call into one place, so the override scope stays
+# narrow. Drop this override if upstream ships stricter stubs.
+[[tool.mypy.overrides]]
+module = ["presidio_analyzer.*", "presidio_anonymizer.*"]
+ignore_missing_imports = true
+# ``AnonymizerEngine.__init__`` is documented but typed only as
+# ``def __init__(self)`` with no annotations -- strict mode flags
+# the construction call as ``no-untyped-call``. Disable that one
+# error code for the Tier-2 adapter; every other strict check
+# (return-any, untyped-def, arg-type on our own code) stays in force.
+[[tool.mypy.overrides]]
+module = ["meho_backplane.redaction.presidio"]
+disable_error_code = ["no-untyped-call", "arg-type"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make sibling-of-``src/`` packages (currently ``scripts/`` — the
+# operator-run one-shot migrations) importable from tests without
+# per-file ``sys.path`` bootstrap. The wheel build target excludes
+# ``scripts/`` (see ``[tool.hatch.build.targets.wheel] packages``
+# above), so this is **test-only** — operators invoke the scripts
+# via ``cd backend && uv run python -m scripts.<name>``, which puts
+# ``backend/`` on ``sys.path`` through ``-m``'s implicit handling.
+pythonpath = ["."]
 # Default-exclude the ``load`` marker so the always-on lane never
 # spends the resolver-microbenchmark wall-clock budget. CLI ``-m
 # load`` overrides this -- pytest's argparse takes the last ``-m``

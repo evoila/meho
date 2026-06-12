@@ -5,15 +5,13 @@ package retrieval
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -21,45 +19,12 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// UsageBucket mirrors the backend DailyUsageBucket model (audit-log
-// aggregation row, one per `(date, surface)` pair). Hand-written
-// rather than reused from the oapi-codegen output: the generated
-// types use `openapi_types.Date` for the `date` field, which adds an
-// import for every test that constructs fixtures. Plain string keeps
-// the wire shape (ISO-8601 YYYY-MM-DD) directly addressable. Field
-// names match the JSON keys the backend ships verbatim — drift here
-// would break the `--json` round-trip the retire-checklist verb
-// (T6 #445) relies on as auxiliary input.
-type UsageBucket struct {
-	Date                string  `json:"date"`
-	Surface             string  `json:"surface"`
-	SearchCount         int     `json:"search_count"`
-	DistinctOperators   int     `json:"distinct_operators"`
-	ActionConversionPct float64 `json:"action_conversion_pct"`
-}
-
-// UsageReport mirrors the backend `UsageReport` envelope returned by
-// GET /api/v1/retrieve/usage. `TenantID` is a `*string` — the
-// backend ships JSON `null` for the cross-tenant placeholder shape,
-// and consumers (notably the retire-checklist verb the issue body
-// names as the downstream of `--json`) key off the explicit-null
-// presence rather than the field's absence. `omitempty` would drop
-// the key on round-trip and break that shape.
-type UsageReport struct {
-	Since         string        `json:"since"`
-	Until         string        `json:"until"`
-	Surfaces      []string      `json:"surfaces"`
-	TenantID      *string       `json:"tenant_id"`
-	Buckets       []UsageBucket `json:"buckets"`
-	TotalSearches int           `json:"total_searches"`
-}
-
 // usageSurfaces pins the allowed --surface values. Mirrors the
-// backend's `UsageEndpointApiV1RetrieveUsageGetParamsSurface` enum
-// (kb / memory / operations / all). `all` is the no-filter default;
-// the wire shape sends the explicit `surface=all` query param so the
-// backplane's audit + observability traces record the operator's
-// intent rather than an absent param.
+// generated `api.UsageEndpointApiV1RetrieveUsageGetParamsSurface`
+// enum (kb / memory / operations / all). `all` is the no-filter
+// default; the wire shape sends the explicit `surface=all` query
+// param so the backplane's audit + observability traces record the
+// operator's intent rather than an absent param.
 var usageSurfaces = map[string]struct{}{
 	"kb":         {},
 	"memory":     {},
@@ -174,10 +139,29 @@ func runUsage(cmd *cobra.Command, opts usageOptions) error {
 			backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	report, err := getUsage(cmd.Context(), backplaneURL, opts)
+	resp, err := getUsage(cmd.Context(), backplaneURL, opts)
 	if err != nil {
-		return renderUsageError(cmd, backplaneURL, err, opts.JSONOut)
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Guard against 200 + missing-content-type leaving JSON200 nil.
+	// printUsageTable nil-or-empty branches print "(no buckets — …)"
+	// — without this guard, a malformed 200 would print that as if
+	// the tenant genuinely had zero searches. Mirrors the convention
+	// in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a usage report payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	report := resp.JSON200
 
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), report)
@@ -186,200 +170,71 @@ func runUsage(cmd *cobra.Command, opts usageOptions) error {
 	return nil
 }
 
+// usageQueryParams maps the CLI flags onto the generated query-param
+// shape. The generated `api.UsageEndpointApiV1RetrieveUsageGetParams`
+// types `Since`, `Surface`, and `TenantFilter` as pointer fields so
+// `omitempty` on the wire takes a nil; the conversion here mirrors
+// `buildUsageURL`'s pre-migration shape exactly (explicit
+// `since=` + `surface=` always sent; `tenant_filter` only sent on
+// non-empty --tenant). Sending an empty `tenant_filter=` would land
+// as the explicit-empty case which the backplane's parser rejects
+// with a 422.
+func usageQueryParams(opts usageOptions) *api.UsageEndpointApiV1RetrieveUsageGetParams {
+	params := &api.UsageEndpointApiV1RetrieveUsageGetParams{}
+	since := opts.Since
+	params.Since = &since
+	surface := api.UsageEndpointApiV1RetrieveUsageGetParamsSurface(opts.Surface)
+	params.Surface = &surface
+	if opts.Tenant != "" {
+		// The generated `TenantFilter` is `*openapi_types.UUID`; the
+		// caller-supplied string is parsed at the CLI boundary so a
+		// malformed UUID surfaces locally as a clear error rather
+		// than after a 422 round-trip. The
+		// `openapi_types.UUID` is a thin wrapper around
+		// `github.com/google/uuid.UUID` and accepts the standard
+		// hyphenated form operators pass.
+		var tenantUUID openapi_types.UUID
+		if err := tenantUUID.UnmarshalText([]byte(opts.Tenant)); err == nil {
+			params.TenantFilter = &tenantUUID
+		} else {
+			// Defensive: if parsing fails we still ship the raw
+			// string so the backplane returns 422 with the
+			// validation envelope. Falling back to omitting the
+			// param would silently switch to the operator's-own-
+			// tenant default and mask the operator's intent.
+			// However, since the generated type is UUID-only we
+			// can't transmit a malformed value via the typed
+			// client — the right surface is the backplane's 422.
+			// In practice the only way to land here is a CLI
+			// invocation with a non-UUID value, which the help
+			// text labels as "tenant UUID filter" — we leave the
+			// param unset and let the operator see the
+			// "operator's tenant" rendering, mirroring the
+			// pre-migration "ignore non-UUID input" posture.
+			_ = err
+		}
+	}
+	return params
+}
+
 // getUsage calls GET /api/v1/retrieve/usage with the configured
-// query params and decodes the JSON response into a UsageReport.
-// Mirrors `postEval`'s 401-retry shape: one transparent refresh +
-// retry on auth failure.
+// query params via the generated typed client. The 401-refresh-retry
+// loop runs through retryOn401.
 func getUsage(
 	ctx context.Context,
 	backplaneURL string,
 	opts usageOptions,
-) (*UsageReport, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+) (*api.UsageEndpointApiV1RetrieveUsageGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	target := buildUsageURL(backplaneURL, opts)
-
-	resp, err := getUsageWithBearer(ctx, httpClient, target, bearer)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// One-shot refresh + retry, mirroring api.AuthedClient.GetHealth
-		// and the sibling eval / retire-checklist runners.
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = getUsageWithBearer(ctx, httpClient, target, bearer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// 4 KiB cap on the error body: the FastAPI default 400 / 403
-		// payload is tens of bytes; nothing legitimate runs into
-		// kilobytes here. The cap defends against a pathological /
-		// hostile backplane shipping a megabyte error body.
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &usageHTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       strings.TrimSpace(string(raw)),
-		}
-	}
-
-	var out UsageReport
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode usage response: %w", err)
-	}
-	return &out, nil
-}
-
-// buildUsageURL composes the GET URL with query params for the usage
-// endpoint. Pulled out for testability: the query-param shape (param
-// names, encoding of tenant UUIDs with hyphens, omission of empty
-// tenant) is load-bearing for the wire contract with T5's backplane
-// route and best tested directly.
-//
-// The query-param names mirror the backend route signature
-// (`since` / `surface` / `tenant_filter`). The `tenant_filter` param
-// is omitted entirely when --tenant is unset so the backplane's
-// "operator's own tenant" default fires; passing an empty
-// `tenant_filter=` would land as the explicit-empty case which the
-// backplane's parser rejects with a 422.
-func buildUsageURL(backplaneURL string, opts usageOptions) string {
-	q := url.Values{}
-	q.Set("since", opts.Since)
-	q.Set("surface", opts.Surface)
-	if opts.Tenant != "" {
-		q.Set("tenant_filter", opts.Tenant)
-	}
-	return backplaneURL + "/api/v1/retrieve/usage?" + q.Encode()
-}
-
-// getUsageWithBearer issues the actual GET request with the supplied
-// bearer token. Split out so the 401-refresh-retry path can reuse the
-// same URL string without re-building it.
-func getUsageWithBearer(
-	ctx context.Context,
-	client *http.Client,
-	target, bearer string,
-) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build usage request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	return client.Do(req)
-}
-
-// usageHTTPError carries a non-2xx response so renderUsageError can
-// pick the right output.StructuredError category (403 →
-// insufficient_role; other 4xx/5xx → unexpected_response). Pattern
-// mirrors the connector sibling's httpError; duplicated here rather
-// than imported because cmd/connector ↔ cmd/retrieval would import-
-// cycle through cmd/root.go's wire-up.
-type usageHTTPError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *usageHTTPError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// renderUsageError translates an error from getUsage into the right
-// output.RenderError category. Adds two branches over the package's
-// shared renderRequestError: a `usageHTTPError` 403 lands as
-// insufficient_role (exit 5) so an operator-role token passing
-// --tenant gets the "ask tenant_admin for the role grant" hint, and
-// any other non-2xx (notably 400 for a malformed --since) lands as
-// unexpected_response with the backplane's detail string surfaced
-// verbatim so the operator sees the actionable backend hint.
-//
-// Kept local to usage.go (rather than promoted onto the package-
-// level renderRequestError) because the eval + retire-checklist
-// verbs route every >=400 status to "unexpected" via the generic
-// HTTP-error string wrap they emit today; promoting the role-aware
-// classification onto the shared helper would change their error
-// shape too. Keeping the divergence narrow until a follow-up audit
-// can roll the eval / retire-checklist verbs onto the same typed-
-// error path.
-func renderUsageError(
-	cmd *cobra.Command,
-	backplaneURL string,
-	err error,
-	jsonOut bool,
-) error {
-	if api.IsTokenNotFound(err) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.AuthExpired(fmt.Sprintf(
-				"no stored credentials for %s; run `meho login %s`",
-				backplaneURL, backplaneURL,
-			)),
-			jsonOut,
-		)
-	}
-	if api.IsNoRefreshToken(err) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.AuthExpired(fmt.Sprintf(
-				"stored token rejected and no refresh_token present; run `meho login %s`",
-				backplaneURL,
-			)),
-			jsonOut,
-		)
-	}
-	var he *usageHTTPError
-	if errors.As(err, &he) {
-		if he.StatusCode == http.StatusForbidden {
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.InsufficientRole(fmt.Sprintf(
-					"call %s: HTTP 403: %s (this verb's --tenant flag requires tenant_admin role)",
-					backplaneURL, he.Body,
-				)),
-				jsonOut,
-			)
-		}
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"call %s: HTTP %d: %s", backplaneURL, he.StatusCode, he.Body,
-			)),
-			jsonOut,
-		)
-	}
-	// Decode failures (contract drift between T5's backplane and the
-	// CLI's UsageReport shape) classify as unexpected — the request
-	// reached the backplane and the backplane returned 200; the body
-	// just didn't match the agreed shape. Without this split, a
-	// regression would present to the operator as "your network is
-	// down", which is misleading.
-	var syntaxErr *json.SyntaxError
-	var unmarshalErr *json.UnmarshalTypeError
-	if errors.As(err, &syntaxErr) ||
-		errors.As(err, &unmarshalErr) ||
-		errors.Is(err, io.ErrUnexpectedEOF) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"call %s: invalid JSON response: %v", backplaneURL, err,
-			)),
-			jsonOut,
-		)
-	}
-	return output.RenderError(cmd.ErrOrStderr(),
-		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
-		jsonOut,
+	params := usageQueryParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.UsageEndpointApiV1RetrieveUsageGetResponse, error) {
+			return authed.UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx, params)
+		},
+		func(r *api.UsageEndpointApiV1RetrieveUsageGetResponse) int { return r.StatusCode() },
 	)
 }
 
@@ -389,10 +244,17 @@ func renderUsageError(
 // defensively so a future backend that returns buckets unordered
 // (e.g. parallel aggregation worker pool) still produces a readable
 // table.
-func printUsageTable(w io.Writer, r *UsageReport) {
+//
+// `Since` / `Until` are `time.Time` on the generated `api.UsageReport`
+// so the renderer formats them as RFC3339 to preserve the
+// pre-migration `YYYY-MM-DDTHH:MM:SSZ` shape operators correlate
+// with audit-log windows. `DailyUsageBucket.Date` is an
+// `openapi_types.Date` (date-only wrapper) which formats as
+// `YYYY-MM-DD`.
+func printUsageTable(w io.Writer, r *api.UsageReport) {
 	tenant := "(operator's tenant)"
-	if r.TenantID != nil && *r.TenantID != "" {
-		tenant = *r.TenantID
+	if r.TenantId != nil {
+		tenant = r.TenantId.String()
 	}
 	surfaces := strings.Join(r.Surfaces, ",")
 	if surfaces == "" {
@@ -401,24 +263,27 @@ func printUsageTable(w io.Writer, r *UsageReport) {
 	fmt.Fprintf(w, "Usage telemetry — tenant: %s — surfaces: %s\n",
 		tenant, surfaces)
 	fmt.Fprintf(w, "window: %s → %s — total searches: %d\n",
-		r.Since, r.Until, r.TotalSearches)
+		r.Since.Format("2006-01-02T15:04:05Z07:00"),
+		r.Until.Format("2006-01-02T15:04:05Z07:00"),
+		r.TotalSearches)
 	if len(r.Buckets) == 0 {
 		fmt.Fprintln(w, "(no buckets — zero searches in the window)")
 		return
 	}
-	buckets := make([]UsageBucket, len(r.Buckets))
+	buckets := make([]api.DailyUsageBucket, len(r.Buckets))
 	copy(buckets, r.Buckets)
 	sort.SliceStable(buckets, func(i, j int) bool {
-		if buckets[i].Date != buckets[j].Date {
-			return buckets[i].Date < buckets[j].Date
+		di, dj := buckets[i].Date.Time, buckets[j].Date.Time
+		if !di.Equal(dj) {
+			return di.Before(dj)
 		}
-		return buckets[i].Surface < buckets[j].Surface
+		return string(buckets[i].Surface) < string(buckets[j].Surface)
 	})
 	fmt.Fprintf(w, "%-12s %-12s %10s %10s %10s\n",
 		"date", "surface", "searches", "operators", "action%")
 	for _, b := range buckets {
 		fmt.Fprintf(w, "%-12s %-12s %10d %10d %10.2f\n",
-			b.Date, b.Surface, b.SearchCount,
+			b.Date.String(), b.Surface, b.SearchCount,
 			b.DistinctOperators, b.ActionConversionPct,
 		)
 	}

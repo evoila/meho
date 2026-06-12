@@ -73,13 +73,18 @@ from fastapi.responses import StreamingResponse
 
 from meho_backplane.api.v1.feed import (
     _HEARTBEAT_INTERVAL_SECONDS,
+    _LIVE_TAIL_CURSOR,
     _XREAD_BLOCK_MS,
     _XREAD_COUNT,
+    _emit_backlog_prelude,
     _process_entries,
     _resolve_cursor,
     _validate_cursor_or_400,
 )
-from meho_backplane.broadcast import get_broadcast_client
+from meho_backplane.broadcast import (
+    get_broadcast_blocking_client,
+    get_broadcast_client,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 
 __all__ = ["build_stream_router"]
@@ -104,6 +109,7 @@ def _stream_key(tenant_id: object) -> str:
     return f"meho:feed:{tenant_id}"
 
 
+# code-quality-allow: pre-existing SSE generator size/complexity; type-only redis-8 XREAD fix
 async def _ui_feed_generator(
     *,
     tenant_id: object,
@@ -116,26 +122,72 @@ async def _ui_feed_generator(
     """SSE generator scoped to the session's tenant.
 
     Structurally identical to
-    :func:`meho_backplane.api.v1.feed._feed_generator` -- BLOCK on
-    XREAD, delegate parse + filter to the shared
-    :func:`_process_entries`, emit a heartbeat on outbound silence so
-    HTTP intermediaries don't idle-time-out the connection. The cursor
-    advances past every consumed entry (not only the ones that survive
-    the filter) so a busy-but-filtered tenant doesn't re-read the same
-    batch under explicit-cursor replay.
+    :func:`meho_backplane.api.v1.feed._feed_generator` -- prelude
+    backlog on fresh ``$`` connections, then BLOCK on XREAD, delegate
+    parse + filter to the shared :func:`_process_entries`, emit a
+    heartbeat on outbound silence so HTTP intermediaries don't
+    idle-time-out the connection. The cursor advances past every
+    consumed entry (not only the ones that survive the filter) so a
+    busy-but-filtered tenant doesn't re-read the same batch under
+    explicit-cursor replay.
+
+    Backlog prelude rationale matches the API edge -- see the docstring
+    of :func:`meho_backplane.api.v1.feed._feed_generator` and the
+    consumer signal in ``claude-rdc-hetzner-dc#771`` Finding 14 +
+    issue #1305: a fresh ``EventSource`` connection from the
+    ``/ui/broadcast`` page with a quiet tenant otherwise sees zero
+    frames over the first 30 s (``$`` skips history, heartbeat
+    cadence is 30 s), so the page renders an empty list under its
+    "Live activity" header for the entire first heartbeat window
+    even when the tenant has 76+ entries on the stream.
 
     On client disconnect Starlette raises
     :class:`asyncio.CancelledError` into the pending ``xread`` await;
     we log and re-raise per the asyncio cancellation contract (Sonar
     S7497 -- swallowing it breaks the task tree's unwind invariants).
+
+    Two clients, two contracts -- mirrors the API edge. The backlog
+    prelude reads via the short-timeout fast client
+    (:func:`get_broadcast_client`, ``socket_timeout=5 s``) because
+    ``XREVRANGE`` is a non-blocking one-shot read; the BLOCK loop
+    reads via the long-timeout blocking client
+    (:func:`get_broadcast_blocking_client`, ``socket_timeout=35 s``)
+    so a 30 s ``XREAD BLOCK`` against a quiet stream returns ``None``
+    instead of raising ``redis.TimeoutError`` at 5 s. See
+    :mod:`meho_backplane.broadcast.client` for the two-client
+    rationale and RDC #789 N1 / Initiative #1353 for the consumer
+    repro.
     """
-    client = get_broadcast_client()
+    fast_client = get_broadcast_client()
+    blocking_client = get_broadcast_blocking_client()
     stream_key = _stream_key(tenant_id)
     last_heartbeat = time.monotonic()
 
     try:
+        # Backlog prelude — same shape as the API edge, gated on the
+        # live-tail cursor so explicit-replay reconnects honour the
+        # caller's anchor. A RedisError during the prelude propagates
+        # out of the generator (same path the BLOCK loop's untrapped
+        # error takes today on this surface — the UI bridge does NOT
+        # emit T11 error frames, distinct from the API edge); the
+        # surrounding FastAPI / Starlette stack closes the SSE
+        # connection and ``EventSource`` reconnects per its spec.
+        if cursor == _LIVE_TAIL_CURSOR:
+            prelude_frames, prelude_last_id = await _emit_backlog_prelude(
+                fast_client,
+                stream_key=stream_key,
+                op_class=op_class,
+                principal=principal,
+                target=target,
+            )
+            for frame in prelude_frames:
+                yield frame
+            if prelude_last_id is not None:
+                cursor = prelude_last_id
+            if prelude_frames:
+                last_heartbeat = time.monotonic()
         while True:
-            entries = await client.xread(
+            entries = await blocking_client.xread(
                 {stream_key: cursor},
                 block=_XREAD_BLOCK_MS,
                 count=_XREAD_COUNT,
@@ -145,8 +197,12 @@ async def _ui_feed_generator(
             if entries:
                 # redis-py returns ``[[stream_key, [(entry_id, fields), ...]], ...]``;
                 # we query exactly one stream, so ``entries[0][1]`` is
-                # this tenant's ``(entry_id, fields_dict)`` list.
-                _key, items = entries[0]
+                # this tenant's ``(entry_id, fields_dict)`` list. redis 8's
+                # stub widens the XREAD return type beyond an int-indexable
+                # outer list, so launder it to the known RESP2 shape here --
+                # exactly as ``_consume_xread_batch`` does for the API route.
+                typed_entries: list[tuple[str, list[tuple[str, dict[str, str]]]]] = entries  # type: ignore[assignment]
+                _key, items = typed_entries[0]
                 if items:
                     # Advance past EVERY consumed entry before the yield
                     # loop so a fully-filtered batch still moves the

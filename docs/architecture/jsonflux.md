@@ -4,8 +4,17 @@ The `JsonFluxReducer` is MEHO's production answer to CLAUDE.md postulate 6
 and v0.1-spec §4: no agent ever sees a 4 MB raw API response. Any
 operation returning a set-shaped payload above threshold is materialized
 into an in-memory DuckDB table, summarized, and replaced with a
-[`ResultHandle`](operations-substrate.md#jsonflux-integration); agents
-drill in via the `result_*` meta-tools.
+[`ResultHandle`](operations-substrate.md#jsonflux-integration) carrying a
+bounded inline `sample` plus a self-documenting `fetch_more` envelope. The
+**full** materialized set is spilled to a Valkey-backed
+`ResultHandleStore` (keyed by `(tenant_id, handle_id)`, server-enforced
+TTL, row count capped by `RESULT_HANDLE_MAX_SPILL_ROWS`), and the
+`result_query` MCP meta-tool pages it back beyond the inline sample. When
+the spill succeeds the handle's `fetch_more.drill_in` is `available=true`
+and names that tool; when it is skipped or the store is unreachable the
+envelope still tells the agent how to act on more than the sample (re-call
+with narrower params / native pagination) and the reduce path is
+unaffected (fail-open).
 
 The reduction engine is **vendored** — copied into this repo rather than
 pulled as a PyPI dependency — because the upstream is a single
@@ -215,6 +224,187 @@ Read off the shipped adapter
 All four are keyword-only. The defaults match v0.1-spec §4 (50 rows /
 4 KB). Empty collections never materialize — a 0-row handle carries no
 information a pass-through doesn't.
+
+### `fetch_more` envelope (G0.15-T8, #1219)
+
+Every `ResultHandle` the adapter mints carries a `fetch_more` envelope
+so an agent reading the response can answer *"how do I get the next
+slice"* from the response itself — without a discovery dance across
+MCP tools / resource URIs / REST routes / CLI verbs. The shape is
+documentation-as-data, matching the established precedents:
+`ConnectorRegistration.next_step` (G0.13-T3 #1153),
+`/ready.features` (G0.14-T7 #1186),
+`/retrieve/usage.counted_surfaces` — every reduced response teaches
+the agent how to act on it next.
+
+`FetchMore` (defined in
+[`connectors/schemas.py`](../../backend/src/meho_backplane/connectors/schemas.py))
+has two independent branches; both are always present so consumers
+parse one shape regardless of source.
+
+**`drill_in: FetchMoreDrillIn`** — *"can the agent fetch more rows
+from the handle directly?"* `available=True` when the reducer spilled
+the full materialized set to the `ResultHandleStore` (G0.20-T7 #1507):
+the branch then names the `result_query` MCP tool (`mcp_tool`), a
+ready-to-adapt `example_call` carrying the handle id + a first-page
+`{offset, limit}`, and the handle's `expires_at` (the spill TTL). When
+the spill was skipped — the reduce ran outside a tenant-scoped dispatch
+— or the store was unreachable, `available=False` and `rationale`
+points at the narrower-params / native-pagination workaround; since
+#1629 the branch additionally carries a machine-readable `reason`
+naming which no-spill branch fired — `no_tenant_context` (no usable
+`tenant_id` / `operator_sub` pair in the reducer context, so the spill
+could not be keyed) or `result_store_unavailable` (the Valkey-backed
+store did not persist the rows: unreachable, write rejected, or
+disabled). `reason` is `None` on the `available=True` branch, and every
+skip also logs a structured `jsonflux_spill_skipped` warning carrying
+the same reason plus `op_id` / `handle_id`, so a reduced-but-unspilled
+response is diagnosable from logs as well as from the envelope (see
+[`docs/codebase/result-spill.md`](../codebase/result-spill.md) for the
+triage runbook). The spill
++ read-back are described under *"Read-back: the `ResultHandleStore`"*
+below; the `mcp_resource_uri` field stays `None` in the current
+tool-only surface. `rationale` always carries the operator/agent-facing
+prose explaining the current state.
+
+**`native_pagination: FetchMoreNativePagination`** — *"what params
+let the underlying op return the next slice?"* When the op
+registered a `PaginationHint` (next paragraph), `available=True`
+and `params` / `example_next_call` are populated verbatim from the
+hint. When no hint exists, `available=False` with the rationale
+*"the underlying op did not register a `pagination_hint` in its
+`llm_instructions`"* and a curated pointer to the registration
+slot — useful for connector authors reading the response during
+development.
+
+The `pagination_hint` slot under `llm_instructions`. Connector
+authors that ship pagination-aware ops attach a `PaginationHint`
+to the op's registration `llm_instructions` payload under the
+`pagination_hint` key:
+
+```python
+register_typed_operation(
+    op_id="vault.kv.list.bulk",
+    ...,
+    llm_instructions={
+        "pagination_hint": {
+            "params": {"path": "directory prefix to list"},
+            "example_next_call": {
+                "op_id": "vault.kv.list.bulk",
+                "params": {"path": "/secret/team-a/"},
+            },
+        },
+        # ...other llm_instructions slots...
+    },
+)
+```
+
+Reading from `llm_instructions` (rather than adding a new
+`endpoint_descriptor` column) keeps the contract additive — no DB
+migration, no `EndpointDescriptor` schema change.
+
+`dispatcher._pagination_hint_from_descriptor(descriptor)` extracts
+the raw dict from `descriptor.llm_instructions["pagination_hint"]`
+and threads it through `reducer_context["pagination_hint"]` (see
+`dispatcher._reduce_or_error`). The reducer's
+`_resolve_pagination_hint` coerces the context value to a
+`PaginationHint` instance (accepting both already-validated
+`PaginationHint` instances and plain dicts the dispatcher reads
+from JSON-deserialised descriptors); a `ValidationError` on a
+malformed dict is **caught**, a warning is logged, and the reducer
+falls back to `native_pagination.available=False` with the same
+"no hint" rationale — so a connector author shipping a broken
+hint doesn't break the operator's read at runtime. Returning a
+plain dict from the dispatcher helper keeps the dispatcher layer
+free of a Pydantic-import dependency on the connectors schema;
+the reducer owns the validation boundary.
+
+### Read-back: the `ResultHandleStore` (G0.20-T7, #1507)
+
+The inline `sample` is a bounded preview; the **full** materialized set
+is spilled so an agent that needs rows beyond the sample can read them
+back. At materialize time the reducer registers the rows in DuckDB
+(as before), then — after the engine closes — persists the full
+normalized row list to
+[`ResultHandleStore`](../../backend/src/meho_backplane/connectors/result_handle_store.py),
+a thin wrapper over the broadcast Valkey client:
+
+```
+KEY:   meho:reshandle:{tenant_id}:{handle_id}
+VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at}
+TTL:   the handle's ttl_seconds (server-enforced)
+```
+
+The store is bounded on both axes by construction: Valkey enforces the
+TTL server-side (no sweeper, a crashed process leaves no orphaned key),
+and the row count is capped at `RESULT_HANDLE_MAX_SPILL_ROWS` (default
+10000) so one pathological op cannot blow the per-key value size — the
+handle records both `stored_rows` and the true `total_rows` so a reader
+learns when the tail was capped. The dispatcher threads `tenant_id` +
+`operator_sub` into `reducer_context`; a reduce with neither (a
+non-dispatch call) skips the spill, and a Valkey error is swallowed
+(`spill` returns `False`) — a read never fails because the spill backend
+is unreachable. Both skip shapes surface in the response as
+`drill_in.available=false` with the matching `reason`
+(`no_tenant_context` / `result_store_unavailable`, #1629) and log a
+`jsonflux_spill_skipped` warning; the store-level failure additionally
+logs `result_handle_spill_failed` with the underlying error.
+
+The `result_query` MCP meta-tool
+([`mcp/tools/result_query.py`](../../backend/src/meho_backplane/mcp/tools/result_query.py))
+is the read surface: `result_query(handle_id, offset, limit)` returns the
+requested window plus `total_rows` / `stored_rows` / `truncated`. The
+tenant comes from the operator's JWT (never the arguments) and the
+spilling operator's `sub` is checked, so a cross-tenant or cross-operator
+read is an indistinguishable `handle_not_found` miss — the same
+recoverable `-32602` taxonomy an expired handle surfaces. This is the
+design first drafted as the `HandleStore` in G3.1-T4 (#304,
+closed-superseded), revived and narrowed to the reduce-time spill case.
+
+### Sample ordering — head vs tail (G0.19-T1, #1479)
+
+The inline `sample` is the first `sample_size` rows of the materialized
+table (registration order) **by default**. That is correct for
+order-agnostic sets — a Vault key list, a topology row set — where
+neither end is more salient.
+
+It is *wrong* for a chronologically-ordered collection. `k8s.logs`
+returns its `lines` oldest-first (kubectl/k8s API order), so a bare
+`SELECT … LIMIT 5` surfaces the **oldest** five lines — typically
+health-probe noise — when a log-triage reader wants the **most-recent**
+five. (DuckDB applies no implicit ordering: without an explicit
+`ORDER BY`, `LIMIT` returns an implementation-ordered subset.)
+
+Connectors whose op returns an oldest-first collection declare a
+`result_ordering` hint under `llm_instructions`:
+
+```python
+register_typed_operation(
+    op_id="k8s.logs",
+    ...,
+    llm_instructions={
+        "result_ordering": {"sample": "tail"},
+        # ...other llm_instructions slots...
+    },
+)
+```
+
+`dispatcher._result_ordering_from_descriptor(descriptor)` lifts the raw
+dict from `descriptor.llm_instructions["result_ordering"]` and threads it
+through `reducer_context["result_ordering"]` — the exact sibling of the
+`pagination_hint` path. `JsonFluxReducer._sample_from_tail` reads it; on
+`{"sample": "tail"}` the reducer's `_query_sample` numbers the scan with
+`row_number() OVER ()`, keeps the highest-ordinal (most-recent)
+`sample_size` rows, and re-sorts ascending so the returned slice stays
+chronological (reads like the bottom of a `kubectl logs` window). A
+missing / malformed / any-other value keeps the head-first default —
+the hint is purely additive, so an op without it is unchanged. A
+non-dict value is logged once (actionable for the connector author) and
+treated as "no tail ordering" rather than raised, matching the
+never-raise discipline the pagination-hint path follows.
+
+For the wire shape of `fetch_more` on a serialized `ResultHandle`,
+see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 
 For how the dispatcher invokes the reducer (the `try/except` wrap that
 turns a reducer exception into `connector_error` with audit + broadcast

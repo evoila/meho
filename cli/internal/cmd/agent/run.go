@@ -8,28 +8,36 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// RunRequest mirrors the backend AgentRunRequest pydantic model
-// (`backend/src/meho_backplane/api/v1/agent_runs.py`). `Async` uses the
-// `async` wire key (a Python keyword on the backend, plain on the wire).
-type RunRequest struct {
-	Input string `json:"input"`
-	Async bool   `json:"async"`
-}
-
-// RunResult mirrors the backend AgentRunResultResponse (a terminal sync
-// run, HTTP 200) and AgentRunHandleResponse (an async / converted-to-async
-// run, HTTP 202) combined — only the fields present in a given response are
-// populated, so unset pointer fields distinguish the two shapes. Output is
-// a free-shaped JSON object (the run's structured / {"text": ...} result).
-type RunResult struct {
+// runResponse models the wire body of POST /api/v1/agents/{name}/run.
+// The endpoint is one of the small set of MEHO routes whose response
+// is a discriminated union of two unrelated Pydantic models —
+// AgentRunResultResponse on a terminal sync run (HTTP 200) and
+// AgentRunHandleResponse on an async / converted-to-async run
+// (HTTP 202) — emitted via a JSONResponse without a single
+// FastAPI response_model. The OpenAPI snapshot therefore renders
+// the response as a free-shape `Any` at 200 only, and the generated
+// `RunAgentApiV1AgentsNameRunPostResponse.JSON200` lands as
+// `*interface{}`. To keep the CLI's typed-printing contract we
+// re-decode the response body off the typed envelope into this
+// union; the field set covers both wire shapes (omitempty on
+// terminal-only / handle-only fields lets the marshaler still emit a
+// minimal --json payload).
+//
+// Code-quality-allow: tracked under the "fix Run endpoint OpenAPI
+// surface to use a discriminated union of two response models" follow-
+// up issue (Initiative G0.12 #1118 adjacent finding) — that's a
+// backend FastAPI change outside the blast radius of this consumer-
+// side migration.
+type runResponse struct {
 	RunID            string         `json:"run_id"`
 	Status           string         `json:"status"`
 	Output           map[string]any `json:"output,omitempty"`
@@ -107,43 +115,50 @@ func runRun(cmd *cobra.Command, opts runOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := postRun(cmd.Context(), backplaneURL, opts)
+	resp, err := postRun(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	// /run replies with 200 on a terminal sync outcome and 202 on a
+	// converted-to-async / fresh-async run; both are success here.
+	status := resp.StatusCode()
+	if status != http.StatusOK && status != http.StatusAccepted {
+		return renderHTTPStatus(cmd, backplaneURL, status, resp.Body, opts.JSONOut)
+	}
+	var result runResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode agent run response: %v", err)), opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
-	printRunResult(cmd.OutOrStdout(), result)
+	printRunResult(cmd.OutOrStdout(), &result)
 	return nil
 }
 
-// buildRunPath assembles the POST path. Exposed for unit tests so URL
-// encoding of names with dots / hyphens stays covered.
-func buildRunPath(name string) string {
-	return "/api/v1/agents/" + url.PathEscape(name) + "/run"
-}
-
-func postRun(ctx context.Context, backplaneURL string, opts runOptions) (*RunResult, error) {
-	body, err := json.Marshal(RunRequest{Input: opts.Input, Async: opts.Async})
-	if err != nil {
-		return nil, fmt.Errorf("encode run request: %w", err)
-	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", buildRunPath(opts.Name), body)
+func postRun(ctx context.Context, backplaneURL string, opts runOptions) (*api.RunAgentApiV1AgentsNameRunPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out RunResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent run response: %w", err)
+	asyncFlag := opts.Async
+	body := api.AgentRunRequest{
+		Input: opts.Input,
+		Async: &asyncFlag,
 	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RunAgentApiV1AgentsNameRunPostResponse, error) {
+			return authed.RunAgentApiV1AgentsNameRunPostWithResponse(ctx, opts.Name, nil, body)
+		},
+		func(r *api.RunAgentApiV1AgentsNameRunPostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printRunResult renders a run response as a key-value summary. A terminal
 // run shows its output; an async / converted run shows the handle and a
 // hint to poll it.
-func printRunResult(w io.Writer, r *RunResult) {
+func printRunResult(w io.Writer, r *runResponse) {
 	if r == nil {
 		return
 	}

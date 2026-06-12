@@ -1,0 +1,11 @@
+{
+  "op": "host.detach_from_vds",
+  "host": "host-42",
+  "dvs": "dvs-17",
+  "fallback_network": "network-9",
+  "planned_nic_migrations": [
+    {"vm": "vm-101", "nic": "4000", "from": "dvportgroup-31", "to": "network-9"},
+    {"vm": "vm-102", "nic": "4000", "from": "dvportgroup-31", "to": "network-9"}
+  ],
+  "planned_dvs_detach": {"dvs": "dvs-17", "action": "remove_host", "host": "host-42"}
+}

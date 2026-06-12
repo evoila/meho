@@ -91,8 +91,10 @@ from meho_backplane.mcp.registry import (
     ToolDefinition,
     all_resource_templates_for,
     all_tools_for,
+    capability_satisfied,
     get_resource_for_uri,
     get_tool,
+    redacted_audit_uri,
     role_at_least,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
@@ -185,6 +187,9 @@ async def handle_tools_list(
     return {"tools": visible}
 
 
+# code-quality-allow: pre-existing oversized MCP envelope dispatcher (>100
+# lines / C901 / PLR0915 on main before #1481); the #1481 audit-status fix
+# adds a small except arm, not the size — refactor is out of scope here.
 async def handle_tools_call(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -269,6 +274,19 @@ async def handle_tools_call(
         defn, handler = entry
         audit_payload["op_class"] = defn.op_class
 
+        # Deprecated-alias breadcrumb (#1612). A call arriving under a
+        # deprecated tool name still dispatches normally (the alias
+        # shares the canonical handler), but the structured warning
+        # gives operators a migration signal to watch before the alias
+        # is removed — same posture as the field-level
+        # ``add_to_memory_field_deprecated`` shim log.
+        if defn.deprecated_alias_for is not None:
+            _log.warning(
+                "mcp_tool_name_deprecated",
+                tool=name,
+                replacement=defn.deprecated_alias_for,
+            )
+
         # RBAC: the tool's required_role gates *invocation*, not just listing.
         # The list filter already hides tools the operator can't call, but
         # a client that knows the name could try to call anyway.
@@ -282,6 +300,23 @@ async def handle_tools_call(
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: {name!r} requires a higher role",
+            )
+
+        # Capability gate (G4.5-T1): the tool's required_capability gates
+        # invocation too, not just listing. all_tools_for already hides a
+        # capability-gated tool the tenant hasn't provisioned, but a
+        # client that learned the name out-of-band could still try to
+        # call it. Re-check here so knowing the name can't bypass the
+        # gate — same 403-projected path as the role re-check above.
+        if not capability_satisfied(operator, defn.required_capability):
+            _log.warning(
+                "mcp_tool_call_capability_forbidden",
+                tool=name,
+                required_capability=defn.required_capability,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} requires an unprovisioned capability",
             )
 
         # Validate arguments against the tool's inputSchema. ``cls`` is
@@ -317,16 +352,38 @@ async def handle_tools_call(
             "content": [{"type": "text", "text": json.dumps(result)}],
             "isError": False,
         }
+    except McpInvalidParamsError:
+        # Class-wide audit-status correction (#1481). A tool handler can
+        # raise ``McpInvalidParamsError`` *after* all the explicit
+        # pre-dispatch gates (name/arguments/unknown-tool/RBAC/schema)
+        # — e.g. ``_approve_handler`` rejecting a self-approval,
+        # ``approval_request_not_found``, or ``approval_unauthorized``.
+        # Those raises bypass every branch that set ``status_code``, so
+        # it is still the init 500 — a server-fault projection of what is
+        # actually a JSON-RPC ``-32602`` parameter/policy rejection on
+        # the wire. Project the whole class onto a 403 "denied" status so
+        # the audit row and the broadcast event
+        # (:func:`_classify_mcp_status`) classify the rejection
+        # consistently with the wire outcome instead of mis-reporting a
+        # crash. Explicit pre-dispatch branches already set 400/403/404,
+        # so they flow through here unchanged; only the residual init 500
+        # is corrected.
+        if status_code == 500:
+            status_code = 403
+        raise
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
         # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
         # row commits so ``broadcast_detail_origin`` lands on the
-        # row's payload. The op_id is the tool name verbatim so
-        # :func:`classify_op` matches credential / audit / read /
-        # write suffixes correctly (e.g. ``vault.kv.read`` →
-        # ``credential_read`` → aggregate-only redacted payload by
-        # default).
+        # row's payload. The broadcast / ``classify_op`` op_id is
+        # ``audit_name`` (the tool name verbatim) so :func:`classify_op`
+        # matches credential / audit / read / write suffixes correctly
+        # (e.g. ``vault.kv.read`` → ``credential_read`` → aggregate-only
+        # redacted payload by default). A handler may bind ``audit_op_id``
+        # to override only the *persisted* row's op_id (see the
+        # strip-and-merge override below); that never touches the
+        # broadcast / ``classify_op`` identity used here.
         #
         # ``resolver_params`` merges the raw tool ``arguments`` on top
         # of ``audit_payload`` so scope-matched override rules
@@ -342,12 +399,35 @@ async def handle_tools_call(
         resolver_params: dict[str, Any] = dict(audit_payload)
         if isinstance(arguments, dict):
             resolver_params.update(arguments)
+        # #93: ``call_operation`` is a wrapper tool — its name does not
+        # carry any sensitivity signal, so ``classify_op("call_operation")``
+        # falls through to ``"other"`` → ``"full"`` detail and ships raw
+        # ``params`` (including secret-bearing ``params.data`` /
+        # ``params.password``) onto the per-tenant feed. The inner
+        # ``arguments["op_id"]`` is the real operation the agent dispatched
+        # and must be used for the redaction classification instead.
+        # This mirrors the inner DISPATCH row's precedent at
+        # ``operations/_audit.py:443`` where ``classify_op(descriptor.op_id)``
+        # is called on the real op id so credential_write/credential_mint/
+        # credential_read ops collapse to aggregate-only. The outer envelope's
+        # ``op_id`` broadcast field and the audit row's ``path`` column are
+        # intentionally left as ``audit_name`` (the wrapper tool name) so
+        # ``meho audit query`` cardinality and path-based correlations are
+        # unchanged (AC #5).
+        _broadcast_op_id = audit_name
+        if (
+            audit_name == "call_operation"
+            and isinstance(arguments, dict)
+            and isinstance(arguments.get("op_id"), str)
+            and arguments["op_id"]
+        ):
+            _broadcast_op_id = arguments["op_id"]
         (
             broadcast_op_class,
             broadcast_detail,
             broadcast_origin,
         ) = await compute_effective_broadcast_detail(
-            op_id=audit_name,
+            op_id=_broadcast_op_id,
             tenant_id=operator.tenant_id,
             raw_params=resolver_params,
             request_override=request_override,
@@ -383,6 +463,20 @@ async def handle_tools_call(
             _stripped = _k[len(_audit_prefix) :]
             if _stripped:
                 audit_payload.setdefault(_stripped, _v)
+        # G4.5-T8 (#1549): a handler may bind ``audit_op_id`` to declare a
+        # canonical, dotted op_id for the persisted row (e.g.
+        # ``meho.docs.search`` on ``search_docs``) so a who-touched /
+        # ``query_audit`` filter is transport-independent across REST / CLI
+        # / MCP. ``audit_payload["op_id"]`` is seeded to the bare tool name
+        # at dispatch entry, so the ``setdefault`` merge above can never
+        # apply it — an explicit override is required. This is the *only*
+        # ``audit_*`` key allowed to overwrite a seeded value; it changes
+        # only the persisted payload's identity, never ``audit_name`` (which
+        # still drives ``classify_op`` broadcast sensitivity and the row's
+        # path, so the read/write/credential taxonomy is unchanged).
+        _op_id_override = structlog.contextvars.get_contextvars().get("audit_op_id")
+        if isinstance(_op_id_override, str) and _op_id_override:
+            audit_payload["op_id"] = _op_id_override
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -472,6 +566,9 @@ async def handle_resources_templates_list(
     return {"resourceTemplates": visible}
 
 
+# code-quality-allow: pre-existing oversized resources/read handler (>100
+# lines on main before #1481); the #1481 audit-status fix adds a small
+# except arm, not the size — refactor is out of scope here.
 async def handle_resources_read(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -535,6 +632,18 @@ async def handle_resources_read(
             raise McpInvalidParamsError(f"resource not found: {uri!r}")
         defn, handler, bound_params = match
 
+        # G0.5-T9: query-bearing resources (``meho://retrieve/{query}``)
+        # opt out of persisting the concrete URI — its variable portion is
+        # a free-form query that leaks operator intent. Replace the audit
+        # path + payload URI with a query-stripped sentinel; the resource
+        # handler binds a privacy-preserving ``audit_query_hash``
+        # contextvar so the row stays correlatable without the raw query.
+        # Only applied once the template matched, so a 404 (unmatched URI)
+        # still records the attempted URI for forensic visibility.
+        if defn.audit_redact_uri:
+            audit_uri = redacted_audit_uri(defn.uriTemplate)
+            audit_payload["uri"] = audit_uri
+
         # RBAC: same call-time re-check as tools.
         if not _operator_meets_required_role(operator, defn):
             _log.warning(
@@ -546,6 +655,21 @@ async def handle_resources_read(
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: resource {uri!r} requires a higher role",
+            )
+
+        # Capability gate (G4.5-T1): same call-time re-check as tools.
+        # all_resource_templates_for hides a capability-gated template the
+        # tenant hasn't provisioned; re-check here so a known URI can't
+        # bypass the gate.
+        if not capability_satisfied(operator, defn.required_capability):
+            _log.warning(
+                "mcp_resource_read_capability_forbidden",
+                uri=uri,
+                required_capability=defn.required_capability,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: resource {uri!r} requires an unprovisioned capability",
             )
 
         body = await handler(operator, bound_params)
@@ -566,6 +690,18 @@ async def handle_resources_read(
                 },
             ],
         }
+    except McpInvalidParamsError:
+        # Class-wide audit-status correction (#1481), mirroring
+        # :func:`handle_tools_call`. A resource handler that raises
+        # ``McpInvalidParamsError`` after the explicit gates leaves
+        # ``status_code`` at the init 500; the wire outcome is a
+        # ``-32602`` rejection, so project it onto a 403 "denied" status
+        # for the audit row and the broadcast event. Pre-dispatch
+        # branches (400/404/403) already set ``status_code`` and pass
+        # through untouched.
+        if status_code == 500:
+            status_code = 403
+        raise
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()

@@ -5,28 +5,16 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// retrieveRequest mirrors the backend RetrieveRequest pydantic
-// model. The kb `search` verb pins `source="kb"` so a search call
-// from this surface is always kb-scoped; the underlying
-// /api/v1/retrieve route supports cross-source retrieval but the
-// kb CLI deliberately constrains it (operators searching the
-// memory layer use `meho recall`, agents use the meta-tools).
-type retrieveRequest struct {
-	Query  string `json:"query"`
-	Source string `json:"source,omitempty"`
-	Kind   string `json:"kind,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-}
 
 // newSearchCmd returns the `meho kb search` command.
 //
@@ -70,6 +58,7 @@ func newSearchCmd() *cobra.Command {
 			return runSearch(cmd, searchOptions{
 				Query:             args[0],
 				Limit:             limit,
+				Changed:           cmd.Flags().Changed("limit"),
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -85,8 +74,15 @@ func newSearchCmd() *cobra.Command {
 }
 
 type searchOptions struct {
-	Query             string
-	Limit             int
+	Query string
+	Limit int
+	// Changed mirrors `cobra.Command.Flags().Changed("limit")` for
+	// runSearch's "operator-supplied 0 is an error; default-0 means
+	// 'use the server default'" gate. Threaded as a field rather
+	// than re-reading off cmd so tests that drive runSearch directly
+	// (bypassing the cobra flag-parse path) can opt in / out of
+	// the gate explicitly.
+	Changed           bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -103,11 +99,10 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 	// Field(ge=1, le=50); the CLI mirrors the bound so operators
 	// see the constraint string locally instead of a 422 round-trip.
 	// Zero is cobra's default for an unset IntVar — preserve that as
-	// the "no flag" sentinel (`postSearch` omits the field on zero),
-	// but reject an *explicit* `--limit=0` (loud failure for a value
-	// outside the documented 1..50 range).
-	limitProvided := cmd.Flags().Changed("limit")
-	if opts.Limit < 0 || opts.Limit > 50 || (limitProvided && opts.Limit == 0) {
+	// the "no flag" sentinel (`buildSearchBody` omits the field on
+	// zero), but reject an *explicit* `--limit=0` (loud failure for
+	// a value outside the documented 1..50 range).
+	if opts.Limit < 0 || opts.Limit > 50 || (opts.Changed && opts.Limit == 0) {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("--limit must be between 1 and 50 when provided; got %d", opts.Limit)),
@@ -118,38 +113,76 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := postSearch(cmd.Context(), backplaneURL, opts)
+	resp, err := searchKb(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printSearchTable(cmd.OutOrStdout(), resp)
+	// Guard against 200 + missing-content-type leaving JSON200 nil.
+	// printSearchTable's nil-or-empty branch prints "no kb hits for
+	// this query" — without this guard, a malformed 200 would be
+	// actively misleading (conflated with a genuinely-empty result
+	// set). Mirrors the convention in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a retrieve response payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printSearchTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-func postSearch(ctx context.Context, backplaneURL string, opts searchOptions) (*RetrieveResponse, error) {
-	body := retrieveRequest{
+// buildSearchBody assembles the typed POST body for /api/v1/retrieve.
+// `Source` is pinned to "kb" so the substrate scopes hits to kb-entry
+// rows. `Limit` only flows onto the wire when the operator passed a
+// positive `--limit` — the generated field tag is `omitempty`, so a
+// nil pointer keeps the JSON key absent and the backend's `Field(ge=1,
+// le=50, default=10)` applies. `Kind` and `MetadataFilters` stay nil
+// for the kb search verb; the operator surface doesn't expose either
+// in v0.2 (memory's search verb adds metadata_filters under G4.4-T2).
+func buildSearchBody(opts searchOptions) api.RetrieveRequest {
+	src := "kb"
+	body := api.RetrieveRequest{
 		Query:  opts.Query,
-		Source: "kb",
+		Source: &src,
 	}
 	if opts.Limit > 0 {
-		body.Limit = opts.Limit
+		limit := opts.Limit
+		body.Limit = &limit
 	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal kb search request: %w", err)
-	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/retrieve", raw)
+	return body
+}
+
+func searchKb(
+	ctx context.Context,
+	backplaneURL string,
+	opts searchOptions,
+) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out RetrieveResponse
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode kb search response: %w", err)
-	}
-	return &out, nil
+	reqBody := buildSearchBody(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
+			return authed.RetrieveEndpointApiV1RetrievePostWithResponse(
+				ctx,
+				&api.RetrieveEndpointApiV1RetrievePostParams{},
+				reqBody,
+			)
+		},
+		func(r *api.RetrieveEndpointApiV1RetrievePostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printSearchTable renders the ranked hits as a compact table.
@@ -157,7 +190,7 @@ func postSearch(ctx context.Context, backplaneURL string, opts searchOptions) (*
 // — the substrate's `source_id`), SNIPPET (200-char excerpt of the
 // body). The hit's `kind` is always `kb-entry` (the substrate
 // scopes via source filter); rendering it would be noise.
-func printSearchTable(w io.Writer, r *RetrieveResponse) {
+func printSearchTable(w io.Writer, r *api.RetrieveResponse) {
 	if r == nil || len(r.Hits) == 0 {
 		fmt.Fprintln(w, "no kb hits for this query")
 		return
@@ -167,12 +200,12 @@ func printSearchTable(w io.Writer, r *RetrieveResponse) {
 		fmt.Fprintf(w, "%-5d %-8.4f %-40s %s\n",
 			i+1,
 			hit.FusedScore,
-			truncate(hit.SourceID, 40),
+			truncate(hit.SourceId, 40),
 			truncate(snippetOf(hit.Body), 80),
 		)
 	}
-	if r.QueryDurationMS > 0 {
-		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMS)
+	if r.QueryDurationMs > 0 {
+		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMs)
 	}
 }
 

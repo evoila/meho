@@ -408,10 +408,14 @@ def _classify_decode_error(
     * ``detail_code`` — value put into the 401 body. Machine-readable
       and low info-leak: ``invalid_audience`` / ``invalid_issuer`` /
       ``missing_sub`` / ``token_expired`` /
-      ``signature_verification_failed`` / ``token_not_yet_valid``, with
-      a residual ``invalid_token`` for genuinely-unclassifiable
-      structural failures (truncated JWS, ``alg: none`` rejection,
-      post-refresh kid miss).
+      ``signature_verification_failed`` / ``token_not_yet_valid`` /
+      ``malformed_jws`` (structural break: non-JWT bearer prefix,
+      wrong segment count, base64 garbage — caught by authlib's
+      :class:`~authlib.jose.errors.DecodeError`), with a residual
+      ``invalid_token`` for the small set of failures that aren't
+      :class:`DecodeError` and still don't admit a specific code
+      (``alg: none`` rejection via :class:`UnsupportedAlgorithmError`,
+      future :class:`JoseError` subclasses, post-refresh kid miss).
     * ``log_fields`` — diagnostic value(s) for the structlog event
       (expected audience / issuer, missing-claim name, exception class).
       **Never** echoed in the response body. Mirrors the
@@ -451,13 +455,30 @@ def _classify_decode_error(
         # remediation from any other failure mode.
         return "token_not_yet_valid", {"reason": "nbf_or_iat_in_future_beyond_leeway"}
     if isinstance(exc, DecodeError):
-        # Structural break (malformed compact JWS, base64 garbage). No
-        # claim semantics — body and log both name ``invalid_token``.
-        return "invalid_token", {"reason": "jws_decode_error"}
-    # Catch-all for ``JoseError`` (unknown algorithm header, alg=none
-    # rejection, future authlib subclasses). Exception class name lands
-    # in the log so an operator can grep the specific authlib failure
-    # even though the public code collapses to ``invalid_token``.
+        # Structural break (truncated compact JWS, non-JWT bearer prefix
+        # like ``Bearer not-a-real-jwt``, wrong segment count, base64
+        # garbage). No claim semantics, but the remediation is distinct
+        # from the claim-failure codes: the operator's CLI / MCP client
+        # is sending something that isn't a JWT at all. Promoting from
+        # the residual ``invalid_token`` to the specific ``malformed_jws``
+        # closes the wall #2 gap the v0.6.0 dogfood signal flagged
+        # (G0.13-T1 #1131): the consumer's ``Bearer not-a-real-jwt``
+        # probe still surfaced as bare ``invalid_token`` at v0.6.0
+        # because G0.9.1-T12's classifier only covered the claim-stage
+        # failures. The log line preserves the authlib description so
+        # an operator can tell ``"Invalid input segments length"``
+        # (wrong number of dots) from a base64 decode failure.
+        return "malformed_jws", {
+            "reason": "jws_decode_error",
+            "detail": getattr(exc, "description", None) or getattr(exc, "error", None) or str(exc),
+        }
+    # Catch-all for ``JoseError`` (``alg: none`` rejection via
+    # :class:`~authlib.jose.errors.UnsupportedAlgorithmError`, future
+    # authlib subclasses). Exception class name lands in the log so an
+    # operator can grep the specific authlib failure even though the
+    # public code collapses to ``invalid_token``. Genuinely structural
+    # JWS failures (``DecodeError``) are handled above with the more
+    # specific ``malformed_jws`` code.
     return "invalid_token", {"reason": "jose_error", "exception": type(exc).__name__}
 
 
@@ -657,6 +678,104 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
         return PrincipalKind.USER
 
 
+def _extract_capabilities(claims: Any, settings: Settings) -> frozenset[str]:
+    """Extract the tenant-provisioned capability set from *claims*.
+
+    G4.5-T1 (#1519): the ``capabilities`` claim is **optional** and
+    **fail-closed**. It carries the capability keys the operator's
+    tenant has provisioned (the meho-docs add-on, future add-ons); the
+    MCP registry filters capability-gated tools against this set both at
+    ``tools/list`` (true absence) and ``tools/call`` (403). A token that
+    carries no claim — or a malformed one — resolves to the empty set,
+    so capability-gated tools are simply *absent* for that operator. The
+    fail-closed direction is deliberate: a missing/garbage capability
+    claim must never *grant* a gated capability, but it also must not
+    lock the operator out of un-gated tools (so it is not a 401, unlike
+    a missing tenant claim).
+
+    Accepted shapes:
+
+    * **absent** → empty set (pre-G4.5 tokens, tenants with no add-on).
+    * **list of strings** → the canonical Keycloak protocol-mapper
+      shape for a multivalued claim. Non-string entries are dropped and
+      logged; the surviving strings form the set.
+    * **single string** → coerced to a one-element set, tolerating a
+      realm that emits a scalar mapper for a single provisioned add-on.
+
+    Any other JSON type (number, object, bool) is logged under
+    ``malformed_capabilities_claim`` and resolves to the empty set.
+
+    The claim name is configurable via ``JWT_CAPABILITIES_CLAIM_NAME``
+    (default ``capabilities``) so realms that surface provisioning under
+    a different attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_capabilities_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        return frozenset({raw})
+    if isinstance(raw, (list, tuple)):
+        values = {item for item in raw if isinstance(item, str)}
+        if len(values) != len(raw):
+            log = structlog.get_logger(__name__)
+            log.warning(
+                "malformed_capabilities_claim",
+                claim_name=claim_name,
+                reason="non_string_entries_dropped",
+            )
+        return frozenset(values)
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_capabilities_claim",
+        claim_name=claim_name,
+        reason="not_a_string_or_array",
+    )
+    return frozenset()
+
+
+def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
+    """Extract the cross-tenant ``platform_admin`` flag from *claims*.
+
+    The ``platform_admin`` claim is **optional** and **fail-closed**: a
+    token that carries no claim — every pre-existing token, and every
+    agent / service principal whose Keycloak client does not emit it —
+    resolves to ``False``. The flag is orthogonal to
+    :class:`~meho_backplane.auth.operator.TenantRole`; it marks a genuine
+    platform / cross-tenant operator, the substrate a later cross-tenant
+    authorization gate checks so that ``tenant_admin`` *rank* alone never
+    confers cross-tenant reach.
+
+    Accepted shapes: a JSON boolean ``true`` / ``false`` (the canonical
+    Keycloak boolean protocol-mapper output) or the strings ``"true"`` /
+    ``"false"`` (case-insensitive) for realms whose mapper emits the claim
+    as a string. Only an explicit truthy value grants the flag; every
+    other shape (absent, ``null``, a number, an object, an unrecognised
+    string) fails closed to ``False`` — a malformed claim must never
+    *grant* the cross-tenant capability. A present-but-malformed value is
+    logged under ``malformed_platform_admin_claim``.
+
+    The claim name is configurable via ``JWT_PLATFORM_ADMIN_CLAIM_NAME``
+    (default ``platform_admin``) so realms that surface the flag under a
+    different attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_platform_admin_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_platform_admin_claim",
+        claim_name=claim_name,
+        reason="not_a_boolean",
+    )
+    return False
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -704,6 +823,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
+    capabilities = _extract_capabilities(claims, settings)
+    platform_admin = _extract_platform_admin(claims, settings)
     try:
         return Operator(
             sub=sub,
@@ -713,6 +834,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             tenant_id=tenant_id,
             tenant_role=tenant_role,
             principal_kind=principal_kind,
+            capabilities=capabilities,
+            platform_admin=platform_admin,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc
@@ -742,9 +865,11 @@ async def verify_jwt_for_audience(
     :func:`_classify_decode_error` for the full mapping):
     ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
     ``token_expired`` / ``signature_verification_failed`` /
-    ``token_not_yet_valid``, with the residual ``invalid_token`` kept
-    only for structural failures that don't admit a more specific code
-    (truncated JWS, ``alg: none`` rejection, post-refresh kid miss).
+    ``token_not_yet_valid`` / ``malformed_jws``, with the residual
+    ``invalid_token`` kept only for the small set of structural
+    failures that aren't authlib :class:`DecodeError` (``alg: none``
+    rejection, future :class:`JoseError` subclasses, post-refresh kid
+    miss).
     The expected-vs-received diagnostic values land in the structlog
     event only — never in the unauthenticated 401 body — mirroring the
     existing ``malformed_tenant_claim`` precedent (G0.9.1-T12).
@@ -785,12 +910,13 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     Each decode-stage failure surfaces a *specific* ``detail`` code
     (``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
     ``token_expired`` / ``signature_verification_failed`` /
-    ``token_not_yet_valid``) so an operator chasing the 401 can name
-    the failed check; the expected-vs-received diagnostic values land
-    in the structlog event only — never in the response body. The
-    error body is intentionally terse (``{"detail": "<reason>"}``)
-    and never echoes claim values; that prevents an unauthenticated
-    caller from probing the backplane for token shape.
+    ``token_not_yet_valid`` / ``malformed_jws``) so an operator
+    chasing the 401 can name the failed check; the expected-vs-received
+    diagnostic values land in the structlog event only — never in the
+    response body. The error body is intentionally terse
+    (``{"detail": "<reason>"}``) and never echoes claim values; that
+    prevents an unauthenticated caller from probing the backplane for
+    token shape.
 
     Kid-rotation handling lives in :func:`_decode_with_kid_rotation`:
     on the canonical "Key not found" ValueError from authlib, the JWKS

@@ -10,10 +10,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunOverridesSetPOSTsCreateRequest -- the request body shape
-// matches the BroadcastOverrideCreate Pydantic model.
+// matches the generated `api.BroadcastOverrideCreate` Pydantic
+// model. The handler decodes against the generated type directly
+// (pre-migration this decoded against the consumer-side
+// CreateRequest struct, which was deleted in G0.12-T6).
 func TestRunOverridesSetPOSTsCreateRequest(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, r *http.Request) {
@@ -21,12 +26,12 @@ func TestRunOverridesSetPOSTsCreateRequest(t *testing.T) {
 			t.Errorf("method: got %s; want POST", r.Method)
 		}
 		body, _ := io.ReadAll(r.Body)
-		var req CreateRequest
+		var req api.BroadcastOverrideCreate
 		if err := json.Unmarshal(body, &req); err != nil {
 			t.Fatalf("decode body: %v\n%s", err, body)
 		}
-		if req.OpIDPattern != "k8s.configmap.info" {
-			t.Errorf("op_id_pattern: got %q; want k8s.configmap.info", req.OpIDPattern)
+		if req.OpIdPattern != "k8s.configmap.info" {
+			t.Errorf("op_id_pattern: got %q; want k8s.configmap.info", req.OpIdPattern)
 		}
 		if req.ScopeField == nil || *req.ScopeField != "namespace" {
 			t.Errorf("scope_field: got %v; want \"namespace\"", req.ScopeField)
@@ -67,17 +72,33 @@ func TestRunOverridesSetPOSTsCreateRequest(t *testing.T) {
 }
 
 // TestRunOverridesSetOpWideOmitsScopeFields -- when --scope-field /
-// --scope-value are both empty, the request body omits them entirely
-// (so Pydantic's model_validator sees None for both, not "" + "").
-func TestRunOverridesSetOpWideOmitsScopeFields(t *testing.T) {
+// --scope-value are both empty, the request body sends both keys as
+// JSON null. Pydantic v2's model_validator sees None for both, which
+// is the op-wide rule shape. The generated
+// `api.BroadcastOverrideCreate` declares `ScopeField` and
+// `ScopeValue` without `omitempty`, so the typed-client serialiser
+// always emits the keys (even when nil); the explicit-null wire
+// shape matches the backend's expected payload exactly.
+//
+// Pre-migration the consumer-side `CreateRequest` carried
+// `omitempty` on both fields, so an op-wide POST dropped the keys
+// entirely. The backend accepts both shapes (missing keys default
+// to None, explicit nulls are None directly) -- this test pins the
+// post-migration wire shape so a future change to the generated
+// type's tags doesn't silently re-flip the behaviour.
+func TestRunOverridesSetOpWideSendsExplicitNulls(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), `"scope_field"`) {
-			t.Errorf("op-wide POST should not send scope_field key: %s", body)
+		var req api.BroadcastOverrideCreate
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode body: %v\n%s", err, body)
 		}
-		if strings.Contains(string(body), `"scope_value"`) {
-			t.Errorf("op-wide POST should not send scope_value key: %s", body)
+		if req.ScopeField != nil {
+			t.Errorf("op-wide POST should leave scope_field nil; got %v", *req.ScopeField)
+		}
+		if req.ScopeValue != nil {
+			t.Errorf("op-wide POST should leave scope_value nil; got %v", *req.ScopeValue)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -136,9 +157,6 @@ func TestRunOverridesSetHalfSetScopeRejectedClientSide(t *testing.T) {
 	// (the StructuredError shape goes to stderr); the test verifies
 	// stderr contains the expected message.
 	if err != nil {
-		// The runner may surface the structured-error return; either
-		// outcome is acceptable as long as the operator sees the
-		// rejection.
 		_ = err
 	}
 	if !strings.Contains(stderr.String(), "both be set or both be omitted") {
@@ -146,7 +164,8 @@ func TestRunOverridesSetHalfSetScopeRejectedClientSide(t *testing.T) {
 	}
 }
 
-// TestRunOverridesSetJSON -- --json emits the created Entry as JSON.
+// TestRunOverridesSetJSON -- --json emits the created
+// api.BroadcastOverrideRead as JSON.
 func TestRunOverridesSetJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, _ *http.Request) {
@@ -172,12 +191,37 @@ func TestRunOverridesSetJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runOverridesSet --json: %v", err)
 	}
-	var decoded Entry
+	var decoded api.BroadcastOverrideRead
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}
 	if decoded.Detail != "full" {
 		t.Errorf("decoded detail: got %q; want full", decoded.Detail)
+	}
+}
+
+// TestRunOverridesSet409RendersConflict -- the duplicate-rule
+// rejection surfaces the backend's `detail` string.
+func TestRunOverridesSet409RendersConflict(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"detail":"duplicate_override_rule"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runOverridesSet(cmd, overridesSetOptions{
+		OpIDPattern:       "vault.kv.*",
+		Detail:            "aggregate",
+		BackplaneOverride: srv.URL,
+	})
+	_ = err
+	if !strings.Contains(stderr.String(), "duplicate_override_rule") {
+		t.Errorf("stderr should surface the backend's 409 detail: %q", stderr.String())
 	}
 }
 

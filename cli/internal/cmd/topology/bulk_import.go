@@ -6,26 +6,29 @@ package topology
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// bulkImportDoc is the on-disk root: a single `edges:` list. Decode
-// into a typed struct rather than a generic map because every supported
-// field maps 1:1 to the wire shape — there is no extras-spill contract
-// for bulk-import the way targets/import.go has. yaml.v3's strict mode
-// (KnownFields) would reject typo'd field names; we leave that off so
-// the server-side validation surfaces every problem in one round trip
-// rather than the CLI failing fast on the first typo.
+// bulkImportDoc is the on-disk root: a single `edges:` list. Decoded
+// from YAML (or JSON, since yaml.v3 is a JSON superset for the input
+// shape we accept). Each row carries the YAML tag set the operator
+// types in the file; the wire shape is later projected onto the
+// generated `api.UnderscoreBulkImportEdge` struct (which only has JSON
+// tags) inside `buildBulkImportBody`. Keeping the file shape distinct
+// from the wire shape lets the YAML decoder accept the bare-scalar
+// shorthand for endpoints (`from: svc-x`) — a vocabulary the generated
+// struct can't express directly.
 type bulkImportDoc struct {
 	Edges []bulkImportEdgeYAML `yaml:"edges" json:"edges"`
 }
@@ -44,9 +47,10 @@ type bulkImportEdgeYAML struct {
 	EvidenceURL string             `yaml:"evidence_url,omitempty" json:"evidence_url,omitempty"`
 }
 
-// bulkImportEndpoint is the wire shape for one annotate endpoint.
-// `Name` is required; `Kind` is the optional disambiguator for an
-// ambiguous bare name. The YAML can spell each endpoint two ways:
+// bulkImportEndpoint is the wire shape for one annotate endpoint as
+// read off the file. `Name` is required; `Kind` is the optional
+// disambiguator for an ambiguous bare name. The YAML can spell each
+// endpoint two ways:
 //
 //	from: svc-orders                 # bare string -> Name="svc-orders"
 //	from: { name: svc-orders, kind: service }
@@ -85,38 +89,7 @@ func (e *bulkImportEndpoint) UnmarshalYAML(node *yaml.Node) error {
 	}
 }
 
-// bulkImportRequest is the wire shape for
-// POST /api/v1/topology/edges/bulk: `{edges: [...], dry_run: bool}`.
-// The route accepts both “dry_run=true/false“ in the body and a
-// canonical 200 response.
-type bulkImportRequest struct {
-	Edges  []bulkImportEdgeYAML `json:"edges"`
-	DryRun bool                 `json:"dry_run,omitempty"`
-}
-
-// bulkImportResponseRow mirrors the per-row outcome from the service.
-type bulkImportResponseRow struct {
-	Index      int      `json:"index"`
-	Action     string   `json:"action"`
-	EdgeID     *string  `json:"edge_id"`
-	FromName   string   `json:"from_name"`
-	FromKind   string   `json:"from_kind"`
-	ToName     string   `json:"to_name"`
-	ToKind     string   `json:"to_kind"`
-	Kind       string   `json:"kind"`
-	Superseded []string `json:"superseded"`
-	Conflicts  []string `json:"conflicts"`
-}
-
-type bulkImportResponse struct {
-	DryRun    bool                    `json:"dry_run"`
-	Created   int                     `json:"created"`
-	Updated   int                     `json:"updated"`
-	Conflicts int                     `json:"conflicts"`
-	Rows      []bulkImportResponseRow `json:"rows"`
-}
-
-// bulkImportError mirrors the 422 invalid_bulk envelope.
+// bulkImportErrorEnvelope mirrors the 422 invalid_bulk envelope.
 type bulkImportErrorEnvelope struct {
 	Error  string                 `json:"error"`
 	Errors []bulkImportRowErrJSON `json:"errors"`
@@ -228,18 +201,26 @@ func runBulkImport(cmd *cobra.Command, opts bulkImportOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			backplane.ClassifyError(err), opts.JSONOut)
 	}
-	body, err := json.Marshal(bulkImportRequest{
-		Edges:  doc.Edges,
-		DryRun: opts.DryRun,
-	})
+	resp, statusCode, body, err := postBulkImport(cmd.Context(), backplaneURL, doc, opts.DryRun)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("encode bulk-import body: %v", err)),
-			opts.JSONOut)
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	resp, err := postBulkImport(cmd.Context(), backplaneURL, body)
-	if err != nil {
-		return renderBulkImportError(cmd, backplaneURL, err, opts.JSONOut)
+	if statusCode != http.StatusOK {
+		// Special-case 422 invalid_bulk: surface the structured per-
+		// row error list before falling back to the generic renderer.
+		if statusCode == http.StatusUnprocessableEntity {
+			if msg := formatInvalidBulkEnvelope(string(body)); msg != "" {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected(msg), opts.JSONOut)
+			}
+		}
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if resp == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a bulk-import payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), resp)
@@ -275,37 +256,67 @@ func parseBulkImportDoc(data []byte) (*bulkImportDoc, error) {
 	return &doc, nil
 }
 
-func postBulkImport(ctx context.Context, backplaneURL string, body []byte) (*bulkImportResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST",
-		"/api/v1/topology/edges/bulk", body)
-	if err != nil {
-		return nil, err
+// buildBulkImportBody projects the YAML-decoded `bulkImportDoc` onto
+// the generated `api.UnderscoreBulkImportRequest` body. The kind
+// rides as a typed `api.GraphEdgeKind` so the generated parser's
+// closed-vocabulary contract is the wire-level check (operators see
+// the substrate's per-row 422 message on a bad kind, same shape as
+// the pre-migration `httpError` ladder).
+func buildBulkImportBody(doc *bulkImportDoc, dryRun bool) api.UnderscoreBulkImportRequest {
+	edges := make([]api.UnderscoreBulkImportEdge, 0, len(doc.Edges))
+	for _, e := range doc.Edges {
+		edge := api.UnderscoreBulkImportEdge{
+			From: api.UnderscoreEdgeEndpoint{Name: e.From.Name},
+			Kind: api.GraphEdgeKind(e.Kind),
+			To:   api.UnderscoreEdgeEndpoint{Name: e.To.Name},
+		}
+		if e.From.Kind != "" {
+			fk := e.From.Kind
+			edge.From.Kind = &fk
+		}
+		if e.To.Kind != "" {
+			tk := e.To.Kind
+			edge.To.Kind = &tk
+		}
+		if e.Note != "" {
+			n := e.Note
+			edge.Note = &n
+		}
+		if e.EvidenceURL != "" {
+			u := e.EvidenceURL
+			edge.EvidenceUrl = &u
+		}
+		edges = append(edges, edge)
 	}
-	var out bulkImportResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode bulk-import response: %w", err)
+	body := api.UnderscoreBulkImportRequest{Edges: edges}
+	if dryRun {
+		dr := true
+		body.DryRun = &dr
 	}
-	return &out, nil
+	return body
 }
 
-// renderBulkImportError intercepts the 422 `invalid_bulk` envelope so
-// the per-row error list is rendered as a structured operator-readable
-// block — one line per bad row pointing at the file index. Other
-// errors fall back to the generic renderer.
-func renderBulkImportError(
-	cmd *cobra.Command,
+func postBulkImport(
+	ctx context.Context,
 	backplaneURL string,
-	err error,
-	jsonOut bool,
-) error {
-	var he *httpError
-	if errors.As(err, &he) && he.StatusCode == 422 {
-		if msg := formatInvalidBulkEnvelope(he.Body); msg != "" {
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(msg), jsonOut)
-		}
+	doc *bulkImportDoc,
+	dryRun bool,
+) (*api.UnderscoreBulkImportResponse, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return renderRequestError(cmd, backplaneURL, err, jsonOut)
+	body := buildBulkImportBody(doc, dryRun)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error) {
+			return authed.BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
 }
 
 // formatInvalidBulkEnvelope renders the 422 `invalid_bulk` body into
@@ -337,7 +348,12 @@ func formatInvalidBulkEnvelope(body string) string {
 // summary header names the action counts; the per-row block surfaces
 // the §6 conflict classifications + the edge ids so the operator can
 // pipe a follow-up unannotate by id.
-func printBulkImportSummary(w io.Writer, resp *bulkImportResponse) {
+//
+// `r.EdgeId` is `*openapi_types.UUID` in the generated client; the
+// dry-run shape leaves it nil, the apply shape populates it. The
+// renderer accesses it only through the existing supersede / conflict
+// lists which carry edge-id strings independently.
+func printBulkImportSummary(w io.Writer, resp *api.UnderscoreBulkImportResponse) {
 	mode := "applied"
 	if resp.DryRun {
 		mode = "planned (dry-run)"

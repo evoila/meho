@@ -86,6 +86,8 @@ module reaching into either.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Protocol
@@ -232,7 +234,7 @@ class ChildRunner(Protocol):
 
 
 class ChildRunRecorder(Protocol):
-    """Persist a child ``agent_run`` row linked to its parent, return its id.
+    """Persist a child ``agent_run`` row linked to its parent; return ``(id, lease_owner)``.
 
     Optional -- injected by the T4 #811 invocation surface / T6 #813 lifecycle
     service, which own the DB session. Called *after* the depth check passes and
@@ -241,6 +243,13 @@ class ChildRunRecorder(Protocol):
     the duration of its loop (so a grand-child invocation links to it). When no
     recorder is wired, the in-process bounds still hold; the lineage row is just
     not written.
+
+    The recorder stamps a lease on the child row at creation (#1501) and
+    returns its ``lease_owner`` alongside the id so the ``invoke_agent`` tool
+    can heartbeat the child for the duration of its loop -- a child that
+    outlives its lease TTL, or whose worker dies mid-flight, is then reclaimed
+    by the reaper instead of staying stuck ``running``, the same contract the
+    top-level run path enforces.
     """
 
     async def __call__(
@@ -249,7 +258,7 @@ class ChildRunRecorder(Protocol):
         operator: Operator,
         definition: AgentDefinition,
         parent_run_id: uuid.UUID | None,
-    ) -> uuid.UUID: ...
+    ) -> tuple[uuid.UUID, str]: ...
 
 
 class ChildRunFinalizer(Protocol):
@@ -280,6 +289,22 @@ class ChildRunFinalizer(Protocol):
         output: Any,
         error: str | None,
     ) -> None: ...
+
+
+async def _stop_child_heartbeat(task: asyncio.Task[None] | None) -> None:
+    """Cancel a child run's heartbeat sidecar and await its unwind.
+
+    A no-op when *task* is ``None`` (no recorder wired, or the heartbeat was
+    already stopped on this code path). Swallows the expected
+    :class:`asyncio.CancelledError` so tearing the sidecar down never surfaces
+    as a stray task exception, mirroring the disposal shape the lifespan-owned
+    sweepers use (#1501).
+    """
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 def _check_invoke_depth(child_agent_name: str) -> int:
@@ -387,8 +412,9 @@ def make_invoke_agent_tool(
 
         parent_run_id = current_agent_run_id_var.get()
         child_run_id: uuid.UUID | None = None
+        child_lease_owner: str | None = None
         if recorder is not None:
-            child_run_id = await recorder(
+            child_run_id, child_lease_owner = await recorder(
                 operator=operator,
                 definition=definition,
                 parent_run_id=parent_run_id,
@@ -413,6 +439,23 @@ def make_invoke_agent_tool(
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
+        # Heartbeat the child's lease for the duration of its loop (#1501).
+        # The child runs inline under the parent task; if the parent task
+        # dies mid-child both stop, the child's lease lapses, and the reaper
+        # reclaims the child row instead of leaving it stuck ``running``. The
+        # sidecar is cancelled in the ``finally`` once the child loop ends.
+        # A local import avoids the module-scope cycle with
+        # ``meho_backplane.agent.invocation`` (which imports this module to
+        # wire the ``invoke_agent`` tool) -- the same lazy-import discipline
+        # the ``AgentRunError`` handler below uses.
+        child_heartbeat: asyncio.Task[None] | None = None
+        if child_run_id is not None and child_lease_owner is not None:
+            from meho_backplane.agent.invocation import _heartbeat_loop
+
+            child_heartbeat = asyncio.create_task(
+                _heartbeat_loop(child_run_id, child_lease_owner),
+                name=f"agent-heartbeat-{child_run_id}",
+            )
         try:
             # Bound 2 -- budget. Sharing ctx.usage threads the child's turns
             # into the parent's running total; the shared UsageLimits the loop
@@ -433,6 +476,12 @@ def make_invoke_agent_tool(
                 error=str(exc),
                 operator_sub=operator.sub,
             )
+            # Stop the heartbeat before finalizing: the child's terminal
+            # transition clears the lease, so a still-beating sidecar would
+            # only race to a no-op LeaseLostError. Cancelling first keeps the
+            # ordering clean.
+            await _stop_child_heartbeat(child_heartbeat)
+            child_heartbeat = None
             # Close the recorded child row to ``failed`` before re-raising, so a
             # failed / over-budget child does not stay stuck ``running``. Only a
             # recorded child has a row to finalize (no recorder -> child_run_id
@@ -447,6 +496,11 @@ def make_invoke_agent_tool(
                 f"Try a different approach or answer directly."
             ) from exc
         finally:
+            # Belt-and-suspenders: stop the heartbeat on every exit path
+            # (success, cancel, the ModelRetry re-raise above) so the sidecar
+            # never outlives the child loop. ``_stop_child_heartbeat`` is a
+            # no-op when it was already stopped in the except branch.
+            await _stop_child_heartbeat(child_heartbeat)
             current_agent_run_id_var.reset(run_id_token)
             _agent_name_chain_var.reset(chain_token)
             agent_invoke_depth_var.reset(depth_token)

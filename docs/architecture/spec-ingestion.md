@@ -48,11 +48,12 @@ Operator-facing surfaces — CLI (T5, [#405](https://github.com/evoila/meho/issu
 
 ## T1 — the parser
 
-[`parse_openapi(spec_path_or_uri, *, spec_source=None) -> list[EndpointDescriptorProto]`](../../backend/src/meho_backplane/operations/ingest/openapi.py) is the only public entry point. The function is synchronous because callers are CLI / one-shot ingestion endpoints with no event-loop concern, and the surface stays trivially testable.
+[`parse_openapi(spec_path_or_uri, *, spec_source=None, content=None) -> list[EndpointDescriptorProto]`](../../backend/src/meho_backplane/operations/ingest/openapi.py) is the only public entry point. The function is synchronous because callers are CLI / one-shot ingestion endpoints with no event-loop concern, and the surface stays trivially testable.
 
 ### Inputs
 
-- `spec_path_or_uri` — a `file://` path or an `http(s)://` URL. Local files read with stdlib; remote files fetched via [`httpx`](https://www.python-httpx.org/) with a 30 s timeout. YAML decoded via PyYAML's `CSafeLoader` (with a pure-Python `SafeLoader` fallback for platforms lacking LibYAML); JSON decoded via stdlib.
+- `spec_path_or_uri` — an `https://` URL the backend fetches under the SSRF / local-file guard (`_assert_fetchable_remote_url`; non-`https` schemes are rejected). Remote fetch uses [`httpx`](https://www.python-httpx.org/) streaming with a 30 s timeout and a 20 MiB cap. YAML decoded via PyYAML's `CSafeLoader` (pure-Python `SafeLoader` fallback); JSON via stdlib.
+- `content` — optional inline spec text. The `meho` CLI reads `docs:` / `file://` sources client-side and uploads the bytes here, so no local path or non-`https` scheme reaches the backend; when set it is used verbatim (capped) and `spec_path_or_uri` is just the audit label.
 - `spec_source` — optional tag string (e.g. `"vcenter.yaml"`) the parser stamps onto every row as a `spec:<source>` entry in `tags`. The downstream T2 merge path keys collision detection off this tag.
 
 ### Per-operation output
@@ -238,7 +239,7 @@ Defined in [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/
 | `/api/v1/connectors` | `GET` | `operator` | `ConnectorListResponse` (200) |
 | `/api/v1/connectors/{id}/review` | `GET` | `operator` | `ConnectorReviewPayload` (200) |
 | `/api/v1/connectors/{id}/groups/{group_key}` | `PATCH` | `tenant_admin` | 204 No Content |
-| `/api/v1/connectors/{id}/operations/{op_id:path}` | `PATCH` | `tenant_admin` | 204 No Content |
+| `/api/v1/connectors/{id}/operations/{op_id:path}` | `PATCH` | `tenant_admin` | `EditOpResponse` (200) — enable-time advisories in `warnings` ([#1630](https://github.com/evoila/meho/issues/1630)) |
 | `/api/v1/connectors/{id}/enable` | `POST` | `tenant_admin` | 204 No Content |
 | `/api/v1/connectors/{id}/disable` | `POST` | `tenant_admin` | 204 No Content |
 
@@ -317,7 +318,7 @@ Resolution path: add a T3 enhancement pass that generates per-op `llm_instructio
 
 ### Gap 2 — live-LLM canary validation
 
-The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deterministic path-prefix classifier so the suite stays reproducible and fast (~5 s ingest + ~1–2 s per benchmark query). A live-LLM variant gated on `MEHO_G07_CANARY_LIVE_LLM=1` is reserved for the day [Task #467](https://github.com/evoila/meho/issues/467) (Anthropic chassis adapter) lands. Once #467 ships, re-run the canary against harder queries (snapshot revert, performance-metrics query, host-network atomic mutation) that the path-prefix stub cannot trivially classify.
+The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deterministic path-prefix classifier so the suite stays reproducible and fast (~5 s ingest + ~1–2 s per benchmark query). A live-LLM variant gated on `MEHO_G07_CANARY_LIVE_LLM=1` exercises the real grouping pass. As of #1386 the chassis wires a production Anthropic `LlmClient` (`build_anthropic_ingest_llm_client`) at FastAPI lifespan startup, reusing `settings.anthropic_api_key`, so the live-LLM variant runs on any deploy / CI runner with `ANTHROPIC_API_KEY` set (it skips when the key is absent). The previously-cited `Task #467` was [G8.1-T3 audit CLI verbs (CLOSED)](https://github.com/evoila/meho/issues/467), never the chassis adapter; the operator-facing framing now lives in [`docs/codebase/spec-ingestion.md`](../codebase/spec-ingestion.md#llm-client-wiring). With the key set, re-run the canary against harder queries (snapshot revert, performance-metrics query, host-network atomic mutation) that the path-prefix stub cannot trivially classify.
 
 ## References
 

@@ -11,8 +11,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -83,61 +86,105 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 			opts.JSONOut,
 		)
 	}
+	// The typed-client's `auditId` path parameter is
+	// `openapi_types.UUID`. Parse the operator string at the verb
+	// edge so a malformed argument surfaces as a clean
+	// output.Unexpected instead of either a server-side 422 after
+	// the round-trip or a panic on assignment to the typed param.
+	parsed, err := uuid.Parse(strings.TrimSpace(opts.AuditID))
+	if err != nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"audit-id is not a valid UUID: %s", opts.AuditID)),
+			opts.JSONOut,
+		)
+	}
+	auditID := openapi_types.UUID(parsed)
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := getEntry(cmd.Context(), backplaneURL, opts.AuditID)
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+	rawBody, entry, err := getEntry(cmd.Context(), client, auditID)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
+		// Emit server bytes verbatim so a payload integer above
+		// 2^53 survives without rounding through the generated
+		// `map[string]interface{}` decoder. The human summary path
+		// accepts the float64 conversion for the table view (a
+		// rounding loss only matters in the extreme-int edge case,
+		// and the --json contract is the precision-preserving one
+		// jq pipelines consume).
+		_, werr := cmd.OutOrStdout().Write(append(rawBody, '\n'))
+		return werr
+	}
+	if entry == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditEntry"),
+			opts.JSONOut,
+		)
 	}
 	printEntrySummary(cmd.OutOrStdout(), entry)
 	return nil
 }
 
-// buildShowPath assembles the GET path. Exposed for unit tests so
-// URL encoding of UUIDs with unusual rendering stays covered.
-func buildShowPath(auditID string) string {
-	return "/api/v1/audit/show/" + pathEscape(auditID)
-}
-
-func getEntry(ctx context.Context, backplaneURL, auditID string) (*Entry, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildShowPath(auditID), nil)
+// getEntry drives the typed-client `ShowApiV1AuditShowAuditIdGet`
+// endpoint with a one-shot 401-retry (mirrors `postQuery`). Returns
+// the raw body bytes (for --json verbatim passthrough) plus the
+// decoded `*api.AuditEntry` (for the key-value summary), or an
+// `*httpResponseError` for a non-2xx status.
+func getEntry(
+	ctx context.Context,
+	client *api.AuthedClient,
+	auditID openapi_types.UUID,
+) ([]byte, *api.AuditEntry, error) {
+	resp, err := client.ShowApiV1AuditShowAuditIdGetWithResponse(ctx, auditID, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var out Entry
-	if err := decodeAuditResponse(raw, &out); err != nil {
-		return nil, err
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, nil, rerr
+		}
+		resp, err = client.ShowApiV1AuditShowAuditIdGetWithResponse(ctx, auditID, nil)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
-	return &out, nil
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp.Body, resp.JSON200, nil
 }
 
 // printEntrySummary renders the full audit row as a stable
 // key-value summary. Optional fields are shown as "-" when null so
 // the layout stays grep-able and predictable across rows.
-func printEntrySummary(w io.Writer, e *Entry) {
-	fmt.Fprintf(w, "%-18s %s\n", "id:", e.ID)
-	fmt.Fprintf(w, "%-18s %s\n", "ts:", e.TS)
-	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", strDerefOrDash(e.TenantID))
+func printEntrySummary(w io.Writer, e *api.AuditEntry) {
+	fmt.Fprintf(w, "%-18s %s\n", "id:", e.Id.String())
+	fmt.Fprintf(w, "%-18s %s\n", "ts:", formatTS(e.Ts))
+	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", strOrDash(uuidDeref(e.TenantId)))
 	fmt.Fprintf(w, "%-18s %s\n", "principal_sub:", e.PrincipalSub)
-	fmt.Fprintf(w, "%-18s %s\n", "principal_name:", strDerefOrDash(e.PrincipalName))
-	fmt.Fprintf(w, "%-18s %s\n", "target_id:", strDerefOrDash(e.TargetID))
-	fmt.Fprintf(w, "%-18s %s\n", "target_name:", strDerefOrDash(e.TargetName))
+	fmt.Fprintf(w, "%-18s %s\n", "principal_name:", strOrDash(strDeref(e.PrincipalName)))
+	fmt.Fprintf(w, "%-18s %s\n", "target_id:", strOrDash(uuidDeref(e.TargetId)))
+	fmt.Fprintf(w, "%-18s %s\n", "target_name:", strOrDash(strDeref(e.TargetName)))
 	fmt.Fprintf(w, "%-18s %s\n", "method:", e.Method)
 	fmt.Fprintf(w, "%-18s %s\n", "path:", e.Path)
 	fmt.Fprintf(w, "%-18s %d\n", "status_code:", e.StatusCode)
-	fmt.Fprintf(w, "%-18s %s\n", "request_id:", strDerefOrDash(e.RequestID))
-	fmt.Fprintf(w, "%-18s %s\n", "duration_ms:", strDerefOrDash(e.DurationMS))
-	fmt.Fprintf(w, "%-18s %s\n", "op_id:", e.OpID)
+	fmt.Fprintf(w, "%-18s %s\n", "request_id:", strOrDash(uuidDeref(e.RequestId)))
+	fmt.Fprintf(w, "%-18s %s\n", "duration_ms:", strOrDash(strDeref(e.DurationMs)))
+	fmt.Fprintf(w, "%-18s %s\n", "op_id:", e.OpId)
 	fmt.Fprintf(w, "%-18s %s\n", "op_class:", e.OpClass)
 	fmt.Fprintf(w, "%-18s %s\n", "result_status:", e.ResultStatus)
-	fmt.Fprintf(w, "%-18s %s\n", "parent_audit_id:", strDerefOrDash(e.ParentAuditID))
-	fmt.Fprintf(w, "%-18s %s\n", "agent_session_id:", strDerefOrDash(e.AgentSessionID))
-	fmt.Fprintf(w, "%-18s %s\n", "broadcast_event_id:", strDerefOrDash(e.BroadcastEventID))
+	fmt.Fprintf(w, "%-18s %s\n", "parent_audit_id:", strOrDash(uuidDeref(e.ParentAuditId)))
+	fmt.Fprintf(w, "%-18s %s\n", "agent_session_id:", strOrDash(uuidDeref(e.AgentSessionId)))
+	fmt.Fprintf(w, "%-18s %s\n", "broadcast_event_id:", strOrDash(uuidDeref(e.BroadcastEventId)))
 	if len(e.Payload) > 0 {
 		fmt.Fprintf(w, "%-18s %s\n", "payload:", formatPayload(e.Payload))
 	} else {
@@ -145,15 +192,14 @@ func printEntrySummary(w io.Writer, e *Entry) {
 	}
 }
 
-// strDerefOrDash returns *s, or "-" when s is nil / empty. Used by
-// the audit-row summary so absent optional fields stay grep-friendly
+// strOrDash returns "-" when s is empty, otherwise s. Used by the
+// audit-row summary so absent optional fields stay grep-friendly
 // rather than rendering as a blank cell.
-func strDerefOrDash(s *string) string {
-	v := strDeref(s)
-	if v == "" {
+func strOrDash(s string) string {
+	if s == "" {
 		return "-"
 	}
-	return v
+	return s
 }
 
 // formatPayload renders the audit payload as a sorted-key
@@ -176,12 +222,14 @@ func formatPayload(payload map[string]any) string {
 // print directly; objects/lists round-trip through json.Marshal so
 // at least the JSON form is readable on a single line.
 //
-// “json.Number“ is the load-bearing case: the package's decoder
-// uses “UseNumber()“ (see “decodeAuditResponse“) so payload
-// numbers survive as their exact decimal string rather than rounding
-// through float64. A 64-bit “hit_count“ like “1745923128091“ (a
-// Unix-millis timestamp) prints back identical to what the backend
-// wrote, where “float64(1745923128091)“ would round-trip lossily.
+// The generated client decodes payload fields as `interface{}` via
+// `json.Unmarshal`, which lands integer values as `float64`. The
+// helper folds the integer case (a float64 whose fractional part is
+// zero) back to a bare integer render so `hit_count=7` doesn't
+// surface as `hit_count=7.000000`. For the rare ≥2^53 integer the
+// rounding-through-float64 loss is real; operators who need
+// exact-precision payload bytes pipe through `--json`, which writes
+// the server bytes verbatim.
 func formatPayloadScalar(v any) string {
 	switch v := v.(type) {
 	case string:
@@ -189,10 +237,11 @@ func formatPayloadScalar(v any) string {
 	case bool:
 		return fmt.Sprintf("%t", v)
 	case json.Number:
+		// Test fixtures that explicitly construct entries with
+		// json.Number values exercise this arm; production calls
+		// land as float64 via the generated decoder.
 		return v.String()
 	case float64:
-		// Defensive fallback for code paths that bypass the
-		// UseNumber decoder (e.g. payloads constructed by tests).
 		if v == float64(int64(v)) {
 			return fmt.Sprintf("%d", int64(v))
 		}

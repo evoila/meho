@@ -11,36 +11,50 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-func sampleEntry() Entry {
-	return Entry{
-		ID:           "11111111-1111-1111-1111-111111111111",
-		TenantID:     "22222222-2222-2222-2222-222222222222",
+// sampleDefinition returns a representative AgentDefinitionRead for
+// happy-path fixtures. Stable UUIDs / timestamps so subtests can
+// assert on the rendered output without time-of-day flakiness.
+func sampleDefinition() api.AgentDefinitionRead {
+	id := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	tenantID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	created := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+	toolset := map[string]any{"allow": []any{"call_operation"}}
+	return api.AgentDefinitionRead{
+		Id:           id,
+		TenantId:     tenantID,
 		Name:         "incident-triage",
 		IdentityRef:  "agent:incident-triage",
 		ModelTier:    "deep",
 		SystemPrompt: "You triage incidents.",
-		Toolset:      map[string]any{"allow": []any{"call_operation"}},
+		Toolset:      toolset,
 		TurnBudget:   25,
 		Enabled:      true,
 		CreatedBySub: "op-admin",
-		CreatedAt:    "2026-05-24T00:00:00Z",
-		UpdatedAt:    "2026-05-24T00:00:00Z",
+		CreatedAt:    created,
+		UpdatedAt:    created,
 	}
 }
 
 // --- list ---
 
-func TestBuildListPath(t *testing.T) {
-	if got := buildListPath(listOptions{}); got != "/api/v1/agents" {
-		t.Fatalf("empty opts: got %q", got)
+func TestListQueryParams(t *testing.T) {
+	params := listQueryParams(listOptions{})
+	if params.Limit != nil || params.Offset != nil {
+		t.Fatalf("empty opts must leave Limit / Offset nil; got %+v", params)
 	}
-	got := buildListPath(listOptions{Limit: 25, Offset: 10})
-	for _, want := range []string{"limit=25", "offset=10"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("buildListPath missing %q in %q", want, got)
-		}
+	params = listQueryParams(listOptions{Limit: 25, Offset: 10})
+	if params.Limit == nil || *params.Limit != 25 {
+		t.Errorf("Limit: got %+v", params.Limit)
+	}
+	if params.Offset == nil || *params.Offset != 10 {
+		t.Errorf("Offset: got %+v", params.Offset)
 	}
 }
 
@@ -50,7 +64,13 @@ func TestRunListHappyPath(t *testing.T) {
 		if r.Header.Get("Authorization") == "" {
 			t.Errorf("missing Authorization header")
 		}
-		_ = json.NewEncoder(w).Encode(ListResponse{Agents: []Entry{sampleEntry()}})
+		// The generated client sets Accept: application/json (the only
+		// content-type the spec advertises for the list endpoint), so
+		// no special header assertion is needed beyond bearer presence.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.AgentDefinitionListResponse{
+			Agents: []api.AgentDefinitionRead{sampleDefinition()},
+		})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -69,7 +89,7 @@ func TestRunListHappyPath(t *testing.T) {
 
 func TestPrintListTableEmpty(t *testing.T) {
 	var sb strings.Builder
-	printListTable(&sb, &ListResponse{})
+	printListTable(&sb, &api.AgentDefinitionListResponse{})
 	if !strings.Contains(sb.String(), "no agent definitions") {
 		t.Errorf("empty render missing hint; got %q", sb.String())
 	}
@@ -77,16 +97,11 @@ func TestPrintListTableEmpty(t *testing.T) {
 
 // --- show ---
 
-func TestBuildShowPathEscapes(t *testing.T) {
-	if got := buildShowPath("vm.inventory-bot"); got != "/api/v1/agents/vm.inventory-bot" {
-		t.Fatalf("buildShowPath: got %q", got)
-	}
-}
-
 func TestRunShowHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/incident-triage", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(sampleEntry())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sampleDefinition())
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -130,13 +145,19 @@ func TestRunCreateHappyPath(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method: got %s; want POST", r.Method)
 		}
-		var body createRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Name != "incident-triage" || body.ModelTier != "deep" || body.TurnBudget != 25 {
+		// Assert the typed request body decodes into the generated
+		// AgentDefinitionCreate shape and the operator-supplied field
+		// values round-trip onto the wire.
+		var body api.AgentDefinitionCreate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.Name != "incident-triage" || string(body.ModelTier) != "deep" || body.TurnBudget != 25 {
 			t.Errorf("unexpected request body: %+v", body)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sampleEntry())
+		_ = json.NewEncoder(w).Encode(sampleDefinition())
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -235,27 +256,31 @@ func TestRunCreate403SurfacesInsufficientRole(t *testing.T) {
 
 func TestBuildEditBodyOnlyChangedFields(t *testing.T) {
 	cmd, _, _ := newTestCmd(t)
-	body, err := buildEditBody(cmd, editOptions{
+	body, anySet, err := buildEditBody(cmd, editOptions{
 		TurnBudget: 50, turnBudgetSet: true,
 		disabledSet: true,
 	})
 	if err != nil {
 		t.Fatalf("buildEditBody: %v", err)
 	}
-	if len(body) != 2 {
-		t.Fatalf("expected 2 fields; got %+v", body)
+	if !anySet {
+		t.Fatalf("expected anySet=true with two field flags")
 	}
-	if body["turn_budget"] != 50 {
-		t.Errorf("turn_budget: got %v", body["turn_budget"])
+	if body.TurnBudget == nil || *body.TurnBudget != 50 {
+		t.Errorf("TurnBudget: got %+v", body.TurnBudget)
 	}
-	if body["enabled"] != false {
-		t.Errorf("enabled: got %v", body["enabled"])
+	if body.Enabled == nil || *body.Enabled != false {
+		t.Errorf("Enabled: got %+v", body.Enabled)
+	}
+	// Field flags that weren't set must round-trip nil.
+	if body.IdentityRef != nil || body.SystemPrompt != nil || body.ModelTier != nil || body.Toolset != nil {
+		t.Errorf("untouched fields must stay nil; got %+v", body)
 	}
 }
 
 func TestBuildEditBodyRejectsBadTier(t *testing.T) {
 	cmd, _, _ := newTestCmd(t)
-	_, err := buildEditBody(cmd, editOptions{ModelTier: "ultra", modelTierSet: true})
+	_, _, err := buildEditBody(cmd, editOptions{ModelTier: "ultra", modelTierSet: true})
 	if err == nil {
 		t.Fatalf("expected error for bad model tier")
 	}
@@ -293,8 +318,9 @@ func TestRunEditHappyPath(t *testing.T) {
 		if !strings.Contains(string(raw), "turn_budget") {
 			t.Errorf("PATCH body missing turn_budget: %s", raw)
 		}
-		entry := sampleEntry()
+		entry := sampleDefinition()
 		entry.TurnBudget = 50
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(entry)
 	})
 	srv := httptest.NewServer(mux)

@@ -18,13 +18,15 @@ The substrate ships the consumer-facing shape so T2 (REST) / T3 (CLI) / T4
 backed by real columns and are populated as :data:`None` until follow-up
 tasks land the schema additions:
 
-* ``principal_name`` — the chassis HTTP audit middleware
-  (``meho_backplane.audit``) and the MCP audit writer
-  (``meho_backplane.mcp.audit``) do not capture the operator's ``name`` JWT
-  claim at write time. The :class:`~meho_backplane.broadcast.events.BroadcastEvent`
-  side has a nullable ``principal_name`` field, but it is populated only on
-  the MCP path (``mcp/handlers.py``), and the audit row itself never carries
-  it. Always None in v0.2; a future small task on the write path closes this.
+* ``principal_name`` — partially populated as of G0.15-T3 #1212. The MCP
+  audit writer (``meho_backplane.mcp.audit.write_mcp_audit_row``) now
+  merges ``Operator.name`` and ``Operator.email`` (both JWT-derived) into
+  ``audit_log.payload`` under the keys ``principal_name`` /
+  ``principal_email``, and ``_build_audit_entry`` reads
+  ``payload['principal_name']`` onto this field. The chassis HTTP audit
+  middleware (``meho_backplane.audit``) still does not bind the name claim
+  to contextvars and continues to leave the field None on HTTP-method
+  rows; closing that gap is a separate follow-up.
 * ``parent_audit_id`` — composite-operation lineage column landed by
   G0.6-T7 (#398) via migration ``0006``. Populated on the returned row from
   ``audit_log.parent_audit_id`` (G8.2-T3 #1011); the *flat filter* on
@@ -118,8 +120,13 @@ class AuditEntry(BaseModel):
     * ``op_id`` / ``op_class`` / ``result_status`` — computed at query time
     * ``parent_audit_id`` ← ``audit_log.parent_audit_id`` (lineage; #398)
     * ``agent_session_id`` ← ``audit_log.agent_session_id`` (MCP session; #1009)
-    * ``principal_name`` / ``broadcast_event_id`` — v0.2 placeholders, always
-      None
+    * ``principal_name`` ← ``payload['principal_name']`` when set. The MCP
+      audit-write helper (``write_mcp_audit_row``) populates it from
+      ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain
+      None pending a separate fix to bind ``name`` to contextvars in
+      ``verify_jwt_and_bind``.
+    * ``broadcast_event_id`` — v0.2 placeholder, always None (FK direction
+      is reversed: ``BroadcastEvent.audit_id`` points at the audit row).
     """
 
     model_config = ConfigDict(frozen=True)

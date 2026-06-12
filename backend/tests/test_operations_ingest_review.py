@@ -50,8 +50,10 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGrou
 from meho_backplane.operations.ingest import (
     ConnectorNotFoundError,
     ConnectorReviewPayload,
+    EditOpWarning,
     InvalidStateTransitionError,
     ReviewService,
+    ensure_connector_class_registered,
     parse_connector_id,
 )
 from meho_backplane.settings import get_settings
@@ -326,6 +328,127 @@ async def test_get_review_payload_no_audit_row_written() -> None:
     assert await _count_audit_rows() == 0
 
 
+@pytest.mark.asyncio
+async def test_get_review_payload_falls_back_to_builtin_for_operator_tenant() -> None:
+    """G0.13-T5 (#1135): operator's-tenant probe falling through to built-in.
+
+    The listing endpoint already returns built-in (``tenant_id IS
+    NULL``) connectors to every operator. The review endpoint's
+    docstring promises the same scope but the route handler calls
+    ``get_review_payload(connector_id, operator.tenant_id)`` — a
+    single-pass lookup with ``WHERE tenant_id = X`` misses every
+    global row. The fix here makes the service do a two-pass lookup:
+    own-tenant first, then ``tenant_id IS NULL``. The non-admin
+    operator role is used deliberately — the bug only surfaced for
+    that role (admins could pass ``tenant_id=None`` directly).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,  # built-in / global connector
+        group_count=2,
+        ops_per_group=3,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+    assert payload.connector_id == "vmware-rest-9.0"
+    assert payload.tenant_id is None  # rendered scope reflects the fallback
+    assert payload.total_op_count == 6
+    assert len(payload.groups) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_does_not_fall_back_for_cross_tenant_probe() -> None:
+    """G0.13-T5 (#1135): cross-tenant probes stay 404, not 200.
+
+    The fallback only triggers when the caller passes the operator's
+    own tenant_id. A probe with a *different* tenant_id (operator A
+    asking after tenant B's connector) must keep the existing
+    cross-tenant 404 conflation — otherwise the fix would open a
+    cross-tenant info-leak surface.
+    """
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    # Built-in connector exists; tenant B has nothing.
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=1,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=tenant_a,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload("vmware-rest-9.0", tenant_b)
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_non_existent_connector_still_404() -> None:
+    """G0.13-T5 (#1135): genuinely missing connector_id still raises after both passes.
+
+    The two-pass fallback must not mask the "connector doesn't exist
+    anywhere" case: neither the operator's-tenant probe nor the
+    built-in probe finds a row, so the exception still propagates.
+    """
+    operator_tenant = uuid.uuid4()
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_prefers_tenant_row_over_builtin() -> None:
+    """G0.13-T5 (#1135): when both exist, the operator's-tenant row wins the first pass.
+
+    Defensive guard against the bait-and-switch failure mode: if an
+    operator's tenant has a curated row at ``(product, version,
+    impl_id)`` *and* a built-in row exists at the same key, the
+    fallback must not silently return the built-in. First-pass wins;
+    fallback is only consulted on miss.
+    """
+    operator_tenant = uuid.uuid4()
+    # Tenant-curated row (3 ops total).
+    await _seed_connector(
+        tenant_id=operator_tenant,
+        group_count=1,
+        ops_per_group=3,
+        review_status="staged",
+    )
+    # Built-in row at the same triple (5 ops total — distinct count
+    # so we can tell which payload we got).
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=5,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+    assert payload.tenant_id == operator_tenant
+    assert payload.total_op_count == 3
+
+
 # ---------------------------------------------------------------------------
 # edit_group
 # ---------------------------------------------------------------------------
@@ -528,6 +651,140 @@ async def test_edit_op_is_enabled_false_override_sticks_after_enable_connector()
     # The two non-overridden ops did flip to True.
     assert enabled_state["GET:/api/v1/group-0/1"] is True
     assert enabled_state["GET:/api/v1/group-0/2"] is True
+
+
+# ---------------------------------------------------------------------------
+# edit_op enable-time auto-shim advisory (G0.23-T4 #1630)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_auto_shim_connector_returns_warning() -> None:
+    """``is_enabled=True`` on a shim-backed op returns the advisory; the write still lands.
+
+    The connector triple is registered to the synthesised
+    ``GenericRestConnector`` auto-shim (the spec-ingest first-contact
+    state), so dispatch is a guaranteed ``connector_unsupported`` /
+    ``cause='unreplaced_auto_shim'`` dead end — the enable must say so
+    while still applying the flag and writing the audit row.
+    """
+    tenant_id = uuid.uuid4()
+    assert ensure_connector_class_registered(
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        base_url=None,
+    ), "expected a fresh auto-shim registration for the acme triple"
+    await _seed_connector(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    warnings = await service.edit_op(
+        "acme-rest-1.2",
+        "GET:/api/v1/group-0/0",
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert isinstance(warning, EditOpWarning)
+    assert warning.code == "unreplaced_auto_shim"
+    assert warning.connector_class == "AutoShim_acme_1_2_acme_rest"
+    # The message names the missing-subclass requirement, the concrete
+    # triple, the dispatch-time error it forecasts, and the doc ref —
+    # the same remediation story result_connector_unsupported tells.
+    assert "per-product Connector subclass" in warning.message
+    assert "'acme'" in warning.message
+    assert "'acme-rest'" in warning.message
+    assert "connector_unsupported" in warning.message
+    assert "re-ingesting the spec will NOT replace the shim" in warning.message
+    assert "docs/codebase/spec-ingestion.md" in warning.message
+
+    # Advisory, not a gate: the flag is set and the audit row written.
+    enabled_state = await _ops_enabled_state(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+    )
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+    assert await _count_audit_rows(op_id="meho.connector.edit_op") == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_hand_rolled_connector_returns_no_warning() -> None:
+    """``is_enabled=True`` on a hand-rolled connector's op is unchanged — no advisory.
+
+    ``vmware-rest-9.0`` resolves to ``VmwareRestConnector`` (priority
+    1, hand-rolled — registered by the session-scoped connector-module
+    import in ``conftest.py``), so the auto-shim probe stays silent.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    warnings = await service.edit_op(
+        "vmware-rest-9.0",
+        "GET:/api/v1/group-0/0",
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    assert warnings == []
+    enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+
+
+@pytest.mark.asyncio
+async def test_edit_op_non_enable_edits_skip_auto_shim_probe() -> None:
+    """Only ``is_enabled=True`` triggers the probe — disable and field edits stay silent.
+
+    Disabling a shim-backed op (or editing its safety level) is not a
+    dispatch dead end, so warning there would train operators to
+    ignore the advisory.
+    """
+    tenant_id = uuid.uuid4()
+    assert ensure_connector_class_registered(
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        base_url=None,
+    )
+    await _seed_connector(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    assert (
+        await service.edit_op(
+            "acme-rest-1.2",
+            "GET:/api/v1/group-0/0",
+            tenant_id=tenant_id,
+            is_enabled=False,
+        )
+        == []
+    )
+    assert (
+        await service.edit_op(
+            "acme-rest-1.2",
+            "GET:/api/v1/group-0/0",
+            tenant_id=tenant_id,
+            safety_level="dangerous",
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------

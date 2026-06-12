@@ -28,8 +28,9 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
 * Pass-through reducer: the dispatcher invokes the reducer; the v0.2
   default returns the response unchanged + a ``None`` handle.
 * Handler-import error -> ``handler_unreachable`` error code.
-* Policy gate -- ``requires_approval=True`` -> ``denied`` with the
-  default-allow policy in v0.2.
+* Policy gate -- ``requires_approval=True`` routes a human/service
+  principal to the approval queue (``awaiting_approval``), not a
+  hard-deny (G11.7-T1 #1401); agents floor to ``needs-approval``.
 
 The audit + broadcast assertions read the actual ``audit_log`` rows
 written by the dispatcher (the conftest autouse fixture runs the
@@ -176,6 +177,7 @@ class _FakeTarget:
         product: str = "test-product",
         version: str | None = None,
         target_id: UUID | None = None,
+        tenant_id: UUID | None = None,
         name: str = "test-target",
         host: str = "test.example.com",
         port: int = 443,
@@ -185,6 +187,10 @@ class _FakeTarget:
         self.fingerprint = _FakeFingerprint(version=version)
         self.preferred_impl_id: str | None = None
         self.id: UUID = target_id or uuid.uuid4()
+        # The shared HTTP client pool keys on ``target_cache_key``
+        # (``(tenant_id, id)``); without ``tenant_id`` any double that
+        # reaches the pool hits ``AttributeError`` (evoila/meho#1682).
+        self.tenant_id: UUID = tenant_id or UUID("00000000-0000-0000-0000-00000000a0a0")
         self.name = name
         self.host = host
         self.port = port
@@ -242,6 +248,58 @@ async def _module_handler_raises(
 ) -> dict[str, Any]:
     """Handler that always raises -- exercises the connector_error path."""
     raise RuntimeError("simulated handler explosion")
+
+
+async def _module_handler_target_optional(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level typed handler that tolerates ``target=None``.
+
+    No ``self`` parameter, so :func:`_handler_requires_target` returns
+    ``False`` and the dispatcher routes it with ``connector_instance=None``
+    even when no target is supplied (G0.20-T6 #1506 — the legitimately
+    target-less case that must keep dispatching).
+    """
+    return {"echo": params, "target_is_none": target is None}
+
+
+class _SelfFirstTypedConnector(Connector):
+    """Connector with a self-first typed handler -- exercises target_required.
+
+    ``keycloak.user.list`` is the production shape: a connector-bound
+    (``self``-first) typed handler that can only run against a resolved
+    connector instance, reached *through* the target. Defined at module
+    scope so ``register_typed_operation``'s ``derive_handler_ref`` round-
+    trips the dotted path back to the same function object.
+    """
+
+    product = "selffirst"
+    version = "1.x"
+    impl_id = "selffirst"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+    async def list_things(
+        self,
+        target: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Self-first typed handler -- mirrors ``keycloak_user_list``'s shape."""
+        return {"rows": [], "total": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +461,7 @@ class _NoOpVaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -592,6 +650,373 @@ async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
     assert result.error is not None
     assert result.error.startswith("no_connector:")
     assert result.extras["error_code"] == "no_connector"
+    # G0.14-T1 (#1142): the resolver's exception message rides under
+    # extras.exception_message so operators see the diagnostic
+    # without re-fetching the pod log.
+    assert "exception_message" in result.extras
+    assert "ghost" in result.extras["exception_message"]
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T1 (#1142): typed/composite resolver miss must surface
+# no_connector (matching the ingested branch), and the resolver's
+# AmbiguousConnectorResolution must surface ambiguous_connector on
+# both branches with the diagnostic message preserved verbatim.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Typed branch mirrors the ingested branch's resolver-miss label.
+
+    Pre-G0.14-T1 (#1142) the typed/composite branch silently returned
+    ``(None, None)`` on :exc:`NoMatchingConnector`, letting an unbound
+    bound-method handler proceed to dispatch and re-surface as the
+    misleading ``connector_error: RuntimeError: typed handler ...
+    reached dispatch still unbound`` from :mod:`_branches`. After
+    #1142 the typed branch returns the explicit ``no_connector``
+    label (with the resolver's exception message in
+    ``extras["exception_message"]``) so operators see the upstream
+    diagnosis, matching ``signals 7`` and ``8`` of
+    ``claude-rdc-hetzner-dc#697``.
+    """
+    # Register a typed op for a product, but DON'T register a
+    # connector class for it — the resolver must miss.
+    await register_typed_operation(
+        product="phantom",
+        version="1.x",
+        impl_id="phantom",
+        op_id="phantom.ping",
+        handler=_module_handler_returning_dict,
+        summary="Phantom op.",
+        description="Phantom op for resolver-miss coverage.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="phantom")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="phantom-1.x",
+        op_id="phantom.ping",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    assert result.extras["error_code"] == "no_connector"
+    # Resolver-message passthrough: the operator can read the resolver's
+    # exception text right off the OperationResult.
+    assert "exception_message" in result.extras
+    assert "phantom" in result.extras["exception_message"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
+
+    Mirrors the live ``rdc-rke2-infra-k8s`` shape from
+    ``claude-rdc-hetzner-dc#697`` signal 8: the Kubernetes connector
+    self-registers under ``('k8s', '', '')`` (v1) AND ``('k8s',
+    '1.x', 'k8s')`` (v2), the tie-break ladder treats both as
+    equally specific (both have ``supported_version_range=None``),
+    and :exc:`AmbiguousConnectorResolution` propagates. Pre-#1142
+    that exception bubbled past the dispatcher as a bare 500; after
+    #1142 it lands as a structured ``ambiguous_connector`` error
+    with the message verbatim in ``extras["exception_message"]``.
+    """
+
+    class _ConflictA(Connector):
+        product = "kclash"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    class _ConflictB(Connector):
+        product = "kclash"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    # Two connectors for the same product, both with no version range
+    # and equal priority (default 0) — the tie-break ladder ends
+    # ambiguous after every step.
+    from meho_backplane.connectors.registry import register_connector_v2 as _reg
+
+    _reg(product="kclash", version="", impl_id="a", cls=_ConflictA)
+    _reg(product="kclash", version="", impl_id="b", cls=_ConflictB)
+
+    # Register a typed op against this product so the dispatcher
+    # reaches the connector-resolution step on the typed branch.
+    await register_typed_operation(
+        product="kclash",
+        version="1.x",
+        impl_id="kclash",
+        op_id="kclash.ping",
+        handler=_module_handler_returning_dict,
+        summary="Ping.",
+        description="Ping.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="kclash")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="kclash-1.x",
+        op_id="kclash.ping",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("ambiguous_connector:")
+    assert result.extras["error_code"] == "ambiguous_connector"
+    # The resolver's exception text — naming the candidates and the
+    # remediation step — rides verbatim. Operators see the same
+    # diagnostic on the wire that the pod log emits.
+    msg = result.extras["exception_message"]
+    assert "preferred_impl_id" in msg
+    assert "kclash" in msg
+
+
+# ---------------------------------------------------------------------------
+# G0.20-T6 (#1506): a target-requiring typed/composite op invoked with
+# ``target=None`` must return a clean ``target_required`` usage error --
+# NOT the opaque ``connector_error: RuntimeError`` the self-guard in
+# ``dispatch_typed`` emits for a genuine instance-cache fault. The guard
+# keys on handler SHAPE (self-first => needs target), so a legitimately
+# target-less module-level handler still dispatches unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_self_first_handler_no_target_returns_target_required(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Self-first typed op + ``target=None`` -> structured ``target_required``.
+
+    Pre-#1506 the dispatcher short-circuited connector resolution on
+    ``target is None`` and let the self-first handler proceed unbound,
+    tripping ``dispatch_typed``'s loud self-guard ``RuntimeError`` — which
+    the generic ``except Exception`` then mislabelled as
+    ``connector_error: RuntimeError`` ("...instance-cache fault..."), an
+    internal-looking message for what is an omitted-argument usage error.
+    The fix catches the no-target case at resolution time and returns the
+    clean ``target_required`` envelope naming the op.
+    """
+    register_connector_v2(
+        product="selffirst",
+        version="",
+        impl_id="",
+        cls=_SelfFirstTypedConnector,
+    )
+    await register_typed_operation(
+        product="selffirst",
+        version="1.x",
+        impl_id="selffirst",
+        op_id="selffirst.thing.list",
+        handler=_SelfFirstTypedConnector.list_things,
+        summary="List things (self-first).",
+        description="Self-first typed op requiring a target.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="selffirst-1.x",
+        op_id="selffirst.thing.list",
+        target=None,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("target_required:")
+    assert result.extras["error_code"] == "target_required"
+    assert result.extras["op_id"] == "selffirst.thing.list"
+    # The misleading internal envelope must NOT surface.
+    assert "connector_error" not in (result.error or "")
+    assert result.extras["error_code"] != "connector_error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_module_level_handler_no_target_still_dispatches(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A legitimately target-less module-level typed op still dispatches.
+
+    The no-target guard keys on handler SHAPE, not just
+    ``source_kind``+``target``: a module-level handler (no ``self``) needs
+    no connector instance, so ``target=None`` is valid and the dispatch
+    runs with ``connector_instance=None`` (regression guard for #1506's
+    second acceptance criterion).
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.targetless",
+        handler=_module_handler_target_optional,
+        summary="Target-less module-level op.",
+        description="Module-level typed op that needs no target.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.targetless",
+        target=None,
+        params={"hello": "world"},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["echo"] == {"hello": "world"}
+    assert result.result["target_is_none"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Ingested branch catches ``AmbiguousConnectorResolution`` the same way.
+
+    Both source-kind branches must mirror each other on the
+    resolver's two diagnostic exception shapes — pre-#1142 the
+    ingested branch caught ``NoMatchingConnector`` only, and any
+    ambiguity from the resolver propagated past the dispatcher into
+    FastAPI as a bare 500.
+    """
+
+    class _AmbA(Connector):
+        product = "ghost"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    class _AmbB(Connector):
+        product = "ghost"
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    from meho_backplane.connectors.registry import register_connector_v2 as _reg
+
+    _reg(product="ghost", version="", impl_id="a", cls=_AmbA)
+    _reg(product="ghost", version="", impl_id="b", cls=_AmbB)
+
+    # Build an ingested descriptor that points at the ambiguous
+    # product. Bypasses ``register_typed_operation`` because that
+    # helper only writes typed/composite rows.
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="ghost",
+        version="1.0",
+        impl_id="ghost",
+        op_id="GET:/api/probe",
+        source_kind="ingested",
+        method="GET",
+        path="/api/probe",
+        handler_ref=None,
+        summary="Ghost probe.",
+        description="Ghost probe.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="ghost")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/probe",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("ambiguous_connector:")
+    assert result.extras["error_code"] == "ambiguous_connector"
+    msg = result.extras["exception_message"]
+    assert "preferred_impl_id" in msg
+    assert "ghost" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +1036,7 @@ class _FakeHttpConnector(HttpConnector):
         super().__init__()
         self.calls: list[dict[str, Any]] = []
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -728,6 +1153,197 @@ async def test_dispatch_ingested_builds_request_via_request_json(
     assert isinstance(result.result, dict)
     assert result.result["method"] == "GET"
     assert len(captured_events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ingested write-body round-trip (#1656): the ``loc=="body"`` container
+# param's *value* must go on the wire unwrapped. Drives the REAL
+# ``HttpConnector._post_json`` httpx transport and captures the outbound
+# request with respx, so the assertion is on the actual bytes a vendor API
+# (here gh-rest issue-create) would receive — not a mocked transport seam.
+# ---------------------------------------------------------------------------
+
+
+class _RoundTripHttpConnector(HttpConnector):
+    """Ingested-dispatch fixture exercising the real httpx ``_post_json``.
+
+    Unlike :class:`_FakeHttpConnector` (which records ``_request_json``
+    calls), this connector keeps :class:`HttpConnector`'s real transport so
+    the request is genuinely serialized and sent — respx intercepts it at
+    the wire. Only ``auth_headers`` and the three ABC methods are
+    overridden; ``_base_url`` derives ``https://{target.host}`` from the
+    target, which the test mocks via ``respx.mock(base_url=...)``.
+    """
+
+    product = "gh"
+    version = "3.0"
+    impl_id = "gh-rest"
+    supported_version_range = ">=3.0,<4.0"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+    async def auth_headers(  # type: ignore[override]
+        self,
+        target: Any,
+        operator: Operator,
+    ) -> dict[str, str]:
+        return {"authorization": "Bearer test-token"}
+
+
+def _gh_issue_create_descriptor(embedding: Any) -> Any:
+    """Build a gh-rest ``POST:/repos/{owner}/{repo}/issues`` ingested descriptor.
+
+    Mirrors the G0.7 ingester's output shape: ``owner``/``repo`` are
+    ``x-meho-param-loc='path'`` and the requestBody is a single ``body``
+    property tagged ``x-meho-param-loc='body'`` (see ``ingest.openapi``).
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    return EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        op_id="POST:/repos/{owner}/{repo}/issues",
+        source_kind="ingested",
+        method="POST",
+        path="/repos/{owner}/{repo}/issues",
+        handler_ref=None,
+        summary="Create an issue",
+        description="Create an issue on a repository.",
+        tags=[],
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-meho-param-loc": "path"},
+                "repo": {"type": "string", "x-meho-param-loc": "path"},
+                "body": {"type": "object", "x-meho-param-loc": "body"},
+            },
+            "required": ["owner", "repo", "body"],
+        },
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="caution",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=embedding,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "issue_body",
+    [
+        pytest.param({"title": "X"}, id="title-only"),
+        pytest.param({"title": "X", "body": "Y"}, id="title-and-body"),
+    ],
+)
+async def test_dispatch_ingested_post_sends_unwrapped_request_body(
+    issue_body: dict[str, Any],
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """gh-rest issue-create sends the body param's *value* (unwrapped) on the wire.
+
+    Regression for #1656: the dispatcher previously serialized
+    ``{"body": {"title": "X"}}`` (the ``{name: value}`` bucket) instead of
+    ``{"title": "X"}`` (the value), which GitHub 422s. Asserts the captured
+    outbound body is exactly the requestBody value and that a recorded 201
+    round-trips to ``status='ok'``.
+    """
+    import json as _json
+
+    import respx
+
+    register_connector_v2(
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        cls=_RoundTripHttpConnector,
+    )
+
+    session.add(_gh_issue_create_descriptor(stub_embedding_service.encode_one.return_value))
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="gh", version="3.0", host="api.github.test", port=443)
+
+    with respx.mock(base_url="https://api.github.test", assert_all_called=True) as mock:
+        route = mock.post("/repos/octocat/hello/issues").respond(
+            201, json={"number": 7, "title": issue_body["title"]}
+        )
+        result = await dispatch(
+            operator=operator,
+            connector_id="gh-rest-3.0",
+            op_id="POST:/repos/{owner}/{repo}/issues",
+            target=target,
+            params={"owner": "octocat", "repo": "hello", "body": issue_body},
+        )
+
+    assert route.called
+    sent = route.calls.last.request
+    # The path params substitute into the URL; the body param's *value* is
+    # the wire body — never wrapped under the ``"body"`` key.
+    assert sent.url.path == "/repos/octocat/hello/issues"
+    # Exact-equality is the load-bearing check: a wire body equal to the
+    # requestBody value proves the dispatcher did NOT wrap it under "body".
+    assert _json.loads(sent.content) == issue_body
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["number"] == 7
+    assert len(captured_events) == 1
+
+
+def test_unwrap_body_returns_value_not_wrapper() -> None:
+    """`_unwrap_body` yields the body param's value (unwrapped), or None when empty.
+
+    Locks the serialization contract shared by both body-carrying dispatch
+    arms (POST/PUT/PATCH/DELETE *and* GET-with-body): the single
+    `x-meho-param-loc='body'` param's value is the request body, never a
+    `{name: value}` wrapper (#1656).
+    """
+    from meho_backplane.operations._branches import _unwrap_body
+
+    # Empty bucket -> no body (httpx omits the request body).
+    assert _unwrap_body({}) is None
+    # Single body param -> its value, unwrapped (the GitHub issue-create shape).
+    assert _unwrap_body({"body": {"title": "X"}}) == {"title": "X"}
+    # The param name is irrelevant — the *value* is returned regardless.
+    assert _unwrap_body({"payload": [1, 2, 3]}) == [1, 2, 3]
+
+
+def test_unwrap_body_rejects_multiple_body_params() -> None:
+    """More than one `loc=='body'` param is an ingest-modelling fault -> raise.
+
+    A descriptor must carry exactly one requestBody container param. Failing
+    loud beats silently picking one and sending a body the caller never
+    asked for.
+    """
+    from meho_backplane.operations._branches import _unwrap_body
+
+    with pytest.raises(RuntimeError, match="multiple 'body' params"):
+        _unwrap_body({"body": {"title": "X"}, "extra": {"k": "v"}})
 
 
 # ---------------------------------------------------------------------------
@@ -1327,15 +1943,18 @@ async def test_dispatch_human_caution_op_auto_executes(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_human_requires_approval_op_denied(
+async def test_dispatch_human_requires_approval_op_queues(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``requires_approval=True`` still hard-denies a **human** (v0.2 contract).
+    """``requires_approval=True`` queues a **human**, not hard-deny (G11.7-T1 #1401).
 
-    The approval queue (G11.2-T4) routes only agent runs to the pending
-    path; human/service principals retain the v0.2 hard-deny so the
-    enforcement signal does not silently disappear.
+    Pre-G11.7 the policy gate hard-denied a human/service principal on a
+    ``requires_approval`` op. G11.7-T1 (#1401) routes them to the
+    approval queue instead — ops-team operators are exactly the humans
+    Phase C expects to run governed writes, so a hard-deny defeated the
+    point. The op is parked + resumable (``awaiting_approval``), not
+    ``denied``.
     """
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
@@ -1345,7 +1964,7 @@ async def test_dispatch_human_requires_approval_op_denied(
         op_id="vault.kv.human_approval",
         handler=_module_handler_returning_dict,
         summary="Safe op flagged requires_approval.",
-        description="requires_approval stays enforced for humans.",
+        description="requires_approval routes humans to the queue.",
         parameter_schema={"type": "object"},
         safety_level="safe",
         requires_approval=True,
@@ -1360,8 +1979,9 @@ async def test_dispatch_human_requires_approval_op_denied(
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "denied"
-    assert result.extras["error_code"] == "denied"
+    assert result.status == "awaiting_approval", result.error
+    assert result.status != "denied"
+    assert "approval_request_id" in result.extras
 
 
 @pytest.mark.asyncio
@@ -1404,6 +2024,198 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
     assert result.status == "awaiting_approval"
     assert result.extras["error_code"] == "awaiting_approval"
     assert "approval_request_id" in result.extras
+
+
+@pytest.mark.asyncio
+async def test_park_populates_proposed_effect_from_builder(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked op with a registered preview builder stores its preview.
+
+    G11.7 follow-up (#1437): when the policy gate routes an op to
+    ``needs-approval``, the dispatcher invokes the op's opt-in
+    ``proposed_effect`` builder and stores the result on the durable
+    :class:`ApprovalRequest` row -- so the reviewer reads the preview in
+    the approval queue, not just in the post-approval op result.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PREVIEW_BUILDERS,
+        PreviewContext,
+        register_preview_builder,
+    )
+
+    async def _preview(ctx: PreviewContext) -> dict[str, Any]:
+        return {"would_change": ["deployment/web"], "param_echo": ctx.params}
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op with a registered preview builder.",
+        description="Parks for approval and populates proposed_effect.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder("vault.kv.preview_op", _preview)
+    try:
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.preview_op",
+            target=_FakeTarget(product="vault"),
+            params={"path": "secret/data/x"},
+        )
+        assert result.status == "awaiting_approval"
+        approval_request_id = UUID(result.extras["approval_request_id"])
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as fresh:
+            row = await fresh.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            # The builder's preview landed under the {op_class, preview}
+            # envelope -- not the identifier-only default.
+            assert row.proposed_effect["op_class"] == "other"
+            assert row.proposed_effect["preview"]["would_change"] == ["deployment/web"]
+            # The identifier-only default keys are NOT present (a built
+            # preview replaces the default, it doesn't merge into it).
+            assert "op_id" not in row.proposed_effect
+    finally:
+        _PREVIEW_BUILDERS.pop("vault.kv.preview_op", None)
+
+
+@pytest.mark.asyncio
+async def test_park_without_builder_uses_identifier_default(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An op with no preview builder parks with the identifier-only default.
+
+    G11.7 follow-up (#1437): the hook is opt-in. An op that registers no
+    builder must park exactly as before -- the durable row carries the
+    ``{op_id, connector_id, target_id}`` default, with no error and no
+    regression.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.no_preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op without a preview builder.",
+        description="Parks for approval; no proposed_effect builder registered.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.no_preview_op",
+        target=target,
+        params={},
+    )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        # Identifier-only default -- no built-preview envelope.
+        assert row.proposed_effect == {
+            "op_id": "vault.kv.no_preview_op",
+            "connector_id": "vault-1.x",
+            "target_id": str(target.id),
+        }
+        assert "preview" not in row.proposed_effect
+
+
+@pytest.mark.asyncio
+async def test_park_merges_permission_preflight_onto_identifier_default(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked write with a registered permission preflight stores its banner.
+
+    G0.20-T4 (#1504): a credential-class write has no preview (suppressed),
+    but its capability-only permission preflight still runs and is merged
+    under ``proposed_effect["permission_preflight"]`` — so the reviewer
+    sees "this write will be denied" at park time, alongside the
+    identifier-only default (op identity is preserved).
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+            "principal_sub": ctx.operator.sub,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.preflight_op",
+        handler=_module_handler_returning_dict,
+        summary="Op with a registered permission preflight.",
+        description="Parks for approval; the preflight flags a will-be-denied write.",
+        parameter_schema={"type": "object"},
+        safety_level="caution",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_permission_preflight("vault.kv.preflight_op", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.preflight_op",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+        assert result.status == "awaiting_approval"
+        approval_request_id = UUID(result.extras["approval_request_id"])
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as fresh:
+            row = await fresh.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            # Identifier default is preserved, with the preflight merged in.
+            assert row.proposed_effect["op_id"] == "vault.kv.preflight_op"
+            assert row.proposed_effect["connector_id"] == "vault-1.x"
+            assert row.proposed_effect["target_id"] == str(target.id)
+            preflight = row.proposed_effect["permission_preflight"]
+            assert preflight["will_be_denied"] is True
+            assert preflight["required"] == ["create", "update"]
+            assert preflight["granted"] == ["read"]
+            # No raw secret material — only the capability banner.
+            assert "data" not in row.proposed_effect
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.preflight_op", None)
 
 
 # ---------------------------------------------------------------------------

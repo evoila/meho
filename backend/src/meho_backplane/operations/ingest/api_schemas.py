@@ -58,7 +58,9 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
 
 __all__ = [
     "ConnectorListItem",
@@ -68,9 +70,12 @@ __all__ = [
     "EditGroupBody",
     "EditOpBody",
     "GroupingResultModel",
+    "IngestJobHandle",
+    "IngestJobStatusResponse",
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
+    "NextStep",
     "SpecSource",
 ]
 
@@ -87,14 +92,20 @@ ConnectorStatusFilter = Literal["staged", "enabled", "disabled", "all"]
 class SpecSource(BaseModel):
     """One spec to ingest under a connector triple.
 
-    ``uri`` carries the operator's spec identifier. Three forms are
-    accepted by the underlying :func:`parse_openapi` resolver:
+    ``uri`` is the operator's spec identifier and audit label. When the
+    spec is *fetched* by the backend, only an ``https://`` URL is
+    accepted -- the G0.16-T8 (#95) SSRF / local-file guard rejects
+    ``http``, ``file://``, and bare paths so a spec URI cannot become a
+    network-topology or filesystem oracle.
 
-    * Absolute local path — ``/abs/path/to/spec.yaml``.
-    * HTTP(S) URL — ``https://api.example.com/openapi.yaml``.
-    * ``docs:<connector-id>/<file>`` shorthand — resolves against the
-      consumer's checked-in docs/ directory; CLI / API layers expand
-      this before calling the parser.
+    ``content`` carries the spec text inline. The ``meho`` CLI reads
+    ``docs:<connector-id>/<file>`` and ``file://`` sources **CLI-side**
+    and uploads the bytes here, leaving ``uri`` as the audit label, so
+    no local path or non-https scheme reaches the backend. When
+    ``content`` is set the backend uses it verbatim (size-capped) and
+    skips the fetch; when absent, ``uri`` is fetched under the https
+    guard. A bare ``docs:`` URI that reaches the backend with no
+    ``content`` is rejected with :exc:`UnsupportedSpecError` (#1535).
 
     Wrapped in its own model so future per-spec knobs (auth headers,
     dialect pinning, content-type override) can land without
@@ -107,6 +118,10 @@ class SpecSource(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     uri: str = Field(min_length=1, max_length=2048)
+    # Inline spec text uploaded by the CLI for docs:/file:// sources.
+    # ~20 MiB coarse char guard; the authoritative byte cap lives in
+    # openapi._load_spec_bytes.
+    content: str | None = Field(default=None, max_length=20 * 1024 * 1024)
 
 
 class IngestRequest(BaseModel):
@@ -118,6 +133,30 @@ class IngestRequest(BaseModel):
     :func:`run_llm_grouping` once for the whole connector. Multi-spec
     ingestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as
     multiple ``SpecSource`` entries in one request.
+
+    Two mutually-exclusive request shapes:
+
+    * **Explicit-quadruple shape** — ``product`` + ``version`` +
+      ``impl_id`` + ``specs[]`` carry the resolved triple plus the
+      spec sources the caller already knows. The MCP admin tool and
+      the historical CLI manual mode use this shape.
+    * **Catalog-driven shape** (G0.14-T9 / #1150) — ``catalog_entry``
+      carries a ``"<product>/<version>"`` reference; the route
+      handler resolves the entry against the packaged catalog (see
+      :mod:`meho_backplane.operations.ingest.catalog`) and fills in
+      ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the
+      catalog entry before dispatching through the existing ingest
+      path. REST-native agent runtimes that can't shell out to the
+      CLI use this shape; the CLI's ``--catalog`` flag has been
+      refactored to POST this shape rather than resolving the entry
+      client-side.
+
+    The two shapes are mutually exclusive: a body that sets
+    ``catalog_entry`` alongside any of ``product`` / ``version`` /
+    ``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at
+    the validator below. A body that sets neither fails 422
+    ``ingest_request_underspecified``. ``base_url`` and ``dry_run``
+    are accepted in both shapes.
 
     ``dry_run=True`` skips both the DB writes and the grouping pass:
     only :func:`parse_openapi` runs, and the response carries
@@ -136,14 +175,170 @@ class IngestRequest(BaseModel):
     and the operator only finds out at review-time.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
-    product: str = Field(min_length=1, max_length=64)
-    version: str = Field(min_length=1, max_length=64)
-    impl_id: str = Field(min_length=1, max_length=128)
-    specs: list[SpecSource] = Field(min_length=1, max_length=16)
+    product: str | None = Field(default=None, min_length=1, max_length=64)
+    version: str | None = Field(default=None, min_length=1, max_length=64)
+    impl_id: str | None = Field(default=None, min_length=1, max_length=128)
+    specs: list[SpecSource] = Field(default_factory=list, max_length=16)
+    catalog_entry: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, max_length=2048)
+    #: Explicit-quadruple counterpart to the catalog row's
+    #: :attr:`ConnectorSpecEntry.spec_info_versions_compatible` opt-in
+    #: (G0.16-T5 #1307). Lets an operator running the manual ``--spec``
+    #: path declare that a self-versioning vendor spec — whose
+    #: ``info.version`` is orthogonal to the connector's product-line
+    #: ``version`` label — is compatible with that label, so the
+    #: spec-vs-label cross-check in ``_validate_spec_versions`` widens
+    #: against the declared band instead of raising
+    #: :exc:`VersionMismatchError`. Each entry is a glob (``"2.x"`` /
+    #: ``"9.0.x"``) or a PEP 440 specifier set (``">=2,<3"``); the
+    #: field validator below rejects any other shape at request-
+    #: validation time. ``None`` (the default) keeps the historical
+    #: strict check. The route forwards a populated value to
+    #: :meth:`IngestionPipelineService.ingest`; it is mutually
+    #: exclusive with ``catalog_entry`` (the catalog row carries its
+    #: own band) — see the ``catalog_entry_conflict`` validator below.
+    #:
+    #: T1 (#1646) — the vRLI catch-22 (claude-rdc-hetzner-dc#1136):
+    #: the version-stable ``/api/v2`` surface self-identifies as
+    #: ``info.version="v2"`` while the seeded ``VcfLogsConnector``
+    #: label is ``9.0``; no label ingested the canonical artifact
+    #: until the manual path gained this catalog-parity opt-in.
+    spec_info_versions_compatible: list[str] | None = Field(
+        default=None,
+        max_length=16,
+    )
     dry_run: bool = False
+    #: Background-mode opt-out. ``True`` (default) fires the
+    #: pipeline off the request thread and returns
+    #: :class:`IngestJobHandle` at HTTP 202; ``False`` runs the
+    #: pipeline inline and returns :class:`IngestResponse` at
+    #: HTTP 200 -- the legacy v0.8.x shape kept for callers with
+    #: small specs that still want a blocking response (CI tests,
+    #: ``dry_run=True`` validation runs, ad-hoc shell scripts).
+    #: ``dry_run=True`` ignores this flag and always runs inline --
+    #: the parse-only path is the fast leg per RDC #771 Finding 21
+    #: and never trips the liveness-probe deadline. Aliased to
+    #: ``async`` on the wire (Python reserved word) so the JSON
+    #: field reads naturally, same shape :class:`AgentRunRequest`
+    #: established in G11.1-T4.
+    async_: bool = Field(
+        default=True,
+        alias="async",
+        description=(
+            "Run the pipeline off the request thread (202 + job handle); "
+            "set to false for the legacy blocking response. Ignored when "
+            "dry_run=true."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_request_shape(self) -> IngestRequest:
+        """Reject bodies that mix or omit both request shapes.
+
+        Catalog-driven shape: ``catalog_entry`` set, every quadruple
+        field unset / empty. Explicit-quadruple shape: every quadruple
+        field set, ``catalog_entry`` unset. Anything else is a
+        caller-side bug worth a 422 rather than a half-resolved
+        downstream failure (the route handler can't tell which shape
+        the caller intended, and silently picking one would land an
+        ingest under either the wrong triple or a half-populated
+        catalog entry).
+
+        The error messages carry the convention's diagnostic shape
+        (see :doc:`docs/codebase/error-message-shape.md`): a stable
+        ``snake_case`` classifier prefix (``catalog_entry_conflict``
+        / ``ingest_request_underspecified``) so REST callers and the
+        MCP-driving agent can branch without re-parsing the prose.
+        """
+        catalog_set = self.catalog_entry is not None
+        quadruple_set = (
+            self.product is not None
+            or self.version is not None
+            or self.impl_id is not None
+            or len(self.specs) > 0
+        )
+        if catalog_set and quadruple_set:
+            raise ValueError(
+                "catalog_entry_conflict: 'catalog_entry' is mutually exclusive "
+                "with 'product' / 'version' / 'impl_id' / 'specs[]'; "
+                "supply only one request shape. "
+                "See docs/codebase/error-message-shape.md.",
+            )
+        if catalog_set and self.spec_info_versions_compatible is not None:
+            # The catalog row carries its own
+            # ``spec_info_versions_compatible`` band (#1307); an
+            # explicit one on a catalog-driven body would be silently
+            # discarded during resolution, so reject it loudly rather
+            # than let the operator believe their override took effect.
+            raise ValueError(
+                "catalog_entry_conflict: 'spec_info_versions_compatible' is "
+                "the explicit-quadruple counterpart of the catalog row's own "
+                "compatibility band; drop it when using 'catalog_entry'. "
+                "See docs/codebase/error-message-shape.md.",
+            )
+        if not catalog_set and not quadruple_set:
+            raise ValueError(
+                "ingest_request_underspecified: supply either "
+                "'catalog_entry' (catalog-driven shape) or "
+                "'product' + 'version' + 'impl_id' + 'specs[]' "
+                "(explicit-quadruple shape). "
+                "See docs/codebase/error-message-shape.md.",
+            )
+        if not catalog_set:
+            # Explicit-quadruple shape — every quadruple field must
+            # be set. Partial-quadruple bodies (e.g. impl_id missing)
+            # would otherwise silently default to None and surface
+            # downstream as a confusing register_ingested error.
+            missing = [
+                name
+                for name, value in (
+                    ("product", self.product),
+                    ("version", self.version),
+                    ("impl_id", self.impl_id),
+                )
+                if value is None
+            ]
+            if not self.specs:
+                missing.append("specs")
+            if missing:
+                raise ValueError(
+                    "ingest_request_underspecified: explicit-quadruple shape "
+                    f"requires {missing}. Supply the missing field(s), or use "
+                    "the catalog-driven shape via 'catalog_entry'. "
+                    "See docs/codebase/error-message-shape.md.",
+                )
+        return self
+
+    @field_validator("spec_info_versions_compatible")
+    @classmethod
+    def _compatibility_patterns_are_parseable(cls, value: list[str] | None) -> list[str] | None:
+        """Reject malformed compat patterns at request-validation time.
+
+        Mirrors the catalog field's
+        :meth:`ConnectorSpecEntry._compatibility_patterns_are_parseable`
+        so the manual ``--spec`` opt-in fails the same way the catalog
+        opt-in does: a glob (``"2.x"`` / ``"9.0.x"``) or a PEP 440
+        specifier set (``">=2,<3"``) passes; anything else (a bare
+        product-line token like ``"v2"``, a typo, a blank) raises a
+        ``ValueError`` the route surfaces as 422 ``extra``-class
+        validation. Compiling here — rather than only inside
+        ``_validate_spec_versions`` mid-pipeline — gives the operator
+        the diagnostic before any spec is fetched or parsed.
+        """
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "spec_info_versions_compatible must be null (no opt-in) or a non-empty list"
+            )
+        normalized: list[str] = []
+        for raw_pattern in value:
+            pattern = raw_pattern.strip()
+            _compatibility_pattern_to_specifier(pattern)
+            normalized.append(pattern)
+        return normalized
 
 
 class IngestionResultModel(BaseModel):
@@ -232,6 +427,38 @@ class IngestResponse(BaseModel):
 ConnectorState = Literal["ingested", "registered"]
 
 
+class NextStep(BaseModel):
+    """Self-describing in-product hint pointing at the verb that closes the workflow.
+
+    Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+    is ``"registered"`` (G0.13-T3 / #1133). An ``"ingested"`` row sets
+    :attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher
+    already resolves operations against it -- there is nothing left for the
+    operator to do.
+
+    Two ``verb`` shapes ship:
+
+    * ``meho connector ingest --catalog <product>/<version>`` -- when the
+      connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+      registry's ``(product, version)``. The operator copies the verb,
+      ``meho connector ingest`` looks up the upstream spec URL, and
+      dispatchability follows after operator review.
+    * ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``
+      -- when the catalog has no entry. The ``rationale`` makes the
+      missing-catalog branch explicit so the operator knows they need
+      to source the OpenAPI spec themselves.
+
+    Frozen for the same reason every wire shape in this module is frozen:
+    responses are read-only and any in-place mutation should surface as a
+    Pydantic error rather than a silently-modified payload.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    verb: str = Field(min_length=1, max_length=512)
+    rationale: str = Field(min_length=1, max_length=512)
+
+
 class ConnectorListItem(BaseModel):
     """One row in the ``GET /api/v1/connectors`` response.
 
@@ -246,8 +473,26 @@ class ConnectorListItem(BaseModel):
     review-queue backlog at a glance.
 
     ``operation_count`` is the sum of operations across all groups
-    in scope. Useful for the CLI's
-    ``meho connector list --status staged`` summary view.
+    in scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the
+    subset of those rows whose per-op ``is_enabled`` flag is set --
+    the operations the dispatcher will actually resolve
+    (dispatchable), vs ingested-but-disabled rows that only surface
+    in review. The naming mirrors the ``*_group_count`` family above:
+    the unprefixed field is the total, the ``enabled_``-prefixed
+    field is the subset. Kept additive (rather than renaming the
+    total to ``total_operation_count``) so existing consumers of
+    ``operation_count`` -- the CLI's ``listEntry`` decode shape and
+    every ``meho.connector.list`` client -- keep working unchanged.
+    Mind the axis difference between the two ``enabled_*`` fields:
+    ``enabled_group_count`` buckets groups by *review_status*, while
+    ``enabled_operation_count`` counts the per-op ``is_enabled`` bit
+    (the dispatchability flag that survives connector-level
+    enable/disable cycles via operator overrides). Useful for the
+    CLI's ``meho connector list --status staged`` summary view and
+    for an LLM browsing the catalog: ``vmware-rest-9.0`` ingests
+    ~2,211 ops of which only a fraction are enabled, and before the
+    split nothing on the row said which of the two numbers
+    ``operation_count`` was.
 
     ``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
     (``"ingested"`` — DB-backed, resolves through the dispatcher) from
@@ -262,6 +507,20 @@ class ConnectorListItem(BaseModel):
     not-yet-dispatchable when ``state == "registered"``. Defaults to
     ``"ingested"`` so existing call sites (tests, MCP fakes)
     construct rows without breakage.
+
+    ``next_step`` (G0.13-T3 / #1133) is the self-describing hint that
+    closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:
+    half-registered connectors fail lookup with no in-product hint
+    about what verb closes the workflow). It is a :class:`NextStep`
+    object on ``state="registered"`` rows and ``None`` on
+    ``state="ingested"`` rows (no operator action remains for an
+    ingested connector). The hint is computed against the curated
+    connector-spec catalog (#743): when the catalog carries an entry
+    for the registry's ``(product, version)`` the verb points at
+    ``meho connector ingest --catalog ...``; otherwise it points at
+    the manual-mode flags. Defaults to ``None`` so existing
+    construction call sites (tests, MCP fakes) continue to compile
+    without explicit assignment.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -276,7 +535,9 @@ class ConnectorListItem(BaseModel):
     enabled_group_count: int
     disabled_group_count: int
     operation_count: int
+    enabled_operation_count: int
     state: ConnectorState = "ingested"
+    next_step: NextStep | None = None
 
 
 class ConnectorListResponse(BaseModel):
@@ -352,3 +613,151 @@ class EditOpBody(BaseModel):
     safety_level: Literal["safe", "caution", "dangerous"] | None = None
     requires_approval: bool | None = None
     is_enabled: bool | None = None
+
+
+class EditOpWarning(BaseModel):
+    """One advisory attached to an ``edit_op`` write (G0.23-T4 #1630).
+
+    Emitted when the edit is legal and **was applied**, but the
+    operator should know it leads somewhere unpleasant. The only
+    producer today is the enable-time auto-shim probe:
+    ``is_enabled=True`` on an op whose resolved connector is the
+    unconfigured ingest auto-shim
+    (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
+    — dispatch is then guaranteed to fail with the
+    ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+    structured error (G0.23-T1 #1627), so this warning surfaces the
+    dead end at enable time instead of one dispatch later.
+
+    ``code`` reuses the dispatch-time cause vocabulary verbatim
+    (``unreplaced_auto_shim``) so an operator — or an SDK — can
+    correlate the proactive warning with the reactive dispatch error
+    without a translation table. Declared as a one-member ``Literal``
+    so the OpenAPI schema names the vocabulary; future advisory codes
+    extend the union (an additive, client-compatible change).
+
+    ``connector_class`` carries the resolved shim class's name
+    (``AutoShim_<product>_<version>_<impl_id>``) — the same key the
+    dispatch error's ``extras`` payload uses. ``message`` is the
+    operator-facing prose: what was applied, why dispatch will still
+    fail, and the remediation imperative (register the per-product
+    subclass; re-ingesting will not replace the shim).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    code: Literal["unreplaced_auto_shim"]
+    connector_class: str
+    message: str
+
+
+class EditOpResponse(BaseModel):
+    """Response body for ``PATCH /api/v1/connectors/{id}/operations/{op_id}``.
+
+    G0.23-T4 (#1630) promoted the route from ``204 No Content`` to
+    ``200`` with this envelope so enable-time advisories have a
+    structured home on the wire. ``warnings`` is empty on the
+    overwhelmingly common clean path; a non-empty list never blocks
+    the write it annotates (the PATCH semantics are unchanged — the
+    edit landed, audit row included, warnings or not).
+
+    Shaped as a list (not a single nullable field) so multiple
+    advisories can ride one response without another schema bump.
+    Required (no default) so the OpenAPI schema marks it as
+    always-present and the generated Go client gets a plain slice
+    instead of a pointer — same convention as
+    :class:`~meho_backplane.operations.ingest.payload.ConnectorReviewPayload.groups`.
+    """
+
+    warnings: list[EditOpWarning]
+
+
+#: Lifecycle of an async ingest job. Mirrors
+#: :data:`~meho_backplane.operations.ingest.jobs.IngestJobStatus` so
+#: the Pydantic projection and the internal dataclass share one
+#: spelling; the route layer projects ``IngestJob`` rows through the
+#: response models defined below.
+#:
+#: ``degraded`` (G0.24 / claude-rdc-hetzner-dc#1136) is terminal-but-not-
+#: green: the pipeline ran to completion yet persisted nothing the
+#: dispatcher can resolve, so the job carries both ``ingestion`` counts
+#: and a structured ``error_class`` (``ingested_not_dispatchable``).
+IngestJobStatusLiteral = Literal["running", "succeeded", "failed", "degraded"]
+
+
+class IngestJobHandle(BaseModel):
+    """Response body for ``POST /api/v1/connectors/ingest`` (HTTP 202).
+
+    Returned when the route fires the pipeline off the request thread
+    (the default; ``async=false`` switches to the legacy blocking
+    :class:`IngestResponse` at HTTP 200). Carries the freshly-minted
+    ``job_id``, the current ``status`` (always ``"running"`` here),
+    and a relative ``poll_url`` the operator's client can follow to
+    inspect progress.
+
+    The shape is deliberately small -- two strings + a URL -- because
+    every meaningful field lives on the polling response
+    (:class:`IngestJobStatusResponse`). A handle is what you get back
+    immediately so the request that started the work can return
+    inside the kubelet liveness-probe deadline (escape hatch must
+    not crash the pod, per G0.16-T1 / RDC #771 Finding 20).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: UUID
+    status: IngestJobStatusLiteral
+    poll_url: str = Field(min_length=1, max_length=2048)
+
+
+class IngestJobStatusResponse(BaseModel):
+    """Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.
+
+    Mirrors the in-memory
+    :class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,
+    projecting it into a Pydantic-typed shape the route returns.
+    Three field clusters:
+
+    * **Identity** -- ``job_id`` + the originator's request descriptors
+      (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /
+      ``spec_uris``). Echo so the polling caller doesn't need to
+      correlate against their own state.
+    * **Lifecycle** -- ``status`` + ``started_at`` + optional
+      ``ended_at``. Status moves ``running`` → one of ``succeeded`` /
+      ``degraded`` / ``failed`` exactly once.
+    * **Result vs error** -- keyed on status. ``succeeded`` populates
+      ``ingestion`` (with optional ``grouping``) and leaves ``error``
+      ``None``; ``failed`` populates ``error`` / ``error_class`` and
+      leaves ``ingestion`` ``None`` (the pipeline raised, no result).
+      ``degraded`` populates **both** — the pipeline returned a result
+      (so ``ingestion`` carries the counts that landed) but a
+      postcondition found it non-dispatchable (so ``error`` /
+      ``error_class`` carry the reason). ``running`` leaves them ``None``
+      so polling clients branch on ``status`` rather than presence.
+
+    ``error`` is the capped message; ``error_class`` is the structured
+    discriminator -- the Python exception class name for ``failed``
+    (``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed
+    ``ingested_not_dispatchable`` token for ``degraded`` -- so agents
+    branch without parsing prose. The structured 422 envelopes the
+    synchronous ingest path used to return (the error-shape convention's
+    classifier + ``detail`` body) are NOT available off the request
+    thread; the polling response is the new error surface for the async
+    path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: UUID
+    status: IngestJobStatusLiteral
+    catalog_entry: str | None = None
+    product: str | None = None
+    version: str | None = None
+    impl_id: str | None = None
+    spec_uris: list[str] = Field(default_factory=list)
+    started_at: float
+    ended_at: float | None = None
+    ingestion: IngestionResultModel | None = None
+    grouping: GroupingResultModel | None = None
+    error: str | None = None
+    error_class: str | None = None

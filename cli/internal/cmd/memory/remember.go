@@ -4,15 +4,18 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -128,7 +131,7 @@ func NewRememberCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&persistFlag, "persist", false,
 		"persist forever — opt out of the backend's default-7-day TTL on memory-user writes (sends expires_at=null)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw MemoryEntry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by `meho login`)")
 	return cmd
@@ -148,6 +151,86 @@ type rememberOptions struct {
 	Persist           bool
 	JSONOut           bool
 	BackplaneOverride string
+}
+
+// rememberRequest captures the inputs to the POST /api/v1/memory
+// request the verb sends. The struct exists alongside the generated
+// `api.RememberBody` because the wire contract requires a tri-state
+// for `expires_at` (absent → backend default fires; null → opt-out;
+// value → explicit cutoff) that the generated type can't express:
+// `api.RememberBody.ExpiresAt` is `*time.Time` *without* `omitempty`,
+// so encoding/json would always emit either a value or `null` and
+// the "absent → default fires" branch would be unreachable.
+//
+// The custom :func:`MarshalJSON` below handles the tri-state by
+// emitting via a `map[string]any`, branching on Persist + ExpiresAt:
+//
+//   - Persist=false, ExpiresAt="" → field OMITTED; backend default
+//     fires on user-scope writes.
+//   - Persist=false, ExpiresAt="<RFC3339>" → field sent verbatim;
+//     backend honours it as the explicit cutoff.
+//   - Persist=true → field emitted as JSON `null`; backend sees the
+//     field as present in :attr:`BaseModel.model_fields_set` with
+//     value None and skips the default. Wire shape for
+//     `meho remember --persist`.
+type rememberRequest struct {
+	Scope      Scope
+	Body       string
+	Slug       string
+	Metadata   map[string]any
+	ExpiresAt  string
+	TargetName string
+	// Persist, when true, emits ``"expires_at": null`` on the wire
+	// even when ExpiresAt is empty. Mutually exclusive with a non-
+	// empty ExpiresAt in practice; the verb-level CLI gate refuses
+	// `--persist` + `--ttl` together so the operator's intent is
+	// unambiguous. The struct doesn't enforce that mutual exclusion
+	// itself (callers do) -- when both are set, ExpiresAt wins
+	// because emitting "null" alongside a real timestamp would be
+	// nonsensical.
+	Persist bool
+}
+
+// MarshalJSON renders rememberRequest with explicit handling for the
+// G5.2-T2 (#624) tri-state “expires_at“ contract. See the type-level
+// docstring for the three states and their wire shapes.
+//
+// Implementation notes:
+//
+//   - Uses a positional emit (json.Marshal over a map[string]any)
+//     rather than struct tags so the `expires_at` rendering can branch
+//     on the Persist bool without leaking into the public field set.
+//   - The map ordering does not affect JSON correctness; the backend
+//     parses fields by key, not position.
+//   - "Persist + ExpiresAt set" lets ExpiresAt win (we already wrote
+//     the operator's intent to a clock-aligned cutoff at the
+//     parseTTLFlag stage; emitting `null` would silently override
+//     their `--ttl` value). The verb-level mutual-exclusion gate is
+//     where this collision is reported back to the operator.
+func (r rememberRequest) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"scope": r.Scope,
+		"body":  r.Body,
+	}
+	if r.Slug != "" {
+		out["slug"] = r.Slug
+	}
+	if r.Metadata != nil {
+		out["metadata"] = r.Metadata
+	}
+	if r.TargetName != "" {
+		out["target_name"] = r.TargetName
+	}
+	switch {
+	case r.ExpiresAt != "":
+		out["expires_at"] = r.ExpiresAt
+	case r.Persist:
+		// Explicit JSON `null` so backend's
+		// :func:`_resolve_default_ttl` sees "expires_at" in
+		// :attr:`BaseModel.model_fields_set` and skips the default.
+		out["expires_at"] = nil
+	}
+	return json.Marshal(out)
 }
 
 func runRemember(cmd *cobra.Command, opts rememberOptions) error {
@@ -201,9 +284,32 @@ func runRemember(cmd *cobra.Command, opts rememberOptions) error {
 		// the convention.
 		req.Metadata = map[string]any{"tags": tags}
 	}
-	entry, err := postRemember(cmd.Context(), backplaneURL, req)
+	resp, err := postRemember(cmd.Context(), backplaneURL, req)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode() != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Generated `ParseRememberApiV1MemoryPostResponse` populates
+	// JSON201 only when the response has Content-Type containing
+	// json AND status 201 (`cli/internal/api/client.gen.go`). A
+	// backplane / proxy that returns 201 with a missing or mistyped
+	// content-type leaves JSON201 nil; without this guard the verb
+	// would emit `null` in `--json` mode and silently no-op in
+	// summary mode. Mirrors the convention in
+	// `cli/internal/cmd/status.go:142` and the kb sibling's
+	// post-iter-2 nil-guard pattern (PR #1282).
+	entry := resp.JSON201
+	if entry == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 201 without a memory entry payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
@@ -212,37 +318,69 @@ func runRemember(cmd *cobra.Command, opts rememberOptions) error {
 	return nil
 }
 
-func postRemember(ctx context.Context, backplaneURL string, req rememberRequest) (*Entry, error) {
+func postRemember(
+	ctx context.Context,
+	backplaneURL string,
+	req rememberRequest,
+) (*api.RememberApiV1MemoryPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	// rememberRequest's custom MarshalJSON owns the tri-state
+	// expires_at contract that the generated `api.RememberBody`
+	// struct can't express (the generated `ExpiresAt *time.Time`
+	// has no `omitempty` tag, so encoding/json would always emit
+	// either a value or `null` and never omit the field). We send
+	// the hand-marshaled body through the `*WithBodyWithResponse`
+	// shape that accepts an `io.Reader`; the typed `*WithResponse`
+	// variant takes a generated `RememberBody` and would break the
+	// tri-state.
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal remember request: %w", err)
 	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/memory", raw)
-	if err != nil {
-		return nil, err
-	}
-	var out Entry
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode remember response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RememberApiV1MemoryPostResponse, error) {
+			return authed.RememberApiV1MemoryPostWithBodyWithResponse(
+				ctx,
+				&api.RememberApiV1MemoryPostParams{},
+				"application/json",
+				bytes.NewReader(raw),
+			)
+		},
+		func(r *api.RememberApiV1MemoryPostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printRememberSummary renders the created entry as a compact
 // confirmation line plus the natural-key coordinates the operator
 // will use for a subsequent `meho recall` / `meho forget`. Body is
 // not echoed back — the operator just typed it.
-func printRememberSummary(w io.Writer, e *Entry) {
+func printRememberSummary(w io.Writer, e *api.MemoryEntry) {
 	if e == nil {
 		return
 	}
 	fmt.Fprintf(w, "remembered %s/%s\n", e.Scope, e.Slug)
-	fmt.Fprintf(w, "%-14s %s\n", "id:", e.ID)
+	fmt.Fprintf(w, "%-14s %s\n", "id:", e.Id.String())
 	fmt.Fprintf(w, "%-14s %s\n", "scope:", e.Scope)
 	fmt.Fprintf(w, "%-14s %s\n", "slug:", e.Slug)
-	fmt.Fprintf(w, "%-14s %s\n", "expires_at:", pluralisePtr(e.ExpiresAt))
+	fmt.Fprintf(w, "%-14s %s\n", "expires_at:", formatTimePtr(e.ExpiresAt))
 	fmt.Fprintf(w, "%-14s %s\n", "user_sub:", pluralisePtr(e.UserSub))
 	fmt.Fprintf(w, "%-14s %s\n", "target_name:", pluralisePtr(e.TargetName))
-	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt)
+	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %d bytes\n", "body:", len(e.Body))
+}
+
+// formatTimePtr renders a *time.Time as a UTC-ISO8601 string when
+// set, or "(none)" when nil. The generated `api.MemoryEntry`
+// surfaces optional timestamps as `*time.Time`; this helper keeps
+// the summary printers' time-rendering identical to the
+// `pluralisePtr(*string)` shape they already use for other optional
+// fields.
+func formatTimePtr(t *time.Time) string {
+	if t == nil {
+		return "(none)"
+	}
+	return t.UTC().Format("2006-01-02T15:04:05Z")
 }

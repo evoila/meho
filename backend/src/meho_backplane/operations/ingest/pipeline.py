@@ -29,15 +29,25 @@ LLM-client injection
 --------------------
 
 The grouping pass requires an :class:`LlmClient` Protocol
-implementation. The chassis does not yet ship a production adapter
-(T5 of #389 lands the Anthropic Messages-API binding); to keep T6's
-REST surface workable both in tests and once the production adapter
-is wired, the pipeline accepts an injectable factory at construction
-time. The default factory raises :class:`LlmClientUnavailable` so
-calling ``POST /api/v1/connectors/ingest`` against a backplane that
-hasn't configured an LLM client returns 503 rather than crashing.
-Sibling tests / the CLI / the MCP tools each inject their own
-client.
+implementation. The production adapter ships and is wired at FastAPI
+lifespan startup (#1386):
+:func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`
+is installed via :func:`set_llm_client_factory`
+(:mod:`meho_backplane.api.v1.connectors_ingest`), reading
+``settings.anthropic_api_key`` (the same key the agent runtime uses)
+into a real Anthropic Messages-API client. To keep T6's REST surface
+workable in tests as well, the pipeline accepts an injectable factory
+at construction time; the fail-closed default factory raises
+:class:`LlmClientUnavailable` so calling
+``POST /api/v1/connectors/ingest`` against a backplane that configured
+no key returns 503 rather than crashing. Sibling tests inject their
+own deterministic stub via
+``IngestionPipelineService(..., llm_client_factory=...)``; the
+CLI / REST / MCP surfaces all read the same lifespan-wired factory,
+so ``meho connector ingest --catalog <product>/<version>`` groups for
+real on a deploy with ``ANTHROPIC_API_KEY`` set and fails closed with
+503 on one without. See G0.18-T7 (#1360) for the prior build-time-only
+framing this replaces.
 
 Multi-spec merge
 ----------------
@@ -63,6 +73,7 @@ exercised. Useful for operators validating a spec before committing.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Literal
 from uuid import UUID
@@ -73,6 +84,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._lookup import dispatch_product
 from meho_backplane.operations.ingest._llm_grouping_internals import (
     DEFAULT_GROUPING_BATCH_SIZE,
     DEFAULT_MAX_GROUPS,
@@ -84,6 +96,9 @@ from meho_backplane.operations.ingest.api_schemas import (
     GroupingResultModel,
     IngestionResultModel,
     SpecSource,
+)
+from meho_backplane.operations.ingest.catalog import (
+    info_version_matches_compatibility,
 )
 from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
@@ -136,18 +151,33 @@ LlmClientFactory = Callable[[], LlmClient]
 
 
 def default_llm_client_factory() -> LlmClient:
-    """Fail-closed default — no production LLM adapter is wired yet.
+    """Fail-closed default for when no LLM-client factory is injected.
 
     Public so that sibling consumers (REST routes at T6, CLI verbs at
     T5, admin MCP tools at T7) can import the same fallback factory
     from :mod:`meho_backplane.operations.ingest` without reaching
     across the underscore boundary.
+
+    This is the *unwired* fallback. Production deploys override it at
+    FastAPI lifespan startup (#1386):
+    :func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`
+    is installed via
+    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`,
+    reusing ``settings.anthropic_api_key``. This default is what runs
+    only when an :class:`IngestionPipelineService` is constructed with
+    no explicit factory and the lifespan wiring has not run (CI / unit
+    tests, which inject their own deterministic stub instead).
     """
     raise LlmClientUnavailable(
-        "no LLM client configured for spec-ingestion grouping; "
-        "the production Anthropic adapter lands with G0.7-T5 (#405). "
-        "Tests inject a deterministic stub via "
-        "IngestionPipelineService(..., llm_client_factory=...).",
+        "no LLM client configured for spec-ingestion grouping; this is "
+        "the fail-closed default that runs when no factory was injected "
+        "and FastAPI lifespan startup did not wire one. Tests inject a "
+        "deterministic stub via "
+        "IngestionPipelineService(..., llm_client_factory=...); "
+        "production deploys wire build_anthropic_ingest_llm_client at "
+        "lifespan startup (#1386) — if you hit this on a real deploy, "
+        "lifespan startup did not run or ANTHROPIC_API_KEY drove a "
+        "different LlmClientUnavailable from the production factory.",
     )
 
 
@@ -410,6 +440,7 @@ class IngestionPipelineService:
         specs: Sequence[SpecSource],
         requested_version: str,
         log: structlog.stdlib.BoundLogger,
+        spec_info_versions_compatible: tuple[str, ...] | None = None,
     ) -> None:
         """Cross-check operator-supplied ``version`` against every spec's ``info.version``.
 
@@ -440,9 +471,25 @@ class IngestionPipelineService:
         operation walk — so an obviously-misclassified ingest fails
         in milliseconds rather than after we've spent CPU parsing a
         2,000-op spec.
+
+        ``spec_info_versions_compatible`` is the catalog row's opt-in
+        compatibility range (G0.16-T5 #1307). When non-``None``,
+        per-spec classification bypasses the verbatim/major-band check
+        for any spec whose ``info.version`` matches a pattern in the
+        range — the catalog has explicitly declared its label
+        (e.g. ``"3"`` for gh-rest) decouples from the spec's
+        documentation version (``"1.1.4"`` and growing on
+        ``rest-api-description``). The multi-spec consistency pass
+        still runs over the per-spec list so two specs whose
+        ``info.version`` values fall in different majors still trip
+        ``multi_spec_inconsistent`` — the opt-in only widens the
+        label-vs-spec axis.
         """
         per_spec, mismatches = self._classify_per_spec(
-            specs=specs, requested_version=requested_version, log=log
+            specs=specs,
+            requested_version=requested_version,
+            log=log,
+            spec_info_versions_compatible=spec_info_versions_compatible,
         )
         if mismatches:
             raise _build_spec_label_mismatch(
@@ -456,6 +503,7 @@ class IngestionPipelineService:
         specs: Sequence[SpecSource],
         requested_version: str,
         log: structlog.stdlib.BoundLogger,
+        spec_info_versions_compatible: tuple[str, ...] | None = None,
     ) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
         """Read each spec's ``info.version`` and bucket the outcome.
 
@@ -464,11 +512,18 @@ class IngestionPipelineService:
         the multi-spec consistency pass); ``mismatches`` lists only
         the rows whose ``info.version`` was incompatible with the
         operator's label.
+
+        ``spec_info_versions_compatible`` (G0.16-T5 #1307) flips the
+        label-vs-spec check off for any spec whose ``info.version``
+        matches a catalog-declared pattern. When the bypass fires we
+        emit ``connector_ingest_version_label_decoupled`` so the
+        structured-log trail still shows the decision and the values
+        that flowed through it.
         """
         per_spec: list[tuple[str, str | None]] = []
         mismatches: list[tuple[str, str | None]] = []
         for spec in specs:
-            info_version = read_spec_info_version(spec.uri)
+            info_version = read_spec_info_version(spec.uri, content=spec.content)
             per_spec.append((spec.uri, info_version))
             if info_version is None:
                 # No info.version → no cross-check possible. Operators
@@ -479,6 +534,22 @@ class IngestionPipelineService:
                     "connector_ingest_version_check_skipped",
                     spec_uri=spec.uri,
                     reason="spec_info_version_missing",
+                )
+                continue
+            if spec_info_versions_compatible and info_version_matches_compatibility(
+                info_version, spec_info_versions_compatible
+            ):
+                # Catalog opted in to label-vs-spec decoupling and the
+                # spec's info.version is inside the declared band. Skip
+                # both the label-vs-spec compare and the drift warning;
+                # leave a structured trace so the audit shows that the
+                # bypass fired with which patterns and values.
+                log.info(
+                    "connector_ingest_version_label_decoupled",
+                    spec_uri=spec.uri,
+                    spec_info_version=info_version,
+                    requested_version=requested_version,
+                    compatibility_patterns=list(spec_info_versions_compatible),
                 )
                 continue
             match = _classify_version_match(info_version, requested_version)
@@ -508,6 +579,7 @@ class IngestionPipelineService:
         base_url: str | None = None,
         tenant_id: UUID | None = None,
         dry_run: bool = False,
+        spec_info_versions_compatible: tuple[str, ...] | None = None,
     ) -> IngestionPipelineResult:
         """Run the full pipeline (parse → register → group) for one connector.
 
@@ -521,6 +593,14 @@ class IngestionPipelineService:
         doesn't permit writes to *tenant_id*. The parser, registrar,
         and grouping pass propagate their own domain exceptions
         verbatim — the router catches them at the HTTP boundary.
+
+        ``spec_info_versions_compatible`` (G0.16-T5 #1307) is the
+        catalog row's opt-in compatibility range. The route resolver
+        passes it through for catalog-driven ingests; the
+        explicit-quadruple shape leaves it ``None``. When present,
+        the spec-vs-label cross-check accepts ``info.version`` values
+        inside the declared band even if they differ from the
+        operator's ``version`` label.
         """
         self._authorize(tenant_id)
         connector_id = build_connector_id(product, version, impl_id)
@@ -537,30 +617,90 @@ class IngestionPipelineService:
         # boundary rather than letting an operator dry-run a spec that
         # belongs under a different version label and convince themselves
         # the real ingest will work.
-        self._validate_spec_versions(specs=specs, requested_version=version, log=log)
+        self._validate_spec_versions(
+            specs=specs,
+            requested_version=version,
+            log=log,
+            spec_info_versions_compatible=spec_info_versions_compatible,
+        )
 
         if dry_run:
-            log.info("ingestion_pipeline_dry_run_start")
-            # G0.9-T9 (#741) — pre-flight runs in dry-run too so the
-            # operator validating a spec sees the same 422 they would
-            # see on the real path; the check is cheap (one v2-registry
-            # snapshot walk) and parallels the dispatcher's resolver
-            # contract. ``register_ingested_operations`` (the real-path
-            # caller) re-invokes the same helper before the auto-shim
-            # is synthesised; the duplicate call is idempotent.
-            check_version_covered_by_registered_class(
-                product=product,
-                version=version,
-                impl_id=impl_id,
-            )
-            return await self._run_dry_run(
+            return await self._dispatch_dry_run(
                 product=product,
                 version=version,
                 impl_id=impl_id,
                 specs=specs,
                 connector_id=connector_id,
+                log=log,
             )
 
+        return await self._dispatch_real_run(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            specs=specs,
+            base_url=base_url,
+            tenant_id=tenant_id,
+            connector_id=connector_id,
+            log=log,
+        )
+
+    # ----- private helpers ------------------------------------------------
+
+    async def _dispatch_dry_run(
+        self,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        specs: Sequence[SpecSource],
+        connector_id: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> IngestionPipelineResult:
+        """Pre-flight + parse-only dry-run wrapper.
+
+        Extracted from :meth:`ingest` to keep the orchestrator slim:
+        the dry-run path needs the v2-registry coverage check
+        (G0.9-T9 #741 — the operator validating a spec sees the same
+        422 they would see on the real path, and the check is cheap)
+        plus the parse-only execution.
+        :func:`register_ingested_operations` (the real-path caller)
+        re-invokes :func:`check_version_covered_by_registered_class`
+        before the auto-shim is synthesised; the duplicate call is
+        idempotent.
+        """
+        log.info("ingestion_pipeline_dry_run_start")
+        check_version_covered_by_registered_class(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        return await self._run_dry_run(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            specs=specs,
+            connector_id=connector_id,
+        )
+
+    async def _dispatch_real_run(
+        self,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        specs: Sequence[SpecSource],
+        base_url: str | None,
+        tenant_id: UUID | None,
+        connector_id: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> IngestionPipelineResult:
+        """Drive the register → group phases for a non-dry-run ingest.
+
+        Extracted from :meth:`ingest` so the public method stays at
+        the "validate, dispatch" abstraction level; the per-phase
+        log binding + result aggregation lives here.
+        """
         log.info("ingestion_pipeline_start")
         sessionmaker = self._sessionmaker()
         aggregated = await self._run_register_phase(
@@ -580,8 +720,16 @@ class IngestionPipelineService:
             connector_registered=aggregated.connector_registered,
         )
 
+        # Grouping reads the descriptor rows the register phase just
+        # wrote and writes its OperationGroup rows under the same
+        # product. register_ingested_operations persists rows under the
+        # dispatch-canonical product (reconciling the VCF-family
+        # long↔short split), so the grouping pass must key on the same
+        # spelling or it would read zero ungrouped ops and write groups
+        # under a product no dispatch probe queries. claude-rdc-hetzner-dc#1136.
+        row_product = dispatch_product(product=product, version=version, impl_id=impl_id)
         grouping_result = await self._run_grouping_phase(
-            product=product,
+            product=row_product,
             version=version,
             impl_id=impl_id,
             tenant_id=tenant_id,
@@ -598,8 +746,6 @@ class IngestionPipelineService:
             ingestion=aggregated,
             grouping=grouping_result,
         )
-
-    # ----- private helpers ------------------------------------------------
 
     async def _run_dry_run(
         self,
@@ -620,7 +766,17 @@ class IngestionPipelineService:
         """
         total_ops = 0
         for spec in specs:
-            parsed = parse_openapi(spec.uri, spec_source=spec.uri)
+            # G0.16-T1 (#1303): wrap the synchronous parser in
+            # ``asyncio.to_thread`` so a 7+ MB OpenAPI spec walk does
+            # not block the event loop. ``parse_openapi`` is pure
+            # CPU + I/O on a private file -- it never touches asyncio
+            # state -- so the thread-pool offload is safe without
+            # extra synchronisation. Yielding the loop between specs
+            # lets the request handler return its 202 + handle inside
+            # the kubelet liveness-probe budget.
+            parsed = await asyncio.to_thread(
+                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
+            )
             total_ops += len(parsed)
         ingestion = IngestionResult(
             inserted_count=total_ops,
@@ -667,7 +823,16 @@ class IngestionPipelineService:
         connector_registered = False
 
         for spec in specs:
-            protos = parse_openapi(spec.uri, spec_source=spec.uri)
+            # G0.16-T1 (#1303): same thread-pool offload as the
+            # dry-run path -- the synchronous parser is the worst
+            # event-loop-blocking offender on real vendor specs
+            # (vmware/9.0 ingest blocked the loop for ~30 s before
+            # this hop). ``register_ingested_operations`` is already
+            # an async coroutine that yields on every DB write so
+            # it doesn't need the same treatment.
+            protos = await asyncio.to_thread(
+                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
+            )
             partial = await register_ingested_operations(
                 product=product,
                 version=version,

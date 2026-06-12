@@ -5,36 +5,16 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// RefreshResult mirrors the backend RefreshResult Pydantic model
-// (backend/src/meho_backplane/topology/refresh.py). Hand-written
-// rather than aliased to a generated client type so the topology
-// package stays decoupled from the generated client's surface — the
-// targets/operation/kb packages take the same stance for the same
-// reason (generated types churn on every spec re-snapshot).
-type RefreshResult struct {
-	TargetID     string `json:"target_id"`
-	AddedNodes   int    `json:"added_nodes"`
-	RemovedNodes int    `json:"removed_nodes"`
-	UpdatedNodes int    `json:"updated_nodes"`
-	AddedEdges   int    `json:"added_edges"`
-	RemovedEdges int    `json:"removed_edges"`
-	UpdatedEdges int    `json:"updated_edges"`
-	// DurationMs is wall-clock for the whole resolve + discover +
-	// reconcile + commit cycle. float64 mirrors the backend
-	// RefreshResult.duration_ms (a Python float), so --json round-trips
-	// the full T5 contract rather than silently dropping the field.
-	DurationMs float64 `json:"duration_ms"`
-}
 
 // newRefreshCmd returns the `meho topology refresh <target>` command.
 //
@@ -93,9 +73,21 @@ func runRefresh(cmd *cobra.Command, opts refreshOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := postRefresh(cmd.Context(), backplaneURL, opts.Target)
+	result, statusCode, body, err := postRefresh(cmd.Context(), backplaneURL, opts.Target)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if result == nil {
+		// Guard 200 + missing-content-type leaving JSON200 nil — without
+		// this, printRefreshSummary would dereference nil. Mirrors the
+		// kb / memory iter-2 nil-guard pattern.
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a refresh-result payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
@@ -106,28 +98,44 @@ func runRefresh(cmd *cobra.Command, opts refreshOptions) error {
 
 // buildRefreshPath assembles the POST path. The target is a single
 // path segment; pathEscape keeps an operator-typed name with spaces
-// or slashes from corrupting the URL. Exposed for unit tests.
+// or slashes from corrupting the URL. The generated client also uses
+// the target name as a path segment internally; this helper stays
+// exposed for the unit test that asserts the wire-level path shape.
 func buildRefreshPath(target string) string {
 	return "/api/v1/topology/refresh/" + pathEscape(target)
 }
 
-func postRefresh(ctx context.Context, backplaneURL, target string) (*RefreshResult, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", buildRefreshPath(target), nil)
+func postRefresh(
+	ctx context.Context,
+	backplaneURL, target string,
+) (*api.RefreshResult, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out RefreshResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode refresh response: %w", err)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RefreshApiV1TopologyRefreshTargetNamePostResponse, error) {
+			return authed.RefreshApiV1TopologyRefreshTargetNamePostWithResponse(ctx, target, nil)
+		},
+		func(r *api.RefreshApiV1TopologyRefreshTargetNamePostResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return &out, nil
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
 }
 
 // printRefreshSummary renders the reconcile counts as a compact
 // two-column summary. The shape mirrors the kb/vault sibling
 // convention of a stable key-value block rather than a one-row table.
-func printRefreshSummary(w io.Writer, target string, r *RefreshResult) {
-	fmt.Fprintf(w, "refreshed topology for %q (target_id=%s)\n", target, r.TargetID)
+//
+// `r.DurationMs` is a float32 in the generated client (the wire
+// contract is a Pydantic float); Printf's `%.0f` accepts both.
+// `r.TargetId` is a UUID (`openapi_types.UUID` ≡ `uuid.UUID`); its
+// `String()` method renders the canonical 8-4-4-4-12 form for the
+// audit-correlation line.
+func printRefreshSummary(w io.Writer, target string, r *api.RefreshResult) {
+	fmt.Fprintf(w, "refreshed topology for %q (target_id=%s)\n", target, r.TargetId)
 	fmt.Fprintf(w, "  nodes:  +%d  -%d  ~%d\n", r.AddedNodes, r.RemovedNodes, r.UpdatedNodes)
 	fmt.Fprintf(w, "  edges:  +%d  -%d  ~%d\n", r.AddedEdges, r.RemovedEdges, r.UpdatedEdges)
 	fmt.Fprintf(w, "  took:   %.0f ms\n", r.DurationMs)

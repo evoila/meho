@@ -269,7 +269,7 @@ Once G0.2 fully lands:
    )
    ```
 5. **Restart.** Lifespan eager-import picks up both the connector and the MCP tools.
-6. **Operator side:** `meho targets create --product harbor --host harbor.evba.lab ...` (or `meho targets import` from a `targets.yaml` entry).
+6. **Operator side:** register the target by importing a `targets.yaml` entry — `meho targets import targets.yaml` (see the cross-repo onboarding docs for the descriptor shape).
 7. **Verify:** `meho targets probe harbor-evba` → fingerprint. `meho harbor project.list` → ops.
 
 ### As an Initiative

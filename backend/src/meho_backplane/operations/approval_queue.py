@@ -66,12 +66,14 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
     AuditLog,
 )
+from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
 __all__ = [
@@ -79,6 +81,7 @@ __all__ = [
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ParamsMismatchError",
+    "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
     "create_pending_request",
@@ -87,6 +90,7 @@ __all__ = [
     "list_pending",
     "publish_approval_event",
     "reject_request",
+    "resume_dispatch_after_approval",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -146,6 +150,32 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class SelfApprovalForbiddenError(ApprovalError):
+    """The approver is the same principal that requested the approval.
+
+    Raised by :func:`approve_request` when
+    ``operator.sub == request.principal_sub`` and the deployment has not
+    enabled the audited single-operator break-glass mode
+    (``Settings.approval_allow_self_approval``). Enforces the
+    requester != approver invariant (G11.7-T1 #1401): a single account
+    must not be able to both request and grant a privileged connector
+    write. The route layer maps this to 403.
+
+    Reject is deliberately *not* guarded — an operator withdrawing their
+    own pending request is not a privilege escalation.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, principal_sub: str) -> None:
+        self.request_id = request_id
+        self.principal_sub = principal_sub
+        super().__init__(
+            f"operator {principal_sub!r} may not approve approval_request "
+            f"{request_id}: requester and approver must differ "
+            "(set APPROVAL_ALLOW_SELF_APPROVAL=true for audited "
+            "single-operator break-glass)"
         )
 
 
@@ -216,6 +246,9 @@ async def _write_audit_row(
     await session.flush()
 
 
+# code-quality-allow: already over the 100-line limit on main before #1481
+# (105 lines); the principal_act source fix adds a handful of lines, not the
+# bulk — splitting the row-build + audit-write is out of scope for this fix.
 async def create_pending_request(
     session: AsyncSession,
     *,
@@ -245,8 +278,10 @@ async def create_pending_request(
         op_id: The operation id.
         target: The dispatch target (or ``None`` for tenant-wide ops).
             ``target.id`` is extracted when present.
-        params: The original dispatch params. Used to verify hash
-            consistency; not stored on the row.
+        params: The original dispatch params. Stored verbatim on the row
+            (#1503) so any approval surface (REST ``/decide``, MCP by-id
+            approve) can re-dispatch a parked direct operator op with the
+            stored params, and also used to verify hash consistency.
         params_hash: Pre-computed
             :func:`~meho_backplane.operations._validate.compute_params_hash`
             of *params*. Stored for resume-path verification.
@@ -272,7 +307,15 @@ async def create_pending_request(
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
 
-    principal_act: str | None = getattr(operator, "identity_act", None)
+    # RFC 8693 ``act`` (#1481): the agent principal acting on the human
+    # subject's behalf on a delegated run, read from the same
+    # ``actor_delegation`` contextvar the synchronous audit log resolves
+    # (``resolve_actor_sub``). Keeps the row's ``principal_sub`` +
+    # ``principal_act`` lineage in lock-step with the audit log; a direct
+    # human / autonomous-agent call (no delegation bound) resolves to
+    # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
+    # dead code — ``Operator`` has no such field, so it was always ``None``.
+    principal_act: str | None = resolve_actor_sub()
 
     request = ApprovalRequest(
         id=uuid.uuid4(),
@@ -284,6 +327,7 @@ async def create_pending_request(
         connector_id=connector_id,
         target_id=target_id,
         params_hash=params_hash,
+        params=params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
         created_at=_now(),
@@ -335,7 +379,14 @@ async def approve_request(
     1. The row exists and belongs to ``operator.tenant_id`` (else 404).
     2. The operator holds at least the ``operator`` role (else 403).
     3. The row is still ``pending`` (else 409).
-    4. If *params* is supplied, ``compute_params_hash(params)`` matches
+    4. The approver is not the requester — ``operator.sub !=
+       request.principal_sub`` — unless the deployment enabled the
+       audited single-operator break-glass mode
+       (``Settings.approval_allow_self_approval``). Else 403,
+       :class:`SelfApprovalForbiddenError` (G11.7-T1 #1401). Checked
+       before the hash check so a self-approver learns *why* they are
+       refused rather than being told their params mismatch.
+    5. If *params* is supplied, ``compute_params_hash(params)`` matches
        the stored ``params_hash`` (else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
        operator-decision path (G11.2-T5 MCP/CLI surface) approves by
@@ -372,20 +423,14 @@ async def approve_request(
         ApprovalNotFoundError: No row for *request_id* in this tenant.
         UnauthorizedApprovalError: Operator lacks ``operator`` role.
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
+        SelfApprovalForbiddenError: Approver is the requester and
+            break-glass is disabled (G11.7-T1 #1401).
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
             (only raised when *params* is supplied).
     """
-    _check_reviewer_role(operator)
-
-    request = await _load_for_tenant(session, request_id, operator.tenant_id)
-
-    if request.status != ApprovalRequestStatus.PENDING.value:
-        raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
-
-    if params is not None:
-        incoming_hash = compute_params_hash(params)
-        if incoming_hash != request.params_hash:
-            raise ParamsMismatchError(request_id)
+    request = await _load_pending_for_approval(
+        session, request_id, operator=operator, params=params
+    )
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -486,6 +531,140 @@ async def reject_request(
     return request
 
 
+async def resume_dispatch_after_approval(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    """Re-hydrate the stored target and re-dispatch an approved op (#1503, G11.7-T1).
+
+    The single execute-after-approve entry point shared by every operator
+    approval surface — REST ``/approve`` and ``/decide``, and the MCP
+    by-id approve tool. It re-runs the original dispatch under the
+    committed approval decision (``dispatch(..., _approved=True)``), so a
+    parked **direct** operator op is executed exactly once regardless of
+    which surface granted it. The in-process agent-run resume path does
+    not call this — it keeps the params in memory and re-dispatches from
+    there (see :mod:`meho_backplane.agent.approval_wait`).
+
+    *params* source:
+
+    * REST ``/approve`` passes the caller-supplied params (already
+      hash-verified against ``params_hash`` by :func:`approve_request`).
+    * ``/decide`` and the MCP by-id approve hold only the request id, so
+      they pass ``params=None`` and this helper falls back to the params
+      stored on the row at park time (``request.params``, #1503). A row
+      written before migration 0036 has ``params IS NULL`` and no
+      caller-supplied params — there is nothing to re-dispatch, so the
+      helper **fails closed** with a structured ``denied`` result naming
+      the gap (the op must be resumed via REST ``/approve`` + params, the
+      pre-0036 path).
+
+    Target re-hydration (G11.7-T1 #1401): the row persists only
+    ``target_id``, not the full target. A write op whose handler reads
+    ``target.host`` / ``target.name`` would mis-resolve (or crash) if
+    re-dispatched with ``target=None``, so a concrete ``target_id`` is
+    re-loaded by id (tenant-scoped, ``deleted_at IS NULL``). A target
+    soft-deleted (or revoked) between request and approval resolves to
+    ``None``; the re-dispatch then **fails closed** (structured ``denied``,
+    never calls :func:`dispatch`) rather than executing the approved
+    privileged write outside the original target scope. Tenant-wide ops
+    (no original target) keep ``target_id IS NULL`` → ``None`` and
+    dispatch normally.
+
+    The re-dispatch bypasses the policy gate (``_approved=True``): the
+    committed approval decision is the authorization. Without the bypass
+    the re-dispatch would re-queue (a human/service principal now routes
+    ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
+    re-hits ``needs-approval``), so the approved op would never execute.
+    """
+    effective_params = params if params is not None else request.params
+    if effective_params is None:
+        # Pre-0036 row (params not stored) approved via a surface that
+        # carries no params (/decide, MCP by-id). Nothing to re-dispatch.
+        _log.warning(
+            "approval_resume_params_unavailable",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+        return result_denied(
+            request.op_id,
+            (
+                f"approval request {request.id} has no stored params "
+                "(parked before migration 0036); re-dispatch refused — "
+                "approve via REST /approve with the original params instead"
+            ),
+            0.0,
+        )
+
+    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    if denied is not None:
+        return denied
+
+    from meho_backplane.operations.dispatcher import dispatch
+
+    return await dispatch(
+        operator=operator,
+        connector_id=request.connector_id,
+        op_id=request.op_id,
+        target=resolved_target,
+        params=effective_params,
+        _approved=True,
+    )
+
+
+async def _rehydrate_resume_target(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> tuple[Any, Any]:
+    """Re-load the stored target by id for a resume re-dispatch (G11.7-T1 #1401).
+
+    Returns ``(resolved_target, None)`` on success — ``resolved_target``
+    is ``None`` for a tenant-wide op (no ``target_id`` pinned) and the
+    live :class:`Target` otherwise. Returns ``(None, denied_result)`` when
+    a concrete ``target_id`` was pinned at request time but no live target
+    resolves it now (soft-deleted / revoked between request and approval,
+    or cross-tenant): the caller must **fail closed** and not dispatch,
+    since dispatching with ``target=None`` would let a typed handler that
+    derives its connection from ``connector_id`` / ``params`` execute the
+    approved privileged write outside the original target scope.
+    """
+    if request.target_id is None:
+        return None, None
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.targets.resolver import resolve_target_by_id
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        resolved_target = await resolve_target_by_id(session, operator.tenant_id, request.target_id)
+    if resolved_target is not None:
+        return resolved_target, None
+
+    _log.warning(
+        "approval_resume_target_unresolvable",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        target_id=str(request.target_id),
+        operator_sub=operator.sub,
+    )
+    denied = result_denied(
+        request.op_id,
+        (
+            f"approved target {request.target_id} no longer resolves "
+            "(soft-deleted or revoked between request and approval); "
+            "re-dispatch refused to avoid executing outside the "
+            "original target scope"
+        ),
+        0.0,
+    )
+    return None, denied
+
+
 async def expire_stale_requests(
     session: AsyncSession,
     *,
@@ -511,6 +690,12 @@ async def expire_stale_requests(
 
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
+        Each row carries the transient ``_audit_id`` attribute (the
+        decision row's primary key) so the caller can publish a
+        fail-open ``approval.expired`` broadcast event **after commit**
+        via :func:`publish_approval_event`. The attribute is set on
+        every returned row — see :func:`approve_request` /
+        :func:`reject_request` for the same pattern.
     """
     # Enforce the operator-role floor the docstring promises, mirroring
     # approve_request / reject_request (CodeRabbit #1086).
@@ -532,9 +717,10 @@ async def expire_stale_requests(
         request.decided_at = cutoff
         await session.flush()
 
+        expire_audit_id = uuid.uuid4()
         await _write_audit_row(
             session,
-            audit_id=uuid.uuid4(),
+            audit_id=expire_audit_id,
             operator=operator,
             request=request,
             path="approval.decision",
@@ -549,6 +735,12 @@ async def expire_stale_requests(
             op_id=request.op_id,
             tenant_id=str(operator.tenant_id),
         )
+        # Expose the audit_id as a transient attr so the caller can
+        # publish the ``approval.expired`` broadcast event AFTER commit.
+        # See create_pending_request / approve_request / reject_request
+        # for the same publish-after-commit invariant: a publish-before-
+        # commit would surface a phantom event if the commit fails.
+        request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
     return rows
 
@@ -567,6 +759,65 @@ def _check_reviewer_role(operator: Operator) -> None:
             operator_sub=operator.sub,
             role=operator.tenant_role.value,
         )
+
+
+def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`SelfApprovalForbiddenError` on a self-approval.
+
+    Enforces requester != approver (G11.7-T1 #1401): the principal that
+    parked the request (``request.principal_sub``) may not also approve
+    it unless the deployment enabled the audited single-operator
+    break-glass mode (``Settings.approval_allow_self_approval``). The
+    comparison is on the stable ``sub`` claim, so a renamed display name
+    cannot launder a self-approval.
+
+    Imported lazily to keep the queue module decoupled from settings at
+    import time (mirrors the local ``TenantRole`` import in
+    :func:`_check_reviewer_role`).
+    """
+    if operator.sub != request.principal_sub:
+        return
+
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_allow_self_approval:
+        _log.warning(
+            "approval_self_approval_break_glass",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        return
+
+    raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub)
+
+
+async def _load_pending_for_approval(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    *,
+    operator: Operator,
+    params: dict[str, Any] | None,
+) -> ApprovalRequest:
+    """Load + validate a row for approval, raising on any precondition failure.
+
+    Runs the full approve precondition ladder in order so callers learn
+    the most specific reason first: role gate → tenant-scoped load →
+    pending guard → self-approval guard (G11.7-T1 #1401) → params-hash
+    check (only when *params* is supplied). Returns the validated
+    pending row; the caller flips status + writes the decision audit row.
+    """
+    _check_reviewer_role(operator)
+    request = await _load_for_tenant(session, request_id, operator.tenant_id)
+    if request.status != ApprovalRequestStatus.PENDING.value:
+        raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+    _check_self_approval(operator, request)
+    if params is not None:
+        incoming_hash = compute_params_hash(params)
+        if incoming_hash != request.params_hash:
+            raise ParamsMismatchError(request_id)
+    return request
 
 
 async def _load_for_tenant(
@@ -649,9 +900,10 @@ async def publish_approval_event(
 ) -> None:
     """Publish a fail-open broadcast event for an approval lifecycle step.
 
-    *decision* is one of ``"pending"`` (creation), ``"approved"``, or
-    ``"rejected"``. The broadcast ``op_id`` is ``approval.<decision>``
-    so operator watchers can match the family with a simple glob.
+    *decision* is one of ``"pending"`` (creation), ``"approved"``,
+    ``"rejected"``, or ``"expired"`` (sweeper-driven). The broadcast
+    ``op_id`` is ``approval.<decision>`` so operator watchers can match
+    the family with a simple glob (``approval.*``).
     """
     try:
         from meho_backplane.broadcast.events import BroadcastEvent, classify_op

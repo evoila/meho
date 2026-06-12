@@ -65,12 +65,14 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
     get_request,
     list_pending,
     publish_approval_event,
     reject_request,
+    resume_dispatch_after_approval,
 )
 
 _log = structlog.get_logger(__name__)
@@ -82,6 +84,56 @@ _OP_IDS: Final[dict[str, str]] = {
     "approve": "approval.approve",
     "reject": "approval.reject",
 }
+
+#: Allowed ``status`` filter values on ``meho.approvals.list``. Mirrors
+#: :class:`~meho_backplane.db.models.ApprovalRequestStatus` plus the
+#: ``"all"`` sentinel that means "no filter". Pinning the enum here (and
+#: in the inputSchema below) brings ``meho.approvals.list.status`` into
+#: parity with ``meho.scheduler.list.status``: both surface the allowed
+#: vocabulary as a JSON-Schema ``enum`` rather than prose, so a schema-
+#: driven MCP client renders the same dropdown shape for sibling list
+#: filters (RDC #789 N4 / G0.18-T5 #1358).
+_LIST_STATUS_VALUES: Final[tuple[str, ...]] = (
+    "pending",
+    "approved",
+    "rejected",
+    "expired",
+    "all",
+)
+
+#: Shared ``approval_request_id`` schema fragment with the deprecated
+#: ``id`` alias. ``additionalProperties: false`` plus the explicit
+#: alias declaration keeps the wire surface honest: a future schema
+#: tweak adds a new field by name, never by silent passthrough.
+_APPROVAL_REQUEST_ID_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "format": "uuid",
+    "description": (
+        "Approval request UUID. Canonical name "
+        "(G0.18-T5 #1358); matches the `<noun>_id` convention used "
+        "by every other MCP tool that names a resource UUID."
+    ),
+}
+
+#: Deprecated ``id`` alias kept for backward compat with v0.8.0 callers.
+_APPROVAL_LEGACY_ID_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "format": "uuid",
+    "description": (
+        "DEPRECATED alias for `approval_request_id` (v0.8.0 wire "
+        "shape). Accepted for backward compatibility; new callers "
+        "SHOULD use `approval_request_id`. Mutually exclusive with "
+        "`approval_request_id`; passing both rejects with -32602."
+    ),
+    "deprecated": True,
+}
+
+#: Either alias satisfies the "id required" constraint; the handler
+#: enforces the XOR. Shared across get / approve / reject.
+_APPROVAL_ID_ANYOF: Final[list[dict[str, Any]]] = [
+    {"required": ["approval_request_id"]},
+    {"required": ["id"]},
+]
 
 
 def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
@@ -109,13 +161,30 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
 
 
 def _require_id(arguments: dict[str, Any]) -> uuid.UUID:
-    raw = arguments.get("id")
+    """Resolve the approval-request UUID from the wire arguments.
+
+    Accepts the canonical ``approval_request_id`` (G0.18-T5 #1358) and
+    the deprecated ``id`` (v0.8.0 wire shape) as aliases — exactly one
+    must be supplied. Passing both rejects with -32602. The
+    ``<noun>_id`` rename aligns with every other MCP tool that names a
+    resource UUID (``trigger_id`` / ``audit_id`` / ``agent_session_id``);
+    ``id`` is retained for one cycle so v0.8.0 callers continue to work.
+    """
+    canonical = arguments.get("approval_request_id")
+    legacy = arguments.get("id")
+    if canonical is not None and legacy is not None:
+        raise McpInvalidParamsError(
+            "pass either `approval_request_id` (canonical) or `id` (deprecated alias), not both",
+        )
+    raw = canonical if canonical is not None else legacy
     if not isinstance(raw, str) or not raw:
-        raise McpInvalidParamsError("id is required and must be a non-empty UUID string")
+        raise McpInvalidParamsError(
+            "approval_request_id is required and must be a non-empty UUID string",
+        )
     try:
         return uuid.UUID(raw)
     except ValueError as exc:
-        raise McpInvalidParamsError("id must be a valid UUID") from exc
+        raise McpInvalidParamsError("approval_request_id must be a valid UUID") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +244,29 @@ register_mcp_tool(
             "properties": {
                 "status": {
                     "type": "string",
+                    "enum": list(_LIST_STATUS_VALUES),
+                    "default": "pending",
                     "description": (
-                        "Filter by status: 'pending' (default), 'approved', "
-                        "'rejected', 'expired', or 'all'."
+                        "Filter by status. 'all' is the sentinel meaning "
+                        "'no filter'. Vocabulary mirrors "
+                        "`meho.scheduler.list.status` (both surface the "
+                        "allowed values as a JSON enum, not prose) — "
+                        "RDC #789 N4 / G0.18-T5."
                     ),
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Page size. Default 50; max 200.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Rows to skip before the first returned row. Default 0.",
+                },
             },
             "additionalProperties": False,
         },
@@ -227,14 +312,17 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
-            "Cross-tenant / absent ids return approval_request_not_found."
+            "Cross-tenant / absent ids return approval_request_not_found. "
+            "Pass either `approval_request_id` (canonical name; "
+            "G0.18-T5 #1358) or the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -263,8 +351,8 @@ async def _approve_handler(
         try:
             # Operator-decision path: no params supplied → approve_request
             # skips the hash check and just flips status + writes the
-            # decision audit row + publishes the approval_decided event.
-            # The agent's REST path (with params) is what re-dispatches.
+            # decision audit row. The params for the re-dispatch are read
+            # back from the row (stored at park time, #1503).
             row = await approve_request(
                 session,
                 request_id,
@@ -278,6 +366,14 @@ async def _approve_handler(
             raise McpInvalidParamsError(
                 f"approval_request_not_pending: current status is {exc.status!r}"
             ) from exc
+        except SelfApprovalForbiddenError as exc:
+            # G11.7-T1 #1401: requester != approver. Surfaced as an
+            # invalid-params error so the operator sees the refusal
+            # reason rather than a generic role failure. Append
+            # ``str(exc)`` so the message also carries the
+            # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
+            # exception already constructs (#1483).
+            raise McpInvalidParamsError(f"self_approval_forbidden: {exc}") from exc
         except UnauthorizedApprovalError as exc:
             raise McpInvalidParamsError(
                 f"approval_unauthorized: role {exc.role!r} cannot approve"
@@ -290,28 +386,62 @@ async def _approve_handler(
         principal_sub=operator.sub,
         audit_id=row._audit_id,  # type: ignore[attr-defined]
     )
-    return _row_to_dict(row)
+
+    result = _row_to_dict(row)
+
+    # Direct operator op (no agent run): the approve drives the execute
+    # (#1503). The committed approval is the authorization; the stored
+    # params re-hydrate the dispatch. Agent-run requests (run_id set) are
+    # resumed in-process by the agent runtime off the approval.approved
+    # broadcast — re-dispatching here too would double-execute, so this
+    # MCP tool only records the decision for them (its historical shape).
+    if row.run_id is None:
+        dispatch_result = await resume_dispatch_after_approval(
+            operator=operator, request=row, params=None
+        )
+        _log.info(
+            "approval_request_redispatched",
+            approval_request_id=str(request_id),
+            op_id=row.op_id,
+            dispatch_status=dispatch_result.status,
+            operator_sub=operator.sub,
+            via="mcp",
+        )
+        result["dispatch"] = {
+            "status": dispatch_result.status,
+            "op_id": dispatch_result.op_id,
+            "result": dispatch_result.result,
+            "error": dispatch_result.error,
+        }
+
+    return result
 
 
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.approvals.approve",
         description=(
-            "Approve a pending approval request (G11.2-T5 / #818). "
+            "Approve a pending approval request (G11.2-T5 / #818; #1503). "
             "Operator-level. Flips the request to 'approved', writes the "
             "decision audit row, and announces approval_decided on the "
-            "broadcast feed. The agent's REST resume path is what "
-            "re-dispatches the approved op (with the params it has + the "
-            "_approved gate-bypass) — this MCP tool captures the operator "
-            "decision durably. Only pending requests may be approved; any "
-            "other status returns approval_request_not_pending."
+            "broadcast feed. For a direct operator op (no agent run) the "
+            "approve then re-dispatches the op using the params stored at "
+            "park time, so the approved write lands exactly once; the "
+            "dispatch outcome is returned under `dispatch`. For an "
+            "agent-run request the in-process agent runtime resumes the "
+            "op off the broadcast, so this tool only records the decision. "
+            "Only pending requests may be approved; any other status "
+            "returns approval_request_not_pending. Pass either "
+            "`approval_request_id` (canonical name; G0.18-T5 #1358) or the "
+            "deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID to approve."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -376,18 +506,21 @@ register_mcp_tool(
             "Operator-level. Flips the request to 'rejected', writes the "
             "decision audit row, and announces approval_decided on the "
             "broadcast feed. The original op is not executed. Only "
-            "pending requests may be rejected."
+            "pending requests may be rejected. Pass either "
+            "`approval_request_id` (canonical name; G0.18-T5 #1358) or "
+            "the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID to reject."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
                 "reason": {
                     "type": "string",
                     "description": "Optional rationale recorded on the decision audit row.",
                 },
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

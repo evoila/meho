@@ -196,14 +196,16 @@ flowchart TD
     D -->|invalid| Z2[result_invalid_params]
     D -->|valid| E[4. policy_gate]
     E -->|denied| Z3["result_denied&#10;+ audit_and_broadcast_safe"]
-    E -->|allowed| F[5. resolve_connector]
+    E -->|allowed| F["5. resolve_connector_or_label"]
     F -->|no match| Z4[result_no_connector]
+    F -->|ambiguous| Z4a[result_ambiguous_connector]
     F -->|cls| G["6. branch on source_kind&#10;ingested / typed / composite"]
     G --> H["7. reduce&#10;(JSONFlux)"]
     H -->|reducer raises| Z5["connector_error&#10;+ audit_and_broadcast_safe"]
     H -->|raw, handle| I["8. audit_and_broadcast_safe&#10;(write row, publish event)"]
     I --> J[9. return OperationResult]
     G -->|handler raises| Z6["connector_error&#10;+ audit_and_broadcast_safe"]
+    G -->|handler raises NotImplementedError| Z6a["connector_unsupported&#10;+ audit_and_broadcast_safe"]
     G -->|ImportError / TypeError| Z7["handler_unreachable&#10;+ audit_and_broadcast_safe"]
 ```
 
@@ -213,7 +215,7 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 2. **Look up `EndpointDescriptor`** by the natural key `(tenant_id, product, version, impl_id, op_id)` with the tenant union (`tenant_id IS NULL OR tenant_id == operator.tenant_id`). Miss → structured `unknown_op` error with `known_op_count` in `extras` so the agent's "did you mean" path has a signal.
 3. **Validate `params`** against `descriptor.parameter_schema` via `jsonschema.Draft202012Validator`. Invalid → structured `invalid_params` error carrying every validator path that failed.
 4. **Policy gate.** v0.2 default-allow; `requires_approval=True` → `denied`. The gate writes an audit row before returning (so denials are visible in `audit_log` even though the op never executed).
-5. **Resolve the connector class** via `resolve_connector(target)` and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). Resolver miss → structured `no_connector` error.
+5. **Resolve the connector class** via [`resolve_connector_or_label(target)`](../../backend/src/meho_backplane/connectors/resolver.py) — the shared wrapper around `resolve_connector(target)` — and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). The helper translates resolver exceptions to labels: `NoMatchingConnector` → `no_connector` (structured error, message in `extras.exception_message`); `AmbiguousConnectorResolution` → `ambiguous_connector` (G0.14-T1 #1142 — message naming the candidates + the remediation step rides in `extras.exception_message`). Both source-kind branches (ingested AND typed/composite-with-target) share this helper; the `/api/v1/targets/{name}/probe` route consults the same helper so dispatch and probe agree on yes/no/ambiguous (consumer feedback signal 19, `claude-rdc-hetzner-dc#697`). A typed/composite op with `target=None` skips the resolver: a connector-bound (self-first) handler yields the `target_required` label (G0.20-T6 #1506 — keyed on handler shape, not just source-kind), while a module-level handler dispatches with `connector_instance=None`.
 6. **Branch on `descriptor.source_kind`** — see [`operations/_branches.py`](../../backend/src/meho_backplane/operations/_branches.py).
 7. **JSONFlux-wrap the response via the `Reducer`.** The default is [`JsonFluxReducer`](jsonflux.md) (G0.6.1, #750), which materializes large set-shaped responses as a `ResultHandle` and passes small ones through; the call is **wrapped in `try/except`** so reducer exceptions land as `connector_error` (with the audit row + broadcast event still firing).
 8. **Write the audit row + publish a broadcast event** via [`_audit.audit_and_broadcast_safe`](../../backend/src/meho_backplane/operations/_audit.py). Audit failure → logged at error level; broadcast skipped (the event would reference a phantom row). Broadcast failure → logged, fail-open per `publish_event`'s contract.
@@ -223,14 +225,18 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 
 The dispatcher never raises; it always returns an `OperationResult`. Every error-shaped exit carries a structured `error` string of the form `"<code>: <human-readable>"` so callers can both string-match (`error.startswith("unknown_op:")`) and parse the suffix for display. Detail payloads land in `extras`. Codes:
 
-| Code                  | When                                                                                  |
-|-----------------------|---------------------------------------------------------------------------------------|
-| `unknown_op`          | Natural key didn't resolve a descriptor.                                              |
-| `invalid_params`      | `params` failed JSON Schema validation.                                               |
-| `no_connector`        | Resolver couldn't pick a connector for the target.                                    |
-| `handler_unreachable` | `importlib` couldn't resolve `handler_ref`, or the resolved symbol is not callable.   |
-| `denied`              | Policy gate denied the call.                                                          |
-| `connector_error`     | Connector / handler / reducer raised. Exception class + (length-capped) message in `extras`. |
+| Code                    | When                                                                                  |
+|-------------------------|---------------------------------------------------------------------------------------|
+| `unknown_op`            | Natural key didn't resolve a descriptor.                                              |
+| `invalid_params`        | `params` failed JSON Schema validation.                                               |
+| `no_connector`          | Resolver couldn't pick a connector for the target. `extras.exception_message` carries the resolver's diagnostic text (G0.14-T1 #1142). |
+| `ambiguous_connector`   | Resolver matched two or more connectors and the tie-break ladder couldn't pick. `extras.exception_message` carries the candidate list + remediation step ("set `target.preferred_impl_id` to one of them"). G0.14-T1 (#1142). |
+| `target_required`       | A typed/composite op whose handler is a connector-bound (self-first) method was invoked with `target=None`. The instance is reached *through* the target, so a `None` target is an omitted-argument usage error — caught at resolution time before the handler proceeds unbound and trips `dispatch_typed`'s self-guard `RuntimeError`. A module-level handler (no `self`) needs no target and dispatches unchanged. G0.20-T6 (#1506). |
+| `handler_unreachable`   | `importlib` couldn't resolve `handler_ref`, or the resolved symbol is not callable.   |
+| `denied`                | Policy gate denied the call.                                                          |
+| `awaiting_approval`     | Policy gate issued a `needs_approval` verdict; a durable `ApprovalRequest` row was created. `extras.approval_request_id` carries the UUID. |
+| `connector_unsupported` | Connector / handler raised `NotImplementedError` — the deliberate "this connector doesn't do that" signal (an unsupported `target.auth_model`; an unreplaced ingest auto-shim). The raise-site message is promoted verbatim into the `error` string and `extras.detail`; `extras.cause` distinguishes `unsupported_feature` (fix the target config) from `unreplaced_auto_shim` (register the per-product subclass). G0.23-T1 (#1627). |
+| `connector_error`       | Connector / handler raised any other exception; reducer / redaction raised any exception (the `connector_unsupported` classification applies only to the source-kind branch where connector code runs). Exception class + (length-capped) message in `extras`. |
 
 Why always-return: two distinct surfaces consume `dispatch()`. HTTP routes via FastAPI — a raised exception turns into a 500 via the chassis handler, useful for genuine programming bugs (deleted module) but not for user-input errors. MCP tool handlers + CLI verbs + recursive composite calls — the caller wants a structured result it can render; a raised exception across the MCP JSON-RPC boundary turns into a generic 500 with no diagnostic surface. Returning a structured `OperationResult` for every operator-visible failure mode keeps the contract uniform across the three call sites.
 
@@ -356,13 +362,16 @@ class ResultHandle(BaseModel):
     total_rows: int | None = None
     sample_rows: tuple[Mapping[str, Any], ...] | None = None  # frozen
     ttl_seconds: int
+    fetch_more: FetchMore | None = None                       # G0.15-T8 (#1219)
 ```
 
 Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@model_validator(mode="after")` calling `object.__setattr__` to bypass `frozen=True`'s field guard). Pydantic v2's `frozen=True` is "faux immutability" — it blocks field reassignment but not nested-dict mutation; the wrapping closes that hole so callers can't tamper with a handle post-construction. Matches the sibling `FingerprintResult.extras` / `OperationResult.extras` pattern.
 
 `schema_` carries a trailing underscore to avoid collision with Pydantic's deprecated `BaseModel.schema()` API; it serialises as `schema_` on the wire.
 
-`JsonFluxReducer` now populates `handle` for large set-shaped responses (G0.6.1, #750). The `result_query` / `result_aggregate` / `result_export` / `result_describe` meta-tools that read handles back from the backing store are still a follow-on Initiative.
+`fetch_more` is the G0.15-T8 (#1219) self-documenting drill-in / pagination envelope. Every handle the production reducer mints carries it (the two branches `drill_in` and `native_pagination` are always populated) so an agent reading the response can answer *"how do I get more rows"* from the envelope itself — no MCP-tool / resource-URI / REST-route discovery dance. The shape, the drill-in branch (`available=True` naming the `result_query` tool when the full set was spilled to the `ResultHandleStore`, `available=False` with the narrower-params workaround when it was skipped or the store was unreachable — G0.20-T7 #1507), and the `llm_instructions.pagination_hint` registration slot the reducer reads to build `native_pagination` are documented in [`jsonflux.md` § fetch_more envelope](jsonflux.md#fetch_more-envelope-g015-t8-1219). `None` only on legacy code paths that build a `ResultHandle` directly without going through the reducer (test fixtures); production reduce paths always populate it.
+
+`JsonFluxReducer` populates `handle` for large set-shaped responses (G0.6.1, #750) and spills the full row set to the Valkey-backed `ResultHandleStore`; the `result_query` MCP meta-tool reads windows back from it (G0.20-T7 #1507). See [`jsonflux.md` § Read-back](jsonflux.md#read-back-the-resulthandlestore-g020-t7-1507).
 
 ## The three operation meta-tools
 
@@ -370,7 +379,7 @@ Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@mod
 
 ### `list_operation_groups(connector_id)`
 
-Returns enabled operation groups for a connector. Tenant scoping: union of built-in + tenant-curated rows. Only `review_status='enabled'` groups surface; staged/disabled rows remain hidden from the agent. Operation counts per group are aggregated in a single DB pass (no N+1).
+Returns the operation groups for a connector that are visible to the agent. Tenant scoping: union of built-in + tenant-curated rows. A group surfaces when it is `review_status='enabled'` **or** still staged/disabled at the group level yet holding ≥1 per-op-enabled descriptor (`edit_op is_enabled=true`); the latter is flagged `partial=true` with a non-zero `enabled_op_count` so groups-first discovery isn't blind to per-op enablement that `search_operations` + dispatch already honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and holds zero enabled ops stays hidden. Operation counts per group are aggregated in a single DB pass (no N+1).
 
 The agent uses this **first** when it doesn't know which group to search within.
 

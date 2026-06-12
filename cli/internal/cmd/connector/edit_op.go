@@ -5,12 +5,14 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -18,20 +20,17 @@ import (
 // Matches the safety_level column on endpoint_descriptor (G0.6-T1
 // #392 schema). Fail fast in the CLI rather than letting the
 // backplane 422 surface an unfamiliar value.
-var validSafetyLevels = map[string]struct{}{
-	"safe":      {},
-	"caution":   {},
-	"dangerous": {},
-}
-
-// EditOpBody mirrors the backend EditOpBody Pydantic model. Every
-// field is optional + nullable so partial patches work. Pointer
-// types let json.Marshal omit unset fields cleanly via `omitempty`.
-type EditOpBody struct {
-	CustomDescription *string `json:"custom_description,omitempty"`
-	SafetyLevel       *string `json:"safety_level,omitempty"`
-	RequiresApproval  *bool   `json:"requires_approval,omitempty"`
-	IsEnabled         *bool   `json:"is_enabled,omitempty"`
+//
+// Mirrors the generated `api.EditOpBodySafetyLevel` enum constants
+// (`Safe` / `Caution` / `Dangerous`) so the validator and the wire
+// shape stay in lockstep. The generator-shipped enum values are the
+// authoritative source — we keep this map only to render the verb's
+// helptext + the "expected one of" message in the same order the
+// operator sees in --help.
+var validSafetyLevels = map[string]api.EditOpBodySafetyLevel{
+	"safe":      api.Safe,
+	"caution":   api.Caution,
+	"dangerous": api.Dangerous,
 }
 
 // newEditOpCmd returns the `meho connector edit-op` command.
@@ -46,7 +45,7 @@ type EditOpBody struct {
 //	  [--json] [--backplane <url>]
 //
 // Hits PATCH /api/v1/connectors/<connector_id>/operations/<op_id>
-// with an EditOpBody. tenant_admin role required.
+// with an api.EditOpBody. tenant_admin role required.
 func newEditOpCmd() *cobra.Command {
 	var (
 		customDesc        string
@@ -79,6 +78,11 @@ func newEditOpCmd() *cobra.Command {
 			"connectors (e.g. `GET:/api/vcenter/cluster`). The CLI URL-escapes\n" +
 			"the op_id segment before placing it in the path so the colons\n" +
 			"and slashes survive the routing layer.\n\n" +
+			"--enable on an op whose resolved connector is still the\n" +
+			"unconfigured spec-ingest auto-shim succeeds but prints a\n" +
+			"`warning (unreplaced_auto_shim)` to stderr: dispatch will fail\n" +
+			"until the per-product Connector subclass is registered, and\n" +
+			"re-ingesting the spec will not replace the shim.\n\n" +
 			"Role: tenant_admin.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
@@ -133,7 +137,7 @@ type editOpOptions struct {
 }
 
 func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
-	body := EditOpBody{}
+	body := api.EditOpBody{}
 
 	descText, descSet, err := loadTextFlag(cmd, "custom-description")
 	if err != nil {
@@ -144,7 +148,8 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	}
 
 	if opts.SafetyFlag != "" {
-		if _, ok := validSafetyLevels[opts.SafetyFlag]; !ok {
+		level, ok := validSafetyLevels[opts.SafetyFlag]
+		if !ok {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(fmt.Sprintf(
 					"--safety %q invalid; expected one of: safe | caution | dangerous",
@@ -153,7 +158,7 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 				opts.JSONOut,
 			)
 		}
-		body.SafetyLevel = &opts.SafetyFlag
+		body.SafetyLevel = &level
 	}
 
 	if opts.RequiresApproval {
@@ -183,17 +188,31 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	if err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body); err != nil {
+	patched, err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body)
+	if err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	// Enable-time advisories land on stderr in BOTH output modes
+	// (G0.23-T4 #1630): stdout stays the machine surface (--json) /
+	// the success summary, while "this enable is a dispatch dead end"
+	// must reach the operator even when stdout is piped into jq. The
+	// same warnings ride the --json envelope as structured fields.
+	printEditOpWarnings(cmd.ErrOrStderr(), patched.Warnings)
 	if opts.JSONOut {
-		// Echo the operator's PATCH body — the route returns 204
-		// No Content, so the only structured artifact is the
-		// payload itself. Same shape as edit-group's --json output.
+		// Echo the operator's PATCH body plus the backplane's
+		// advisories — the route's 200 EditOpResponse carries only
+		// `warnings`, so the echoed payload remains the structured
+		// record of what was edited. Same shape as edit-group's
+		// --json output, extended with `warnings`.
 		return output.PrintJSON(cmd.OutOrStdout(), editOpResult{
 			ConnectorID: opts.ConnectorID,
 			OpID:        opts.OpID,
 			Patched:     body,
+			Warnings:    patched.Warnings,
 		})
 	}
 	printEditOpResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, body)
@@ -204,48 +223,83 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 // invoked edit-op without any actual change. Without this guard the
 // CLI would ship an empty PATCH that succeeds at the route layer
 // but does nothing, surprising the operator.
-func isEmptyEditOpBody(b EditOpBody) bool {
+func isEmptyEditOpBody(b api.EditOpBody) bool {
 	return b.CustomDescription == nil &&
 		b.SafetyLevel == nil &&
 		b.RequiresApproval == nil &&
 		b.IsEnabled == nil
 }
 
-// patchOp issues the PATCH against T6's per-op route. The route
-// returns HTTP 204 No Content — no JSON body, so we deliberately
-// don't decode anything. A non-2xx surfaces as *httpError via
-// doAuthedRequest's status check.
+// patchOp drives the typed-client edit-op endpoint with a one-shot
+// 401-retry. The route returns HTTP 200 with an EditOpResponse
+// envelope (G0.23-T4 #1630 promoted it from 204 No Content so
+// enable-time advisories have a structured wire home); the decoded
+// JSON200 payload is returned for the caller to render. Non-200
+// surfaces as *httpResponseError for the caller to route through
+// renderHTTPStatus. The op_id segment may contain `:` and `/`
+// (canonical form `METHOD:/path`); the generated client URL-escapes
+// the path parameter, so the colons / slashes survive the routing
+// layer.
 func patchOp(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
-	body EditOpBody,
-) error {
-	raw, err := json.Marshal(body)
+	body api.EditOpBody,
+) (*api.EditOpResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return fmt.Errorf("marshal edit-op request: %w", err)
+		return nil, err
 	}
-	path := fmt.Sprintf("/api/v1/connectors/%s/operations/%s",
-		pathEscapeOpID(connectorID), pathEscapeOpID(opID),
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
+			return authed.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse(
+				ctx,
+				connectorID,
+				opID,
+				&api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams{},
+				body,
+			)
+		},
+		func(r *api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse) int {
+			return r.StatusCode()
+		},
 	)
-	if _, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw); err != nil {
-		return err
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
+		// A 200 whose body failed to decode (JSON200 nil) is the
+		// same contract-drift class as a non-200: surface the raw
+		// body so renderHTTPStatus can classify it.
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp.JSON200, nil
 }
 
 // editOpResult is the synthetic envelope rendered to JSON for --json
-// operators. The PATCH route returns 204 No Content; the only
-// structured record of the operator's edit is the body they sent.
+// operators. The PATCH route's 200 response carries only `warnings`,
+// so the echoed PATCH body remains the structured record of the edit;
+// `warnings` relays the backplane's enable-time advisories verbatim.
 type editOpResult struct {
-	ConnectorID string     `json:"connector_id"`
-	OpID        string     `json:"op_id"`
-	Patched     EditOpBody `json:"patched"`
+	ConnectorID string              `json:"connector_id"`
+	OpID        string              `json:"op_id"`
+	Patched     api.EditOpBody      `json:"patched"`
+	Warnings    []api.EditOpWarning `json:"warnings"`
 }
 
-func printEditOpResult(w io.Writer, connectorID, opID string, body EditOpBody) {
-	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, opID)
+// printEditOpWarnings renders the backplane's enable-time advisories
+// to stderr, one line per warning, prefixed with the stable code so
+// operators (and log scrapers) can grep for `unreplaced_auto_shim`.
+// No-op on the clean path.
+func printEditOpWarnings(w io.Writer, warnings []api.EditOpWarning) {
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "warning (%s): %s\n", warning.Code, warning.Message)
+	}
+}
+
+func printEditOpResult(w io.Writer, connectorID, opID string, body api.EditOpBody) {
+	fmt.Fprintf(w, "%s/%s — updated\n", connectorID, opID)
 	if body.SafetyLevel != nil {
-		fmt.Fprintf(w, "  safety: %s\n", *body.SafetyLevel)
+		fmt.Fprintf(w, "  safety: %s\n", string(*body.SafetyLevel))
 	}
 	if body.RequiresApproval != nil {
 		fmt.Fprintf(w, "  requires_approval: %t\n", *body.RequiresApproval)

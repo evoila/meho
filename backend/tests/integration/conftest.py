@@ -388,10 +388,15 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a foreign key constraint``.
         # * ``scheduled_trigger`` — migration 0020 (G11.3-T1 #822) carries
         #   real FKs to ``tenant(id)`` and ``agent_definition(id)``; same rule.
+        # * ``event_outbox`` — migration 0027 (G11.3-T3 #824) carries a real
+        #   FK to ``tenant(id)``; omitting it causes PG to reject the
+        #   TRUNCATE with ``cannot truncate a table referenced in a foreign
+        #   key constraint`` (the recurring fixture gotcha #1064 / #1065 hit).
         await conn.execute(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
-                "agent_principal, scheduled_trigger, agent_run, audit_log, "
+                "agent_principal, scheduled_trigger, event_outbox, "
+                "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
@@ -454,7 +459,8 @@ async def pg_engine_empty_tenant(
         await conn.execute(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
-                "agent_principal, scheduled_trigger, agent_run, audit_log, "
+                "agent_principal, scheduled_trigger, event_outbox, "
+                "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
@@ -625,6 +631,17 @@ async def count_audit_rows(async_url: str) -> int:
 
 _KEYCLOAK_REALM: str = "meho-integration"
 _KEYCLOAK_CLIENT_ID: str = "agent:test-bot"
+# Confidential admin client the backplane's KeycloakAdminClient
+# authenticates as to provision agent clients over the Admin REST API.
+# Its service account is granted realm-management/manage-clients at
+# import time via the realm ``users`` array — a service-account user
+# (``serviceAccountClientId: meho-admin``) carrying the ``clientRoles``
+# grant, the canonical ``kc export`` shape. The #1487
+# register-provisions-mappers test uses it to create an agent client
+# purely over the API (no realm-fixture pre-injection of mappers).
+# Same throwaway-credential discipline as ``_KEYCLOAK_CLIENT_SECRET``.
+_KEYCLOAK_ADMIN_CLIENT_ID: str = "meho-admin"
+_KEYCLOAK_ADMIN_CLIENT_SECRET: str = "admin-secret-do-not-use-anywhere-else-g0-19-1487"
 # This secret is generated *into* the testcontainer realm import and
 # only ever held in this module + the realm JSON. It is bound to a
 # throwaway per-test-run Keycloak instance that never persists, is
@@ -672,6 +689,13 @@ class KeycloakBootstrap:
       ``expected_principal_kind`` — the literal values the realm's
       hardcoded-claim mappers stamp; the integration test asserts the
       resulting :class:`Operator` carries these.
+    * ``admin_url`` / ``admin_client_id`` / ``admin_client_secret`` — the
+      Admin REST API base (``{base_url}/admin/realms/{realm}``) and the
+      ``meho-admin`` confidential client the backplane's
+      :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`
+      authenticates as. The #1487 test uses these to provision an agent
+      client purely over the API (no realm-fixture pre-injection of
+      mappers) and prove it authenticates end-to-end.
     """
 
     base_url: str
@@ -683,6 +707,9 @@ class KeycloakBootstrap:
     expected_tenant_id: str
     expected_tenant_role: str
     expected_principal_kind: str
+    admin_url: str
+    admin_client_id: str
+    admin_client_secret: str
 
 
 @pytest.fixture(scope="module")
@@ -722,10 +749,13 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
     Bootstrap admin credentials are set via
     ``KC_BOOTSTRAP_ADMIN_USERNAME`` / ``KC_BOOTSTRAP_ADMIN_PASSWORD``
     (the 26.x replacement for ``KEYCLOAK_ADMIN`` /
-    ``KEYCLOAK_ADMIN_PASSWORD``). The integration test does not use
-    admin credentials — it authenticates as the imported
-    confidential client — but Keycloak refuses to start without
-    bootstrap admin creds on a fresh database.
+    ``KEYCLOAK_ADMIN_PASSWORD``). The integration test authenticates as
+    the imported ``meho-admin`` confidential client, not as this
+    master-realm admin; the ``meho-admin`` service account is granted
+    ``realm-management/manage-clients`` at import time via the realm
+    ``users`` array, so no post-boot admin REST call is needed. Keycloak
+    refuses to start without bootstrap admin creds on a fresh database,
+    so they are load-bearing regardless.
     """
     image = os.environ.get("MEHO_TEST_KEYCLOAK_IMAGE")
     if not image:
@@ -743,7 +773,8 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
     # which probes the socket on import, so keeping the import inside
     # the fixture lets the module collect on a no-Docker sandbox.
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     realm_file = Path(__file__).parent / "_fixtures" / f"{_KEYCLOAK_REALM}-realm.json"
     if not realm_file.is_file():
@@ -793,7 +824,7 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
         # "Listening on" prefix — the realm-import line that precedes
         # it is itself a useful but slightly Keycloak-version-specific
         # signal, so anchor on the Quarkus boot line instead.
-        wait_for_logs(container, "Listening on:", timeout=120)
+        wait_for_log_message(container, "Listening on:", timeout=120)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8080)
         base_url = f"http://{host}:{port}"
@@ -807,6 +838,9 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
             expected_tenant_id=_KEYCLOAK_TENANT_ID,
             expected_tenant_role=_KEYCLOAK_TENANT_ROLE,
             expected_principal_kind=_KEYCLOAK_PRINCIPAL_KIND,
+            admin_url=f"{base_url}/admin/realms/{_KEYCLOAK_REALM}",
+            admin_client_id=_KEYCLOAK_ADMIN_CLIENT_ID,
+            admin_client_secret=_KEYCLOAK_ADMIN_CLIENT_SECRET,
         )
         yield bootstrap
     finally:

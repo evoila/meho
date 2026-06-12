@@ -120,7 +120,7 @@ class _StickyTopoConnector(Connector):
 
     product = _PRODUCT
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:

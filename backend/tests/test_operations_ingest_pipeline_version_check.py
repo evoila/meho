@@ -28,11 +28,13 @@ covered by ``tests/test_api_v1_connectors_ingest.py``.
 
 from __future__ import annotations
 
+import io
 import uuid
 from pathlib import Path
 
 import pytest
 import structlog
+import yaml
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.operations.ingest import (
@@ -61,6 +63,56 @@ def _operator() -> Operator:
 def _bound_log() -> structlog.stdlib.BoundLogger:
     """Return a bound logger of the shape ``_validate_spec_versions`` expects."""
     return structlog.get_logger(__name__).bind(test=True)
+
+
+def _read_spec_info_version_local(uri: str, *, content: str | None = None) -> str | None:
+    """Read ``info.version`` from a local file path URI, bypassing the SSRF guard.
+
+    Autouse fixture :func:`_patch_read_spec_info_version` swaps
+    the pipeline's ``read_spec_info_version`` for this function so
+    these service-layer unit tests can pass local file paths without
+    triggering the network-facing guard that was added in G0.16-T8
+    (#95). The SSRF guard's own correctness is covered by
+    ``tests/test_operations_ingest_openapi.py``.
+    """
+    if content is not None:
+        raw = content.encode("utf-8")
+    else:
+        try:
+            raw = Path(uri).read_bytes()
+        except OSError:
+            return None
+    try:
+        spec = yaml.safe_load(io.BytesIO(raw))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    info = spec.get("info")
+    if not isinstance(info, dict):
+        return None
+    version = info.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    return version
+
+
+@pytest.fixture(autouse=True)
+def _patch_read_spec_info_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the pipeline's ``read_spec_info_version`` with a local-file reader.
+
+    These tests exercise ``_validate_spec_versions`` (the service-layer
+    cross-check logic) not the HTTP fetch path. G0.16-T8 (#95) moved
+    the network-facing guard into ``_load_spec_bytes``, so all tests
+    that pass local file paths as ``spec.uri`` would fail the scheme
+    check without this patch. Swapping the imported name in the pipeline
+    module is the narrowest possible seam — only ``_validate_spec_versions``
+    is affected; the real ``read_spec_info_version`` (and its SSRF guard)
+    stays in place for every other caller.
+    """
+    import meho_backplane.operations.ingest.pipeline as _pipeline_mod
+
+    monkeypatch.setattr(_pipeline_mod, "read_spec_info_version", _read_spec_info_version_local)
 
 
 def _spec_yaml(path: Path, *, openapi: str = "3.0.3", info_version: str | None) -> SpecSource:
@@ -282,6 +334,92 @@ def test_validate_spec_versions_multi_spec_pure_inconsistent(tmp_path: Path) -> 
         "spec_label_mismatch",
         "multi_spec_inconsistent",
     }
+
+
+# -- _validate_spec_versions: spec_info_versions_compatible opt-in (G0.16-T5 #1307)
+
+
+def test_validate_spec_versions_compat_opt_in_accepts_label_drift(
+    tmp_path: Path,
+) -> None:
+    """spec ``1.1.4`` + label ``3`` with compat ``["1.x.x"]`` → no raise."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    # Without the opt-in this would raise spec_label_mismatch (different
+    # major: spec 1.x vs label 3); with it, the validator widens to the
+    # compat band and the ingest proceeds.
+    service._validate_spec_versions(
+        specs=[spec],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=("1.x.x",),
+    )
+
+
+def test_validate_spec_versions_compat_opt_in_off_by_default(tmp_path: Path) -> None:
+    """Without the opt-in the historical label-vs-spec check still fires."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    with pytest.raises(VersionMismatchError) as excinfo:
+        service._validate_spec_versions(
+            specs=[spec],
+            requested_version="3",
+            log=_bound_log(),
+        )
+    assert excinfo.value.kind == "spec_label_mismatch"
+
+
+def test_validate_spec_versions_compat_opt_in_outside_range_still_raises(
+    tmp_path: Path,
+) -> None:
+    """Compat band is bounded — a spec outside it still raises."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="2.0.0")
+    service = IngestionPipelineService(operator=_operator())
+    with pytest.raises(VersionMismatchError) as excinfo:
+        service._validate_spec_versions(
+            specs=[spec],
+            requested_version="3",
+            log=_bound_log(),
+            spec_info_versions_compatible=("1.x.x",),
+        )
+    assert excinfo.value.kind == "spec_label_mismatch"
+
+
+def test_validate_spec_versions_compat_opt_in_specifier_set_shape(
+    tmp_path: Path,
+) -> None:
+    """PEP 440 SpecifierSet syntax is accepted directly."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    service._validate_spec_versions(
+        specs=[spec],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=(">=1.0,<2.0",),
+    )
+
+
+def test_validate_spec_versions_compat_opt_in_multi_spec_still_consistency_checked(
+    tmp_path: Path,
+) -> None:
+    """The opt-in widens label-vs-spec only; multi-spec consistency still fires.
+
+    Two specs whose ``info.version`` values both fall inside the
+    declared compatibility band collapse cleanly. Two specs whose
+    values straddle major versions still trip
+    ``multi_spec_inconsistent`` — the opt-in doesn't grant a free
+    pass to a bundle that can't share a connector triple.
+    """
+    spec_a = _spec_yaml(tmp_path / "vcenter.yaml", info_version="1.1.4")
+    spec_b = _spec_yaml(tmp_path / "vi-json.yaml", info_version="1.2.0")
+    service = IngestionPipelineService(operator=_operator())
+    # Both inside the compat band → no raise.
+    service._validate_spec_versions(
+        specs=[spec_a, spec_b],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=("1.x.x",),
+    )
 
 
 def test_version_mismatch_error_renders_both_values() -> None:

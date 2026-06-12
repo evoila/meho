@@ -16,8 +16,9 @@ Two tools, exactly two — ``query_topology`` (parametric) and
 * ``tools/call query_topology {kind: dependents, target: <node>}``
   dispatches through the T4 service and returns the dependents list.
 * ``list_targets`` returns the operator's tenant's targets;
-  ``tenant_admin`` + ``tenant`` works cross-tenant; an ``operator``
-  passing ``tenant`` is rejected.
+  a ``platform_admin`` + ``tenant`` works cross-tenant (#1641); a
+  non-platform-admin (any rank, incl. ``tenant_admin``) passing a
+  foreign ``tenant`` is rejected — naming one's own tenant is allowed.
 * Tool descriptions name the blast-radius use-case verbatim ("call
   this *before* recommending a destructive op").
 * Tenant scope comes from the operator JWT, never the arguments dict.
@@ -46,6 +47,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
 from meho_backplane.mcp.registry import all_tools_for, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import TopologyNode, TopologyPath
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -364,6 +366,122 @@ def test_query_topology_dependencies_passes_filters_through(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependents_untracked_returns_typed_envelope(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.18-T4 (#1357, RDC #789 N2). When the substrate raises
+    :class:`NodeNotFoundError` for an untracked anchor the closure
+    verb returns a successful tool call with a typed
+    ``{status: "node_untracked"}`` envelope rather than -32602.
+
+    Pre-fix behaviour treated the miss as an operator input error and
+    raised -32602; the agent retried with corrections instead of
+    rendering "the anchor isn't in the topology graph yet — refresh
+    or annotate first." The new envelope is what lets an agent stop
+    misreading an empty closure as "safe to delete" for the
+    blast-radius use case.
+    """
+    client, _op = client_with_operator
+    mock_dep = AsyncMock(side_effect=NodeNotFoundError("vault-prod"))
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependents",
+                        "target": "vault-prod",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependents"
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "vault-prod"
+    assert payload["nodes"] == []
+    assert "node_kind" not in payload  # no kind pin was supplied
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependencies_untracked_echoes_node_kind_when_supplied(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The ``node_untracked`` envelope echoes ``node_kind`` when the
+    caller supplied one — same self-contained-diagnostic discipline
+    the REST 404 follows.
+    """
+    client, _op = client_with_operator
+    mock_deps = AsyncMock(side_effect=NodeNotFoundError("vc-prod", kind="target"))
+    with patch(_DEPENDENCIES_PATCH, new=mock_deps):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependencies",
+                        "target": "vc-prod",
+                        "node_kind": "target",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependencies"
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "vc-prod"
+    assert payload["node_kind"] == "target"
+    assert payload["nodes"] == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependents_tracked_no_deps_omits_status(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A tracked-but-no-dependents anchor keeps the historical
+    ``{kind, nodes: [root]}`` shape — no ``status`` field, no
+    envelope drift. Pin G0.18-T4 (#1357)'s structural distinction
+    between untracked (status set) and tracked-empty (status omitted).
+    """
+    client, _op = client_with_operator
+    mock_dep = AsyncMock(return_value=[_node("ns-prod-foo", "namespace", 0, None)])
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependents",
+                        "target": "ns-prod-foo",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependents"
+    assert "status" not in payload
+    assert [n["name"] for n in payload["nodes"]] == ["ns-prod-foo"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_query_topology_path_returns_path_or_null(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
@@ -582,21 +700,44 @@ async def test_list_targets_connector_id_filters_by_product(
 async def test_list_targets_operator_cannot_cross_tenant(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """An operator passing `tenant` is rejected (-32602), not silently scoped."""
+    """A non-platform-admin operator naming a foreign tenant is rejected (-32602)."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
+    await _seed_target(_OTHER_TENANT_ID, "other-vc", "vmware", "ovc.example")
 
     response = _list_targets_call(client, 22, {"tenant": "other-tenant"})
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "tenant_admin" in body["error"]["message"]
+    assert "platform_admin" in body["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-async def test_list_targets_tenant_admin_cross_tenant_by_slug(
+async def test_list_targets_tenant_admin_cannot_cross_tenant(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """tenant_admin + `tenant` slug lists the other tenant's targets."""
+    """A `tenant_admin` (not platform-admin) naming a foreign tenant is denied (#1641).
+
+    Cross-tenant enumeration moved off `tenant_admin` rank onto the
+    `platform_admin` capability — a tenant-admin of A must not be able
+    to enumerate B's targets (the cross-tenant IDOR this task closes).
+    """
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
+    await _seed_target(_OTHER_TENANT_ID, "other-vc", "vmware", "ovc.example")
+
+    response = _list_targets_call(client, 23, {"tenant": "other-tenant"})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "platform_admin" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [(TenantRole.TENANT_ADMIN, True)], indirect=True)
+async def test_list_targets_platform_admin_cross_tenant_by_slug(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A `platform_admin` + `tenant` slug lists the other tenant's targets (#1641)."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
     await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
@@ -605,6 +746,22 @@ async def test_list_targets_tenant_admin_cross_tenant_by_slug(
     response = _list_targets_call(client, 23, {"tenant": "other-tenant"})
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert [t["name"] for t in payload["targets"]] == ["other-vc"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_list_targets_own_tenant_slug_is_allowed(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Naming one's OWN tenant explicitly (slug) is allowed for any role (#1641)."""
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_target(OPERATOR_TENANT_ID, "rdc-vcenter", "vmware", "vc.example")
+
+    response = _list_targets_call(client, 25, {"tenant": "op-tenant"})
+    body = response.json()
+    assert "error" not in body, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
@@ -644,3 +801,41 @@ async def test_list_targets_keyset_pagination(
     )
     assert [t["name"] for t in page2["targets"]] == ["t-c"]
     assert page2["next_cursor"] is None
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_list_targets_excludes_soft_deleted(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Soft-deleted targets (G0.14-T4 #1145) are excluded from the MCP listing.
+
+    Mirrors the REST list endpoint's ``deleted_at IS NULL`` filter so
+    MCP and REST never disagree about which targets are visible to a
+    tenant — the consumer's session-pinned target cache should not
+    surface tombstoned rows.
+    """
+    from datetime import UTC, datetime
+
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_target(OPERATOR_TENANT_ID, "live", "vmware", "live.example")
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            TargetORM(
+                tenant_id=OPERATOR_TENANT_ID,
+                name="retired",
+                aliases=[],
+                product="vmware",
+                host="retired.example",
+                port=443,
+                secret_ref="targets/topology-x",
+                auth_model="shared_service_account",
+                deleted_at=datetime.now(UTC),
+            )
+        )
+
+    response = _list_targets_call(client, 27, {})
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert [t["name"] for t in payload["targets"]] == ["live"]

@@ -99,6 +99,12 @@ async def _tenant_info_handler(
         "slug": tenant.slug,
         "name": tenant.name,
         "operator_role": operator.tenant_role.value,
+        # G4.5-T1: the tenant's provisioned capability keys, sorted for a
+        # deterministic wire shape. ONE source of truth for provisioning
+        # — MCP clients and the CLI (T5) read what's enabled from here
+        # rather than re-deriving it from the JWT claim. Empty array when
+        # the tenant has no add-on provisioned (fail-closed default).
+        "capabilities": sorted(operator.capabilities),
     }
 
 

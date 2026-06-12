@@ -40,6 +40,7 @@
   hours keeps getting 200s and the ``EventSource`` never hits the
   non-200 (login redirect) that would permanently kill it.
 -#}
+{% from "_icons.html" import icon %}
 <!doctype html>
 <html lang="en" data-theme="meho-dark" class="h-full">
   <head>
@@ -60,7 +61,7 @@
         class="bg-base-100 border-base-300 flex flex-none items-center justify-between gap-4 border-b px-4 py-2"
       >
         <div class="flex items-center gap-2">
-          <span aria-hidden="true" class="text-xl">&#x1F4E1;</span>
+          <span aria-hidden="true">{{ icon("radio-tower", class="size-5") }}</span>
           <h1 class="text-lg font-semibold">Broadcast wall</h1>
           <code class="badge badge-outline">{{ tenant_id }}</code>
         </div>

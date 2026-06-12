@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import SecretStr
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
@@ -50,6 +52,10 @@ from meho_backplane.agent.invocation import (
     _record_child_run,
     _resolve_child_definition,
 )
+from meho_backplane.agent.reaper import (
+    AGENT_RUN_REAPER_INTERRUPTION_REASON,
+    _run_one_tick,
+)
 from meho_backplane.agent.run import AgentDefinition, AgentRunEventKind, PydanticAgentRun
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
@@ -58,7 +64,13 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPrincipal, AgentRunStatus, AgentRunTrigger, Tenant
+from meho_backplane.db.models import (
+    AgentPrincipal,
+    AgentRunStatus,
+    AgentRunTrigger,
+    ScheduledTriggerInFlightPolicy,
+    Tenant,
+)
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
@@ -190,7 +202,7 @@ class _NoOpVaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -374,6 +386,90 @@ async def test_poll_unknown_handle_is_not_found() -> None:
     invoker = _invoker_with(_final_text("x"))
     with pytest.raises(AgentRunNotFoundError):
         await invoker.poll(_make_operator(), uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Lease/heartbeat wiring into the fire path (#1501)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_run_row_stamps_lease_so_run_is_reapable() -> None:
+    """#1501: ``_create_run_row`` claims a lease, so a live run has a non-NULL
+    ``lease_expires_at`` and the reaper's claim query can reach it.
+
+    The pre-#1501 defect was that ``_create_run_row`` only called
+    ``create_run`` + ``start_run`` -- never ``claim_lease`` -- so every run
+    committed with ``lease_expires_at = NULL`` and the reaper
+    (``WHERE lease_expires_at IS NOT NULL AND < now``) could never reclaim a
+    hung/crashed run. Here we drive the real run-creation transaction and
+    assert the lease + owner landed.
+    """
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("x"))
+    entry = await AgentDefinitionService().get(_TENANT_A, "reader")
+    assert entry is not None
+
+    run_id, lease_owner = await invoker._create_run_row(
+        _make_operator(), entry, provider="anthropic", model="claude-sonnet-4-6"
+    )
+
+    # The owner is the per-process worker stamp ("<hostname>:<pid>" shape).
+    assert ":" in lease_owner
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(AgentRunRow, run_id)
+        assert row is not None
+        assert row.status == AgentRunStatus.RUNNING.value
+        # The lease is stamped in the same committed transaction as the
+        # pending -> running transition: a committed run is never
+        # ``running`` without a lease.
+        assert row.lease_owner == lease_owner
+        assert row.lease_expires_at is not None
+        # The default in-flight policy is the conservative reclaim outcome.
+        assert row.in_flight_policy == ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value
+
+
+async def test_hung_run_with_expired_lease_is_reaped_to_failed() -> None:
+    """#1501 acceptance: a run created through the real fire path whose lease
+    has expired (simulated dead worker) is transitioned to ``failed`` by the
+    reaper within one reap interval.
+
+    Drives ``_create_run_row`` (the production lease-stamping path), back-dates
+    the lease to simulate a worker that died without releasing it, then runs
+    one reaper tick. With the default ``fail_into_audit`` policy the row lands
+    terminal ``failed`` with the reaper's interruption reason -- the
+    "no run silently lost" contract, end to end through the wired fire path.
+    """
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("x"))
+    entry = await AgentDefinitionService().get(_TENANT_A, "reader")
+    assert entry is not None
+
+    run_id, _owner = await invoker._create_run_row(
+        _make_operator(), entry, provider="anthropic", model="claude-sonnet-4-6"
+    )
+
+    sessionmaker = get_sessionmaker()
+    # Simulate the worker dying: the lease lapsed two minutes ago and no
+    # heartbeat extended it.
+    async with sessionmaker() as session:
+        row = await session.get(AgentRunRow, run_id)
+        assert row is not None
+        row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=120)
+        await session.commit()
+
+    await _run_one_tick()
+
+    async with sessionmaker() as session:
+        row = await session.get(AgentRunRow, run_id)
+        assert row is not None
+        assert row.status == AgentRunStatus.FAILED.value
+        assert row.error == AGENT_RUN_REAPER_INTERRUPTION_REASON
+        assert row.ended_at is not None
+        # Terminal transition cleared the lease.
+        assert row.lease_owner is None
+        assert row.lease_expires_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +832,9 @@ async def test_finalize_child_run_swallows_illegal_transition() -> None:
     # state out-of-band, simulating a cancel landing before the finalizer runs.
     child_def = await _resolve_child_definition(op, "child")
     assert child_def is not None
-    child_run_id = await _record_child_run(operator=op, definition=child_def, parent_run_id=None)
+    child_run_id, _lease_owner = await _record_child_run(
+        operator=op, definition=child_def, parent_run_id=None
+    )
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -796,7 +894,7 @@ async def test_run_scheduled_rejects_cross_agent_definition(
             "other-bot",
             "do the thing",
             agent_client_id="agent:a",
-            agent_client_secret="s3cr3t",
+            agent_client_secret=SecretStr("s3cr3t"),
         )
     # Fail-closed before persisting anything.
     create_spy.assert_not_awaited()
@@ -828,8 +926,22 @@ async def test_run_scheduled_allows_matching_agent_definition(
             )
         ),
     )
-    # Pass the guard, then stop the flow at run-row creation.
-    monkeypatch.setattr(invoker, "_to_agent_definition", lambda entry: object())
+    # Pass the guard, then stop the flow at run-row creation. The
+    # stubbed definition needs the real ``AgentDefinition`` shape now
+    # that the G11.5-T6 #1080 pre-execution budget gate reads
+    # ``definition.tier``; the budget gate itself returns ALLOW
+    # unchanged (no budget configured for this principal).
+    from meho_backplane.agent.run import AgentDefinition
+
+    monkeypatch.setattr(
+        invoker,
+        "_to_agent_definition",
+        lambda entry: AgentDefinition(
+            name="a-bot",
+            system_prompt="stub",
+            request_limit=1,
+        ),
+    )
     boom = RuntimeError("stop-after-guard")
     create_spy = AsyncMock(side_effect=boom)
     monkeypatch.setattr(invoker, "_create_run_row", create_spy)
@@ -839,7 +951,84 @@ async def test_run_scheduled_allows_matching_agent_definition(
             "a-bot",
             "do the thing",
             agent_client_id="agent:a",
-            agent_client_secret="s3cr3t",
+            agent_client_secret=SecretStr("s3cr3t"),
         )
     # Guard passed — the run row creation was reached.
     create_spy.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# #1502: run_scheduled bounds its wait so a hung run cannot block the serial
+# scheduler tick (and strand the advisory lock) until a pod restart.
+# ---------------------------------------------------------------------------
+
+
+def _blocking_model(gate: asyncio.Event) -> FunctionModel:
+    """A model whose first turn awaits *gate* — simulates a hung HTTP call."""
+
+    async def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await gate.wait()
+        return ModelResponse(parts=[TextPart("eventually")])
+
+    return FunctionModel(fn)
+
+
+async def test_run_scheduled_bounds_wait_and_converts_to_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled run still executing at the deadline returns a running handle.
+
+    The wait abandons (``converted_to_async``) instead of blocking forever, so
+    the serial scheduler tick can return and release its advisory lock; the
+    background loop keeps running and is later reaped/finalised (#1502).
+    """
+    await _seed_definition(name="reporter")
+    gate = asyncio.Event()
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _blocking_model(gate)))
+
+    # The scheduled path obtains a client_credentials token and verifies the
+    # JWT before launching; stub both seams (no Keycloak in unit tests). The
+    # verified operator must own the seeded ``agent:reporter`` definition.
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-reporter")),
+    )
+
+    # Drive the bound near zero so the wait abandons deterministically while the
+    # background loop is still parked on the gate — no real long-running call.
+    monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    try:
+        outcome = await asyncio.wait_for(
+            invoker.run_scheduled(
+                "reporter",
+                "go",
+                agent_client_id="agent:reporter",
+                agent_client_secret=SecretStr("s3cr3t"),
+            ),
+            # Generous ceiling: the call must return on the 0.05s inner bound,
+            # well under this; exceeding it means run_scheduled blocked on the
+            # still-gated loop — the bug this guards against.
+            timeout=5.0,
+        )
+    finally:
+        # Release the background loop so it finalises cleanly regardless of
+        # outcome (avoids a "Task was destroyed but it is pending" warning).
+        gate.set()
+
+    assert outcome.converted_to_async is True
+    assert outcome.status is AgentRunStatus.RUNNING
+
+    # The abandoned loop keeps running and reaches a terminal state once the
+    # gate is released — the wait was abandoned, not the run.
+    for _ in range(200):
+        view = await invoker.poll(_make_operator(sub="sa-reporter"), outcome.run_id)
+        if view.status is AgentRunStatus.SUCCEEDED:
+            break
+        await asyncio.sleep(0.01)
+    assert view.status is AgentRunStatus.SUCCEEDED

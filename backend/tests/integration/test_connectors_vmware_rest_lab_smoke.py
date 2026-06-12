@@ -85,6 +85,10 @@ class _LabTarget:
     """A lab vCenter target satisfying ``VsphereTargetLike``."""
 
     def __init__(self) -> None:
+        # Tenant-unique cache key components (#1642/#1672); without them
+        # ``target_cache_key`` raises AttributeError at runtime.
+        self.id: UUID = UUID(int=0x5A)
+        self.tenant_id: UUID = UUID(int=0)
         self.name = "vcenter-lab-smoke"
         # Strip any scheme an operator may have included in the env var.
         self.host = (_LAB_VCENTER or "").removeprefix("https://").removeprefix("http://")

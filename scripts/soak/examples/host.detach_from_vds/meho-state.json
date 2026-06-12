@@ -1,0 +1,11 @@
+{
+  "host": "host-42",
+  "dvs_membership": {"dvs-17": false},
+  "vm_nic_backing": [
+    {"vm": "vm-101", "nic": "4000", "network": "network-9"},
+    {"vm": "vm-102", "nic": "4000", "network": "network-9"}
+  ],
+  "host_dvs_proxy_switches": [],
+  "taskId": "task-bbbb-2222",
+  "endTime": "2026-05-31T09:11:48Z"
+}

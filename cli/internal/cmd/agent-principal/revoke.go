@@ -5,12 +5,12 @@ package agentprincipal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -42,7 +42,7 @@ func newRevokeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw AgentPrincipalRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -63,10 +63,14 @@ func runRevoke(cmd *cobra.Command, opts revokeOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := deleteRevoke(cmd.Context(), backplaneURL, opts.Name)
+	resp, err := deleteRevoke(cmd.Context(), backplaneURL, opts.Name)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	entry := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
@@ -75,15 +79,24 @@ func runRevoke(cmd *cobra.Command, opts revokeOptions) error {
 	return nil
 }
 
-func deleteRevoke(ctx context.Context, backplaneURL, name string) (*Entry, error) {
-	path := "/api/v1/agent-principals/" + url.PathEscape(name) + "/revoke"
-	raw, err := doAuthedRequest(ctx, backplaneURL, "DELETE", path, nil)
+func deleteRevoke(
+	ctx context.Context,
+	backplaneURL, name string,
+) (*api.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode revoke response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse, error) {
+			return authed.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse(
+				ctx,
+				name,
+				&api.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams{},
+			)
+		},
+		func(r *api.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse) int {
+			return r.StatusCode()
+		},
+	)
 }

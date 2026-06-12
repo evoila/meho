@@ -1,0 +1,92 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the bulk targets.yaml import surface (Initiative
+  #340 Task #875 work item #5). Extends ``base.html`` so the chrome
+  matches the rest of the console.
+
+  Flow:
+    * Operator pastes a ``targets.yaml`` into the textarea OR picks a
+      file with the upload control.
+    * The form ``hx-post``s to ``/ui/connectors/import`` (multipart) and
+      swaps the server-rendered preview table into
+      ``#connectors-import-result``.
+    * The preview fragment carries its own "Confirm import" button that
+      ``hx-post``s to ``/ui/connectors/import/confirm`` (re-sending the
+      same YAML via a hidden field) and swaps the result summary into
+      the same slot.
+
+  CSRF: the page-level ``hx-headers`` directive echoes ``X-CSRF-Token``;
+  HTMX inherits it on the form submit. The upload form sets
+  ``hx-encoding="multipart/form-data"`` so the file rides along as a
+  proper multipart part rather than url-encoded text.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Bulk import &middot; Connectors &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Bulk import targets</h1>
+      <p class="text-sm opacity-70">
+        Paste or upload a <code class="font-mono">targets.yaml</code>. The
+        server previews which targets would be created vs updated before
+        anything is written. Mirrors <code class="font-mono">meho targets import</code>.
+      </p>
+    </div>
+    <a href="/ui/connectors" class="btn btn-ghost btn-sm" aria-label="Back to connectors list">
+      Back to list
+    </a>
+  </header>
+
+  <form
+    id="connectors-import-form"
+    hx-post="/ui/connectors/import"
+    hx-encoding="multipart/form-data"
+    hx-target="#connectors-import-result"
+    hx-swap="innerHTML"
+    hx-disabled-elt="find button[type=submit]"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-label="Bulk import targets"
+  >
+    <div class="card-body space-y-3">
+      <label class="form-control">
+        <span class="label-text">Paste targets.yaml</span>
+        <textarea
+          name="pasted"
+          class="textarea textarea-bordered min-h-[14rem] font-mono text-sm"
+          aria-label="Paste targets.yaml"
+          placeholder="targets:&#10;  - name: example&#10;    product: kubernetes&#10;    host: cluster.example.internal"
+        ></textarea>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">…or upload a file <span class="opacity-60">(takes precedence over paste)</span></span>
+        <input
+          type="file"
+          name="upload"
+          accept=".yaml,.yml,text/yaml,application/x-yaml"
+          class="file-input file-input-bordered file-input-sm"
+          aria-label="Upload targets.yaml"
+        />
+      </label>
+
+      <div class="flex justify-end">
+        <button type="submit" class="btn btn-sm btn-primary" data-action="import-preview">
+          Preview import
+        </button>
+      </div>
+    </div>
+  </form>
+
+  {# Preview table + confirm button (or inline parse error) swap in here;
+     the confirm result summary then replaces the preview in the same slot. #}
+  <div id="connectors-import-result"></div>
+</section>
+{% endblock %}

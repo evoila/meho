@@ -27,7 +27,7 @@ from meho_backplane.connectors import (
     register_connector,
     register_connector_v2,
 )
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.registry import clear_registry, registered_product_tokens
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,7 +37,7 @@ from meho_backplane.connectors.registry import clear_registry
 class _FakeConnector(Connector):
     product = "fake"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -325,6 +325,30 @@ def test_harbor_connector_registered_under_v2_triple() -> None:
     assert snapshot[key] is HarborConnector
 
 
+def test_argocd_connector_registered_under_v2_triple_and_wildcard() -> None:
+    """ArgoCdConnector package registers under (argocd, 3.x, argocd-api) + wildcard.
+
+    G3.12-T1 (#1390) ships dual registration from day one per G0.15-T6:
+    the versioned triple ``("argocd", "3.x", "argocd-api")`` and the
+    wildcard fallback ``("argocd", "", "")`` both resolve to the connector.
+    Same idempotent-registration pattern as the Harbor test above; the
+    wildcard leg is registered via a second ``_ensure_registered_v2``-style
+    guard since the connector class only carries the versioned triple in
+    its class attributes.
+    """
+    from meho_backplane.connectors.argocd import ArgoCdConnector
+
+    _ensure_registered_v2(ArgoCdConnector)
+    wildcard = ("argocd", "", "")
+    if wildcard not in all_connectors_v2():
+        register_connector_v2(product="argocd", version="", impl_id="", cls=ArgoCdConnector)
+
+    snapshot = all_connectors_v2()
+    versioned = ("argocd", "3.x", "argocd-api")
+    assert snapshot[versioned] is ArgoCdConnector
+    assert snapshot[wildcard] is ArgoCdConnector
+
+
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
     """VcfAutomationConnector package registers under (vcf-automation, 9.0, vcfa-rest).
 
@@ -443,3 +467,166 @@ def test_holodeck_connector_registered_under_v2_triple() -> None:
     key = ("holodeck", "9.0", "holodeck-ssh")
     assert key in snapshot
     assert snapshot[key] is HolodeckConnector
+
+
+def test_keycloak_connector_registered_under_v2_triple() -> None:
+    """KeycloakConnector package registers under (keycloak, 26.x, keycloak-admin).
+
+    G3.13-T1 (#1393) substrate. Same idempotent-registration pattern as
+    the SDDC Manager / Harbor / pfSense tests above.
+    """
+    from meho_backplane.connectors.keycloak import KeycloakConnector
+
+    _ensure_registered_v2(KeycloakConnector)
+    snapshot = all_connectors_v2()
+    key = ("keycloak", "26.x", "keycloak-admin")
+    assert key in snapshot
+    assert snapshot[key] is KeycloakConnector
+
+
+# ---------------------------------------------------------------------------
+# registered_product_tokens — G0.14-T3 #1144
+# ---------------------------------------------------------------------------
+
+
+def test_registered_product_tokens_returns_empty_set_for_empty_registry() -> None:
+    """An empty registry → an empty product-tokens set.
+
+    Pins the source-of-truth invariant: callers (the
+    :func:`create_target` validator, the OpenAPI enum hook) can
+    distinguish "registry is empty" from "registry is populated but
+    no products advertised" via the empty set return. The empty
+    state is what tests with isolated registries see; production
+    sees a full set after the lifespan's eager-import call.
+    """
+    assert registered_product_tokens() == set()
+
+
+def test_registered_product_tokens_returns_product_axis_of_v2_registry() -> None:
+    """The token set is the union of v2 ``product`` fields.
+
+    Registering connectors under distinct ``(product, version, impl_id)``
+    triples produces one entry per *product* (the version and impl_id
+    axes are collapsed). Mirrors the resolver's "valid product"
+    judgement at probe / dispatch time.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeConnector,
+    )
+    register_connector_v2(
+        product="vmware",
+        version="7.0",
+        impl_id="vmware-pyvmomi",
+        cls=_AnotherFakeConnector,
+    )
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_FakeConnector,
+    )
+    # Two ``vmware`` triples collapse to one entry; ``k8s`` adds a
+    # second.
+    assert registered_product_tokens() == {"vmware", "k8s"}
+
+
+def test_registered_product_tokens_includes_v1_compat_entries() -> None:
+    """v1 ``register_connector`` registrations show up under their product token.
+
+    The v1 entry point writes a ``(product, "", "")`` row into the v2
+    registry; the helper must surface the product token from that
+    padded triple just like any v2-native entry. Without this
+    contract a deploy that mixes v1- and v2-registered connectors
+    would only see the v2 set, and the v1 products would silently
+    miss the discoverability enum.
+    """
+    register_connector(product="vault", cls=_FakeConnector)
+    assert registered_product_tokens() == {"vault"}
+
+
+def test_registered_product_tokens_filters_empty_product_defensively() -> None:
+    """An empty ``product`` slug is filtered (defensive).
+
+    Direct ``_REGISTRY_V2`` mutation simulates a hypothetical bug-
+    state (the public registrars don't reject empty ``product``
+    today but no real connector ships with one). The helper drops
+    the empty entry rather than surfacing a meaningless token to
+    the operator's discoverability layer.
+    """
+    from meho_backplane.connectors.registry import _REGISTRY_V2
+
+    _REGISTRY_V2[("", "1.x", "ghost")] = _FakeConnector
+    _REGISTRY_V2[("k8s", "1.x", "k8s")] = _FakeConnector
+    assert registered_product_tokens() == {"k8s"}
+
+
+def test_registered_product_tokens_returns_fresh_set_each_call() -> None:
+    """Callers can mutate the returned set without affecting the registry.
+
+    The helper returns a fresh ``set`` so a caller that sorts /
+    extends / filters the result cannot accidentally corrupt the
+    canonical registry. Defensive return-by-value invariant for any
+    snapshot accessor over a mutable internal collection.
+    """
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_FakeConnector,
+    )
+    snapshot = registered_product_tokens()
+    snapshot.add("phantom")
+    assert "phantom" not in registered_product_tokens()
+
+
+# ---------------------------------------------------------------------------
+# G0.18-T2 (#1355) PRODUCT_ALIASES + canonical_product_token
+#
+# Unit-level coverage of the alias bridge (mapping, identity,
+# pass-through, idempotency, key-vs-value disjointness) lives in the
+# sibling :mod:`test_connectors_registry` so it sits next to the v1
+# registry tests that share the import. The check below is the only
+# v2-specific assertion: that no alias key collides with a *live v2-
+# registered* product token. The v1 sibling test pins the alias
+# map's keys vs values; this one pins the alias keys vs the actually
+# imported v2 registry, which catches a future SDDC-style connector
+# that registers under ``product="sddc"`` without dropping the alias
+# first.
+# ---------------------------------------------------------------------------
+
+
+def test_product_aliases_keys_are_disjoint_from_live_v2_registry() -> None:
+    """No PRODUCT_ALIASES key is also a live v2-registered product token.
+
+    Invariant that keeps :func:`canonical_product_token` idempotent
+    against the imported registry, not just the static alias map:
+    if ``"x"`` is both an alias key and a registered product, then
+    ``canonical_product_token("x")`` returns the mapped value while
+    a registered ``"x"`` is also a legal canonical token — two
+    spellings the validator accepts under different paths, which is
+    exactly the split the bridge is supposed to prevent. The check
+    eager-imports every connector package so the live (lifespan-
+    populated) registry is what's compared, not the
+    snapshot-restored test-only state. A future connector
+    registering under an alias key (e.g. someone adding a real
+    ``product="sddc"`` connector without first dropping the alias)
+    trips here at unit-test time.
+    """
+    from meho_backplane.connectors.registry import (
+        PRODUCT_ALIASES,
+        _eager_import_connectors,
+    )
+
+    _eager_import_connectors()
+    canonical = registered_product_tokens()
+    overlap = canonical & set(PRODUCT_ALIASES.keys())
+    assert overlap == set(), (
+        f"PRODUCT_ALIASES keys {overlap!r} are also registered product "
+        "tokens; an alias key must never also be a canonical spelling, "
+        "otherwise canonical_product_token loses idempotency. "
+        "Remove the alias or rename the conflicting connector "
+        "registration."
+    )

@@ -57,6 +57,17 @@
 # human-readable tag in a trailing comment (devops_best_practices:
 # SHA-pin every action). Same SHAs as the publish workflows where the
 # action overlaps, so a single supply-chain audit covers all of CI.
+#
+# Merge queue (#769): the `merge_group` event fires when a PR is admitted
+# to the GitHub merge queue. Required checks configured in the merge-queue
+# ruleset run against the actual merge result (PR head + current main +
+# any ahead-in-queue PRs), so a semantically-broken combination is caught
+# before it reaches main — ending the inherited-red episodes from
+# 2026-05-20/21. The concurrency group is intentionally NOT set to
+# cancel-in-progress on merge_group runs: a cancelled queue check fails
+# the merge attempt and defeats the queue's purpose. cancel-in-progress
+# is scoped to pull_request / push refs only so PR force-pushes and rapid
+# main pushes still cancel their predecessors cleanly.
 
 name: CI
 
@@ -65,6 +76,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Fires when a PR enters the merge queue. Runs the full check matrix
+  # against the synthesised merge commit (PR + current main tip +
+  # any ahead-in-queue PRs). This is the gate that prevents a
+  # stale-but-green PR from landing a broken combination on main.
+  merge_group:
 
 permissions:
   contents: read
@@ -74,8 +90,15 @@ concurrency:
   # commit cancels its predecessor. On PRs: scoped per PR ref so an
   # author force-push cancels its own prior CI run cleanly. Mirrors
   # the pattern used by image.yml, chart.yml, and cli-release.yml.
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  #
+  # IMPORTANT: already-running merge_group jobs must NEVER be cancelled.
+  # A cancelled queue check causes the merge attempt to fail and the PR
+  # falls out of the queue — defeating the whole point of the merge queue.
+  # The conditional below restricts cancel-in-progress to pull_request /
+  # push contexts only. Queued (not-yet-started) merge_group runs can
+  # still be displaced by newer queue entries; that is expected behaviour.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   python-lint-test:
@@ -138,7 +161,7 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -168,7 +191,7 @@ jobs:
         # same lockfile are near-instant. version unset -> latest, which
         # is fine because uv ships a strict resolver and the lockfile
         # pins every transitive dep.
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           enable-cache: true
 
@@ -231,7 +254,44 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run python -m meho_backplane.retrieval.warm
 
+      - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
+        # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
+        # (capability-flagged per policy). The acceptance gate
+        # (``Tier-2 redacts a free-text field containing a person
+        # name / IP / FQDN``) requires a spaCy model on the host;
+        # spaCy ships no model out of the box and Presidio's
+        # AnalyzerEngine raises ``Tier2NotAvailableError`` without one.
+        # ``en_core_web_sm`` (~12 MB) is the fast-CI choice; production
+        # Docker images bake ``en_core_web_lg`` (~560 MB, the Presidio
+        # documented default for higher NER recall). The acceptance
+        # tests in tests/test_redaction_presidio.py and the Tier-2
+        # middleware test gate on ``spacy.util.is_package(...)``,
+        # accepting either model -- so this step suffices for the
+        # unit lane's correctness signal without paying the ``lg``
+        # download wall every run.
+        #
+        # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
+        # presidio.py adapter reads; setting it here pins the unit
+        # job's engine to the ``sm`` model regardless of the
+        # adapter's default. Production deployments leave the env
+        # unset and let the adapter pick the documented default.
+        run: |
+          uv run python -m spacy download en_core_web_sm
+          # Smoke-test the import path so a presidio<->spacy model-
+          # version mismatch fails THIS PR, not the integration lane.
+          MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
+            uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
+
       - name: Pytest (unit + coverage)
+        env:
+          # Pin Tier-2's spaCy model to the unit-lane choice so the
+          # acceptance tests in test_redaction_presidio.py + the
+          # tier2 path in test_redaction_middleware.py exercise the
+          # real engine path instead of skipping. The integration
+          # lane stays on the adapter's documented default
+          # (en_core_web_lg) once that lane provisions the heavier
+          # model.
+          MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
         # PARALLELIZED via pytest-xdist (#585 unblocked this). The
         # serial sweep was the job's dominant cost (~49 min in CI vs
         # ~5 min local). #585 added process-wide global-registry
@@ -381,7 +441,7 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the
@@ -394,7 +454,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           enable-cache: true
 
@@ -419,7 +479,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Set up Go
         # Same version + cache shape as cli-release.yml so a single
@@ -552,7 +612,7 @@ jobs:
         # persist-credentials: false — this job only does a read-only
         # checkout + a working-tree `git diff`; it never pushes, so it
         # has no need for the checkout token persisted in local git config.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -588,7 +648,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           enable-cache: true
 
@@ -628,7 +688,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Helm
         # Same version pin as chart.yml's validate + publish jobs so

@@ -369,3 +369,90 @@ async def test_run_record_is_persisted(client: TestClient) -> None:
         row = result.scalar_one()
     assert row.tenant_id == _TENANT_A
     assert row.status == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T6 #1080 -- pre-execution budget gate contract on the REST boundary
+# ---------------------------------------------------------------------------
+#
+# The four contract surfaces the gate maps onto (REST 429, MCP -32602,
+# scheduler scheduler_invoke_refused, SSE pre-stream 429) are tested in
+# their respective suites; the two below pin the REST shapes (sync run +
+# SSE pre-stream). The global kill switch is the simplest deterministic
+# trigger -- no DB seeding, no per-window arithmetic; the gate refuses
+# every run inside ``_enforce_pre_run_budget`` and the surface maps the
+# resulting :class:`BudgetExceededError` onto the documented HTTP shape.
+
+
+@pytest.mark.asyncio
+async def test_rest_run_returns_429_when_budget_exceeded_pre_execution(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /agents/{name}/run returns 429 + structured ``budget_exceeded`` body.
+
+    Contract (G11.5-T6 #1080): when the pre-execution budget gate
+    refuses, the REST surface raises ``HTTPException(429, detail={...})``
+    so FastAPI emits ``{"detail": {"error": "budget_exceeded",
+    "reason": <str>}}``. The status code distinguishes a quota refusal
+    from 4xx auth / 4xx not-found / 4xx disabled (all of which use a
+    plain-string detail), and the structured body carries the gate's
+    reason so clients can log + back off intelligently.
+    """
+    await _seed_definition()
+    _install_invoker()
+    monkeypatch.setenv("AGENT_RUNS_DISABLED_GLOBAL", "true")
+    get_settings.cache_clear()
+
+    key = make_rsa_keypair("kid-budget-429")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agents/triage/run",
+            json={"input": "go"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 429, resp.text
+    body = resp.json()
+    assert isinstance(body["detail"], dict), body
+    assert body["detail"]["error"] == "budget_exceeded"
+    assert "global kill switch" in body["detail"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_rest_sse_returns_429_pre_stream_when_budget_exceeded(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /agents/{name}/run/events refuses with 429 *before* opening the SSE stream.
+
+    Contract (G11.5-T6 #1080): the SSE route calls
+    :meth:`AgentInvoker.ensure_runnable` before yielding the streaming
+    response. A budget refusal there must surface as a normal 4xx
+    (``Content-Type`` is JSON, not ``text/event-stream``) so an
+    :class:`EventSource` client does not auto-reconnect into a hot loop
+    on a torn stream. The body shape mirrors the sync-run contract:
+    ``{"detail": {"error": "budget_exceeded", "reason": <str>}}``.
+    """
+    await _seed_definition()
+    _install_invoker()
+    monkeypatch.setenv("AGENT_RUNS_DISABLED_GLOBAL", "true")
+    get_settings.cache_clear()
+
+    key = make_rsa_keypair("kid-budget-sse-429")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agents/triage/run/events",
+            json={"input": "go"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 429, resp.text
+    # Crucially NOT text/event-stream -- the EventSource auto-reconnect
+    # hot-loop guard relies on the surface returning a clean HTTP error
+    # before the StreamingResponse is constructed.
+    assert not resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.json()
+    assert isinstance(body["detail"], dict), body
+    assert body["detail"]["error"] == "budget_exceeded"
+    assert "global kill switch" in body["detail"]["reason"]

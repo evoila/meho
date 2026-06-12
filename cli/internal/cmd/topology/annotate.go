@@ -5,13 +5,14 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -138,24 +139,39 @@ type annotateOptions struct {
 	BackplaneOverride string
 }
 
-// annotateRequestBody is the wire shape for POST /api/v1/topology/edges
-// — the issue body specifies `{from, kind, to, note?, evidence_url?}`.
-// `evidence_url` is snake_case on the wire (the JSON tag) even though
-// the CLI flag is kebab-case `--evidence-url` (Cobra convention).
-// Endpoints are nested objects carrying `name` + optional `kind` — the
-// route binds them via the `_EdgeEndpoint` Pydantic model and the
-// `_AnnotateEdgeRequest`'s `from` / `to` aliases.
-type annotateRequestBody struct {
-	From        annotateRequestEndpoint `json:"from"`
-	Kind        string                  `json:"kind"`
-	To          annotateRequestEndpoint `json:"to"`
-	Note        string                  `json:"note,omitempty"`
-	EvidenceURL string                  `json:"evidence_url,omitempty"`
-}
-
-type annotateRequestEndpoint struct {
-	Name string `json:"name"`
-	Kind string `json:"kind,omitempty"`
+// buildAnnotateBody wraps the operator-typed annotate inputs into the
+// generated `UnderscoreAnnotateEdgeRequest` body. `Kind` is forwarded
+// as a plain string and validated server-side against the closed
+// 10-kind GraphEdgeKind vocabulary (a 422 with the per-row message is
+// the failure surface the operator sees if they typo the kind, same
+// shape as the pre-migration contract). Endpoint kinds are passed as
+// nil pointers when the operator didn't supply --from-kind / --to-kind
+// so the wire shape sees an absent field rather than an empty string
+// (the backend's _EdgeEndpoint model treats absent and empty kind
+// differently — absent means "no pin", empty would fail validation).
+func buildAnnotateBody(opts annotateOptions) api.UnderscoreAnnotateEdgeRequest {
+	body := api.UnderscoreAnnotateEdgeRequest{
+		From: api.UnderscoreEdgeEndpoint{Name: opts.From},
+		Kind: api.GraphEdgeKind(opts.Kind),
+		To:   api.UnderscoreEdgeEndpoint{Name: opts.To},
+	}
+	if opts.FromKind != "" {
+		fk := opts.FromKind
+		body.From.Kind = &fk
+	}
+	if opts.ToKind != "" {
+		tk := opts.ToKind
+		body.To.Kind = &tk
+	}
+	if opts.Note != "" {
+		n := opts.Note
+		body.Note = &n
+	}
+	if opts.EvidenceURL != "" {
+		u := opts.EvidenceURL
+		body.EvidenceUrl = &u
+	}
+	return body
 }
 
 func runAnnotate(cmd *cobra.Command, opts annotateOptions) error {
@@ -163,22 +179,21 @@ func runAnnotate(cmd *cobra.Command, opts annotateOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	body := annotateRequestBody{
-		From:        annotateRequestEndpoint{Name: opts.From, Kind: opts.FromKind},
-		Kind:        opts.Kind,
-		To:          annotateRequestEndpoint{Name: opts.To, Kind: opts.ToKind},
-		Note:        opts.Note,
-		EvidenceURL: opts.EvidenceURL,
-	}
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("encode annotate body: %v", err)),
-			opts.JSONOut)
-	}
-	edge, err := postAnnotate(cmd.Context(), backplaneURL, encoded)
+	edge, statusCode, body, err := postAnnotate(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if edge == nil {
+		// Guard the 201-without-payload case so the renderer below
+		// doesn't dereference nil. Mirrors the kb / memory iter-2
+		// nil-guard pattern.
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 201 without an annotate payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), edge)
@@ -187,25 +202,35 @@ func runAnnotate(cmd *cobra.Command, opts annotateOptions) error {
 	return nil
 }
 
-func postAnnotate(ctx context.Context, backplaneURL string, body []byte) (*Edge, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/topology/edges", body)
+func postAnnotate(
+	ctx context.Context,
+	backplaneURL string,
+	opts annotateOptions,
+) (*api.TopologyEdge, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out Edge
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode annotate response: %w", err)
+	body := buildAnnotateBody(opts)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error) {
+			return authed.AnnotateEdgeRouteApiV1TopologyEdgesPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.AnnotateEdgeRouteApiV1TopologyEdgesPostResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return &out, nil
+	return resp.JSON201, resp.StatusCode(), resp.Body, nil
 }
 
 // printAnnotateSummary renders the resulting edge as a compact two-
 // line block: the relationship in `kind/from -> kind/to` form (the
 // same arrow notation the `path` verb uses) plus the edge id so the
 // operator can pipe it into a follow-up `unannotate <id>`.
-func printAnnotateSummary(w io.Writer, e *Edge) {
+func printAnnotateSummary(w io.Writer, e *api.TopologyEdge) {
 	fmt.Fprintf(w, "annotated edge: %s/%s --[%s]--> %s/%s\n",
 		e.From.Kind, e.From.Name, e.Kind, e.To.Kind, e.To.Name)
-	fmt.Fprintf(w, "  edge_id: %s\n", e.ID)
+	fmt.Fprintf(w, "  edge_id: %s\n", e.Id)
 	fmt.Fprintf(w, "  source:  %s\n", e.Source)
 }

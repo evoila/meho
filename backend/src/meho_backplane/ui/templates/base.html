@@ -35,11 +35,21 @@
 {#- Sidebar surface registry: (key, href, icon name, label). -#}
 {% set nav_surfaces = [
   ("broadcast", "/ui/broadcast", "radio-tower", "Broadcast"),
-  ("knowledge", "/ui/knowledge", "book-open", "Knowledge"),
+  ("knowledge", "/ui/kb", "book-open", "Knowledge"),
   ("topology", "/ui/topology", "waypoints", "Topology"),
   ("connectors", "/ui/connectors", "plug", "Connectors"),
   ("memory", "/ui/memory", "brain", "Memory"),
+  ("runbooks", "/ui/runbooks", "scroll", "Runbooks"),
 ] %}
+{#- ``session_tenant`` is injected by the
+    :func:`_ui_session_context_processor` chassis context processor on
+    every UI template render -- it carries the active BFF session's
+    tenant ``id`` / ``slug`` / ``name``, or ``None`` on the unauthenticated
+    auth surfaces (G0.15-T9 #1217). Default to ``None`` so a template
+    rendered outside the FastAPI request flow (the chassis smoke test
+    renders ``base.html`` directly against the bare env) does not trip
+    ``StrictUndefined``. -#}
+{% set session_tenant = session_tenant | default(none) %}
 <!doctype html>
 <html lang="en" data-theme="meho-dark" class="h-full">
   <head>
@@ -52,11 +62,18 @@
     <div
       class="drawer lg:drawer-open"
       x-data="{
-        sidebarOpen: (localStorage.getItem('meho.sidebar') ?? 'open') === 'open',
+        sidebarOpen: true,
         userMenuOpen: false,
+        init() {
+          try {
+            this.sidebarOpen = (localStorage.getItem('meho.sidebar') ?? 'open') === 'open';
+          } catch (_) { this.sidebarOpen = true; }
+        },
         toggleSidebar() {
           this.sidebarOpen = !this.sidebarOpen;
-          localStorage.setItem('meho.sidebar', this.sidebarOpen ? 'open' : 'closed');
+          try {
+            localStorage.setItem('meho.sidebar', this.sidebarOpen ? 'open' : 'closed');
+          } catch (_) {}
         }
       }"
     >
@@ -157,16 +174,20 @@
           {# Bottom block: tenant + account + status #}
           <div class="mt-auto px-5 pb-6">
             <div class="space-y-4 border-t border-base-content/8 pt-5">
-              {# Tenant placeholder. T4 #865 wires the live selector
-                 against the operator's accessible tenants; the chassis
-                 renders a quiet read-only chip. #}
+              {# Live read-only tenant chip (G0.15-T9 #1217): the BFF
+                 session's tenant, lifted into ``session_tenant`` by the
+                 chassis context processor (human name, slug fallback,
+                 UUID fallback). ``None`` on the pre-session auth surfaces,
+                 so the chip shows the sign-in hint. A cross-tenant
+                 *selector* is still future (T4 #865). #}
               <div>
                 <div class="meho-overline mb-1.5">Tenant</div>
                 <div
                   class="truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/55"
-                  title="Sign in to choose a tenant"
+                  {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
+                  title="{% if session_tenant is not none %}Active tenant{% else %}Sign in to choose a tenant{% endif %}"
                 >
-                  (sign in to choose)
+                  {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}(sign in to choose){% endif %}
                 </div>
               </div>
 

@@ -59,9 +59,25 @@ tool results, repeated turns). Pydantic AI drives its loop through a
 :class:`~pydantic_ai.models.Model`, so the seam mirrors the *pattern* of
 ``LlmClientFactory`` — an injected, fail-closed factory — rather than the
 one-shot method. :func:`default_model_factory` builds an Anthropic model
-from settings (the G11 initiative ships against Anthropic; multi-provider
-routing is G11.5). Tests inject a deterministic
-:class:`~pydantic_ai.models.function.FunctionModel` instead.
+from settings (the G11 initiative shipped against Anthropic; G11.5-T1
+generalises this to a per-tenant resolver). Tests inject a deterministic
+:class:`~pydantic_ai.models.function.FunctionModel` via the
+``model_factory=`` constructor argument instead.
+
+Per-tenant resolver (G11.5-T1)
+==============================
+
+The zero-arg :data:`ModelFactory` shape was right for T1 (one deploy → one
+provider) but loses the two pieces multi-provider routing needs: *which
+tenant* is running, and *which tier* the definition asks for. The
+:class:`~meho_backplane.agent.models.ModelResolver` Protocol takes both
+and returns the concrete :class:`~pydantic_ai.models.Model`. When a
+:class:`PydanticAgentRun` is built with a resolver, definitions naming an
+:class:`~meho_backplane.agent.models.AgentTier` route through it; the
+legacy zero-arg :data:`ModelFactory` path is preserved for tests and for
+definitions with ``tier is None`` (the pre-G11.5 default-tenant case).
+See :mod:`meho_backplane.agent.models` for the resolver shape + capability
+flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 """
 
 from __future__ import annotations
@@ -79,20 +95,28 @@ from pydantic_ai import Agent, RunContext, Tool, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
+from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
     ChildRunRecorder,
     make_invoke_agent_tool,
 )
+from meho_backplane.agent.models import (
+    AgentTier,
+    ModelResolver,
+    ResolverError,
+)
 from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
 __all__ = [
+    "SCHEDULED_RUN_NO_INPUT_CLASS",
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
@@ -101,12 +125,39 @@ __all__ = [
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
+    "BudgetExceededError",
     "ModelFactory",
     "PydanticAgentRun",
+    "ScheduledRunNoInputError",
     "default_model_factory",
+    "prompt_is_effectively_empty",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Machine-readable classification tag prefixed onto the ``agent_run.error``
+#: column when a scheduled run is refused for having no usable user prompt.
+#: Greppable in logs and in the runs table so on-call can distinguish a
+#: misconfigured no-inputs trigger from an opaque provider 400 (the raw
+#: ``"messages: at least one message is required"`` text every supported
+#: backend would otherwise surface). See :class:`ScheduledRunNoInputError`.
+SCHEDULED_RUN_NO_INPUT_CLASS = "scheduled_run_no_input"
+
+
+def prompt_is_effectively_empty(inputs: str) -> bool:
+    """Return ``True`` when *inputs* carries no usable user turn.
+
+    The loop's ``inputs`` string becomes the run's single
+    :class:`~pydantic_ai.messages.UserPromptPart`. Every supported model
+    backend drops a whitespace-only user turn before the request leaves
+    the client (the Anthropic adapter's ``_map_user_prompt`` only yields a
+    text block ``if part.content``), so a blank prompt produces an empty
+    ``messages`` array and a provider 400 ("at least one message is
+    required") -- the system prompt rides the separate ``system`` param
+    and does not count. Treating leading/trailing whitespace as empty
+    matches that drop: ``"   "`` is just as doomed as ``""``.
+    """
+    return not inputs.strip()
 
 
 #: A factory that builds the framework :class:`~pydantic_ai.models.Model`
@@ -128,6 +179,82 @@ class AgentRunError(RuntimeError):
     :class:`AgentRunHandle` as a :attr:`AgentRunStatus.FAILED` status with
     the error message attached — they do not propagate as this exception.
     """
+
+
+class BudgetExceededError(AgentRunError):
+    """The pre-execution budget gate refused this run.
+
+    Raised by the
+    :class:`~meho_backplane.agent.invocation.AgentInvoker` when the
+    G11.5-T6 (#1080) enforcement gate
+    (:func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`)
+    returns
+    :attr:`~meho_backplane.operations.budget_enforcement.BudgetDecisionKind.REFUSE`.
+    Subclass of :class:`AgentRunError` so a caller that only catches the
+    parent type still handles the budget-refused path uniformly with
+    every other seam-level failure (turn budget exhausted, resolver
+    mismatch, etc.); a caller that wants to distinguish "I refused
+    because of cost / kill switch" from "the loop tripped" catches
+    this subclass specifically.
+
+    The exception's message carries the short human-readable reason
+    from
+    :attr:`~meho_backplane.operations.budget_enforcement.BudgetDecision.reason`
+    (e.g. ``"daily cost_consumed (3.50) >= cost_limit (3.50)"``,
+    ``"global kill switch enabled"``); the full per-window snapshot
+    rides on :attr:`reason` separately so REST / MCP boundaries can
+    structure the response without re-parsing the message.
+
+    The boundary contract is intentionally a *pre*-creation refusal —
+    no ``agent_run`` row is written when this is raised, so an
+    operator polling the runs table sees the refused attempt only via
+    the audit log (the structured ``agent_run_refused_*`` warning
+    emitted by the enforcement service) and the surface's HTTP /
+    MCP-elicitation response. The "no row" choice keeps a kill-switched
+    deploy from filling the runs table with ``failed`` rows the moment
+    a stuck scheduler retries.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class ScheduledRunNoInputError(AgentRunError):
+    """A scheduled run was fired with no usable user prompt.
+
+    Raised by the scheduled-invocation seam when the trigger's rendered
+    ``inputs`` is empty / whitespace-only (the common cause: a trigger
+    created without ``inputs``). Such a run would otherwise reach the
+    provider as a system-prompt-only request with an empty ``messages``
+    array and come back as an opaque provider 400 ("messages: at least
+    one message is required"), finalised to a generic ``failed`` row with
+    raw provider text. Failing typed instead -- *before* the model call
+    -- finalises the row with a :data:`SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+    ``error`` so the misconfiguration is greppable and the doomed provider
+    call is never made.
+
+    Subclass of :class:`AgentRunError` so the invocation surface's
+    existing failure-recording path (which already maps an
+    :class:`AgentRunError` to a ``failed`` row) classifies it uniformly;
+    a caller that wants to distinguish "no input" from "the loop tripped"
+    catches this subclass specifically.
+
+    The supported no-user-turn rule: MEHO does not (yet) support an
+    autonomous run shape that needs no user turn -- every backend rejects
+    the system-prompt-only request before any tool loop runs, so MEHO
+    fails fast and typed rather than injecting a synthetic user turn
+    (which would misrepresent operator intent). A genuine no-user-turn
+    autonomous shape would be a distinct feature.
+    """
+
+    def __init__(self, *, agent: str) -> None:
+        self.agent = agent
+        super().__init__(
+            f"{SCHEDULED_RUN_NO_INPUT_CLASS}: scheduled run for agent "
+            f"{agent!r} has no usable user prompt (empty inputs); a "
+            "scheduled trigger must supply a non-empty prompt",
+        )
 
 
 class AgentRunStatus(StrEnum):
@@ -180,6 +307,16 @@ class AgentDefinition(BaseModel):
     #: shape. Persisted definitions (T2 #809) materialise their stored
     #: ``toolset`` JSON into this field.
     toolset: dict[str, Any] | None = None
+    #: Optional logical tier name (G11.5-T1). When set *and* the runtime
+    #: carries a :class:`~meho_backplane.agent.models.ModelResolver`, the
+    #: resolver materialises the :class:`~pydantic_ai.models.Model` from
+    #: ``(operator.tenant_id, tier)``; the zero-arg :data:`ModelFactory`
+    #: is bypassed. When ``None`` (the legacy shape — every definition
+    #: written before G11.5), the runtime falls back to its
+    #: :data:`ModelFactory` so existing tests + the default single-tenant
+    #: path are unaffected. Concrete backends behind each tier are
+    #: tenant-policy decisions — see :mod:`meho_backplane.agent.models`.
+    tier: AgentTier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,11 +329,24 @@ class AgentRunResult:
     ``tool_call_count`` are lifted from the framework's usage accounting so
     the T6 run record and cost attribution (G11.5) have the turn + tool
     totals without re-deriving them from the message log.
+
+    Token totals (``input_tokens`` / ``output_tokens`` /
+    ``cache_read_tokens`` / ``cache_write_tokens``) are also lifted
+    from the framework's usage so the G11.5-T5 per-identity budget
+    bucketing (#1079) has the per-stream amounts the
+    :func:`~meho_backplane.operations.identity_budget.compute_cost`
+    pricing table charges against. Default to 0 so a deterministic
+    test model that does not stamp usage (e.g. a function model that
+    short-circuits the loop) still produces a valid result.
     """
 
     output: Any
     request_count: int
     tool_call_count: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class AgentRunEventKind(StrEnum):
@@ -342,6 +492,8 @@ def default_model_factory() -> Model:
 
     from meho_backplane.settings import get_settings
 
+    from .invocation import _split_model_id
+
     settings = get_settings()
     api_key = settings.anthropic_api_key
     if not api_key:
@@ -350,7 +502,12 @@ def default_model_factory() -> Model:
             "set it to run against Anthropic. Multi-provider routing is G11.5.",
         )
     provider = AnthropicProvider(anthropic_client=AsyncAnthropic(api_key=api_key))
-    return AnthropicModel(settings.agent_default_model, provider=provider)
+    # ``agent_default_model`` is the pydantic-ai spec form
+    # (``anthropic:claude-...``); AnthropicModel's ``model_name`` reaches the
+    # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
+    # only the bare model id. A deploy-supplied bare id falls through unchanged.
+    _, model_name = _split_model_id(settings.agent_default_model)
+    return AnthropicModel(model_name, provider=provider)
 
 
 def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
@@ -387,15 +544,31 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         arguments; ``target`` is an optional ``{"name": "<slug>"}`` for
         operations that act on a specific managed target.
         """
-        return await call_operation(
-            ctx.deps,
-            {
-                "connector_id": connector_id,
-                "op_id": op_id,
-                "params": params or {},
-                "target": target,
-            },
-        )
+        call_arguments: dict[str, Any] = {
+            "connector_id": connector_id,
+            "op_id": op_id,
+            "params": params or {},
+            "target": target,
+        }
+        result = await call_operation(ctx.deps, call_arguments)
+        if result.get("status") == "awaiting_approval":
+            # G11.1-T9 (#1117) — bridge ``requires_approval`` ops back into
+            # the loop: subscribe to the broadcast feed for an
+            # ``approval.{approved,rejected}`` event and either re-dispatch
+            # with ``_approved=True`` on approval or surface the
+            # rejection / timeout to the model. Same shape the toolset-
+            # resolved path applies (see :func:`_make_meta_tool` in
+            # :mod:`meho_backplane.agent.toolset`); duplicated here because
+            # this code path is the T1 default surface used by definitions
+            # that didn't declare a toolset.
+            settings = get_settings()
+            return await resume_or_surface_awaiting_approval(
+                operator=ctx.deps,
+                call_arguments=call_arguments,
+                awaiting_envelope=result,
+                timeout_seconds=settings.agent_approval_wait_timeout_seconds,
+            )
+        return result
 
     @agent.tool
     async def list_operation_groups_tool(
@@ -492,9 +665,28 @@ class PydanticAgentRun:
     loop as an :class:`asyncio.Task`. State lives on the returned
     :class:`AgentRunHandle`; the implementation itself is stateless beyond
     the factory, so a single instance is safe to share across runs.
+
+    G11.5-T1 added an optional :attr:`model_resolver`. When set, a definition
+    that names an :class:`~meho_backplane.agent.models.AgentTier` routes
+    through the resolver instead of :attr:`model_factory` — the per-tenant
+    backend (Anthropic / Bedrock / on-prem vLLM / VCF PAIF) is picked from
+    the tenant's policy. A definition with ``tier is None`` (or a runtime
+    built without a resolver, e.g. tests) keeps the legacy zero-arg
+    factory path.
     """
 
     model_factory: ModelFactory = field(default=default_model_factory)
+    #: Optional per-tenant tier→Model resolver (G11.5-T1). When set, a
+    #: :class:`AgentDefinition` that names a :class:`AgentTier` builds its
+    #: :class:`~pydantic_ai.models.Model` via the resolver
+    #: (``resolver.resolve(operator, definition.tier)``) — honouring the
+    #: tenant's policy + egress constraint + per-backend capability flags.
+    #: ``None`` (the default) means the legacy single-tenant
+    #: :attr:`model_factory` path is taken for every run, regardless of
+    #: ``definition.tier`` — useful for tests and for deploys that haven't
+    #: configured multi-provider routing yet. See
+    #: :mod:`meho_backplane.agent.models` for the resolver shape.
+    model_resolver: ModelResolver | None = None
     #: Optional child-agent resolver (G11.1-T5 #812). When set, every built
     #: agent additionally carries the ``invoke_agent`` meta-tool, so a running
     #: agent can invoke another definition in its tenant as a depth-capped,
@@ -536,8 +728,14 @@ class PydanticAgentRun:
         definition. The tool is bound to :meth:`run_child` as its
         :class:`~meho_backplane.agent.invoke.ChildRunner`, so the child loop
         runs with the parent's shared usage budget.
+
+        Model selection (G11.5-T1): when both :attr:`model_resolver` is wired
+        *and* ``definition.tier`` is set, the model comes from the resolver
+        — picked from the tenant's policy + egress constraint + capability
+        flags. Otherwise the legacy :attr:`model_factory` is called (the
+        zero-arg path tests rely on and the pre-G11.5 default).
         """
-        model = self.model_factory()
+        model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
             tools = resolve_agent_tools(definition.toolset, operator)
@@ -560,6 +758,37 @@ class PydanticAgentRun:
         )
         _register_default_meta_tools(agent)
         return agent
+
+    def _resolve_model(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+    ) -> Model:
+        """Pick the :class:`~pydantic_ai.models.Model` for one run.
+
+        Resolution order (G11.5-T1):
+
+        1. If :attr:`model_resolver` is set and ``definition.tier`` is set,
+           call ``resolver.resolve(operator, definition.tier)`` — the
+           per-tenant, capability-checked, egress-aware path. Any
+           :class:`~meho_backplane.agent.models.ResolverError` (a missing
+           backend, a no-egress violation, a capability mismatch) is
+           wrapped in :class:`AgentRunError` so callers catch one
+           exception type regardless of which mismatch fired.
+        2. Otherwise the legacy zero-arg :attr:`model_factory` — the path
+           every existing test relies on and the recovery shape for
+           single-tenant deploys that haven't yet onboarded a resolver.
+        """
+        if self.model_resolver is not None and definition.tier is not None:
+            try:
+                return self.model_resolver.resolve(operator, definition.tier)
+            except ResolverError as exc:
+                raise AgentRunError(
+                    f"could not resolve a model for tier "
+                    f"'{definition.tier.value}' under tenant "
+                    f"'{operator.tenant_id}': {exc}",
+                ) from exc
+        return self.model_factory()
 
     def _maybe_build_invoke_tool(self) -> Tool[Operator] | None:
         """Build the ``invoke_agent`` tool when composition is wired, else ``None``.
@@ -611,6 +840,10 @@ class PydanticAgentRun:
             output=run_result.output,
             request_count=usage.requests,
             tool_call_count=usage.tool_calls,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
         )
         _log.info(
             "agent_run_succeeded",
@@ -618,6 +851,8 @@ class PydanticAgentRun:
             agent=definition.name,
             request_count=result.request_count,
             tool_call_count=result.tool_call_count,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
             operator_sub=operator.sub,
         )
         return result
@@ -778,14 +1013,20 @@ class PydanticAgentRun:
         A tripped turn budget surfaces as a :attr:`AgentRunEventKind.ERROR`
         event (then the generator ends) rather than a raised exception, so
         an SSE consumer always sees a terminal frame regardless of how the
-        loop ended. Tool returns are read from the run's message history
-        after the call-tools node completes — the plain (non-streaming)
-        node-graph path the deterministic test model supports.
+        loop ended. Same envelope covers a resolver failure (no backend
+        registered, no-egress tenant routed to SaaS, capability mismatch)
+        from :meth:`_build_agent`: it surfaces as a terminal ``ERROR`` event
+        rather than an exception escaping the generator, so the SSE consumer
+        always sees a terminal frame regardless of how the agent
+        construction or the loop went wrong. Tool returns are read from
+        the run's message history after the call-tools node completes —
+        the plain (non-streaming) node-graph path the deterministic test
+        model supports.
         """
-        agent = self._build_agent(definition, operator)
-        limits = UsageLimits(request_limit=definition.request_limit)
         emitted_tool_returns = 0
         try:
+            agent = self._build_agent(definition, operator)
+            limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 async for node in run:
                     events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)

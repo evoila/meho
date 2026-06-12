@@ -5,7 +5,8 @@
 
 Boots a real ``hashicorp/vault:1.18`` server in dev mode via
 testcontainers, seeds the surfaces every op in Initiative #366 touches
-(KV-v2 ``secret/``, ``userpass``, ``approle``), then dispatches every
+(KV-v2 ``secret/``, ``userpass``, ``approle``, and a ``ci-readonly`` ACL
+policy for the G3.15-T2 #1410 policy reads), then dispatches every
 registered ``vault.kv.*`` / ``vault.sys.*`` / ``vault.auth.*`` op
 through the **real G0.6 dispatcher** against the live Vault and a real
 Postgres audit store. The unit suites (``test_connectors_vault*.py``)
@@ -31,8 +32,11 @@ What this harness proves (issue #551 DoD)
   :func:`~meho_backplane.operations.dispatch`; each asserts the live
   response shape, that a synchronous ``audit_log`` row committed
   (CLAUDE.md postulate 7), and that the broadcast event's
-  ``op_class`` is correct — ``write`` for ``vault.kv.put`` /
-  ``vault.kv.delete``, ``credential_read`` for ``vault.kv.read`` /
+  ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
+  and ``vault.kv.patch`` (their KV-v2 secret rides in the request
+  params, so the broadcast collapses to aggregate-only per G11.7-T1
+  #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
+  ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, and ``other`` for the two ``.read``
   auth-config ops (``vault.auth.userpass.read`` /
@@ -41,7 +45,10 @@ What this harness proves (issue #551 DoD)
   ``credential_read``-allowlisted ``vault.kv.read``; the auth-config
   ``.read`` ops therefore classify ``other``, the safe
   over-broadcast direction for non-secret auth-method metadata
-  (decision #3). The test assertions below encode this split.
+  (decision #3). ``vault.sys.policy.read`` (G3.15-T2 #1410) shares
+  this ``other`` classification for the same reason — its only param
+  is the policy name — while ``vault.sys.policy.list`` is ``read`` via
+  the ``.list`` suffix. The test assertions below encode this split.
 * The dev-root token is generated into the container via
   ``VAULT_DEV_ROOT_TOKEN_ID`` and only ever held in the fixture's
   return value — it is never written to a workflow log, a committed
@@ -89,6 +96,7 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
     VaultConnector,
+    register_vault_identity_token_operations,
     register_vault_sys_typed_operations,
     register_vault_typed_operations,
 )
@@ -190,7 +198,8 @@ def vault_dev_addr() -> Iterator[str]:
     # which probes the socket on import. Keeping it inside the fixture
     # lets the module collect on a no-Docker sandbox and skip cleanly.
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18")
     container = (
@@ -212,7 +221,7 @@ def vault_dev_addr() -> Iterator[str]:
         # Vault logs this line once the dev server is unsealed and
         # serving; testcontainers polls the log stream until it appears
         # or the timeout trips.
-        wait_for_logs(container, "Vault server started!", timeout=60)
+        wait_for_log_message(container, "Vault server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         addr = f"http://{host}:{port}"
@@ -284,6 +293,16 @@ def _seed_vault(addr: str) -> None:
         token_policies=["default"],
         token_ttl="1h",
         mount_point="approle",
+    )
+
+    # --- ACL policy (G3.15-T2 #1410) -------------------------------
+    # A named policy so vault.sys.policy.read / .list have a non-builtin
+    # target to assert on. Reads only — the dangerous write/delete ops
+    # are approval-gated, so a dispatch parks before reaching Vault and
+    # is covered by the unit suite.
+    client.sys.create_or_update_policy(
+        name="ci-readonly",
+        policy='path "secret/data/app/*" {\n  capabilities = ["read", "list"]\n}\n',
     )
 
 
@@ -363,6 +382,7 @@ async def vault_e2e(
     )
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
+    await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
 
     @asynccontextmanager
     async def _root_client_cm(_target: Any) -> AsyncIterator[hvac.Client]:
@@ -518,30 +538,137 @@ async def test_kv_put_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.kv.put`` writes a new version; audited; op_class=write."""
+    """``vault.kv.put`` writes a new version; audited; op_class=credential_write.
+
+    G11.7-T1 (#1401) reclassified ``vault.kv.put`` from plain ``write`` to
+    ``credential_write``: the KV-v2 secret rides in the *request params*, so
+    a plain-``write`` classification broadcast the written secret in full to
+    every operator on the feed. ``credential_write`` collapses the broadcast
+    to aggregate-only (``{op_class, result_status}``) — the team-coordination
+    signal "someone wrote a credential" without the secret material.
+
+    This integration assertion strengthens the contract end-to-end: the
+    written secret value is seeded as a distinctive sentinel and the test
+    positively asserts it is **absent** from the *entire serialised
+    BroadcastEvent* (not just ``payload`` — a regression placing the secret
+    in a new top-level field would slip a payload-only check), mirroring
+    :func:`tests.test_broadcast_credential_write_dispatch
+    .test_credential_write_broadcast_is_aggregate_only`. The
+    :class:`~meho_backplane.connectors.schemas.OperationResult` and the
+    Vault read-back still carry the secret — only the broadcast is redacted.
+    """
     target, addr = vault_e2e
+    # Distinctive value so any appearance in the serialised broadcast event
+    # is an unambiguous leak (a short/common value like "v" could collide
+    # with field names or framework strings and make absence unprovable).
+    sentinel = "kvput-secret-sentinel-1401"
     operator = _make_operator(sub="op-kv-put")
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
         op_id="vault.kv.put",
         target=target,
-        params={"path": "app/written", "data": {"k": "v"}},
+        params={"path": "app/written", "data": {"k": sentinel}},
+        # ``vault.kv.put`` is now approval-gated (requires_approval=True, G3.15-T1
+        # #1409); the approvals-API resume flag drives the authorized-execution
+        # path so the write actually lands and the read-back + redaction
+        # assertions below still run (the same flag a human approval sets).
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"version": 1}
-    # Read back through a fresh root client to prove the write landed.
+    # Read back through a fresh root client to prove the write landed — the
+    # secret is intact in Vault and in the caller's OperationResult; only the
+    # broadcast view is redacted.
     readback = _root_client(addr).secrets.kv.v2.read_secret_version(
         path="app/written",
         mount_point=_KV_MOUNT,
         raise_on_deleted_version=False,
     )
-    assert readback["data"]["data"] == {"k": "v"}
+    assert readback["data"]["data"] == {"k": sentinel}
     await _assert_audited(
         "vault.kv.put",
         operator_sub="op-kv-put",
-        expected_op_class="write",
+        expected_op_class="credential_write",
         events=captured_events,
+    )
+    # Positive secret-absence assertion (AC4): the redacted broadcast carries
+    # only the aggregate view and the sentinel never reaches the feed.
+    put_event = next(e for e in captured_events if e.op_id == "vault.kv.put")
+    assert put_event.payload == {
+        "op_class": "credential_write",
+        "result_status": "ok",
+    }
+    serialised = put_event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event for "
+        f"vault.kv.put — serialised event: {serialised}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kv_patch_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.kv.patch`` merges a field; audited; op_class=credential_write.
+
+    Proves the partial-write semantics end-to-end: an existing secret is
+    seeded with two keys, ``vault.kv.patch`` merges a third (and rotates
+    one), and the read-back shows the untouched key preserved alongside
+    the merged fields — the distinguishing behaviour vs. ``vault.kv.put``
+    (wholesale replace). The merged sentinel value must be absent from
+    the serialised broadcast event (``credential_write`` redaction,
+    same posture as ``vault.kv.put``).
+    """
+    target, addr = vault_e2e
+    sentinel = "kvpatch-secret-sentinel-1409"
+    _root_client(addr).secrets.kv.v2.create_or_update_secret(
+        path="app/to-patch",
+        secret={"keep": "original", "rotate": "old"},
+        mount_point=_KV_MOUNT,
+    )
+    operator = _make_operator(sub="op-kv-patch")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.patch",
+        target=target,
+        params={"path": "app/to-patch", "data": {"rotate": sentinel, "added": "new"}},
+        # ``vault.kv.patch`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the partial-merge write
+        # executes and the read-back + redaction assertions still run.
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"version": 2}
+    # Read back: the untouched key survives, the rotated/added keys land —
+    # the partial-merge contract that separates patch from put.
+    readback = _root_client(addr).secrets.kv.v2.read_secret_version(
+        path="app/to-patch",
+        mount_point=_KV_MOUNT,
+        raise_on_deleted_version=False,
+    )
+    assert readback["data"]["data"] == {
+        "keep": "original",
+        "rotate": sentinel,
+        "added": "new",
+    }
+    await _assert_audited(
+        "vault.kv.patch",
+        operator_sub="op-kv-patch",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    patch_event = next(e for e in captured_events if e.op_id == "vault.kv.patch")
+    assert patch_event.payload == {
+        "op_class": "credential_write",
+        "result_status": "ok",
+    }
+    serialised = patch_event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event for "
+        f"vault.kv.patch — serialised event: {serialised}"
     )
 
 
@@ -593,6 +720,10 @@ async def test_kv_delete_against_dev_vault(
         op_id="vault.kv.delete",
         target=target,
         params={"path": "app/to-delete", "versions": [1]},
+        # ``vault.kv.delete`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the soft-delete executes
+        # and the audit/op_class assertions still run.
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"deleted_versions": [1]}
@@ -722,6 +853,215 @@ async def test_sys_auth_list_against_dev_vault(
     )
 
 
+@pytest.mark.asyncio
+async def test_sys_policy_read_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.policy.read`` returns the seeded ci-readonly body; op_class=read."""
+    target, _ = vault_e2e
+    operator = _make_operator(sub="op-policy-read")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.policy.read",
+        target=target,
+        params={"name": "ci-readonly"},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["name"] == "ci-readonly"
+    assert "secret/data/app/*" in (result.result["rules"] or "")
+    await _assert_audited(
+        "vault.sys.policy.read",
+        operator_sub="op-policy-read",
+        # ``.read`` is not a read-suffix; policy.read's only param is the
+        # policy name, so it broadcasts ``other`` (full params) like the
+        # vault.auth.*.read ops.
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_policy_list_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.policy.list`` includes the seeded policy + builtins; op_class=read."""
+    target, _ = vault_e2e
+    operator = _make_operator(sub="op-policy-list")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.policy.list",
+        target=target,
+        params={},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    policies = result.result["policies"]
+    assert "ci-readonly" in policies
+    assert "default" in policies
+    await _assert_audited(
+        "vault.sys.policy.list",
+        operator_sub="op-policy-list",
+        expected_op_class="read",
+        events=captured_events,
+    )
+
+
+# ---------------------------------------------------------------------------
+# sys bootstrap writes — auth/mount enable + tune (G3.15-T5 #1413). These
+# are approval-gated, so each dispatch passes ``_approved=True`` (the
+# approvals-API resume flag) to drive the authorized-execution path.
+# ``.enable`` / ``.tune`` are not write/read suffixes, so all four
+# broadcast ``other`` (full params; no secret material in the params).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_enable_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.auth.enable`` mounts a new auth method; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-auth-enable")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.enable",
+        target=target,
+        params={"method_type": "userpass", "path": "userpass-new", "description": "ci"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "path": "userpass-new",
+        "method_type": "userpass",
+        "created": True,
+    }
+    # Read back through a root client: the method is mounted at the path.
+    methods = _root_client(addr).sys.list_auth_methods()
+    assert "userpass-new/" in methods["data"]
+    await _assert_audited(
+        "vault.sys.auth.enable",
+        operator_sub="op-auth-enable",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_enable_idempotent_on_existing_path(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """Re-enabling the seeded ``userpass`` method → created=False (no error)."""
+    target, _ = vault_e2e
+    result = await dispatch(
+        operator=_make_operator(sub="op-auth-enable-dup"),
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.enable",
+        target=target,
+        # ``userpass`` is enabled by ``_seed_vault``; a duplicate enable
+        # is Vault's "path is already in use" 400 → idempotent success.
+        params={"method_type": "userpass", "path": "userpass"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "path": "userpass",
+        "method_type": "userpass",
+        "created": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sys_mounts_enable_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-mount-enable")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.mounts.enable",
+        target=target,
+        params={"backend_type": "kv", "path": "kv-prod"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": "kv-prod", "backend_type": "kv", "created": True}
+    mounts = _root_client(addr).sys.list_mounted_secrets_engines()
+    assert "kv-prod/" in mounts["data"]
+    await _assert_audited(
+        "vault.sys.mounts.enable",
+        operator_sub="op-mount-enable",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_tune_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-auth-tune")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.tune",
+        target=target,
+        params={"path": "userpass", "default_lease_ttl": "1234s", "description": "tuned-up"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": "userpass", "tuned": True}
+    # Read back the tuned config — the lease TTL landed.
+    cfg = _root_client(addr).sys.read_auth_method_tuning(path="userpass")
+    assert cfg["data"]["default_lease_ttl"] == 1234
+    await _assert_audited(
+        "vault.sys.auth.tune",
+        operator_sub="op-auth-tune",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_mounts_tune_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-mount-tune")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.mounts.tune",
+        target=target,
+        params={"path": _KV_MOUNT, "max_lease_ttl": "4321s"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": _KV_MOUNT, "tuned": True}
+    cfg = _root_client(addr).sys.read_mount_configuration(path=_KV_MOUNT)
+    assert cfg["data"]["max_lease_ttl"] == 4321
+    await _assert_audited(
+        "vault.sys.mounts.tune",
+        operator_sub="op-mount-tune",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
 # ---------------------------------------------------------------------------
 # auth group — userpass + approle read-only
 # ---------------------------------------------------------------------------
@@ -847,3 +1187,513 @@ async def test_auth_approle_read_against_dev_vault(
         expected_op_class="other",
         events=captured_events,
     )
+
+
+# ---------------------------------------------------------------------------
+# auth write group (G3.15-T3 #1411) — userpass + approle credential lifecycle
+#
+# Every write op registers ``requires_approval=True``; an ordinary dispatch
+# would park it in the approval queue (G11.7-T1 #1401). These tests pass
+# ``_approved=True`` (the approvals-API resume flag) to drive the
+# authorized execution path — the same handler/audit/broadcast path that
+# runs once a human approves — against the live Vault. The redaction
+# assertions positively prove the password (request-side) and the minted
+# SecretID (response-side) never reach the serialised broadcast event.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_write_redacts_password_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.write`` creates a user; password absent from the broadcast.
+
+    The password rides in the request params, so the op classifies
+    ``credential_write`` (G11.7-T1 #1401) and the broadcast collapses to
+    aggregate-only. A distinctive sentinel password is seeded and the
+    test positively asserts it is absent from the *entire serialised
+    BroadcastEvent*; the write still lands in Vault (the user logs in).
+    """
+    target, addr = vault_e2e
+    sentinel = "userpass-write-pw-sentinel-1411"
+    operator = _make_operator(sub="op-up-write")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.write",
+        target=target,
+        params={"username": "minted-user", "password": sentinel, "token_policies": ["default"]},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result["written"] is True
+    assert sentinel not in str(result.result)
+    # The write landed — the user can authenticate with the sentinel.
+    login = _root_client(addr).auth.userpass.login(
+        username="minted-user", password=sentinel, mount_point="userpass"
+    )
+    assert login["auth"]["client_token"]
+    await _assert_audited(
+        "vault.auth.userpass.write",
+        operator_sub="op-up-write",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.write")
+    assert event.payload == {"op_class": "credential_write", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_update_password_redacts_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.update_password`` rotates a password; redacted from broadcast."""
+    target, addr = vault_e2e
+    # Seed a user to rotate so this test is independent of the create test.
+    _root_client(addr).auth.userpass.create_or_update_user(
+        username="rotate-user", password="initial-pw", policies=["default"], mount_point="userpass"
+    )
+    sentinel = "userpass-rotate-pw-sentinel-1411"
+    operator = _make_operator(sub="op-up-rotate")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.update_password",
+        target=target,
+        params={"username": "rotate-user", "password": sentinel},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "username": "rotate-user",
+        "mount": "userpass",
+        "password_updated": True,
+    }
+    login = _root_client(addr).auth.userpass.login(
+        username="rotate-user", password=sentinel, mount_point="userpass"
+    )
+    assert login["auth"]["client_token"]
+    await _assert_audited(
+        "vault.auth.userpass.update_password",
+        operator_sub="op-up-rotate",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.update_password")
+    serialised = event.model_dump_json()
+    assert sentinel not in serialised, "rotated password leaked into broadcast event"
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.delete`` removes a user; op_class=write (no secret)."""
+    target, addr = vault_e2e
+    _root_client(addr).auth.userpass.create_or_update_user(
+        username="doomed-user", password="pw", policies=["default"], mount_point="userpass"
+    )
+    operator = _make_operator(sub="op-up-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.delete",
+        target=target,
+        params={"username": "doomed-user"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"username": "doomed-user", "mount": "userpass", "deleted": True}
+    # The user is gone — list no longer contains it.
+    listing = _root_client(addr).auth.userpass.list_user(mount_point="userpass")
+    assert "doomed-user" not in listing["data"]["keys"]
+    await _assert_audited(
+        "vault.auth.userpass.delete",
+        operator_sub="op-up-delete",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_write_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.write`` creates a role; op_class=write."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-ar-write")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.write",
+        target=target,
+        params={"role_name": "minted-role", "token_policies": ["default"], "token_ttl": 600},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"role_name": "minted-role", "mount": "approle", "written": True}
+    role = _root_client(addr).auth.approle.read_role(role_name="minted-role", mount_point="approle")
+    assert "default" in role["data"]["token_policies"]
+    await _assert_audited(
+        "vault.auth.approle.write",
+        operator_sub="op-ar-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.delete`` removes a role; op_class=write."""
+    target, addr = vault_e2e
+    _root_client(addr).auth.approle.create_or_update_approle(
+        role_name="doomed-role", token_policies=["default"], mount_point="approle"
+    )
+    operator = _make_operator(sub="op-ar-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.delete",
+        target=target,
+        params={"role_name": "doomed-role"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"role_name": "doomed-role", "mount": "approle", "deleted": True}
+    listing = _root_client(addr).auth.approle.list_roles(mount_point="approle")
+    assert "doomed-role" not in listing["data"]["keys"]
+    await _assert_audited(
+        "vault.auth.approle.delete",
+        operator_sub="op-ar-delete",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.generate_secret_id`` mints a SecretID; redacted from broadcast.
+
+    The minted SecretID lands in the *response*, so the op classifies
+    ``credential_mint`` and the broadcast collapses to aggregate-only. The
+    caller's OperationResult carries the SecretID (the point of minting),
+    but the test positively asserts that exact value is absent from the
+    entire serialised BroadcastEvent. Non-idempotent: a second call mints
+    a distinct SecretID.
+    """
+    target, addr = vault_e2e
+    _root_client(addr).auth.approle.create_or_update_approle(
+        role_name="sid-role", token_policies=["default"], mount_point="approle"
+    )
+    operator = _make_operator(sub="op-ar-sid")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.generate_secret_id",
+        target=target,
+        params={"role_name": "sid-role"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    minted_secret_id = result.result["secret_id"]
+    assert minted_secret_id, "the minted SecretID must reach the caller's OperationResult"
+    assert result.result["role_name"] == "sid-role"
+    await _assert_audited(
+        "vault.auth.approle.generate_secret_id",
+        operator_sub="op-ar-sid",
+        expected_op_class="credential_mint",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.approle.generate_secret_id")
+    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert minted_secret_id not in serialised, (
+        "credential_mint leak: the minted SecretID reached the broadcast event"
+    )
+    # Non-idempotent: a second mint yields a distinct SecretID.
+    second = await dispatch(
+        operator=_make_operator(sub="op-ar-sid-2"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.generate_secret_id",
+        target=target,
+        params={"role_name": "sid-role"},
+        _approved=True,
+    )
+    assert second.status == "ok", second.error
+    assert second.result["secret_id"] != minted_secret_id
+
+
+# ---------------------------------------------------------------------------
+# Identity + token op groups (G3.15-T4 #1412)
+#
+# The writes (identity entity/alias/group + token create/revoke_accessor)
+# register requires_approval=True, so these tests pass ``_approved=True``
+# (the approvals-API resume flag) to drive the authorized execution path.
+# token.create's minted client token is response-side secret material;
+# the redaction test positively asserts that exact value is absent from
+# the serialised BroadcastEvent (credential_mint -> aggregate-only).
+# The identity/token core backends are always mounted on a dev Vault.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_identity_entity_write_and_read_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """entity.write creates an entity (op_class=write) and entity.read reads it back."""
+    target, _addr = vault_e2e
+    write = await dispatch(
+        operator=_make_operator(sub="op-ent-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.write",
+        target=target,
+        params={"name": "e2e-entity", "policies": ["default"], "metadata": {"team": "ops"}},
+        _approved=True,
+    )
+    assert write.status == "ok", write.error
+    assert write.result["written"] is True
+    entity_id = write.result["entity_id"]
+    assert entity_id, "a create must return the minted entity_id"
+    await _assert_audited(
+        "vault.identity.entity.write",
+        operator_sub="op-ent-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+    # Read it back — safe op, no approval needed.
+    read = await dispatch(
+        operator=_make_operator(sub="op-ent-read"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.read",
+        target=target,
+        params={"entity_id": entity_id},
+    )
+    assert read.status == "ok", read.error
+    assert read.result["name"] == "e2e-entity"
+    assert "default" in read.result["policies"]
+
+
+@pytest.mark.asyncio
+async def test_identity_group_write_delete_list_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """group.write creates a group, list/read see it, group.delete removes it."""
+    target, addr = vault_e2e
+    write = await dispatch(
+        operator=_make_operator(sub="op-grp-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.write",
+        target=target,
+        params={"name": "e2e-group", "policies": ["default"]},
+        _approved=True,
+    )
+    assert write.status == "ok", write.error
+    assert write.result["group_id"], "a create must return the minted group_id"
+    await _assert_audited(
+        "vault.identity.group.write",
+        operator_sub="op-grp-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-grp-list"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.list",
+        target=target,
+        params={"kind": "groups"},
+    )
+    assert listing.status == "ok", listing.error
+    assert write.result["group_id"] in listing.result["keys"]
+    await _assert_audited(
+        "vault.identity.list",
+        operator_sub="op-grp-list",
+        expected_op_class="read",
+        events=captured_events,
+    )
+
+    read = await dispatch(
+        operator=_make_operator(sub="op-grp-read"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.read",
+        target=target,
+        params={"name": "e2e-group"},
+    )
+    assert read.status == "ok", read.error
+    assert read.result["name"] == "e2e-group"
+
+    delete = await dispatch(
+        operator=_make_operator(sub="op-grp-delete"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.delete",
+        target=target,
+        params={"name": "e2e-group"},
+        _approved=True,
+    )
+    assert delete.status == "ok", delete.error
+    assert delete.result == {"name": "e2e-group", "deleted": True}
+    # The group is gone — Vault answers a read of a missing group with a
+    # 404, which hvac surfaces as InvalidPath (the same not-found posture
+    # vault.identity.group.read documents for production callers).
+    with pytest.raises(hvac.exceptions.InvalidPath):
+        _root_client(addr).secrets.identity.read_group_by_name(
+            name="e2e-group", mount_point="identity"
+        )
+
+
+@pytest.mark.asyncio
+async def test_identity_entity_alias_write_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """entity_alias.write links a userpass login to an entity (op_class=write)."""
+    target, addr = vault_e2e
+    # Need an entity to map onto and the userpass mount accessor.
+    entity = await dispatch(
+        operator=_make_operator(sub="op-alias-entity"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.write",
+        target=target,
+        params={"name": "alias-entity"},
+        _approved=True,
+    )
+    assert entity.status == "ok", entity.error
+    canonical_id = entity.result["entity_id"]
+    auth_methods = _root_client(addr).sys.list_auth_methods()
+    mount_accessor = auth_methods["userpass/"]["accessor"]
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-alias-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity_alias.write",
+        target=target,
+        params={
+            "name": "ci-operator",
+            "canonical_id": canonical_id,
+            "mount_accessor": mount_accessor,
+        },
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result["written"] is True
+    assert result.result["canonical_id"] == canonical_id
+    await _assert_audited(
+        "vault.identity.entity_alias.write",
+        operator_sub="op-alias-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_token_create_redacts_token_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """token.create mints a token in the response; redacted from the broadcast.
+
+    The minted client_token lands in the *response*, so the op classifies
+    ``credential_mint`` and the broadcast collapses to aggregate-only. The
+    caller's OperationResult carries the token (the point of minting), but
+    the test positively asserts that exact value is absent from the entire
+    serialised BroadcastEvent. Non-idempotent: a second call mints a
+    distinct token.
+    """
+    target, addr = vault_e2e
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-create"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m", "num_uses": 1},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    minted_token = result.result["client_token"]
+    assert minted_token, "the minted token must reach the caller's OperationResult"
+    assert result.result["accessor"]
+    # The minted token actually works against the live Vault.
+    assert _root_client(addr).sys.read_health_status(method="GET") is not None
+    await _assert_audited(
+        "vault.token.create",
+        operator_sub="op-token-create",
+        expected_op_class="credential_mint",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.token.create")
+    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert minted_token not in serialised, (
+        "credential_mint leak: the minted client token reached the broadcast event"
+    )
+    # Non-idempotent: a second create yields a distinct token.
+    second = await dispatch(
+        operator=_make_operator(sub="op-token-create-2"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m"},
+        _approved=True,
+    )
+    assert second.status == "ok", second.error
+    assert second.result["client_token"] != minted_token
+
+
+@pytest.mark.asyncio
+async def test_token_list_and_revoke_accessor_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """list_accessors enumerates accessors; revoke_accessor surgically revokes one."""
+    target, addr = vault_e2e
+    minted = await dispatch(
+        operator=_make_operator(sub="op-token-for-revoke"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m"},
+        _approved=True,
+    )
+    assert minted.status == "ok", minted.error
+    accessor = minted.result["accessor"]
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-token-list"),
+        connector_id="vault-1.x",
+        op_id="vault.token.list_accessors",
+        target=target,
+        params={},
+    )
+    assert listing.status == "ok", listing.error
+    assert accessor in listing.result["keys"]
+
+    revoke = await dispatch(
+        operator=_make_operator(sub="op-token-revoke"),
+        connector_id="vault-1.x",
+        op_id="vault.token.revoke_accessor",
+        target=target,
+        params={"accessor": accessor},
+        _approved=True,
+    )
+    assert revoke.status == "ok", revoke.error
+    assert revoke.result == {"accessor": accessor, "revoked": True}
+    # The accessor is gone from a fresh listing.
+    after = _root_client(addr).auth.token.list_accessors()
+    assert accessor not in (after["data"]["keys"] if after else [])

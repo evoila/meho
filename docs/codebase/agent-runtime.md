@@ -316,14 +316,116 @@ framework `Agent` construction + the `usage=ctx.usage` call, keeping
 `finalizer` (the durable child-row create / close hooks the live invoker owns)
 without `invoke.py` importing the framework's loop driver or the DB session.
 
+## Awaiting-approval resume (T9 #1117)
+
+When the agent's `call_operation` tool reaches an op with
+`requires_approval=True`, the dispatcher parks the dispatch durably (see
+[approvals](approvals.md)) and returns an `awaiting_approval` envelope rather
+than executing. Until #1117 the only path that resumed the run was the REST
+`POST /api/v1/approvals/{id}/approve` endpoint with the original `params` —
+the human-driven express lane that re-dispatches inline. Every other operator
+surface (`/decide`, MCP `meho.approvals.{approve,reject}`, CLI, wall-monitor)
+captures the decision durably and publishes `approval.{approved,rejected}` on
+the broadcast feed, but did **not** re-dispatch. Without an agent-side
+resume substrate, an agent run that bridged a `requires_approval` op via any
+path other than REST `/approve+params` was dead-on-arrival: the operator
+could approve, but the agent run never found out.
+
+The agent runtime closes that gap with a wrapped `call_operation`. On
+`status="awaiting_approval"`, the wrapper:
+
+1. **Subscribes** to the per-tenant Valkey stream (`meho:feed:{tenant_id}`)
+   via `XREAD BLOCK`, filtered to the request's own `approval_request_id`.
+   The wait is in `meho_backplane/agent/approval_wait.py`; the per-tenant
+   stream is the same one the SSE feed and `meho.broadcast.watch` read.
+2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
+   original in-memory `params` (passed through `call_operation_with_approval`
+   in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
+   the policy gate; the durable approval-decision row is the authorization.
+3. **On rejection** — returns the original `awaiting_approval` envelope to
+   the model annotated with `extras["error_code"] = "approval_rejected"`
+   and `extras["decision"] = "rejected"` plus a rewritten `error` message,
+   so the agent's model sees a structured tool result it can reason about.
+4. **On timeout / broadcast outage** — returns the envelope annotated with
+   `extras["error_code"] = "awaiting_approval_timeout"` so the model can
+   distinguish "still pending, timed out" from "decision happened". The
+   durable decision row remains the source of truth; the agent can query
+   approval status or re-issue.
+
+The wait cap is `Settings.agent_approval_wait_timeout_seconds` (default
+1800s = 30 min, env `AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS`). It bounds how
+long an agent loop ties up its turn budget on a forgotten review; pick a
+value long enough for human review across timezone-distant teams.
+
+### Operator / agent split
+
+The substrate preserves the operator/agent split G11.2 established:
+
+| Path | Decision capture | Re-dispatch |
+|---|---|---|
+| REST `/approve` with `params` | inline | inline (human as operator + agent) |
+| REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime via wait+wrap** |
+
+For the **agent-run** case this Task targets, the agent-side in-memory
+params are authoritative: the live `call_operation` wait holds them and
+re-dispatches from there, so `#1117` deliberately did not store `params`
+on the approval row. Resuming agent runs whose process died between
+dispatch and approval is explicitly out-of-scope for v1.
+
+The **direct operator op** case is different — there is no in-process
+wait holding the params, so a parked direct op approved by id alone
+(`/decide`, MCP, CLI) had nothing to re-dispatch. #1503 (G0.20-T3) adds a
+nullable `approval_request.params` column (migration 0036) so a direct
+op's stored params drive the post-approval re-dispatch on any surface.
+That column is `run_id`-gated at the re-dispatch sites: an agent-run
+request (`run_id` set) is never re-dispatched from `/decide`/MCP — the
+broadcast-driven runtime resume above remains its only re-dispatch path,
+so this section's behaviour is unchanged. The params column is internal
+re-dispatch input only and is never surfaced on a read view or broadcast
+frame. See [approvals.md § G0.20-T3](approvals.md#g020-t3--execute-a-parked-direct-op-on-approve-via-every-surface-1503).
+
+### Audit attribution
+
+The resumed dispatch is recorded under the agent principal (the original
+caller), with the approval-decision audit row holding the human reviewer's
+identity. The two-row decision audit invariant (`approval.request` +
+`approval.decision`) sits alongside the dispatch audit row from the
+re-dispatch, so the chain reads: agent attempted op → policy gate parked
+→ operator decided → agent resumed → op executed. Every row is
+correlated by `approval_request_id`.
+
+### Where it lands
+
+- **`agent/approval_wait.py`** — `wait_for_approval_decision(tenant_id,
+  approval_request_id, timeout_seconds)` (the read-side primitive) +
+  `resume_or_surface_awaiting_approval(...)` (the agent-facing entry
+  point that branches on decision).
+- **`agent/run.py`** and **`agent/toolset.py`** — the wrapped
+  `call_operation` tool. Both the T1 default surface (no toolset) and
+  the T3 resolved surface go through the resume substrate; the wrapping
+  is duplicated rather than factored out because the two adapters bind
+  arguments slightly differently and the wrap is one branch each.
+- **`operations/meta_tools.py`** — `call_operation_with_approval(operator,
+  arguments)`, the re-dispatch entry point. Threads `_approved=True`
+  into the same body `call_operation` uses; not part of the public
+  REST/MCP surface.
+
 ## Dependencies
 
-- **`pydantic-ai-slim[anthropic]`** (pinned in `backend/pyproject.toml`) —
-  the loop framework + the Anthropic provider. Confined to
-  `meho_backplane.agent.run`.
-- **`anthropic`** — the Anthropic SDK, pulled in transitively and used only
-  inside `default_model_factory` (lazy-imported, so processes that never run
-  an agent against Anthropic do not load it).
+- **`pydantic-ai-slim[anthropic,bedrock]`** (pinned in
+  `backend/pyproject.toml`) — the loop framework + the Anthropic
+  provider (`[anthropic]`) + the Bedrock Converse provider (`[bedrock]`,
+  G11.5-T2 #1076; pulls in `boto3`). Both providers are confined to
+  `meho_backplane.agent.run` (legacy `default_model_factory`) and
+  `meho_backplane.agent.models` (the per-tenant builders).
+- **`anthropic`** — the Anthropic SDK, pulled in transitively from
+  `[anthropic]` and used only inside `default_model_factory` /
+  `anthropic_backend_builder` (lazy-imported, so processes that never
+  run an agent against Anthropic do not load it).
+- **`boto3` / `botocore`** — pulled in transitively from `[bedrock]`,
+  used only inside `bedrock_backend_builder` (lazy-imported on the same
+  pattern; the public Bedrock endpoint is `bedrock-runtime.<region>.
+  amazonaws.com`).
 - **`meho_backplane.operations.meta_tools`** — `call_operation`,
   `list_operation_groups`, `search_operations`: the existing dispatch entry
   points the loop's tools call.
@@ -333,9 +435,17 @@ without `invoke.py` importing the framework's loop driver or the DB session.
 - **`meho_backplane.auth.operator.Operator` / `TenantRole`** — the principal
   injected as the framework dependency, and the role gated against the
   meta-tool floors.
-- **`meho_backplane.settings`** — `anthropic_api_key` (fail-closed: empty
-  means the model factory raises) and `agent_default_model` (the pinned
-  model id, never a `-latest` tag).
+- **`meho_backplane.settings`** — `anthropic_api_key` (fail-closed:
+  empty means the Anthropic builder raises) and `agent_default_model`
+  (the pinned Anthropic model id, never a `-latest` tag). G11.5-T2
+  added `bedrock_region` (empty = boto3 region chain; explicit pin
+  otherwise) and `bedrock_default_model` (the pinned full Bedrock
+  model id, geo-prefixed and `-v1:0`-suffixed) for the Bedrock
+  builder; AWS credentials follow boto3's standard chain (env vars
+  / IRSA role / instance profile / shared profile) and are *not*
+  surfaced as backplane settings of their own. A multi-provider deploy
+  that routes some tiers to Anthropic and others to Bedrock works with
+  the union of both env-var surfaces.
 
 ## Why the model factory, not the `LlmClient` seam
 
@@ -346,9 +456,358 @@ pass, the wrong shape for a multi-turn tool-use loop, which needs the full
 Messages API (tool calls, tool results, repeated turns). Pydantic AI drives
 its loop through a framework `Model`, so the agent seam mirrors the
 *pattern* of `LlmClientFactory` (an injected, fail-closed factory) rather
-than the one-shot method. The G11 initiative ships against Anthropic;
-multi-provider routing (Bedrock, on-prem OpenAI-compatible, VCF Private AI
-Foundation) is G11.5.
+than the one-shot method. The G11 initiative shipped against Anthropic;
+G11.5-T1 layered a per-tenant resolver on top of that pattern.
+
+## Per-tenant tier→Model resolver (G11.5-T1 #1075)
+
+The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.
+It loses the two pieces multi-provider routing needs to honour: *which
+tenant* is running the agent, and *which logical tier* (`triage` /
+`investigate` / `summarize`) the definition asks for. G11.5-T1 added the
+`ModelResolver` protocol in `meho_backplane/agent/models.py`, the
+architectural sibling of the connectors' fingerprint resolver:
+
+```python
+resolver.resolve(operator, tier) -> pydantic_ai.models.Model
+```
+
+`PydanticAgentRun` now takes an optional `model_resolver`. When *both* the
+runtime carries a resolver *and* the definition names a tier, the
+resolver builds the model; otherwise the legacy `model_factory` runs.
+This dual path keeps every existing test (which injects
+`model_factory=lambda: FunctionModel(...)`) unmodified — definitions
+without a tier still resolve through the factory.
+
+### The three gates
+
+For every `resolve(operator, tier)` call the resolver checks, in order:
+
+1. **Tenant policy** — `policies[tenant_id]` (falling back to the
+   `__default__` policy when the tenant has no explicit row) maps each
+   `AgentTier` to a `TierMapping(backend_id=...)`. A tier the policy
+   doesn't cover raises `BackendNotConfiguredError`.
+2. **Egress** — when the policy carries `allow_egress=False` (the
+   air-gapped posture), the resolver refuses to materialise any backend
+   flagged `is_saas_egress=True` and raises `EgressViolationError`. The
+   per-backend flag (not a name-string match) is what decides; an
+   on-prem Bedrock-via-AWS-PrivateLink deployment can register the same
+   `bedrock` builder with `is_saas_egress=False`.
+3. **Capabilities** — each backend declares `BackendCapabilities`
+   (`supports_tools`, `supports_streaming`, `supports_prompt_cache`,
+   `tool_format`). The agent runtime always needs tools (the loop is
+   tool-use), so a backend with `supports_tools=False` mapped to any
+   tier raises `CapabilityMismatchError`. Future capability-aware tiers
+   (a no-tools "free-text summary" tier) reuse the same shape.
+
+### What ships in T1 + T2 vs C4-c/d
+
+T1 (#1075) shipped the resolver + capability flags + the **Anthropic
+backend builder** (lifted from the old `default_model_factory`, fail-
+closed on missing key). The recovery shape `default_anthropic_policy()`
++ `default_anthropic_backends()` reproduces the pre-resolver single-
+tenant behaviour — every tier under the default tenant policy routes
+to Anthropic.
+
+T2 (#1076) added the **AWS Bedrock Converse backend builder** alongside:
+`bedrock_backend_builder()` constructs a
+`pydantic_ai.models.bedrock.BedrockConverseModel` against a
+`BedrockProvider` (boto3 region + credential chain). The shipped
+registration `default_bedrock_backends()` exposes the builder under the
+id `"bedrock-anthropic"` with `is_saas_egress=True` — public Bedrock
+endpoints traverse the public internet, so an air-gapped tenant
+brokering Bedrock over AWS PrivateLink / VPC endpoints layers a second
+registration under a different id (`"bedrock-anthropic-privatelink"`,
+say) with `is_saas_egress=False`. The `[bedrock]` extra (boto3) lives
+on the same pydantic-ai-slim pin as `[anthropic]`, so every wheel
+already ships both; the lazy function-local imports in each builder
+keep an unused backend's dependencies out of the import graph.
+
+**The Bedrock caveat that drives `tool_format="converse"`.** Pydantic
+AI's Bedrock path is the **Converse API** (boto3), *not* the
+`anthropic[bedrock]` adapter. The two look like "Claude over AWS" from
+a tenant-facing distance, but route tool calls through different wire
+shapes (Bedrock `toolSpec` vs. Anthropic-native XML), so the capability
+flag records the difference. A future tool-format adapter (initiative
+#806 §C4) branches on the `tool_format` string rather than inferring
+from the underlying model family — Claude over Anthropic-direct and
+Claude over Bedrock are different format domains.
+
+**Per-model prompt-caching on Bedrock.** The default Bedrock
+registration sets `supports_prompt_cache=True` because it targets the
+Anthropic-on-Bedrock family, which the
+`pydantic_ai.providers.bedrock.BedrockModelProfile`
+`bedrock_supports_prompt_caching` allow-list covers. A deploy that
+registers a *non*-Anthropic Bedrock model (Amazon Nova, Mistral,
+Cohere) registers it under a separate backend id with a copy of
+`bedrock_capabilities` flipping `supports_prompt_cache=False` — the
+resolver and the cost-attribution path (#1079) read the per-
+registration flag, not the model id.
+
+OpenAI-compatible / vLLM / Ollama (#1077 — landed) and VCF Private AI
+Foundation (#1078) land their own `BackendBuilder` registrations on
+the same pattern. They are deliberately not eagerly imported in
+`models.py`'s default policy helpers — an eager import would break the
+module on a deployment without the corresponding extra. The `[openai]`
+extra **is** pinned now (see #1077 below) but its builder still imports
+lazily inside the closure so an Anthropic-only deploy never loads the
+`openai` wheel.
+
+## OpenAI-compatible backend (G11.5-T3 #1077)
+
+The OpenAI-compatible backend covers three deployment shapes the
+Initiative #806 §C4 calls out: **OpenAI SaaS** (`api.openai.com`),
+**vLLM** on-prem (a Python inference server exposing the OpenAI Chat
+Completions wire format under `/v1`), and **Ollama** local (the same
+wire format with a few documented quirks). All three share the
+transport — pydantic_ai's `OpenAIChatModel` + `OpenAIProvider` — and
+differ on which sub-features the underlying engine actually
+implements, surfaced through `OpenAIModelProfile` flags.
+
+### Three knobs, one shape
+
+The vendor-specific quirks are wired through three pre-built profile
+factories in `meho_backplane.agent.models`:
+
+| Vendor | `openai_supports_strict_tool_definition` | `openai_chat_supports_multiple_system_messages` |
+|---|---|---|
+| `OpenAICompatVendor.OPENAI` | `True` (default) | `True` (default) |
+| `OpenAICompatVendor.VLLM` | **`False`** — engine ignores the strict flag (vLLM tool-calling docs) | `True` |
+| `OpenAICompatVendor.OLLAMA` | **`False`** — `openai` compat layer ignores the strict flag | **`False`** — Ollama collapses multiple `role=system` turns |
+
+The `json_schema_transformer` knob the issue body names stays at the
+framework's `None` default for all three vendors — none of them
+requires a per-call schema rewrite at the time of this slice.
+
+`BackendCapabilities` for the OpenAI-compat surface:
+
+- `supports_tools=True` — every vendor honours the tool-use loop.
+- `supports_streaming=True` — same.
+- `supports_prompt_cache=False` — none of the three exposes the
+  Anthropic-style `cache_control` knob. OpenAI's automatic input
+  caching is opaque to the client; vLLM/Ollama have no equivalent.
+  The cost-attribution layer (#1079) reads this flag to decide
+  whether to model a per-message cache discount.
+- `tool_format="openai"` — the wire format every OpenAI-compat
+  surface speaks.
+
+### Two builder shapes
+
+```python
+# Per-backend, fully parameterised — the multi-endpoint case
+builder = openai_compat_backend_builder(
+    vendor=OpenAICompatVendor.VLLM,
+    model_id="meta-llama/Llama-3.1-8B-Instruct",
+    base_url="http://vllm.internal:8000/v1",
+    api_key=vault_secret,
+)
+backends = {
+    "vllm-on-prem": (builder, openai_compat_capabilities, False),  # is_saas_egress=False
+    ...
+}
+
+# Settings-driven default — the single-knob single-tenant case
+model = default_openai_backend_builder()
+```
+
+The explicit `openai_compat_backend_builder(...)` is the multi-tenant
+shape: each on-prem endpoint gets its own backend id, its own
+`base_url`, its own `api_key`. The settings-driven
+`default_openai_backend_builder()` is the convenience path — it reads
+`openai_api_key` / `openai_base_url` / `openai_default_model` from
+`Settings` and picks a vendor profile from the base URL host hint
+(URL contains `ollama` → Ollama profile, `vllm` → vLLM, else
+OpenAI). Both builders are **lazy**: pydantic_ai's `openai` provider
+imports inside the closure, so a deploy that registers an OpenAI-compat
+backend but never resolves to it never loads the `openai` wheel.
+
+### `base_url` configuration model
+
+The OpenAI-compat builder takes its endpoint and credential from one
+of two sources, in order of authority:
+
+1. **Per-tenant secret + per-backend builder.** A
+   `openai_compat_backend_builder(base_url=..., api_key=...)` call
+   constructs a closure that captures the values verbatim; the
+   resolver registers it under a tenant-specific backend id and the
+   tenant's `TenantModelPolicy.tiers` map points at that id. This is
+   how a real multi-tenant deploy wires per-tenant on-prem endpoints
+   — each tenant's `base_url` comes from its row in the tenants table
+   (or from Vault, when the credential is per-tenant), the
+   `api_key` from a Vault-issued per-tenant token. The builder never
+   reaches into `Settings`.
+2. **Settings-driven default.** `default_openai_backend_builder()`
+   reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL`
+   from process environment — wired the same way `ANTHROPIC_API_KEY`
+   is on Helm deploys (G0.18-T10 #1363): a first-class chart `agent.*`
+   block, `secretKeyRef` only, optional ExternalSecret rendering via
+   `eso.agent.enabled`. Empty `OPENAI_API_KEY` is fail-closed: the
+   builder raises `AgentRunError` rather than starting a loop with no
+   credentials. Use this only when the whole deploy talks to one
+   OpenAI-compat endpoint — the moment you need per-tenant routing,
+   switch to builder #1.
+
+### Egress + the `is_saas_egress` flag
+
+The resolver's egress check (`allow_egress=False` refuses any backend
+flagged `is_saas_egress=True`) is honoured uniformly across backend
+kinds: OpenAI SaaS at `api.openai.com` is `is_saas_egress=True`, an
+on-prem vLLM / Ollama / VCF PAIF endpoint is `is_saas_egress=False`.
+A no-egress tenant policy can route every tier through an
+OpenAI-compat backend without tripping `EgressViolationError`, as
+long as each registered backend's egress flag matches the endpoint's
+actual posture. The flag is set at registration time, not derived
+from the URL — operators are responsible for declaring the truth
+about the endpoint they are pointing at.
+
+### Failure mode unification
+
+Every `ResolverError` subclass raised at `_build_agent` time is wrapped
+in `AgentRunError` by `PydanticAgentRun._resolve_model`, so callers
+catch the seam's one exception type regardless of which precise
+resolver mismatch fired. The original `ResolverError` is preserved as
+`__cause__` so an operator's log read sees the policy detail.
+
+## VCF Private AI Foundation backend (G11.5-T4 #1078)
+
+VCF Private AI Foundation (PAIF) is VMware's air-gapped on-prem
+inference platform — the **zero-egress** target the Initiative #806
+DoD names. PAIF reuses the OpenAI-compat seam from #1077 with two
+deviations that matter:
+
+1. **Non-standard sub-path.** PAIF mounts the OpenAI-compatible
+   API at `/api/v1/compatibility/openai/v1/` (Broadcom developer
+   docs — pinned as `VCF_PAIF_OPENAI_COMPAT_BASE_PATH`), not the
+   bare `/v1` vLLM exposes or the `api.openai.com/v1` SaaS shape.
+2. **OpenID bearer auth.** PAIF requires an OAuth 2.0 / OIDC
+   access token in the `Authorization` header — not an API key.
+   The Broadcom developer docs name Authorization Code with PKCE
+   as the preferred interactive grant; for the backplane (a
+   service-to-service caller), the bundled OIDC provider runs the
+   `client_credentials` grant against the IdP's token endpoint.
+
+The wire format is OpenAI Chat Completions verbatim, so the
+`OpenAIChatModel` + `OpenAIProvider` stack from #1077 is reused. The
+PAIF profile (`vcf_paif_chat_profile`) is bit-equivalent to the vLLM
+profile — strict-tool-def off, multi-system on — because the underlying
+PAIF engine is vLLM for chat completions (Broadcom techdocs;
+embeddings use Infinity, CPU fallback uses llama.cpp, but only the
+chat-completions surface is in scope for the agent runtime today).
+
+### Bearer-token provider (lazy callable, not static api_key)
+
+The auth pattern shape is the design decision worth understanding:
+
+- The framework default would be to pass `api_key="<bearer>"` to
+  `OpenAIProvider` and rebuild the provider whenever the IdP
+  rotates the token. That works, but it re-instantiates the
+  underlying `httpx.AsyncClient` on every resolver call —
+  losing connection pooling and forcing a TCP+TLS handshake to
+  PAIF on every agent run.
+- `openai>=2.0` accepts `api_key: str | Callable[[], Awaitable[str]] | None`
+  natively on `AsyncOpenAI`. The PAIF backend takes the
+  `Callable` path: one long-lived `AsyncOpenAI` client wired with
+  a token-provider callable that re-resolves on every request.
+  Token rotation is transparent — no resolver rebuild required.
+
+```python
+provider = vcf_paif_bearer_provider(
+    token_url="https://kc.airgap.local/realms/meho/protocol/openid-connect/token",
+    client_id="meho-backplane",
+    client_secret=vault_secret,
+    scope="paif",  # optional
+)
+builder = vcf_paif_backend_builder(
+    model_id="openai:meta-llama/Llama-3.1-8B-Instruct",
+    base_url="https://pais.airgap.local/api/v1/compatibility/openai/v1/",
+    bearer_token_provider=provider,
+)
+backends = {
+    "vcf-paif": (builder, vcf_paif_capabilities, False),  # is_saas_egress=False
+}
+```
+
+The bundled `OidcClientCredentialsTokenProvider` caches the access
+token + an absolute monotonic expiry (`time.monotonic() + expires_in
+- refresh_skew_seconds`) under a `threading.Lock` — concurrent
+agent runs against the same provider don't double-post the grant.
+`refresh_skew_seconds` defaults to 30 s: long enough to mask a slow
+IdP, short enough not to waste most of a typical 5–15 min lifetime.
+
+Why `client_credentials` and not Authorization-Code-with-PKCE (the
+PAIF docs' "preferred" grant): the backplane is a service-to-service
+caller, not an interactive user. Per-tenant authorization is enforced
+one layer up — the tenant policy maps the tier to this PAIF backend —
+not by per-call token issuance. A future per-tenant token mode would
+supply a *different* `BearerTokenProvider` callable; the builder
+surface stays unchanged.
+
+Why no refresh-token plumbing: the `client_credentials` grant in
+OAuth 2.0 does not return a refresh token (RFC 6749 §4.4.3). The
+recovery path is "re-issue an access token by re-running the grant"
+— exactly what `_fetch_token` does on cache miss.
+
+### Settings-driven default
+
+The convenience path mirrors `default_openai_backend_builder` /
+`anthropic_backend_builder`:
+
+```python
+model = default_vcf_paif_backend_builder()
+```
+
+Reads `vcf_paif_base_url` / `vcf_paif_model` / the OIDC config
+(`vcf_paif_oidc_token_url` / `vcf_paif_oidc_client_id` /
+`vcf_paif_oidc_client_secret` / `vcf_paif_oidc_scope`) from
+`Settings`. Fail-closed: any of the four required settings empty
+raises `AgentRunError` naming every missing key — the operator's
+fix is one `helm upgrade` away. Multi-PAIF deploys (per-tenant
+routing to different appliances) construct each backend via
+`vcf_paif_backend_builder(...)` explicitly and never touch the
+settings-driven default.
+
+### Egress posture (the on-prem invariant)
+
+PAIF is on-prem by definition — the registration triple must
+declare `is_saas_egress=False`. An air-gapped tenant
+(`allow_egress=False`) routing every tier to a PAIF backend
+resolves without tripping `EgressViolationError`. A regression
+that mis-registered PAIF with `is_saas_egress=True` would
+fail-close on resolve — the resolver enforces the egress flag,
+not URL-parsing — proving the egress contract is end-to-end
+robust regardless of which backend kind is misregistered.
+
+### Token-acquisition failure modes
+
+A separate typed error — `TokenAcquisitionError` — surfaces IdP
+failures distinctly from `ResolverError`:
+
+- IdP returns a non-2xx (invalid client id/secret, grant not
+  enabled, IdP down): message names the IdP's `error` field
+  when present (`invalid_client`, `invalid_grant`, …) so the
+  operator's log read maps to a Keycloak / Okta / Authentik
+  client config without spelunking through logs.
+- IdP returns 200 with a malformed body (no `access_token` or
+  `expires_in`): typed error rather than silent fallthrough to
+  `None`.
+- Network unreachable: same typed surface, with the underlying
+  `httpx.HTTPError` preserved as `__cause__`.
+
+`TokenAcquisitionError` is deliberately **not** wrapped in
+`ResolverError` because it is a runtime condition (token endpoint
+down, secret rotated out-of-band) discovered after resolve, not a
+configuration mismatch discovered at resolve time. The agent loop
+surfaces it as the terminal `AgentRunEventKind.ERROR` event with the
+typed reason preserved.
+
+### Cross-repo deployer recipe
+
+Operator-facing setup — provisioning the OIDC client in the IdP
+realm, the Helm values for the OIDC env vars, the
+per-environment values pattern — is at
+[`docs/cross-repo/vcf-paif-deployment.md`](../cross-repo/vcf-paif-deployment.md).
+That doc is the consumer-facing handshake spec; this section is
+the architecture grounding it links back to.
 
 ## Testing
 
@@ -359,6 +818,38 @@ Foundation) is G11.5.
   factory fails closed without a key, and (T3) a toolset-driven definition
   registers the resolved tools, a meta-tool omitted from the spec is absent
   from the model's surface, and a `read_only` identity gets an empty surface.
+- `backend/tests/test_agent_model_resolver.py` (G11.5-T1 + T2) — unit
+  tests for the per-tenant tier→Model resolver: a tenant policy picks
+  the configured backend per tier; a no-egress tenant refuses a SaaS
+  backend; a no-tools backend is refused; the default-tenant policy
+  routes every tier to Anthropic; the Anthropic builder fails closed
+  without a key; an unknown backend id raises
+  `BackendNotConfiguredError`; the `PydanticAgentRun` seam routes
+  through the resolver when both a resolver and a `tier` are set,
+  falls back to the factory otherwise, and wraps `ResolverError`s in
+  `AgentRunError`. G11.5-T2 adds: Bedrock capability flags declare
+  `tool_format="converse"`; `default_bedrock_backends()` registers the
+  `bedrock-anthropic` id and builds a `BedrockConverseModel`; the
+  Bedrock builder fails closed when boto3 cannot resolve a region; an
+  air-gapped tenant refuses the default (SaaS) Bedrock registration
+  but routes through a PrivateLink-flagged sibling registration
+  cleanly; a tenant policy can split tiers across Anthropic + Bedrock
+  by layering both default registrations.
+- `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
+  tests for the OpenAI-compat builder, per-vendor profile dispatch
+  (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
+  the settings-driven default builder's host-hint heuristic, and
+  fail-closed posture without `OPENAI_API_KEY`.
+- `backend/tests/test_agent_vcf_paif_backend.py` (G11.5-T4) — unit tests
+  for the VCF PAIF builder and the bundled OIDC token provider: the
+  vLLM-equivalent profile flips strict-tool-def off; the `client_credentials`
+  grant body is form-encoded with the right parameters; the cached access
+  token survives the skew window and gets re-acquired past it; IdP
+  non-2xx + malformed-200 + network errors surface as `TokenAcquisitionError`;
+  the air-gapped tenant resolves all three tiers to PAIF with **zero**
+  SaaS-host traffic; a mis-flagged `is_saas_egress=True` PAIF registration
+  still fails closed for an air-gapped tenant; the settings-driven default
+  fails closed naming every missing setting.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input

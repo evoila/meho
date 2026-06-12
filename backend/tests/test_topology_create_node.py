@@ -52,7 +52,13 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, GraphNode, Tenant
+from meho_backplane.db.models import (
+    AuditLog,
+    GraphHistoryChangeKind,
+    GraphNode,
+    GraphNodeHistory,
+    Tenant,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.topology import (
     InvalidNodeKindError,
@@ -60,6 +66,7 @@ from meho_backplane.topology import (
     annotate_edge,
     create_or_get_node,
 )
+from meho_backplane.topology.query import query_history, query_timeline
 
 _PUBLISH = "meho_backplane.topology.nodes.publish_event"
 
@@ -446,3 +453,278 @@ async def test_create_node_then_annotate_round_trip() -> None:
     assert edge.kind == "authenticates-via"
     assert edge.from_node_id == first.node.id
     assert edge.to_node_id == second.node.id
+
+
+# ---------------------------------------------------------------------------
+# graph_node_history diff-on-write hook (G0.18-T6 #1359, RDC #789 F-A)
+# ---------------------------------------------------------------------------
+#
+# Pre-#1359, ``create_or_get_node`` wrote audit_log + broadcast but no
+# ``graph_node_history`` row, so a manual seed was invisible to
+# ``query_topology kind=history|timeline`` even though it appeared in
+# ``query_audit`` — an audit-vs-graph-history asymmetry that breaks the
+# "when was this node added?" answer for any tenant that bootstrapped
+# via manual seeds rather than the refresh service. The hook now mirrors
+# :mod:`refresh` / :mod:`annotate`: one row per meaningful call sharing
+# the call's pre-allocated ``audit_id``, with heartbeat-only re-seeds
+# (``seeded_at`` / ``last_seen`` only) deliberately skipped to honour
+# the "no double-write" criterion on the get path.
+
+
+@pytest.mark.asyncio
+async def test_create_node_emits_created_history_row_visible_to_history_verb() -> None:
+    """Fresh insert emits a ``created`` history row, surfaced by ``query_history``.
+
+    Anchor acceptance criterion: ``query_topology kind=history
+    <manually-seeded-node>`` returns the create entry (issue body).
+    Drives the substrate end-to-end — seed via :func:`create_or_get_node`
+    then read back through :func:`query_history` — so a future drift in
+    the snapshot column projection, the audit_id pre-allocation, or the
+    history walk's index would fail this test rather than surfacing on
+    the next dogfood cycle.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            result = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="vault-role",
+                name="rdc-vault",
+                note="seeded from INVENTORY.md L42",
+                evidence_url="https://example.test/inv#L42",
+            )
+
+    # Exactly one history row landed for this node, ``created``.
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(GraphNodeHistory).where(
+                        GraphNodeHistory.tenant_id == tenant_id,
+                        GraphNodeHistory.node_id == result.node.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    history = rows[0]
+    assert history.change_kind == GraphHistoryChangeKind.CREATED.value
+    # ``snapshot.before`` is None on a fresh insert; ``after`` carries
+    # the full post-insert projection so the temporal-replay verbs can
+    # reconstruct the seed without joining back against live tables.
+    assert history.snapshot["before"] is None
+    after = history.snapshot["after"]
+    assert after["kind"] == "vault-role"
+    assert after["name"] == "rdc-vault"
+    assert after["discovered_by"] == "op-1"
+    assert after["properties"]["note"] == "seeded from INVENTORY.md L42"
+    assert after["properties"]["evidence_url"] == "https://example.test/inv#L42"
+
+    # The history row's ``audit_id`` references the create_node call's
+    # ``audit_log`` row — same chassis "audit-id pre-allocation" pattern
+    # refresh / annotate use so the query layer can join history back
+    # against audit to recover the causing principal.
+    async with sessionmaker() as session:
+        audit = (
+            (await session.execute(select(AuditLog).where(AuditLog.tenant_id == tenant_id)))
+            .scalars()
+            .one()
+        )
+    assert history.audit_id == audit.id
+
+    # query_history surfaces the row through the operator-visible verb.
+    result_history = await query_history(_operator(tenant_id), "rdc-vault", kind="vault-role")
+    assert len(result_history.rows) == 1
+    assert result_history.rows[0].change_kind == GraphHistoryChangeKind.CREATED.value
+    assert result_history.rows[0].audit_id == audit.id
+
+
+@pytest.mark.asyncio
+async def test_create_node_seed_appears_in_timeline_verb() -> None:
+    """``query_topology kind=timeline`` includes the manually-seeded node.
+
+    Anchor acceptance criterion: ``kind=timeline`` includes the seed
+    (issue body). The timeline UNIONs ``graph_node_history`` +
+    ``graph_edge_history`` tenant-scoped — pre-#1359 the seed was
+    audited but invisible to this verb because no history row existed.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            result = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="principal",
+                name="k8s-sa-prod",
+            )
+
+    timeline = await query_timeline(_operator(tenant_id))
+    # Exactly one entry — the create_node seed.
+    assert len(timeline.rows) == 1
+    entry = timeline.rows[0]
+    assert entry.source == "node"
+    assert entry.resource_id == result.node.id
+    assert entry.change_kind == GraphHistoryChangeKind.CREATED.value
+
+
+@pytest.mark.asyncio
+async def test_create_node_idempotent_reseed_does_not_double_write_history() -> None:
+    """No double-write when ``create_or_get_node`` hits the get path.
+
+    Acceptance criterion: an idempotent re-seed with the same
+    ``(kind, name)`` and identical ``(note, evidence_url)`` must not
+    emit a phantom ``updated`` history row. The only changes between
+    the two calls are the heartbeat fields (``seeded_at`` is
+    ``datetime.now(UTC).isoformat()``; ``last_seen`` is refreshed),
+    which mirror the heartbeat-skip discipline in
+    :func:`refresh._update_existing_node` (``is_meaningful_update``)
+    and :func:`annotate._annotate_curated_is_meaningful`. Without this
+    guard, repeated MCP polls of a bootstrap seed would balloon the
+    history table with empty UPDATED rows.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            first = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="vault-role",
+                name="rdc-vault",
+                note="same",
+                evidence_url="https://example.test/same",
+            )
+        async with sessionmaker() as session:
+            second = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="vault-role",
+                name="rdc-vault",
+                note="same",
+                evidence_url="https://example.test/same",
+            )
+
+    assert first.was_created is True
+    assert second.was_created is False
+
+    # Only the first call's ``created`` row exists — the second's
+    # heartbeat-only re-seed deliberately emits no history row.
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(GraphNodeHistory).where(
+                        GraphNodeHistory.tenant_id == tenant_id,
+                        GraphNodeHistory.node_id == first.node.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].change_kind == GraphHistoryChangeKind.CREATED.value
+
+
+@pytest.mark.asyncio
+async def test_create_node_meaningful_reseed_emits_updated_history_row() -> None:
+    """A re-seed with a *different* note emits one ``updated`` row.
+
+    Distinguishes the heartbeat-only no-op skip (covered above) from a
+    real property change — the operator updated ``note`` /
+    ``evidence_url`` on an already-seeded row and that mutation must
+    land in the history table so the operator-visible "what changed
+    for this node?" query reflects it.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            first = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="vault-role",
+                name="rdc-vault",
+                note="first",
+            )
+        async with sessionmaker() as session:
+            second = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="vault-role",
+                name="rdc-vault",
+                note="second",
+            )
+
+    assert first.was_created is True
+    assert second.was_created is False
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(GraphNodeHistory)
+                    .where(
+                        GraphNodeHistory.tenant_id == tenant_id,
+                        GraphNodeHistory.node_id == first.node.id,
+                    )
+                    .order_by(GraphNodeHistory.history_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 2
+    kinds = [row.change_kind for row in rows]
+    assert kinds == [GraphHistoryChangeKind.CREATED.value, GraphHistoryChangeKind.UPDATED.value]
+    # ``snapshot.before`` on the updated row captures the pre-mutation
+    # ``note='first'`` — the diff-on-write hook discipline that lets
+    # ``meho topology diff`` reconstruct the operator's edit without
+    # joining live tables.
+    update_row = rows[1]
+    assert update_row.snapshot["before"]["properties"]["note"] == "first"
+    assert update_row.snapshot["after"]["properties"]["note"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_create_node_history_does_not_leak_across_tenants() -> None:
+    """A history row for tenant-B is invisible to a tenant-A history query.
+
+    The history walk's first WHERE clause is ``tenant_id = :tenant_id``;
+    this test pins that the create_node hook also wrote the row under
+    the correct tenant scope so the tenant-isolation invariant the
+    rest of the substrate enforces holds at the seed-emit point too.
+    """
+    tenant_a = await _seed_tenant(slug="tenant-a")
+    tenant_b = await _seed_tenant(slug="tenant-b")
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            await create_or_get_node(
+                session,
+                _operator(tenant_b, sub="op-b"),
+                kind="vault-role",
+                name="rdc-vault",
+            )
+        async with sessionmaker() as session:
+            await create_or_get_node(
+                session,
+                _operator(tenant_a, sub="op-a"),
+                kind="vault-role",
+                name="rdc-vault",
+            )
+
+    timeline_a = await query_timeline(_operator(tenant_a, sub="op-a"))
+    assert len(timeline_a.rows) == 1
+    timeline_b = await query_timeline(_operator(tenant_b, sub="op-b"))
+    assert len(timeline_b.rows) == 1

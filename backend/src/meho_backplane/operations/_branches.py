@@ -33,6 +33,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -41,9 +42,11 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "IngestedRequest",
     "dispatch_composite",
     "dispatch_ingested",
     "dispatch_typed",
+    "resolve_ingested_request",
 ]
 
 
@@ -96,6 +99,36 @@ def _split_ingested_params(
     return path_params, query_params, header_params, body_params
 
 
+def _unwrap_body(body_params: dict[str, Any]) -> Any:
+    """Return the request body to send for the ``loc=="body"`` bucket.
+
+    An ingested op models its OpenAPI ``requestBody`` as a *single*
+    parameter (named ``body``, tagged ``x-meho-param-loc: "body"`` by the
+    G0.7 ingester -- see ``ingest.openapi``'s parameter-schema builder).
+    :func:`_split_ingested_params` collects it into ``body_params`` keyed
+    by that parameter name. The HTTP request body is that param's
+    **value** -- not a ``{name: value}`` wrapper. Returning the wrapper
+    would serialize ``{"body": {"title": "X"}}`` onto the wire, so an
+    upstream that expects the requestBody schema at the top level (GitHub's
+    issue-create wants ``{"title": "X"}``) rejects it as malformed (422).
+
+    Empty bucket -> ``None`` (no body; httpx omits the request body).
+    Exactly one entry -> its value, unwrapped. The single-entry shape is
+    an ingest invariant; should a malformed descriptor ever carry more
+    than one ``loc=="body"`` property, fail loudly rather than silently
+    pick one and send a body the caller never asked for.
+    """
+    if not body_params:
+        return None
+    if len(body_params) > 1:
+        raise RuntimeError(
+            "ingested op declares multiple 'body' params "
+            f"{sorted(body_params)!r}; requestBody must be a single container "
+            "param (x-meho-param-loc='body'). This is an ingest-modelling fault."
+        )
+    return next(iter(body_params.values()))
+
+
 def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
     """Substitute ``{var}`` placeholders in *path_template* from *path_params*.
 
@@ -116,33 +149,62 @@ def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
     return _PATH_VAR_RE.sub(_replace, path_template)
 
 
-async def dispatch_ingested(
+@dataclass(frozen=True)
+class IngestedRequest:
+    """The literal HTTP request an ingested-op dispatch would put on the wire.
+
+    G0.24 follow-up (#1683). The same four artefacts
+    :func:`dispatch_ingested` hands to the connector's HTTP transport,
+    captured as data so they can be *returned* (the read-only dispatch
+    preview) instead of only being sent. The body here is the **raw**
+    unwrapped request body -- redaction is the dispatcher's
+    connector-boundary concern (it owns the policy resolution), so this
+    layer stays free of a redaction import and the preview path runs the
+    raw body through the exact same
+    :func:`~meho_backplane.redaction.middleware.apply_connector_boundary_redaction`
+    pipeline the response path uses.
+
+    Attributes:
+        method: The upper-cased HTTP verb (``GET`` / ``POST`` / ...).
+        path: The fully resolved request path -- ``{var}`` placeholders
+            substituted *and* the connector's ``mount_op_path`` prefix
+            applied, exactly as the wire call receives it.
+        query: The query-string params bucket (``loc=="query"``), or
+            ``None`` when empty -- the same value passed as httpx's
+            ``params=`` on the GET path.
+        body: The raw, unwrapped JSON request body (``loc=="body"``), or
+            ``None`` when the op declares no body param -- the same value
+            passed as httpx's ``json=``.
+    """
+
+    method: str
+    path: str
+    query: dict[str, Any] | None
+    body: Any
+
+
+async def resolve_ingested_request(
     *,
     connector: Connector,
     descriptor: EndpointDescriptor,
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-) -> Any:
-    """Execute an ``source_kind='ingested'`` op via the connector's HTTP transport.
+) -> IngestedRequest:
+    """Resolve an ingested op + params to the literal HTTP request, without sending.
 
-    v0.2 routes through :meth:`HttpConnector._request_json` for idempotent
-    verbs (GET / HEAD / OPTIONS) -- the only verbs the ingest pipeline
-    declares as safe-to-retry. POST / PUT / DELETE / PATCH route through
-    :meth:`HttpConnector._post_json` (the same client pool, no retry).
-    The connector instance MUST be an :class:`HttpConnector` -- the
-    dispatcher type-checks via ``hasattr(connector, "_request_json")``
-    rather than an :func:`isinstance` import to avoid a circular
-    dependency on the adapters package.
+    The single source of truth for "what method / path / query / body
+    does an ``source_kind='ingested'`` dispatch put on the wire" -- shared
+    verbatim by :func:`dispatch_ingested` (which then *sends* it) and the
+    read-only dispatch preview (#1683, which *returns* it). Keeping the
+    resolution in one place means the preview can never drift from the
+    real request: the path substitution, the ``mount_op_path`` prefix
+    application, the requestBody unwrap (#1656) all run identically.
 
-    The v0.2 ingest pipeline (G0.7, not yet shipped) does not exist;
-    consequently no ``source_kind='ingested'`` rows live in the DB
-    today. The branch ships anyway so:
-
-    * G0.7 can land a single ingested descriptor and the dispatcher
-      routes it without code change.
-    * The mock-based test asserting "GET /api/test/{id} -> the right
-      httpx call" can pin the contract before G0.7 lands.
+    Raises the same :class:`RuntimeError` (missing method/path) and
+    :class:`KeyError` (unsubstituted path var) the dispatch path raised
+    inline, so both the execute and the preview surface them through the
+    dispatcher's structured-error mapping unchanged.
     """
     method = (descriptor.method or "").upper()
     path_template = descriptor.path or ""
@@ -164,11 +226,59 @@ async def dispatch_ingested(
     mount_op_path = getattr(connector, "mount_op_path", None)
     if mount_op_path is not None:
         substituted = await mount_op_path(target, substituted, operator)
+    return IngestedRequest(
+        method=method,
+        path=substituted,
+        query=query_params or None,
+        body=_unwrap_body(body_params),
+    )
+
+
+async def dispatch_ingested(
+    *,
+    connector: Connector,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Execute an ``source_kind='ingested'`` op via the connector's HTTP transport.
+
+    v0.2 routes through :meth:`HttpConnector._request_json` for idempotent
+    verbs (GET / HEAD / OPTIONS) -- the only verbs the ingest pipeline
+    declares as safe-to-retry. POST / PUT / DELETE / PATCH route through
+    :meth:`HttpConnector._post_json` (the same client pool, no retry).
+    The connector instance MUST be an :class:`HttpConnector` -- the
+    dispatcher type-checks via ``hasattr(connector, "_request_json")``
+    rather than an :func:`isinstance` import to avoid a circular
+    dependency on the adapters package.
+
+    The literal method / path / query / body are resolved by
+    :func:`resolve_ingested_request` -- the same resolver the read-only
+    dispatch preview (#1683) calls, so the previewed request can never
+    drift from what this branch actually sends.
+
+    The v0.2 ingest pipeline (G0.7, not yet shipped) does not exist;
+    consequently no ``source_kind='ingested'`` rows live in the DB
+    today. The branch ships anyway so:
+
+    * G0.7 can land a single ingested descriptor and the dispatcher
+      routes it without code change.
+    * The mock-based test asserting "GET /api/test/{id} -> the right
+      httpx call" can pin the contract before G0.7 lands.
+    """
+    request = await resolve_ingested_request(
+        connector=connector,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
     # Thread the full Operator (not just operator.raw_jwt) to the HTTP
     # transport: the connector's credential loader resolves the per-target
     # secret under the operator's identity (operator-context Vault read).
     # See docs/architecture/connector-auth.md.
-    if method in ("GET", "HEAD", "OPTIONS"):
+    if request.method in ("GET", "HEAD", "OPTIONS"):
         request_json = getattr(connector, "_request_json", None)
         if request_json is None:
             raise RuntimeError(
@@ -177,11 +287,11 @@ async def dispatch_ingested(
             )
         return await request_json(
             target,
-            method,
-            substituted,
+            request.method,
+            request.path,
             operator=operator,
-            params=query_params or None,
-            json=body_params or None,
+            params=request.query,
+            json=request.body,
         )
     # Non-idempotent verb -- POST / PUT / PATCH / DELETE. v0.2 routes
     # through ``_post_json``-shaped httpx call (no retry). The connector
@@ -194,9 +304,9 @@ async def dispatch_ingested(
         )
     return await post_json(
         target,
-        substituted,
+        request.path,
         operator=operator,
-        json=body_params or None,
+        json=request.body,
     )
 
 

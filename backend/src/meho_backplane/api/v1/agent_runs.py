@@ -63,6 +63,7 @@ from meho_backplane.agent.invocation import (
     AgentNotFoundError,
     AgentRunNotFoundError,
     AgentRunOutcome,
+    BudgetExceededError,
     get_agent_invoker,
 )
 from meho_backplane.agent.run import AgentRunEvent
@@ -192,7 +193,10 @@ async def run_agent(
     Sync (default) blocks up to ``agent_sync_timeout_seconds`` and returns
     the final output at 200; a longer run converts to async and returns a
     handle at 202. ``async=true`` returns the handle immediately. A
-    cross-tenant / absent name is 404; a disabled definition is 409.
+    cross-tenant / absent name is 404; a disabled definition is 409; a
+    budget-refused run (per-identity cap reached, per-tenant or global
+    kill switch on — G11.5-T6 #1080) is 429 with the reason in the
+    ``detail`` body so the operator sees which gate fired.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["run"],
@@ -211,6 +215,11 @@ async def run_agent(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="agent_disabled",
+        ) from exc
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return _outcome_response(outcome)
 
@@ -301,8 +310,9 @@ async def run_agent_events(
     )
     invoker = get_agent_invoker()
     # Resolve the definition before opening the stream so a not-found /
-    # disabled error surfaces as a clean HTTP status, not a dropped SSE
-    # connection the EventSource would auto-reconnect into a hot loop.
+    # disabled / budget-refused error surfaces as a clean HTTP status,
+    # not a dropped SSE connection the EventSource would auto-reconnect
+    # into a hot loop.
     try:
         await invoker.ensure_runnable(operator, name)
     except AgentNotFoundError as exc:
@@ -314,6 +324,11 @@ async def run_agent_events(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="agent_disabled",
+        ) from exc
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return StreamingResponse(
         _events_generator(operator, name, body.input),

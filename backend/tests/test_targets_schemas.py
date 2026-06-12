@@ -84,15 +84,41 @@ def test_target_is_frozen() -> None:
 
 
 def test_target_summary_is_frozen() -> None:
-    s = TargetSummary(
-        id=uuid.uuid4(),
-        name="prod-k8s",
-        aliases=["k8s"],
-        product="kubernetes",
-        host="10.0.0.1",
-    )
+    s = _make_summary()
     with pytest.raises(ValidationError):
         s.name = "mutated"  # type: ignore[misc]
+
+
+def _make_summary(**overrides: Any) -> TargetSummary:
+    """Helper: construct a :class:`TargetSummary` with sensible defaults.
+
+    G0.16-T6 Finding D (#1312) widened :class:`TargetSummary` to
+    mirror the detail-endpoint shape per
+    ``docs/codebase/api-shape-conventions.md`` §5; the helper carries
+    a fully-populated default so each test names only the fields it
+    asserts on.
+    """
+    defaults: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "tenant_id": uuid.uuid4(),
+        "name": "prod-k8s",
+        "aliases": ["k8s"],
+        "product": "kubernetes",
+        "version": None,
+        "host": "10.0.0.1",
+        "port": None,
+        "fqdn": None,
+        "secret_ref": None,
+        "auth_model": AuthModel.SHARED_SERVICE_ACCOUNT,
+        "vpn_required": False,
+        "fingerprint": None,
+        "preferred_impl_id": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+        "deleted_at": None,
+    }
+    defaults.update(overrides)
+    return TargetSummary(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +159,35 @@ def test_target_round_trip_lossless() -> None:
 
 
 def test_target_summary_round_trip_lossless() -> None:
-    s = TargetSummary(
-        id=uuid.uuid4(),
+    s = _make_summary(
         name="rdc-vcenter",
         aliases=["vcenter"],
         product="vsphere",
         host="vcenter.corp.internal",
     )
     assert TargetSummary.model_validate(s.model_dump()) == s
+
+
+def test_target_summary_field_set_superset_of_target() -> None:
+    """List-row field set ⊇ detail field set (G0.16-T6 Finding D #1312).
+
+    Per ``docs/codebase/api-shape-conventions.md`` §5 the list
+    endpoint must not silently mask fields the detail endpoint
+    exposes. The two deliberately-omitted fields are ``notes`` and
+    ``extras`` (operator-authored blobs that can carry meaningful
+    payload but inflate the list page for the common
+    "names + routing" question). Every other detail field must
+    appear on :class:`TargetSummary`.
+    """
+    target_fields = set(Target.model_fields)
+    summary_fields = set(TargetSummary.model_fields)
+    deliberately_omitted = {"notes", "extras"}
+    silently_masked = target_fields - summary_fields - deliberately_omitted
+    assert silently_masked == set(), (
+        f"TargetSummary silently masks {silently_masked!r} relative to "
+        "Target; widen the projection or document the omission as a "
+        "summary-shape decision per api-shape-conventions.md §5."
+    )
 
 
 def test_target_round_trip_with_empty_aliases() -> None:
@@ -258,7 +305,76 @@ def test_target_update_rejects_port_out_of_range() -> None:
         TargetUpdate(port=0)
 
 
-def test_target_update_name_and_product_absent() -> None:
-    """name and product are not patchable — absent from TargetUpdate."""
+def test_target_update_name_absent() -> None:
+    """``name`` is not patchable — rename = delete + re-create."""
     assert "name" not in TargetUpdate.model_fields
-    assert "product" not in TargetUpdate.model_fields
+
+
+def test_target_update_product_is_patchable() -> None:
+    """``product`` is patchable as of G0.14-T4 #1145.
+
+    The original G0.3 contract treated ``product`` as immutable; the
+    v0.6.0 dogfood (signal 6) showed the combination of "no DELETE"
+    + "no PATCH on product" left a misregistered target permanently
+    broken. T4 #1145 adds ``product`` to ``TargetUpdate`` with route-
+    handler validation against the registered connectors.
+    """
+    assert "product" in TargetUpdate.model_fields
+    # Accepts a non-empty string.
+    u = TargetUpdate(product="k8s")
+    assert u.product == "k8s"
+
+
+def test_target_update_rejects_empty_product() -> None:
+    """``product`` must be at least one character (min_length=1)."""
+    with pytest.raises(ValidationError):
+        TargetUpdate(product="")
+
+
+def test_target_full_schema_includes_deleted_at() -> None:
+    """``Target.deleted_at`` is part of the read shape (G0.14-T4 #1145)."""
+    assert "deleted_at" in Target.model_fields
+    # Live targets have ``None``.
+    now = datetime.now(UTC)
+    t = Target(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        name="live",
+        aliases=(),
+        product="ssh",
+        host="h",
+        port=None,
+        fqdn=None,
+        secret_ref=None,
+        auth_model=AuthModel.SHARED_SERVICE_ACCOUNT,
+        vpn_required=False,
+        extras={},
+        notes=None,
+        fingerprint=None,
+        preferred_impl_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    assert t.deleted_at is None
+    # The field round-trips with a real timestamp.
+    deleted = Target(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        name="retired",
+        aliases=(),
+        product="ssh",
+        host="h",
+        port=None,
+        fqdn=None,
+        secret_ref=None,
+        auth_model=AuthModel.SHARED_SERVICE_ACCOUNT,
+        vpn_required=False,
+        extras={},
+        notes=None,
+        fingerprint=None,
+        preferred_impl_id=None,
+        created_at=now,
+        updated_at=now,
+        deleted_at=now,
+    )
+    assert deleted.deleted_at == now

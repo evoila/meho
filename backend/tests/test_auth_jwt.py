@@ -231,7 +231,21 @@ def test_empty_bearer_token_returns_401() -> None:
     assert response.json() == {"detail": "missing_token"}
 
 
-def test_unparseable_bearer_token_returns_401() -> None:
+def test_unparseable_bearer_token_returns_malformed_jws() -> None:
+    """A non-JWT bearer surfaces the structural-break code ``malformed_jws``.
+
+    Reproduces the consumer's v0.6.0 dogfood signal
+    (`rdc-hetzner-dc/meho-signals/auth-invalid-token-opaque-error.yaml`,
+    G0.13-T1 #1131): the probe ``curl -H "Authorization: Bearer
+    not-a-real-jwt" .../api/v1/health`` previously returned bare
+    ``{"detail":"invalid_token"}`` because authlib's
+    :class:`DecodeError` (raised on the segment-count check before
+    any claim inspection) fell through to the residual ``invalid_token``
+    branch in :func:`_classify_decode_error`. The classifier now
+    promotes that case to the specific ``malformed_jws`` code so the
+    consumer's probe carries a per-claim-class diagnostic without
+    leaking token content.
+    """
     client = TestClient(_build_app())
     with respx.mock(assert_all_called=False) as mock_router:
         # JWKS is technically reachable; the token itself is garbage.
@@ -241,7 +255,7 @@ def test_unparseable_bearer_token_returns_401() -> None:
             headers={"Authorization": "Bearer not-a-real-jwt"},
         )
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "malformed_jws"}
 
 
 # ---------------------------------------------------------------------------

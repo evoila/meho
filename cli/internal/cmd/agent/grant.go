@@ -5,14 +5,15 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -49,65 +50,6 @@ func NewGrantRootCmd() *cobra.Command {
 }
 
 // ---------------------------------------------------------------------------
-// Wire types mirroring the backend Pydantic shapes
-// ---------------------------------------------------------------------------
-
-// grantEntry mirrors backend AgentGrantRead.
-type grantEntry struct {
-	ID           string  `json:"id"`
-	TenantID     string  `json:"tenant_id"`
-	PrincipalSub string  `json:"principal_sub"`
-	OpPattern    string  `json:"op_pattern"`
-	TargetScope  *string `json:"target_scope"`
-	Verdict      string  `json:"verdict"`
-	CreatedBySub string  `json:"created_by_sub"`
-	ExpiresAt    *string `json:"expires_at"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-}
-
-// grantListResponse mirrors backend AgentGrantListResponse.
-type grantListResponse struct {
-	Grants []grantEntry `json:"grants"`
-}
-
-// grantCreateRequest mirrors backend AgentGrantCreate.
-type grantCreateRequest struct {
-	PrincipalSub string  `json:"principal_sub"`
-	OpPattern    string  `json:"op_pattern"`
-	TargetScope  *string `json:"target_scope,omitempty"`
-	Verdict      string  `json:"verdict"`
-	ExpiresAt    *string `json:"expires_at,omitempty"`
-}
-
-const _grantsBasePath = "/api/v1/agents/grants"
-
-func buildGrantListPath(principalSub string, includeExpired bool, limit, offset int) string {
-	q := url.Values{}
-	if principalSub != "" {
-		q.Set("principal_sub", principalSub)
-	}
-	if includeExpired {
-		q.Set("include_expired", "true")
-	}
-	if limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", limit))
-	}
-	if offset > 0 {
-		q.Set("offset", fmt.Sprintf("%d", offset))
-	}
-	path := _grantsBasePath
-	if enc := q.Encode(); enc != "" {
-		path = path + "?" + enc
-	}
-	return path
-}
-
-func buildGrantShowPath(grantID string) string {
-	return _grantsBasePath + "/" + grantID
-}
-
-// ---------------------------------------------------------------------------
 // meho agent grant list
 // ---------------------------------------------------------------------------
 
@@ -135,20 +77,18 @@ func newGrantListCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			raw, err := doAuthedRequest(cmd.Context(), backplaneURL, "GET",
-				buildGrantListPath(principalSub, includeExpired, limit, offset), nil)
+			params := grantListParams(principalSub, includeExpired, limit, offset)
+			resp, err := getGrantList(cmd.Context(), backplaneURL, params)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			var resp grantListResponse
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("decode grant list: %v", err)), jsonOut)
+			if resp.StatusCode() != http.StatusOK {
+				return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 			}
 			if jsonOut {
-				return output.PrintJSON(cmd.OutOrStdout(), resp)
+				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 			}
-			printGrantListTable(cmd.OutOrStdout(), resp.Grants)
+			printGrantListTable(cmd.OutOrStdout(), resp.JSON200.Grants)
 			return nil
 		},
 	}
@@ -160,13 +100,47 @@ func newGrantListCmd() *cobra.Command {
 		"max grants per page (1..500, server default 100)")
 	cmd.Flags().IntVar(&offset, "offset", 0, "page offset (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON")
+		"emit raw AgentGrantListResponse JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
 	return cmd
 }
 
-func printGrantListTable(w io.Writer, grants []grantEntry) {
+func grantListParams(principalSub string, includeExpired bool, limit, offset int) *api.ListGrantsApiV1AgentsGrantsGetParams {
+	params := &api.ListGrantsApiV1AgentsGrantsGetParams{}
+	if principalSub != "" {
+		sub := principalSub
+		params.PrincipalSub = &sub
+	}
+	if includeExpired {
+		expired := true
+		params.IncludeExpired = &expired
+	}
+	if limit > 0 {
+		l := limit
+		params.Limit = &l
+	}
+	if offset > 0 {
+		o := offset
+		params.Offset = &o
+	}
+	return params
+}
+
+func getGrantList(ctx context.Context, backplaneURL string, params *api.ListGrantsApiV1AgentsGrantsGetParams) (*api.ListGrantsApiV1AgentsGrantsGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListGrantsApiV1AgentsGrantsGetResponse, error) {
+			return authed.ListGrantsApiV1AgentsGrantsGetWithResponse(ctx, params)
+		},
+		func(r *api.ListGrantsApiV1AgentsGrantsGetResponse) int { return r.StatusCode() },
+	)
+}
+
+func printGrantListTable(w io.Writer, grants []api.AgentGrantRead) {
 	if len(grants) == 0 {
 		fmt.Fprintln(w, "no permission grants in this tenant")
 		return
@@ -176,10 +150,10 @@ func printGrantListTable(w io.Writer, grants []grantEntry) {
 	for _, g := range grants {
 		exp := "-"
 		if g.ExpiresAt != nil {
-			exp = *g.ExpiresAt
+			exp = g.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		fmt.Fprintf(w, "%-36s %-36s %-30s %-12s %-22s %s\n",
-			g.ID, g.PrincipalSub, g.OpPattern, g.Verdict, exp, g.CreatedBySub)
+			g.Id.String(), g.PrincipalSub, g.OpPattern, g.Verdict, exp, g.CreatedBySub)
 	}
 }
 
@@ -201,50 +175,68 @@ func newGrantShowCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			grantID, err := uuid.Parse(args[0])
+			if err != nil {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected(fmt.Sprintf("invalid <grant-id>: %v", err)), jsonOut)
+			}
 			backplaneURL, err := backplane.Resolve(backplaneOverride)
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			raw, err := doAuthedRequest(cmd.Context(), backplaneURL, "GET",
-				buildGrantShowPath(args[0]), nil)
+			resp, err := getGrant(cmd.Context(), backplaneURL, grantID)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			var entry grantEntry
-			if err := json.Unmarshal(raw, &entry); err != nil {
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("decode grant show: %v", err)), jsonOut)
+			if resp.StatusCode() != http.StatusOK {
+				return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 			}
 			if jsonOut {
-				return output.PrintJSON(cmd.OutOrStdout(), entry)
+				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 			}
-			printGrantDetail(cmd.OutOrStdout(), entry)
+			printGrantDetail(cmd.OutOrStdout(), resp.JSON200)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw grant JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw AgentGrantRead JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
 	return cmd
 }
 
-func printGrantDetail(w io.Writer, g grantEntry) {
+func getGrant(ctx context.Context, backplaneURL string, grantID uuid.UUID) (*api.ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error) {
+			return authed.ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(ctx, grantID, nil)
+		},
+		func(r *api.ShowGrantApiV1AgentsGrantsGrantIdGetResponse) int { return r.StatusCode() },
+	)
+}
+
+func printGrantDetail(w io.Writer, g *api.AgentGrantRead) {
+	if g == nil {
+		return
+	}
 	exp := "-"
 	if g.ExpiresAt != nil {
-		exp = *g.ExpiresAt
+		exp = g.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	scope := "*"
 	if g.TargetScope != nil {
 		scope = *g.TargetScope
 	}
-	fmt.Fprintf(w, "id:            %s\n", g.ID)
+	fmt.Fprintf(w, "id:            %s\n", g.Id.String())
 	fmt.Fprintf(w, "principal_sub: %s\n", g.PrincipalSub)
 	fmt.Fprintf(w, "op_pattern:    %s\n", g.OpPattern)
 	fmt.Fprintf(w, "target_scope:  %s\n", scope)
 	fmt.Fprintf(w, "verdict:       %s\n", g.Verdict)
 	fmt.Fprintf(w, "expires_at:    %s\n", exp)
 	fmt.Fprintf(w, "created_by:    %s\n", g.CreatedBySub)
-	fmt.Fprintf(w, "created_at:    %s\n", g.CreatedAt)
+	fmt.Fprintf(w, "created_at:    %s\n", g.CreatedAt.UTC().Format(time.RFC3339))
 }
 
 // ---------------------------------------------------------------------------
@@ -285,11 +277,14 @@ func newGrantCreateCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			raw, err := doAuthedRequest(cmd.Context(), backplaneURL, "POST", _grantsBasePath, body)
+			resp, err := postGrantCreate(cmd.Context(), backplaneURL, body)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			return renderGrantResult(cmd.OutOrStdout(), raw, jsonOut, "created")
+			if resp.StatusCode() != http.StatusCreated {
+				return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
+			}
+			return renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "created")
 		},
 	}
 	cmd.Flags().StringVar(&principalSub, "principal", "", "JWT sub of the agent principal (required)")
@@ -300,10 +295,23 @@ func newGrantCreateCmd() *cobra.Command {
 		"target UUID or '*' for any target (default: any)")
 	cmd.Flags().StringVar(&expiresAt, "expires", "",
 		"ISO 8601 UTC expiry for a time-bounded elevation, e.g. 2026-05-25T18:00:00Z")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw grant JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw AgentGrantRead JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
 	return cmd
+}
+
+func postGrantCreate(ctx context.Context, backplaneURL string, body api.AgentGrantCreate) (*api.CreateGrantApiV1AgentsGrantsPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.CreateGrantApiV1AgentsGrantsPostResponse, error) {
+			return authed.CreateGrantApiV1AgentsGrantsPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.CreateGrantApiV1AgentsGrantsPostResponse) int { return r.StatusCode() },
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +344,7 @@ func newGrantElevateCmd() *cobra.Command {
 					output.Unexpected("--principal, --op, --verdict, and --expires are all required for elevate"),
 					jsonOut)
 			}
-			body, err := buildGrantCreateBody(principalSub, opPattern, verdict, targetScope, expiresAt)
+			body, err := buildGrantElevateBody(principalSub, opPattern, verdict, targetScope, expiresAt)
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 			}
@@ -344,12 +352,14 @@ func newGrantElevateCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			raw, err := doAuthedRequest(cmd.Context(), backplaneURL, "POST",
-				_grantsBasePath+"/elevate", body)
+			resp, err := postGrantElevate(cmd.Context(), backplaneURL, body)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			return renderGrantResult(cmd.OutOrStdout(), raw, jsonOut, "elevated")
+			if resp.StatusCode() != http.StatusCreated {
+				return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
+			}
+			return renderGrantEntry(cmd.OutOrStdout(), resp.JSON201, jsonOut, "elevated")
 		},
 	}
 	cmd.Flags().StringVar(&principalSub, "principal", "", "JWT sub of the agent principal (required)")
@@ -358,10 +368,23 @@ func newGrantElevateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&targetScope, "target", "", "target UUID or '*' for any target (optional)")
 	cmd.Flags().StringVar(&expiresAt, "expires", "",
 		"required ISO 8601 UTC expiry, e.g. 2026-06-01T00:00:00Z")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw grant JSON")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw AgentGrantRead JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
 	return cmd
+}
+
+func postGrantElevate(ctx context.Context, backplaneURL string, body api.AgentElevationCreate) (*api.ElevateGrantApiV1AgentsGrantsElevatePostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ElevateGrantApiV1AgentsGrantsElevatePostResponse, error) {
+			return authed.ElevateGrantApiV1AgentsGrantsElevatePostWithResponse(ctx, nil, body)
+		},
+		func(r *api.ElevateGrantApiV1AgentsGrantsElevatePostResponse) int { return r.StatusCode() },
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -384,16 +407,21 @@ func newGrantRevokeCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			grantID := args[0]
+			grantIDArg := args[0]
+			grantID, err := uuid.Parse(grantIDArg)
+			if err != nil {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected(fmt.Sprintf("invalid <grant-id>: %v", err)), jsonOut)
+			}
 			if !confirm {
-				prompt := fmt.Sprintf("Revoke grant %q. Continue?", grantID)
+				prompt := fmt.Sprintf("Revoke grant %q. Continue?", grantIDArg)
 				if !confirmPrompt(cmd, prompt) {
 					if jsonOut {
 						return output.PrintJSON(cmd.OutOrStdout(), map[string]string{
-							"grant_id": grantID, "status": "declined",
+							"grant_id": grantIDArg, "status": "declined",
 						})
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "declined: grant %q not revoked\n", grantID)
+					fmt.Fprintf(cmd.OutOrStdout(), "declined: grant %q not revoked\n", grantIDArg)
 					return nil
 				}
 			}
@@ -401,15 +429,19 @@ func newGrantRevokeCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			if err := callGrantRevoke(cmd.Context(), backplaneURL, grantID); err != nil {
+			resp, err := callGrantRevoke(cmd.Context(), backplaneURL, grantID)
+			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
+			}
+			if resp.StatusCode() != http.StatusNoContent {
+				return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, jsonOut)
 			}
 			if jsonOut {
 				return output.PrintJSON(cmd.OutOrStdout(), map[string]string{
-					"grant_id": grantID, "status": "revoked",
+					"grant_id": grantIDArg, "status": "revoked",
 				})
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "revoked grant %q\n", grantID)
+			fmt.Fprintf(cmd.OutOrStdout(), "revoked grant %q\n", grantIDArg)
 			return nil
 		},
 	}
@@ -420,53 +452,87 @@ func newGrantRevokeCmd() *cobra.Command {
 	return cmd
 }
 
-func callGrantRevoke(ctx context.Context, backplaneURL, grantID string) error {
-	_, err := doAuthedRequest(ctx, backplaneURL, "DELETE", buildGrantShowPath(grantID), nil)
-	return err
+func callGrantRevoke(ctx context.Context, backplaneURL string, grantID uuid.UUID) (*api.RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse, error) {
+			return authed.RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse(ctx, grantID, nil)
+		},
+		func(r *api.RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse) int { return r.StatusCode() },
+	)
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-// buildGrantCreateBody builds the JSON request body for create / elevate.
-// Validates the expiresAt format when supplied.
+// buildGrantCreateBody assembles the generated AgentGrantCreate body
+// for the /grants create endpoint. ExpiresAt is `*time.Time` (omit for
+// a permanent grant); a non-empty --expires must parse as RFC 3339 /
+// ISO 8601.
 func buildGrantCreateBody(
 	principalSub, opPattern, verdict, targetScope, expiresAt string,
-) ([]byte, error) {
-	req := grantCreateRequest{
+) (api.AgentGrantCreate, error) {
+	body := api.AgentGrantCreate{
 		PrincipalSub: principalSub,
 		OpPattern:    opPattern,
-		Verdict:      verdict,
+		Verdict:      api.PermissionVerdict(verdict),
 	}
 	if targetScope != "" {
-		req.TargetScope = &targetScope
+		scope := targetScope
+		body.TargetScope = &scope
 	}
 	if expiresAt != "" {
-		// Validate format — must parse as RFC 3339 / ISO 8601.
-		if _, err := time.Parse(time.RFC3339, expiresAt); err != nil {
-			return nil, fmt.Errorf("--expires %q is not a valid ISO 8601 date-time: %w", expiresAt, err)
+		parsed, err := time.Parse(time.RFC3339, expiresAt)
+		if err != nil {
+			return api.AgentGrantCreate{}, fmt.Errorf("--expires %q is not a valid ISO 8601 date-time: %w", expiresAt, err)
 		}
-		req.ExpiresAt = &expiresAt
+		body.ExpiresAt = &parsed
 	}
-	return json.Marshal(req)
+	return body, nil
 }
 
-// renderGrantResult decodes the raw backend response (a grantEntry JSON
-// object), prints a human summary or raw JSON, and returns any error.
-func renderGrantResult(w io.Writer, raw []byte, jsonOut bool, verb string) error {
-	var entry grantEntry
-	if err := json.Unmarshal(raw, &entry); err != nil {
-		return fmt.Errorf("decode grant response: %w", err)
+// buildGrantElevateBody assembles the generated AgentElevationCreate
+// body. ExpiresAt is required and `time.Time` (not a pointer) — the
+// elevate endpoint refuses an open-ended elevation.
+func buildGrantElevateBody(
+	principalSub, opPattern, verdict, targetScope, expiresAt string,
+) (api.AgentElevationCreate, error) {
+	parsed, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return api.AgentElevationCreate{}, fmt.Errorf("--expires %q is not a valid ISO 8601 date-time: %w", expiresAt, err)
+	}
+	body := api.AgentElevationCreate{
+		PrincipalSub: principalSub,
+		OpPattern:    opPattern,
+		Verdict:      api.PermissionVerdict(verdict),
+		ExpiresAt:    parsed,
+	}
+	if targetScope != "" {
+		scope := targetScope
+		body.TargetScope = &scope
+	}
+	return body, nil
+}
+
+// renderGrantEntry prints a single AgentGrantRead — either as raw JSON
+// (with --json) or as the existing "<verb> grant <id>: ..." human line.
+// Shared between the create and elevate verbs.
+func renderGrantEntry(w io.Writer, entry *api.AgentGrantRead, jsonOut bool, verb string) error {
+	if entry == nil {
+		return fmt.Errorf("backend returned an empty grant body")
 	}
 	if jsonOut {
 		return output.PrintJSON(w, entry)
 	}
 	exp := "permanent"
 	if entry.ExpiresAt != nil {
-		exp = "expires " + *entry.ExpiresAt
+		exp = "expires " + entry.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	fmt.Fprintf(w, "%s grant %s: principal=%s op=%s verdict=%s (%s)\n",
-		verb, entry.ID, entry.PrincipalSub, entry.OpPattern, entry.Verdict, exp)
+		verb, entry.Id.String(), entry.PrincipalSub, entry.OpPattern, entry.Verdict, exp)
 	return nil
 }

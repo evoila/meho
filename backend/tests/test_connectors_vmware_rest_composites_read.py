@@ -26,6 +26,7 @@ sub-ops, in what order, with what params.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -40,6 +42,40 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+
+
+@pytest.fixture(autouse=True)
+def _prime_preflight_cache() -> Iterator[None]:
+    """Prime the L2 pre-flight cache so handler-direct tests skip the DB walk.
+
+    The handler-direct tests in this module bypass the dispatcher and call
+    the composite handlers as plain async functions. The G0.14-T10 (#1151)
+    pre-flight check would otherwise issue a
+    :func:`~meho_backplane.operations._lookup.lookup_descriptor` query
+    against an unconfigured session at the top of every handler. Priming
+    the per-process cache with each composite's op_id before the test
+    fires (and clearing it after) keeps these tests handler-direct
+    without re-shaping every fixture to stand up a DB session.
+
+    Per-composite preflight behaviour (cache miss -> DB walk; cache miss
+    on missing L2 -> structured exception) is exercised in the dedicated
+    module ``test_connectors_vmware_rest_composites_l2_preflight.py``
+    where a stub ``lookup_descriptor`` exercises both the all-present
+    and the missing-L2 code paths.
+    """
+    _preflight.reset_preflight_cache()
+    _preflight._PREFLIGHT_CACHE.update(
+        {
+            "vmware.composite.cluster.drs_recommendations",
+            "vmware.composite.event.tail",
+            "vmware.composite.performance.summary",
+            "vmware.composite.datastore.usage",
+            "vmware.composite.network.portgroup.audit",
+        }
+    )
+    yield
+    _preflight.reset_preflight_cache()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -525,17 +561,22 @@ async def test_datastore_usage_skips_malformed_listing_entries() -> None:
 async def test_network_portgroup_audit_dispatches_three_phases() -> None:
     """DVS + portgroup listings + per-portgroup VM listings aggregate to the expected shape."""
     dvs_listing = [{"vds": "dvs-1", "name": "DVS-A"}]
+    # Generic ``GET:/vcenter/network`` summaries: ``{network, name,
+    # type}``. The summary carries no parent-DVS field, so ``dvs`` is
+    # resolved best-effort and is ``None`` for the real REST shape. The
+    # first entry carries a synthetic ``vds`` field to exercise the
+    # best-effort enrichment path against the DVS index.
     pg_listing = [
-        {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED"},
-        {"network": "pg-2", "name": "PG-B", "vds": "dvs-1", "type": "DISTRIBUTED"},
+        {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED_PORTGROUP"},
+        {"network": "pg-2", "name": "PG-B", "type": "DISTRIBUTED_PORTGROUP"},
     ]
     vms_per_pg = {
         "pg-1": [{"name": "vm-pg1-a"}, {"name": "vm-pg1-b"}],
         "pg-2": [],
     }
     sequence: list[OperationResult] = [
-        _ok_result("GET:/vcenter/network/distributed-switch", dvs_listing),
-        _ok_result("GET:/vcenter/network/distributed-portgroup", pg_listing),
+        _ok_result("GET:/vcenter/network/distributed-switches", dvs_listing),
+        _ok_result("GET:/vcenter/network", pg_listing),
     ]
     for pg in pg_listing:
         sequence.append(_ok_result("GET:/vcenter/vm", vms_per_pg[pg["network"]]))
@@ -550,8 +591,10 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
 
     # 1 + 1 + 2 portgroups = 4 calls.
     assert len(dispatch.calls) == 4
-    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/network/distributed-switch"
-    assert dispatch.calls[1]["op_id"] == "GET:/vcenter/network/distributed-portgroup"
+    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/network/distributed-switches"
+    # Portgroups come from the generic network resource, type-filtered.
+    assert dispatch.calls[1]["op_id"] == "GET:/vcenter/network"
+    assert dispatch.calls[1]["params"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
     # Per-PG VM call uses ``filter.networks`` and the default power-state filter.
     assert dispatch.calls[2]["op_id"] == "GET:/vcenter/vm"
     assert dispatch.calls[2]["params"] == {
@@ -564,16 +607,17 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
             "name": "PG-A",
             "dvs": "dvs-1",
             "dvs_name": "DVS-A",
-            "type": "DISTRIBUTED",
+            "type": "DISTRIBUTED_PORTGROUP",
             "vm_count": 2,
             "vm_names": ["vm-pg1-a", "vm-pg1-b"],
         },
         {
+            # No ``vds`` on the generic Network summary -> dvs/dvs_name None.
             "id": "pg-2",
             "name": "PG-B",
-            "dvs": "dvs-1",
-            "dvs_name": "DVS-A",
-            "type": "DISTRIBUTED",
+            "dvs": None,
+            "dvs_name": None,
+            "type": "DISTRIBUTED_PORTGROUP",
             "vm_count": 0,
             "vm_names": [],
         },
@@ -581,11 +625,17 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_filter_dvs_passes_through() -> None:
-    """``filter_dvs`` flows into both DVS + PG listings as ``filter.vdses``."""
+async def test_network_portgroup_audit_filter_dvs_scopes_dvs_listing_only() -> None:
+    """``filter_dvs`` scopes the DVS listing; the portgroup call is type-only.
+
+    The generic ``Network`` FilterSpec has no per-DVS filter, so
+    ``filter_dvs`` cannot narrow the portgroup set server-side -- it
+    flows only into the distributed-switches ``filter.vdses`` query,
+    narrowing the DVS index (and thus the ``dvs_name`` enrichment).
+    """
     sequence = [
-        _ok_result("GET:/vcenter/network/distributed-switch", []),
-        _ok_result("GET:/vcenter/network/distributed-portgroup", []),
+        _ok_result("GET:/vcenter/network/distributed-switches", []),
+        _ok_result("GET:/vcenter/network", []),
     ]
     dispatch = _RecordingDispatchChild(sequence)
     await network_portgroup_audit_composite(
@@ -595,17 +645,18 @@ async def test_network_portgroup_audit_filter_dvs_passes_through() -> None:
         dispatch_child=dispatch,
     )
     assert dispatch.calls[0]["params"] == {"filter.vdses": ["dvs-prod"]}
-    assert dispatch.calls[1]["params"] == {"filter.vdses": ["dvs-prod"]}
+    # Portgroup call is type-filtered only -- no ``filter.vdses``.
+    assert dispatch.calls[1]["params"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
 
 
 @pytest.mark.asyncio
 async def test_network_portgroup_audit_include_disconnected_drops_power_filter() -> None:
     """``include_disconnected_vms=True`` removes the ``POWERED_ON`` filter on the VM call."""
     sequence = [
-        _ok_result("GET:/vcenter/network/distributed-switch", []),
+        _ok_result("GET:/vcenter/network/distributed-switches", []),
         _ok_result(
-            "GET:/vcenter/network/distributed-portgroup",
-            [{"network": "pg-1", "name": "PG-A"}],
+            "GET:/vcenter/network",
+            [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
         ),
         _ok_result("GET:/vcenter/vm", []),
     ]
@@ -727,8 +778,8 @@ async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
             network_portgroup_audit_composite,
             {},
             {
-                "GET:/vcenter/network/distributed-switch": [],
-                "GET:/vcenter/network/distributed-portgroup": [],
+                "GET:/vcenter/network/distributed-switches": [],
+                "GET:/vcenter/network": [],
             },
         ),
     )

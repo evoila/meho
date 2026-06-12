@@ -1,0 +1,34 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-swappable body view partial for the Memory detail page
+  (Initiative #341 Task #877). Rendered:
+
+    * Inline by ``memory/detail.html`` on first page load.
+    * As the response to the Cancel-edit button (HTMX returns this
+      partial after a ``GET /ui/memory/<scope>/<slug>`` with the
+      ``HX-Request: true`` header so the body slot swaps back).
+    * As the response to the Save button on the edit form (HTMX
+      ``PATCH /ui/memory/<scope>/<slug>`` returns this partial with
+      the freshly-rendered Markdown body).
+
+  The outer element id ``#memory-body`` is the HTMX swap target.
+  Per the HTMX docs (https://htmx.org/attributes/hx-swap/), an
+  ``outerHTML`` swap replaces the element including its ID so the
+  edit form (with the same id) can swap back into this partial after
+  Save.
+
+  ``entry.body_html`` is wrapped in :class:`markupsafe.Markup` by
+  :func:`render_markdown` so Jinja's autoescape leaves it as-is. The
+  ``commonmark`` preset is constructed with ``html=False`` so raw
+  HTML smuggled inside a memory body renders as escaped text, not
+  parsed markup.
+-#}
+<article
+  id="memory-body"
+  class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4"
+  aria-label="Memory body"
+>
+  {{ entry.body_html }}
+</article>

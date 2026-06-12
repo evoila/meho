@@ -31,6 +31,7 @@ loaded plugin (`@plugin "./vendor/daisyui.js"` in
 | `cytoscape-cose-bilkent.js` | cytoscape-cose-bilkent | 4.1.0 | `9297c5b4245efd314941c622cb045fb96ffbfde3268985463745311699cae0b2` | https://cdn.jsdelivr.net/npm/cytoscape-cose-bilkent@4.1.0/cytoscape-cose-bilkent.js |
 | `cytoscape-dagre.js` | cytoscape-dagre | 3.0.0 | `1b060e1ffec6355e208d5ec4d49aa573000e8069eafbe01b1719a3bd630da290` | https://cdn.jsdelivr.net/npm/cytoscape-dagre@3.0.0/cytoscape-dagre.js |
 | `daisyui.js` | DaisyUI | 5.5.20 | `a92e663a1f150d6db47920967b0485ee34f87bfe74d0a80045c3a3a73afbc657` | https://github.com/saadeghi/daisyui/releases/download/v5.5.20/daisyui.js |
+| `codemirror-bundle.min.js` | CodeMirror 6 (IIFE bundle) | codemirror@6.0.1 + @codemirror/lang-markdown@6.3.2 | `a411a47cb814ef5b4c22156820a13fce6e6025f8c9afbd235cc334c55679866a` | built locally with esbuild from npm packages (see below) |
 
 ## Why these sources
 
@@ -45,6 +46,47 @@ byte-for-byte through jsDelivr at the pinned `@<version>` path. The
 jsDelivr and unpkg before pinning. The SHA256 below covers the same
 byte sequence either way — vendoring + pinning is the actual security
 boundary, not the URL scheme.
+
+## CodeMirror 6 bundle (Task #872)
+
+CodeMirror 6 is a modular ES-module library with no official
+single-file browser bundle. To comply with the no-`npm`-in-CI, no-CDN
+policy, `codemirror-bundle.min.js` is produced once by a local esbuild
+invocation and committed as a vendored artifact:
+
+```bash
+# Reproduce the bundle (developer machine only — not in CI)
+BUILD=$(mktemp -d)
+cd "$BUILD"
+cat > package.json <<'EOF'
+{"name":"cm6-build","version":"1.0.0","private":true}
+EOF
+npm install --save-exact \
+  codemirror@6.0.1 \
+  @codemirror/lang-markdown@6.3.2 \
+  esbuild
+cat > entry.js <<'EOF'
+import { EditorView, lineNumbers, highlightActiveLine, keymap, drawSelection } from "@codemirror/view";
+import { EditorState, Compartment } from "@codemirror/state";
+import { history, defaultKeymap, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { markdown } from "@codemirror/lang-markdown";
+import { basicSetup, minimalSetup } from "codemirror";
+export { EditorView, EditorState, Compartment, markdown, basicSetup, minimalSetup, defaultKeymap, historyKeymap, indentWithTab, keymap, history, drawSelection, lineNumbers, highlightActiveLine };
+EOF
+./node_modules/.bin/esbuild entry.js \
+  --bundle --format=iife --global-name=CM --minify \
+  --outfile=codemirror-bundle.min.js
+sha256sum codemirror-bundle.min.js
+cp codemirror-bundle.min.js \
+  <repo>/backend/src/meho_backplane/ui/static/src/vendor/
+```
+
+The resulting IIFE exposes the `CM` global with: `CM.EditorView`,
+`CM.EditorState`, `CM.basicSetup`, `CM.markdown`, `CM.keymap`,
+`CM.defaultKeymap`, `CM.historyKeymap`, `CM.indentWithTab`.
+
+The SHA256 above (`a411a47c…`) was computed against the committed
+LF-ending blob (same convention as the other entries in this table).
 
 ## Cytoscape layout plugins (Task #881)
 

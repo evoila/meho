@@ -50,9 +50,9 @@ Field-to-source mapping:
 | `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id AND targets.tenant_id = :tenant_id`. The tenant-id half of the ON clause is defence-in-depth: `audit_log.target_id` has no FK in v0.2 (soft column per chassis discipline) so a cross-tenant value resolves to `target_name=None` rather than leaking another tenant's name. |
 | `method` / `path` / `status_code` / `request_id` / `duration_ms` / `payload` | Columns of the same name on `audit_log`. |
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
-| `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. |
+| `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
-| `principal_name` | **None in v0.2** — JWT `name` claim is not captured by either write path. |
+| `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
@@ -102,10 +102,14 @@ query_audit(filters, tenant_id, session)
   │   ├─ op_id = payload['op_id'] if str else f"http.{method.lower()}:{path}"
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
   │   ├─ result_status = _derive_result_status(status_code)
+  │   ├─ principal_name = payload['principal_name'] if str
+  │   │                  else None   # MCP rows since G0.15-T3 #1212
+  │   │                              # carry it in payload; HTTP-chassis
+  │   │                              # rows still have no source
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
   │                 parent_audit_id=row.parent_audit_id,
   │                 agent_session_id=row.agent_session_id,
-  │                 principal_name=None, broadcast_event_id=None)
+  │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
                    if has_more else None
@@ -276,10 +280,12 @@ the flat path (which already returns other in-tenant principals' rows):
 bound MCP session id — the `mcp_session_id` structlog contextvar the
 transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
 #1010). Any mismatch — a different session id, an absent
-`agent_session_id`, or no session header at all (the transport then
-binds a fresh uuid4 the client can't predict) — is rejected with
-`-32602`. Cross-session forensic replay is the `tenant_admin`-gated
-`meho.audit.replay` tool, not this path.
+`agent_session_id`, or no session header at all (the transport leaves
+the contextvar unbound after G0.14-T6 #1147 decoupled capture from
+enforcement — there is no synthetic uuid4 fallback for the client to
+match against) — is rejected with `-32602`. Cross-session forensic
+replay is the `tenant_admin`-gated `meho.audit.replay` tool, not this
+path.
 
 ## `meho.audit.replay` admin tool (G8.2-T6 #1014)
 
@@ -345,16 +351,90 @@ Reverse dependencies:
   (admin tool + `shape="tree"`) through `replay_session`.
 * T3 #467 (CLI) follows.
 
+## BFF (operator UI) audit coverage (G0.15-T7 #1216)
+
+Every authenticated ``/ui/<surface>`` GET / HEAD writes one ``audit_log`` row
+attributed to the BFF session's operator. The binding lives in
+:func:`meho_backplane.ui.auth.middleware.require_ui_session` — the FastAPI
+dependency every UI route declares (directly or transitively via
+``require_ui_admin``). On entry the dependency calls
+:func:`meho_backplane.ui.audit.bind_ui_view_audit`, which binds four
+structlog contextvars the chassis :class:`AuditMiddleware` reads on the
+response side:
+
+| Contextvar | Value | Lands on `audit_log` as |
+|---|---|---|
+| ``operator_sub`` | Session's stable subject id | typed ``operator_sub`` column |
+| ``tenant_id`` | ``str(session.tenant_id)`` | typed ``tenant_id`` column |
+| ``audit_op_id`` | ``ui.view.<surface>`` (see table below) | ``payload.op_id`` |
+| ``audit_op_class`` | ``"ui_view"`` (constant ``UI_AUDIT_OP_CLASS``) | ``payload.op_class`` |
+
+Surface mapping (single source of truth in
+``backend/src/meho_backplane/ui/audit.py``):
+
+| URL prefix | Surface | op_id |
+|---|---|---|
+| ``/ui/`` | dashboard | ``ui.view.dashboard`` |
+| ``/ui/broadcast`` (+ subpaths) | broadcast | ``ui.view.broadcast`` |
+| ``/ui/connectors`` (+ subpaths) | connectors | ``ui.view.connectors`` |
+| ``/ui/kb`` (+ subpaths) | kb | ``ui.view.kb`` |
+| ``/ui/memory`` (+ subpaths) | memory | ``ui.view.memory`` |
+| ``/ui/topology`` (+ subpaths) | topology | ``ui.view.topology`` |
+
+The ``op_class="ui_view"`` is a new class (the consumer's
+``claude-rdc-hetzner-dc#753`` v0.7.0 closed-loop dogfood "Option B")
+distinct from the agent path's ``read`` / ``write``. Operators who want
+UI page views in their forensic timeline query
+``op_class=ui_view``; operators who want to prune them filter them
+out — and a retention policy can drop them independently of the
+governance-load-bearing agent dispatch trail.
+
+Target-scoped page views (e.g. ``/ui/connectors/<name>``) also populate
+the typed ``audit_log.target_id`` column. That binding is unchanged
+from G0.3-T4 — :func:`meho_backplane.targets.resolver.resolve_target`
+binds ``target_id`` into structlog at its single exit point, and the
+audit middleware reads it into the row. The JOIN against ``targets``
+in :func:`query_audit` then surfaces ``target_name`` on the returned
+``AuditEntry``.
+
+Skipped paths:
+
+* ``/ui/auth/*`` — login / callback / logout. Unauthenticated by design;
+  the session middleware bypasses the audit-thread binding and the
+  AuditMiddleware's general no-``operator_sub``-skip applies.
+* ``/ui/static/*`` — vendored JS + compiled CSS. Bypassed at the session
+  middleware so unauthenticated browsers render styled login pages.
+* POST / PATCH / DELETE on ``/ui/*`` — service-layer functions
+  (``create_target``, ``update_target``, ``forget_memory``, etc.) write
+  their own audit row under the canonical ``<surface>.<verb>`` op_id /
+  ``op_class=write`` discipline. Binding ``ui_view`` here would
+  double-attribute every state change. ``operator_sub`` / ``tenant_id``
+  are still bound on non-GET so a write-path route that happens to
+  bypass the service-layer writer still produces a row (under the
+  default ``http.<method>:<path>`` op_id) rather than disappearing.
+
+Pre-fix gap (closed by G0.15-T7): the chassis audit middleware skips
+requests with no ``operator_sub`` contextvar, and only
+``require_ui_admin`` — a dependency a small subset of write surfaces
+chain — bound it. Every read GET through ``require_ui_session`` left
+zero audit footprint, so an operator browsing 5 surfaces generated
+zero rows under their sub. The substrate now has full BFF coverage
+parity with the ``/api/v1/*`` chassis path and the MCP transport path.
+
 ## Known issues / v0.2 gaps
 
-* **`principal_name` never populates.** The HTTP audit middleware
+* **`principal_name` populates for MCP rows; HTTP-chassis rows still
+  return `None`.** Since G0.15-T3 (#1212) the MCP audit writer
+  (`mcp/audit.py:write_mcp_audit_row`) merges `Operator.name` into
+  `payload['principal_name']` whenever the JWT carries it, and the
+  audit-query handler reads that key off the JSON column into the
+  returned `AuditEntry`. The HTTP audit middleware
   (`meho_backplane.audit._write_audit_row`) reads `operator_sub` from
-  contextvars but never the JWT `name` claim; the MCP audit writer
-  (`mcp/audit.py:write_mcp_audit_row`) takes an `Operator` value object that
-  has a `name` field but does not persist it. Closing this is a small write-
-  path follow-up: bind `audit_principal_name` in `verify_jwt_and_bind` and
-  let the `_AUDIT_PAYLOAD_PREFIX` machinery push it into `payload`. The
-  audit-query handler then reads it out and stops returning None.
+  contextvars but never the JWT `name` claim, so HTTP rows remain
+  `principal_name=None`. Closing the HTTP gap is a small write-path
+  follow-up: bind `audit_principal_name` in `verify_jwt_and_bind` and
+  let the `_AUDIT_PAYLOAD_PREFIX` machinery push it into `payload`;
+  the handler already reads it out, so no read-side change is needed.
 
 * **`parent_audit_id` flat filter stays gated.** The column is real (#398,
   migration `0006`) and is now read onto the returned row + walked by the
@@ -368,6 +448,16 @@ Reverse dependencies:
   nullable + indexed); G8.2-T2 writes it from the MCP `Mcp-Session-Id`
   header; G8.2-T3 (#1011) un-gated the filter, surfaced the column on the
   returned row, and added `replay.py` for the per-session tree query.
+  G0.14-T6 (#1147) decoupled capture from enforcement: any
+  `Mcp-Session-Id` the client sends is captured into `agent_session_id`
+  regardless of the `MCP_REQUIRE_SESSION_ID` env var (which now strictly
+  gates the missing-header reject), so the replay-tree filter has data
+  to walk on default deploys. Calls with no header (or a malformed one)
+  land `agent_session_id` as NULL — the recursive CTE filters those out
+  of the session walk naturally (no synthetic per-call uuid4 polluting
+  the search). Operators can confirm the deploy's mode at
+  `GET /api/v1/health`'s `mcp_session_id_capture` field
+  (`"always"` / `"enforced"`).
 
 * **`op_id` / `op_class` glob filtering is JSON-path-based.** On PostgreSQL
   the `payload->>'op_id'` lookup runs over the JSONB column without an index

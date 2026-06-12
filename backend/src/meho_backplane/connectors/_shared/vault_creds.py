@@ -84,6 +84,8 @@ __all__ = [
     "BasicCredentialsTargetLike",
     "VaultCredentialsReadError",
     "load_basic_credentials",
+    "load_vault_secret_data",
+    "strip_credential_value",
 ]
 
 #: KV-v2 mount the consumer convention addresses secrets under. Dev mode
@@ -97,6 +99,26 @@ DEFAULT_KV_MOUNT: str = "secret"
 #: needs. Kept as a module constant so connector loaders and tests share
 #: one source of truth.
 DEFAULT_BASIC_CREDENTIAL_FIELDS: tuple[str, ...] = ("username", "password")
+
+
+def strip_credential_value(value: object) -> str:
+    """Coerce a Vault secret field to the credential string sent upstream.
+
+    Coerces to ``str`` (a numeric secret field round-trips as the string a
+    vendor expects) and strips surrounding whitespace -- above all a trailing
+    newline, the single most common secret-storage artifact: ``echo`` without
+    ``-n``, ``jq -r``, a text editor's final newline, ``vault kv put k=@file``
+    on a file ending in ``\\n``, a ``k=-`` heredoc. A connector forwards the
+    field **verbatim** in a Basic-auth header, a Bearer token, or a
+    token-request body, so a stray ``\\n`` turns a valid secret into an
+    upstream 401/``unauthorized_client`` that reads like a permissions, realm,
+    or grant-config problem -- a multi-hour chase for a one-byte artifact. No
+    vendor credential legitimately carries leading or trailing whitespace, so
+    stripping is always safe and is applied to every credential field every
+    connector loads from Vault. Internal whitespace is preserved -- only the
+    surrounding artifact is removed.
+    """
+    return str(value).strip()
 
 
 @runtime_checkable
@@ -249,8 +271,11 @@ def _extract_fields(
 
     A missing field raises :class:`VaultCredentialsReadError` naming the
     target + field + ``secret_ref`` — never a bare ``KeyError``. Present
-    values are coerced to ``str`` so a numeric secret field round-trips as
-    the string a vendor Basic-auth header expects.
+    values run through :func:`strip_credential_value` (coerced to ``str``
+    and surrounding-whitespace-stripped) so a numeric secret field
+    round-trips as a string and a trailing newline — the most common
+    secret-storage artifact — never reaches a vendor Basic-auth header or
+    token-request body as a verbatim ``\n``.
     """
     credentials: dict[str, str] = {}
     for field in fields:
@@ -259,7 +284,7 @@ def _extract_fields(
                 f"vault secret for target {target_name!r} (secret_ref={secret_ref!r}) "
                 f"is missing required field {field!r}"
             )
-        credentials[field] = str(secret_data[field])
+        credentials[field] = strip_credential_value(secret_data[field])
     return credentials
 
 
@@ -302,9 +327,11 @@ async def load_basic_credentials(
     Returns
     -------
     dict[str, str]
-        ``{field: value}`` for every name in *fields*. Values are
-        coerced to ``str`` so a numeric secret field round-trips as the
-        string a vendor Basic-auth header expects.
+        ``{field: value}`` for every name in *fields*. Values are coerced
+        to ``str`` and surrounding-whitespace-stripped via
+        :func:`strip_credential_value` so a numeric secret field
+        round-trips as a string and a trailing newline never reaches a
+        vendor Basic-auth header verbatim.
 
     Raises
     ------
@@ -355,3 +382,55 @@ async def load_basic_credentials(
         fields=list(fields),
     )
     return credentials
+
+
+async def load_vault_secret_data(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> dict[str, object]:
+    """Read *target*'s KV-v2 secret payload and return the raw data dict.
+
+    Same operator-context Vault read, same fail-closed precondition
+    guards, same structural unwrap as :func:`load_basic_credentials`,
+    but **without** the named-field extraction — the caller is
+    responsible for inspecting the returned dict and surfacing its own
+    structured error when the payload shape is wrong. Used when the
+    connector picks an upstream credential protocol by inspecting
+    which fields the operator stored (e.g. the gh-rest connector's
+    App-vs-PAT discriminator).
+
+    The structured-log event carries only ``target`` / ``host`` and the
+    **set of field names** present — never a credential value. The
+    returned dict is ephemeral in-memory state and must not enter any
+    log event, :class:`OperationResult`, or durable artifact.
+
+    Raises the same two-phase error contract as
+    :func:`load_basic_credentials`: login-phase failures propagate as
+    :class:`~meho_backplane.auth.vault.VaultClientError` subclasses;
+    read-phase precondition / unwrap failures raise
+    :class:`VaultCredentialsReadError`.
+    """
+    path = _resolve_secret_ref(target, operator)
+
+    async with vault_client_for_operator(operator) as client:
+        payload = await asyncio.to_thread(
+            client.secrets.kv.v2.read_secret_version,
+            path=path,
+            mount_point=mount,
+            raise_on_deleted_version=False,
+        )
+
+    secret_data = _structural_unwrap(payload, target_name=target.name)
+
+    # Log only the field-name set (no values). Sorted for a stable log
+    # shape that diff-friendly observability tooling can pattern-match
+    # without re-ordering noise.
+    structlog.get_logger(__name__).info(
+        "vault_secret_data_loaded",
+        target=target.name,
+        host=target.host,
+        fields=sorted(secret_data.keys()),
+    )
+    return secret_data

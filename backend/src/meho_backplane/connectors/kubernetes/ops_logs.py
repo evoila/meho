@@ -221,11 +221,24 @@ K8S_LOGS_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "Flat dict: {'pod': <resolved-name>, 'namespace', 'container', "
-        "'lines': [<str>], 'truncated': <bool>}. When truncated is "
-        "true, extras carries 'line_count', 'byte_count', and "
+        "'lines': [<str>], 'truncated': <bool>}. ``lines`` is "
+        "chronological -- oldest first, newest last (the bottom of the "
+        "window is the most-recent log line). When truncated is true, "
+        "extras carries 'line_count', 'byte_count', and "
         "'truncated_byte_count' so callers can render an 'X KiB "
-        "dropped from the front' hint."
+        "dropped from the front' hint. A large ``lines`` collection is "
+        "reduced to a JSONFlux handle whose inline ``sample`` shows the "
+        "most-recent lines (not the oldest) -- see ``result_ordering`` "
+        "below."
     ),
+    # G0.19-T1 (#1479): ``lines`` is oldest-first, so the meaningful inline
+    # preview of a reduced (>threshold) log response is the *tail* -- the
+    # most-recent N lines a triage reader actually wants. Without this hint
+    # the reducer's sample is the oldest N (health-probe noise). Threaded
+    # through the dispatcher into ``reducer_context["result_ordering"]`` and
+    # consumed by ``JsonFluxReducer._query_sample`` (sibling slot to
+    # ``pagination_hint``).
+    "result_ordering": {"sample": "tail"},
 }
 
 

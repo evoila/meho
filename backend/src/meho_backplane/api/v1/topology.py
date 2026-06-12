@@ -94,12 +94,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_raw_session
@@ -220,20 +222,94 @@ _MAX_HOPS_DEFAULT = 8
 _MAX_HOPS_MAX = 32
 
 
-@router.get("/dependents/{name}", response_model=list[TopologyNode])
+#: OpenAPI 404 + 409 declarations for the closure routes (``dependents``
+#: / ``dependencies``). Declared at module scope so the two routes share
+#: one definition — divergence would let the generated SDK lose either
+#: error shape for one of the verbs. The 404 ``node_untracked`` shape
+#: is G0.18-T4 (#1357) — distinct slug from the annotate flow's
+#: ``node_not_found`` (`_node_not_found_http`) because the operator
+#: action differs (closure: register / refresh the target; annotate:
+#: seed the endpoint via ``meho.topology.create_node``).
+_CLOSURE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {
+        "description": (
+            "Anchor node is not tracked in the topology graph for this "
+            "tenant. Auto-discovery is k8s-only today, so every "
+            "registered non-k8s target falls here until a populator or "
+            "curated annotation lands."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "properties": {
+                                "error": {
+                                    "type": "string",
+                                    "enum": ["node_untracked"],
+                                },
+                                "name": {"type": "string"},
+                                "kind": {"type": "string"},
+                            },
+                            "required": ["error", "name"],
+                        },
+                    },
+                    "required": ["detail"],
+                },
+            },
+        },
+    },
+    409: {
+        "description": (
+            "Bare ``name`` resolves to multiple ``kind`` candidates; "
+            "client should re-issue with an explicit ``kind``."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "properties": {
+                                "error": {
+                                    "type": "string",
+                                    "enum": ["ambiguous_node"],
+                                },
+                                "name": {"type": "string"},
+                                "kinds": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["error", "name", "kinds"],
+                        },
+                    },
+                    "required": ["detail"],
+                },
+            },
+        },
+    },
+}
+
+
+@router.get("/dependents/{name}", responses=_CLOSURE_RESPONSES)
 async def dependents(
     name: str,
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
-) -> list[TopologyNode]:
+) -> list[TopologyNode] | dict[str, object]:
     """Reverse closure: every node that depends on *name*.
 
     Wraps :func:`~meho_backplane.topology.query.find_dependents`. The
-    root node is included at depth 0 so a caller can distinguish "node
-    exists but has no dependents" (one-element list) from "node does
-    not exist in this tenant" (empty list).
+    root node is included at depth 0 (the substrate's depth-0 anchor
+    row), so a tracked node with no dependents returns a one-element
+    list with the root.
 
     ``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique
     row; omit it only when *name* is unique across kinds in the tenant.
@@ -241,13 +317,40 @@ async def dependents(
     (``ambiguous_node``) rather than silently merging unrelated
     closures. ``kind_filter`` restricts the walk to edges of that
     ``graph_edge.kind``.
+
+    G0.18-T4 (#1357, RDC #789 N2) — an anchor name with no matching
+    :class:`~meho_backplane.db.models.GraphNode` in the tenant returns
+    **404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4
+    the route returned ``[]`` for an untracked anchor, which conflated
+    "tracked, nothing depends on me" with "anchor isn't in the graph
+    at all" — for the pre-destructive blast-radius use case the empty
+    list read as "safe to delete," a false-negative. Auto-discovery
+    is k8s-only (only
+    :class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`
+    overrides
+    :meth:`~meho_backplane.connectors.base.Connector.discover_topology`),
+    so every registered ``vault`` / ``vcenter`` / ``nsx`` /
+    ``sddc-manager`` / ``gh`` target currently surfaces as untracked
+    until non-k8s populators or a curated annotation lands. The
+    distinct 404 lets the CLI / MCP front render the explicit "not
+    in graph — `meho topology refresh` first / annotate the
+    relationships" prompt instead of misleading the operator.
+
+    G0.16-T6 Finding E (#1312) — opt-in to the REST↔MCP envelope
+    agreement per ``docs/codebase/api-shape-conventions.md`` §4.
+    Default response stays the v0.8.0 bare ``list[TopologyNode]`` so
+    no client breaks; passing ``?envelope=v2`` returns the
+    discriminated envelope ``{"kind": "dependents", "nodes": [...]}``
+    matching the MCP ``query_topology`` tool's shape. The convention
+    doc names "migration is REST-toward-MCP, not the other way";
+    the v2 opt-in is the migration mechanism.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_DEPENDENTS,
         audit_op_class="read",
     )
     try:
-        return await find_dependents(
+        nodes = await find_dependents(
             operator,
             name,
             kind=kind,
@@ -256,30 +359,42 @@ async def dependents(
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
+    except NodeNotFoundError as exc:
+        raise _node_untracked_http(exc) from exc
+    if envelope is None:
+        return nodes
+    return {
+        "kind": "dependents",
+        "nodes": [n.model_dump(mode="json") for n in nodes],
+    }
 
 
-@router.get("/dependencies/{name}", response_model=list[TopologyNode])
+@router.get("/dependencies/{name}", responses=_CLOSURE_RESPONSES)
 async def dependencies(
     name: str,
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
-) -> list[TopologyNode]:
+) -> list[TopologyNode] | dict[str, object]:
     """Forward closure: everything *name* depends on.
 
     The mirror of :func:`dependents` — same shape, same one-row-per-
     node closure dedupe, same ``kind`` disambiguation contract, same
-    tenant scoping — walking edges out of the current node rather than
-    into it. Wraps
-    :func:`~meho_backplane.topology.query.find_dependencies`.
+    tenant scoping, **same G0.18-T4 (#1357) untracked-anchor
+    treatment** (404 ``node_untracked`` rather than an empty list) —
+    walking edges out of the current node rather than into it. Wraps
+    :func:`~meho_backplane.topology.query.find_dependencies`. Honours
+    the same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)
+    returning ``{"kind": "dependencies", "nodes": [...]}``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_DEPENDENCIES,
         audit_op_class="read",
     )
     try:
-        return await find_dependencies(
+        nodes = await find_dependencies(
             operator,
             name,
             kind=kind,
@@ -288,6 +403,14 @@ async def dependencies(
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
+    except NodeNotFoundError as exc:
+        raise _node_untracked_http(exc) from exc
+    if envelope is None:
+        return nodes
+    return {
+        "kind": "dependencies",
+        "nodes": [n.model_dump(mode="json") for n in nodes],
+    }
 
 
 @router.get("/path", response_model=TopologyPath | None)
@@ -869,6 +992,33 @@ def _node_not_found_http(exc: NodeNotFoundError) -> HTTPException:
     """
     detail: dict[str, str | None] = {
         "error": "node_not_found",
+        "name": exc.name,
+    }
+    if exc.kind is not None:
+        detail["kind"] = exc.kind
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=detail,
+    )
+
+
+def _node_untracked_http(exc: NodeNotFoundError) -> HTTPException:
+    """Map :class:`NodeNotFoundError` on a closure read to **404 ``node_untracked``**.
+
+    G0.18-T4 (#1357, RDC #789 N2). Distinct from ``_node_not_found_http``
+    so the CLI / MCP / agent fronts can render the closure-specific
+    diagnostic ("not in the topology graph — likely a registered
+    non-k8s target the auto-discovery doesn't cover yet") instead of
+    the annotate-write diagnostic ("seed the endpoint first via
+    ``meho.topology.create_node``"). The two share a 404 status code
+    and the same ``name`` / ``kind`` echo, only the ``error`` slug
+    diverges — the operator action diverges too. Pre-G0.18-T4 the
+    closure routes returned an empty list for this case, which
+    conflated tracked-no-deps with untracked and read as "safe to
+    delete" for the blast-radius use case.
+    """
+    detail: dict[str, str | None] = {
+        "error": "node_untracked",
         "name": exc.name,
     }
     if exc.kind is not None:

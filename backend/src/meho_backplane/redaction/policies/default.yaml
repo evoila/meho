@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Conservative default Tier-1 redaction policy -- Initiative #805
+# (G11.4 Safety, C1), Task #1071 (T2). Applied at the connector-result
+# boundary by the middleware in :mod:`meho_backplane.redaction.middleware`
+# whenever a more specific policy (per-connector_id, per-tenant, per-op)
+# is not registered. Default-safe: no operator action required for a new
+# connector to land with sensible redaction.
+#
+# Posture: redact every credential-shaped value the named-pattern library
+# knows about. Identifier-shaped patterns (uuid / ipv4 / ipv6 / fqdn) are
+# **intentionally excluded** -- they over-redact in too many connector
+# responses to be a sensible global default (a Kubernetes pod-list reply
+# is mostly UUIDs and IPs; redacting them by default would blank the
+# operator-facing summary and force every site to override). Operators
+# who want them turned on at the global level register a wider policy
+# via :func:`meho_backplane.redaction.resolver.register_policy`; per-
+# connector overrides land the same way.
+
+id: connector-boundary-default
+version: 1
+description: |
+  Default-safe Tier-1 redaction policy applied at the dispatcher's
+  connector-result boundary whenever no more-specific policy is
+  registered for the call's (connector_id, tenant, op). Targets
+  credentials and kubeconfig blobs; identifier-shaped patterns
+  (UUID / IP / FQDN) are excluded to keep operator-facing summaries
+  legible by default.
+
+rules:
+  - name: strip-authorization-header
+    pattern: authorization_header
+    action: redact
+    reason: "RFC 7235 secret on the header line"
+
+  - name: strip-bearer-token
+    pattern: bearer_token
+    action: redact
+    reason: "bare bearer token outside an Authorization header"
+
+  - name: strip-jwt
+    pattern: jwt
+    action: redact
+    reason: "JWT in payload body"
+
+  - name: strip-api-key
+    pattern: api_key
+    action: redact
+    reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
+
+  - name: strip-kubeconfig
+    pattern: kubeconfig
+    action: redact
+    reason: "kubeconfig blob in payload"

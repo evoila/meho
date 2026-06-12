@@ -72,12 +72,17 @@ the operator's tenant owns (cross-tenant run ids surface as
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final
 
 import structlog
+from pydantic import SecretStr
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.run import (
@@ -86,7 +91,10 @@ from meho_backplane.agent.run import (
     AgentRunError,
     AgentRunEvent,
     AgentRunEventKind,
+    BudgetExceededError,
     PydanticAgentRun,
+    ScheduledRunNoInputError,
+    prompt_is_effectively_empty,
 )
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
@@ -98,7 +106,20 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
 from meho_backplane.operations import agent_run as run_lifecycle
-from meho_backplane.settings import get_settings
+from meho_backplane.operations import identity_budget
+from meho_backplane.operations._audit import (
+    AgentRunAuditMeta,
+    agent_run_audit_meta_var,
+    agent_session_id_var,
+)
+from meho_backplane.operations.budget_enforcement import (
+    BudgetDecision,
+    BudgetDecisionKind,
+    EnforcementContext,
+    evaluate_pre_run_budget,
+)
+from meho_backplane.operations.identity_budget import TokenUsage
+from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "AgentDisabledError",
@@ -108,6 +129,8 @@ __all__ = [
     "AgentRunNotFoundError",
     "AgentRunOutcome",
     "AgentRunStatusView",
+    "BudgetExceededError",
+    "ScheduledRunNoInputError",
     "get_agent_invoker",
     "reset_agent_invoker_for_testing",
 ]
@@ -218,6 +241,102 @@ class _RunState:
 _DEFAULT_PROVIDER: Final[str] = "anthropic"
 
 
+def _lease_owner() -> str:
+    """Compute a stable per-process identifier for the run's ``lease_owner``.
+
+    ``"<hostname>:<pid>"`` -- the same shape
+    :func:`meho_backplane.events.drain._claimer_identity` uses for the
+    outbox-drain claimer. Visible from PG diagnostics, no PII, no secret
+    material; an operator chasing a reaped run can map the
+    ``prior_lease_owner`` the reaper records straight back to the pod /
+    process whose worker died.
+    """
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+async def _heartbeat_loop(run_id: uuid.UUID, owner: str) -> None:
+    """Extend *run_id*'s lease on a cadence until cancelled or the lease is lost.
+
+    Wiring the lease lifecycle into the fire path (#1501) closes the
+    G11.3-T4 #825 gap: :func:`run_lifecycle.claim_lease` stamps the lease
+    at run-start, but without a heartbeat the lease expires under any run
+    that outlives one TTL window and the reaper would reclaim a perfectly
+    healthy worker. This sidecar bumps ``lease_expires_at`` forward every
+    ``ttl_seconds / 2`` so a live worker keeps its lease, while a worker
+    that has died (its event loop gone) stops heartbeating and the reaper
+    reclaims the run after the TTL lapses.
+
+    Each heartbeat opens its own short-lived committed transaction -- the
+    conditional ``UPDATE`` in :func:`run_lifecycle.heartbeat` is atomic, so
+    no longer-held session is needed. A :class:`run_lifecycle.LeaseLostError`
+    means the reaper (or an operator cancel) already took the run over: the
+    loop logs and returns so it stops touching a row it no longer owns.
+    :class:`asyncio.CancelledError` (the run finished, the sidecar is being
+    torn down) propagates verbatim.
+    """
+    settings = get_settings()
+    ttl_seconds = settings.agent_run_lease_ttl_seconds
+    # Heartbeat at half the TTL so a single missed beat (a transient DB
+    # blip, a short GC pause) still leaves one full window of slack before
+    # the reaper reclaims -- the same two-window margin the reaper's
+    # default tick/TTL pairing documents.
+    interval = max(1.0, ttl_seconds / 2.0)
+    sessionmaker = get_sessionmaker()
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with sessionmaker() as session:
+                await run_lifecycle.heartbeat(
+                    session,
+                    run_id=run_id,
+                    owner=owner,
+                    ttl_seconds=ttl_seconds,
+                )
+                await session.commit()
+        except run_lifecycle.LeaseLostError:
+            # The reaper reclaimed the row or an operator cancelled it
+            # out from under us. Stop heartbeating -- the run is no
+            # longer ours to keep alive.
+            _log.info("agent_run_lease_lost", run_id=str(run_id), owner=owner)
+            return
+
+
+def _log_decision(
+    decision: BudgetDecision,
+    *,
+    operator: Operator,
+    agent: str,
+) -> None:
+    """Emit one structured log line per pre-execution budget decision.
+
+    Three log shapes so an operator's ``grep`` / Loki query distinguishes
+    them at a glance:
+
+    * ``agent_run_refused_*`` -- already emitted by the enforcement
+      service itself (kill switch + cap-breach paths); this function
+      adds nothing in the REFUSE branch.
+    * ``agent_run_tier_downgraded`` / ``agent_run_threshold_no_cheaper_tier``
+      -- already emitted by the enforcement service.
+    * ``agent_run_budget_allowed`` -- the no-op happy-path line this
+      function emits when nothing fired, gated to ``debug`` so the
+      hot path stays quiet by default.
+
+    Centralising the post-decision logging here (rather than threading
+    it through every invocation entry point) keeps the audit trail
+    consistent across :meth:`AgentInvoker.run` /
+    :meth:`AgentInvoker.run_scheduled` /
+    :meth:`AgentInvoker.stream_events`.
+    """
+    if decision.kind is BudgetDecisionKind.ALLOW and not decision.downgraded:
+        _log.debug(
+            "agent_run_budget_allowed",
+            agent=agent,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            tier=decision.tier.value if decision.tier is not None else None,
+        )
+
+
 def _split_model_id(model_id: str) -> tuple[str, str]:
     """Split ``"anthropic:claude-..."`` into ``(provider, model)``.
 
@@ -229,6 +348,23 @@ def _split_model_id(model_id: str) -> tuple[str, str]:
     if not sep:
         return _DEFAULT_PROVIDER, model_id
     return provider, model
+
+
+def _full_model_id(provider: str | None, model: str | None) -> str | None:
+    """Rebuild the provider-prefixed model id from a split ``(provider, model)``.
+
+    The inverse of :func:`_split_model_id`. The
+    :class:`~meho_backplane.db.models.AgentRun` row stores the two
+    pieces separately (``provider``, ``model``); the
+    :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
+    table keys on the rejoined ``provider:model`` form that
+    :attr:`Settings.agent_default_model` emits. ``None`` either side
+    surfaces as ``None`` so the cost lookup falls through to the
+    *"unknown model -> Decimal(0)"* branch.
+    """
+    if provider is None or model is None:
+        return None
+    return f"{provider}:{model}"
 
 
 class AgentInvoker:
@@ -281,15 +417,79 @@ class AgentInvoker:
         """Validate the named agent is runnable for the tenant, run nothing.
 
         The SSE events route calls this *before* opening the stream so a
-        not-found / disabled error surfaces as a clean HTTP status rather
-        than a torn ``text/event-stream`` connection (which an
-        ``EventSource`` client would auto-reconnect into a hot loop).
+        not-found / disabled / budget-refused error surfaces as a clean
+        HTTP status rather than a torn ``text/event-stream`` connection
+        (which an ``EventSource`` client would auto-reconnect into a
+        hot loop). The budget gate runs here too (G11.5-T6 #1080) for
+        the same reason; the SSE generator's own re-check inside
+        :meth:`stream_events` is the source of truth for the resolved
+        tier the loop actually runs against, but the pre-stream call
+        gives the boundary a clean 4xx path.
 
         Raises:
             AgentNotFoundError: no such definition in the tenant.
             AgentDisabledError: the definition is disabled.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run.
         """
-        await self._load_definition(operator, name)
+        entry = await self._load_definition(operator, name)
+        definition = self._to_agent_definition(entry)
+        # Discard the (possibly degraded) return value here: the gate
+        # is re-evaluated inside :meth:`stream_events` once the
+        # generator is actually entered, and that re-evaluation is
+        # the canonical one (it's the gate whose result the loop
+        # runs against). The pre-stream call just trips a 4xx ahead
+        # of the StreamingResponse.
+        await self._enforce_pre_run_budget(operator, definition)
+
+    async def _enforce_pre_run_budget(
+        self,
+        operator: Operator,
+        definition: AgentDefinition,
+    ) -> AgentDefinition:
+        """Run the G11.5-T6 pre-execution budget gate; return the (maybe degraded) definition.
+
+        Calls
+        :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
+        against the operator's tenant + sub, with the definition's
+        :attr:`AgentDefinition.tier` as the requested tier. On
+        :attr:`BudgetDecisionKind.REFUSE` raises
+        :class:`BudgetExceededError` (which the public surface
+        propagates as a 4xx / MCP elicitation refusal / terminal
+        ``ERROR`` SSE event); on :attr:`BudgetDecisionKind.ALLOW`
+        returns either the unchanged definition or a frozen-model
+        copy with ``tier`` replaced by the one-rung-cheaper tier the
+        policy picked (the runtime then resolves against that tier
+        via :class:`~meho_backplane.agent.run.PydanticAgentRun`'s
+        normal resolver path).
+
+        The check uses a short-lived session because the consumption
+        service is read-only here and the gate must commit no rows
+        (so a refused run leaves no DB footprint per the
+        :class:`BudgetExceededError` contract).
+        """
+        settings = get_settings()
+        context = EnforcementContext.from_settings(settings)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            decision = await evaluate_pre_run_budget(
+                session,
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                requested_tier=definition.tier,
+                context=context,
+            )
+        _log_decision(decision, operator=operator, agent=definition.name)
+        if decision.kind is BudgetDecisionKind.REFUSE:
+            raise BudgetExceededError(decision.reason)
+        if decision.downgraded and decision.tier is not None:
+            # The definition is frozen (Pydantic ConfigDict(frozen=True)),
+            # so the tier swap goes through ``model_copy`` rather than
+            # in-place mutation — keeps the original value object
+            # untouched for any concurrent reader and matches the
+            # frozen-data convention.
+            return definition.model_copy(update={"tier": decision.tier})
+        return definition
 
     @staticmethod
     def _to_agent_definition(entry: AgentDefinitionRead) -> AgentDefinition:
@@ -302,7 +502,32 @@ class AgentInvoker:
         free-text answer in v0.2 (recorded as ``{"text": ...}``). The
         toolset spec passes through verbatim — the T3 resolver intersects it
         with the operator's permissions at run time.
+
+        ``tier`` is deliberately *not* threaded from ``entry.model_tier``
+        in G11.5-T1 (#1075): the persisted
+        :class:`~meho_backplane.agents.schemas.AgentModelTier`
+        vocabulary (``standard`` / ``fast`` / ``deep``) and the resolver's
+        :class:`~meho_backplane.agent.models.AgentTier` vocabulary
+        (``triage`` / ``investigate`` / ``summarize``) are orthogonal:
+        the first is a cost/capability ladder, the second is a workflow
+        role. A naive equate-by-position mapping would be semantically
+        wrong, and the API-surface
+        :class:`~meho_backplane.agents.schemas.AgentDefinitionCreate.model_tier`
+        is a public contract a rename would break. The reconciliation
+        (single enum / explicit mapping table + Alembic retag of stored
+        values) is queued behind the concrete-backend tasks
+        (#1076 / #1077 / #1078), which exercise the resolver via direct
+        programmatic construction in v0.2; once a concrete non-Anthropic
+        backend ships the persisted vocabulary needs to grow, and that
+        is the right moment to unify. Until then, every persisted
+        definition resolves through :data:`ModelFactory` (the legacy
+        single-tenant path) and the resolver branch in
+        :meth:`~meho_backplane.agent.run.PydanticAgentRun._resolve_model`
+        is reachable only via direct programmatic construction.
         """
+        # TODO(G11.5-T2 — follow up to #1075): map entry.model_tier ->
+        # definition.tier once AgentModelTier (standard/fast/deep) and
+        # AgentTier (triage/investigate/summarize) are reconciled.
         return AgentDefinition(
             name=entry.name,
             system_prompt=entry.system_prompt,
@@ -320,16 +545,31 @@ class AgentInvoker:
         provider: str,
         model: str,
         trigger: AgentRunTrigger = AgentRunTrigger.DIRECT,
-    ) -> uuid.UUID:
-        """Insert a ``pending`` run row, transition it to ``running``, commit.
+    ) -> tuple[uuid.UUID, str]:
+        """Insert a ``pending`` run row, claim a lease, go ``running``, commit.
 
         Done in its own committed transaction *before* the loop starts so
         the run is pollable the instant :meth:`run` returns a handle — even
         in async mode where the background task has not made progress yet.
-        Returns the run id (the durable handle + audit-lineage key). A
-        human-initiated :meth:`run` records ``DIRECT``; an autonomous
-        :meth:`run_scheduled` records ``SCHEDULED``.
+        Returns ``(run_id, lease_owner)``: the run id is the durable handle
+        + audit-lineage key; the lease owner is the per-process stamp the
+        heartbeat sidecar reuses so its conditional ``UPDATE`` matches the
+        row this worker claimed. A human-initiated :meth:`run` records
+        ``DIRECT``; an autonomous :meth:`run_scheduled` records
+        ``SCHEDULED``.
+
+        The lease is stamped (#1501 / G11.3-T4 #825) in the *same*
+        transaction as the ``pending`` -> ``running`` transition, so a
+        committed run is never ``running`` without a lease: the reaper's
+        claim query (``status='running' AND lease_expires_at < now()``)
+        can therefore reclaim this run once its lease lapses, instead of
+        the row staying stuck ``running`` forever. The in-flight policy
+        is left at the row default (``fail_into_audit``) -- a direct /
+        scheduled run has no firing-trigger row to snapshot, and
+        ``fail_into_audit`` is the conservative reclaim outcome the
+        reaper applies.
         """
+        owner = _lease_owner()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await run_lifecycle.create_run(
@@ -341,9 +581,15 @@ class AgentInvoker:
                 agent_definition_id=entry.id,
             )
             await run_lifecycle.start_run(session, row, provider=provider, model=model)
+            await run_lifecycle.claim_lease(
+                session,
+                row,
+                owner=owner,
+                ttl_seconds=get_settings().agent_run_lease_ttl_seconds,
+            )
             run_id = row.id
             await session.commit()
-        return run_id
+        return run_id, owner
 
     @staticmethod
     async def _finalize_run(
@@ -351,6 +597,7 @@ class AgentInvoker:
         *,
         output: dict[str, object] | None,
         error: str | None,
+        usage: TokenUsage | None = None,
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -360,6 +607,29 @@ class AgentInvoker:
         operator cancelled it mid-flight) is left untouched —
         :class:`~meho_backplane.operations.agent_run.IllegalTransitionError`
         is swallowed because the cancel already wrote the terminal state.
+
+        When *usage* is supplied (the success path), the function also:
+
+        1. Rebuilds the provider-prefixed model id from the row's
+           ``provider`` + ``model`` columns (the inverse of
+           :func:`_split_model_id`) so the
+           :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
+           lookup hits.
+        2. Computes the run's USD cost via
+           :func:`~meho_backplane.operations.identity_budget.compute_cost`.
+        3. Stamps that cost on ``agent_run.cost`` through the lifecycle
+           ``succeed_run`` helper (which already accepts the parameter
+           the v0.2 stub-out reserved for this slice).
+        4. Applies one increment per active budget bucket (daily +
+           weekly + monthly) for the principal via
+           :func:`~meho_backplane.operations.identity_budget.apply_consumption`.
+
+        The two writes (``succeed_run`` and ``apply_consumption``) share
+        the same :class:`AsyncSession` and the same commit, so the budget
+        increments are atomic with the run's terminal transition: either
+        both land or neither does. A failure path (``error is not None``)
+        skips consumption entirely -- a failed run has no cost stamp by
+        the v0.2 contract.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -370,7 +640,19 @@ class AgentInvoker:
                 if error is not None:
                     await run_lifecycle.fail_run(session, row, error=error)
                 else:
-                    await run_lifecycle.succeed_run(session, row, output=output or {})
+                    cost: Decimal | None = None
+                    if usage is not None:
+                        model_id = _full_model_id(row.provider, row.model)
+                        cost = identity_budget.compute_cost(usage, model_id)
+                    await run_lifecycle.succeed_run(session, row, output=output or {}, cost=cost)
+                    if usage is not None and cost is not None:
+                        await identity_budget.apply_consumption(
+                            session,
+                            tenant_id=row.tenant_id,
+                            principal_sub=row.identity_sub,
+                            tokens=usage.total_tokens,
+                            cost=cost,
+                        )
             except run_lifecycle.IllegalTransitionError:
                 await session.rollback()
                 return
@@ -382,6 +664,9 @@ class AgentInvoker:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        meta: AgentRunAuditMeta,
+        lease_owner: str,
     ) -> None:
         """Background coroutine: run the loop and record its terminal state.
 
@@ -392,13 +677,42 @@ class AgentInvoker:
         background task (an unhandled task exception would surface only as a
         log warning at GC time).
 
-        Binds :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` to
-        this run's id for the loop's duration, so the first ``invoke_agent``
-        call records its child with this run as the parent (the lineage key).
+        A heartbeat sidecar (:func:`_heartbeat_loop`) runs alongside the
+        loop for its whole lifetime (#1501): it keeps the run's lease fresh
+        so the reaper does not reclaim a healthy long-running worker, and is
+        cancelled in the ``finally`` once the loop terminates (success,
+        failure, or cancel). If *this* task dies (worker recycle, unhandled
+        crash), the sidecar dies with it -- the lease then lapses and the
+        reaper drives the row to ``failed`` rather than leaving it stuck
+        ``running``. The lifecycle's terminal-transition helpers already
+        clear the lease, so a cleanly-finished run drops its lease before
+        the sidecar is even cancelled; the cancel is belt-and-suspenders.
+
+        Binds three contextvars around the loop, each scoped to this run:
+
+        * :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` --
+          the parent id for any ``invoke_agent`` call the loop makes
+          (the run-lineage key on the child ``agent_run`` row).
+        * :data:`~meho_backplane.operations._audit.agent_session_id_var`
+          (G11.4-T5 #1074) -- the session lineage key the dispatcher
+          writes onto every per-tool-call ``audit_log`` row, so the
+          G8.2-T3 #1011 reconstruct-sense replay can rebuild the
+          agent's full session graph by ``agent_session_id``.
+        * :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
+          (G11.4-T5 #1074) -- the model / provider / cost snapshot
+          attribution-stamped onto every per-tool-call audit row's
+          payload (per the C2 acceptance criteria).
+
         The task carries its own contextvar copy (``asyncio.create_task``
-        snapshots the context), so the bind is isolated to this run.
+        snapshots the context), so the binds are isolated to this run.
         """
         run_token = current_agent_run_id_var.set(run_id)
+        session_token = agent_session_id_var.set(run_id)
+        meta_token = agent_run_audit_meta_var.set(meta)
+        heartbeat = asyncio.create_task(
+            _heartbeat_loop(run_id, lease_owner),
+            name=f"agent-heartbeat-{run_id}",
+        )
         try:
             try:
                 handle = self._runtime.start(definition, operator, inputs)
@@ -413,8 +727,29 @@ class AgentInvoker:
                 _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
                 await self._finalize_run(run_id, output=None, error=str(exc))
                 return
-            await self._finalize_run(run_id, output=_project_output(result.output), error=None)
+            usage = TokenUsage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_write_tokens=result.cache_write_tokens,
+            )
+            await self._finalize_run(
+                run_id,
+                output=_project_output(result.output),
+                error=None,
+                usage=usage,
+            )
         finally:
+            # Stop the heartbeat sidecar before resetting the contextvars:
+            # the run has reached its terminal state (or is being cancelled),
+            # so the lease no longer needs extending. Awaiting the cancel
+            # keeps a stray "Task was destroyed but it is pending!" warning
+            # from surfacing at GC under pytest-asyncio shutdown.
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            agent_run_audit_meta_var.reset(meta_token)
+            agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
 
     # -- public surface ---------------------------------------------------
@@ -439,9 +774,19 @@ class AgentInvoker:
         Raises:
             AgentNotFoundError: no such definition in the tenant.
             AgentDisabledError: the definition is disabled.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run
+                (G11.5-T6 #1080).
         """
         entry = await self._load_definition(operator, name)
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — pre-execution budget gate. Refused runs
+        # short-circuit *before* the durable row is created so a
+        # kill-switched deploy doesn't fill the runs table with
+        # ``failed`` rows on every retry. A degraded tier comes back as
+        # a modified definition copy; the runtime picks the cheaper
+        # backend via its normal resolver path.
+        definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
         # Resource-server delegation (G11.2-T2 #816): a human triggered this
@@ -456,8 +801,17 @@ class AgentInvoker:
         # actor_delegation (empty identity_ref) raises before the row is
         # committed — never a ``running`` row with no backing task.
         with actor_delegation(entry.identity_ref):
-            run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
-            task = self._launch_run(run_id, definition, operator, inputs)
+            run_id, lease_owner = await self._create_run_row(
+                operator, entry, provider=provider, model=model
+            )
+            task = self._launch_run(
+                run_id,
+                definition,
+                operator,
+                inputs,
+                meta=AgentRunAuditMeta(model=model, provider=provider),
+                lease_owner=lease_owner,
+            )
 
         _log.info(
             "agent_invoke_started",
@@ -498,43 +852,41 @@ class AgentInvoker:
             error=view.error,
         )
 
-    async def run_scheduled(
+    async def _authenticate_scheduled_agent(
         self,
         name: str,
-        inputs: str,
         *,
         agent_client_id: str,
-        agent_client_secret: str,
-    ) -> AgentRunOutcome:
-        """Run an agent autonomously under its own ``client_credentials`` identity.
+        agent_client_secret: SecretStr,
+        settings: Settings,
+    ) -> tuple[Operator, AgentDefinitionRead]:
+        """Authenticate the agent's own identity and resolve its owned definition.
 
-        No human initiator: the agent authenticates as itself via the
-        ``client_credentials`` grant (a single
-        :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
-        call), so it is the *subject* (``operator_sub``=agent) and there is no
-        separate actor — ``actor_sub`` stays ``NULL`` on every audit row the
-        run produces (this method deliberately does **not** bind
-        :func:`~meho_backplane.auth.delegation.actor_delegation`, unlike the
-        human-initiated :meth:`run`).
+        Obtains a ``client_credentials`` token for *agent_client_id*, verifies
+        the issued JWT, loads the named definition, and asserts the
+        authenticated client owns it. Returns the verified ``operator`` and the
+        ``entry`` for the caller to launch. Split out of :meth:`run_scheduled`
+        so that method stays focused on the run-lifecycle (create row → launch
+        → bounded wait) rather than the auth-and-bind preamble.
 
-        The scheduler that decides *when* to fire a run and supplies the agent
-        credentials (from Vault / config) is G11.3's
-        ``SCHEDULED``-trigger scope; this method is the authentication +
-        audit-shape seam it calls. Blocks until the loop completes (autonomous
-        runs have no client waiting on a sync timeout).
+        ``agent_client_secret`` is a :class:`~pydantic.SecretStr` so it can
+        never be rendered into a log line as a frame local on any exception
+        path -- the value is unwrapped via ``.get_secret_value()`` only at
+        the single :func:`get_client_credentials_token` call below.
 
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
+            AgentInvocationError: the authenticated client does not own the
+                named definition (cross-agent launch refused).
             AgentNotFoundError / AgentDisabledError: no enabled definition
                 named *name* in the agent's tenant.
         """
-        settings = get_settings()
         # Request the audience we then verify, so the token carries it even on
         # realms without a default audience mapper.
         token = await get_client_credentials_token(
             issuer_url=str(settings.keycloak_issuer_url),
             client_id=agent_client_id,
-            client_secret=agent_client_secret,
+            client_secret=agent_client_secret.get_secret_value(),
             audience=settings.keycloak_audience,
         )
         operator = await verify_jwt_for_audience(
@@ -556,18 +908,152 @@ class AgentInvoker:
                 f"scheduled run rejected: agent credentials for {agent_client_id!r} "
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
+        return operator, entry
+
+    async def run_scheduled(
+        self,
+        name: str,
+        inputs: str,
+        *,
+        agent_client_id: str,
+        agent_client_secret: SecretStr,
+    ) -> AgentRunOutcome:
+        """Run an agent autonomously under its own ``client_credentials`` identity.
+
+        No human initiator: the agent authenticates as itself via the
+        ``client_credentials`` grant (a single
+        :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
+        call), so it is the *subject* (``operator_sub``=agent) and there is no
+        separate actor — ``actor_sub`` stays ``NULL`` on every audit row the
+        run produces (this method deliberately does **not** bind
+        :func:`~meho_backplane.auth.delegation.actor_delegation`, unlike the
+        human-initiated :meth:`run`).
+
+        The scheduler that decides *when* to fire a run and supplies the agent
+        credentials (from Vault / config) is G11.3's
+        ``SCHEDULED``-trigger scope; this method is the authentication +
+        audit-shape seam it calls. The wait on the loop is **bounded** by
+        :attr:`Settings.agent_sync_timeout_seconds` (mirroring :meth:`run`):
+        a run still executing at the deadline keeps going in the background
+        (it is shielded from the wait's cancellation) and the call returns a
+        :class:`AgentRunOutcome` flagged ``converted_to_async``. Without this
+        bound a single hung or approval-gated run would block the serial
+        scheduler tick — and strand the tick's advisory lock — until a pod
+        restart (#1502); the lifecycle/reaper, not this wait, owns reclaiming
+        an abandoned background run.
+
+        Authentication + identity binding (token grant, JWT verify,
+        owns-definition guard) is delegated to
+        :meth:`_authenticate_scheduled_agent`.
+
+        A trigger fired with no usable user prompt (empty / whitespace-only
+        *inputs*, the common cause being a trigger created without
+        ``inputs``) does **not** reach the model: the run row is finalised
+        ``failed`` with a :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+        error and the returned :class:`AgentRunOutcome` carries
+        ``status=FAILED`` (#1505). This is a returned terminal outcome, not
+        a raised exception -- the scheduler treats it as a fired-but-failed
+        trigger (a permanent misconfiguration), not a transient retry.
+
+        Raises:
+            AgentTokenError: the ``client_credentials`` grant failed.
+            AgentInvocationError: the authenticated client does not own the
+                named definition.
+            AgentNotFoundError / AgentDisabledError: no enabled definition
+                named *name* in the agent's tenant.
+        """
+        settings = get_settings()
+        operator, entry = await self._authenticate_scheduled_agent(
+            name,
+            agent_client_id=agent_client_id,
+            agent_client_secret=agent_client_secret,
+            settings=settings,
+        )
+        return await self._launch_scheduled_run(
+            name, inputs, operator=operator, entry=entry, settings=settings
+        )
+
+    async def _refuse_scheduled_no_input(
+        self,
+        run_id: uuid.UUID,
+        name: str,
+        operator: Operator,
+    ) -> AgentRunOutcome:
+        """Finalise an already-created scheduled run ``failed`` for no input (#1505).
+
+        The run row exists (so the refusal is auditable in the runs table)
+        but the loop is never launched: the row is finalised ``failed``
+        with a :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+        error and no model call is made. Returns the terminal
+        ``status=FAILED`` outcome the scheduler surfaces as
+        ``scheduler_fired_run_failed``.
+        """
+        error = str(ScheduledRunNoInputError(agent=name))
+        _log.warning(
+            "agent_scheduled_no_input",
+            run_id=str(run_id),
+            agent=name,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        await self._finalize_run(run_id, output=None, error=error)
+        return AgentRunOutcome(
+            run_id=run_id,
+            status=AgentRunStatus.FAILED,
+            error=error,
+        )
+
+    async def _launch_scheduled_run(
+        self,
+        name: str,
+        inputs: str,
+        *,
+        operator: Operator,
+        entry: AgentDefinitionRead,
+        settings: Settings,
+    ) -> AgentRunOutcome:
+        """Budget-gate, persist, launch, and bounded-wait a scheduled run.
+
+        The run-lifecycle half of :meth:`run_scheduled`, kept separate from the
+        auth-and-bind preamble. The wait on the background loop is bounded by
+        ``settings.agent_sync_timeout_seconds``; on timeout the still-running
+        handle is returned (``converted_to_async``) so the serial scheduler tick
+        is not blocked and its advisory lock is released each cadence (#1502).
+        """
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — same pre-execution gate as :meth:`run`.
+        # A scheduler-fired run is the most common cost-runaway shape
+        # (a misconfigured cron firing every minute), so the gate is
+        # critical here even when the operator is a service account
+        # rather than a human.
+        definition = await self._enforce_pre_run_budget(operator, definition)
         provider, model = _split_model_id(settings.agent_default_model)
-        run_id = await self._create_run_row(
+        run_id, lease_owner = await self._create_run_row(
             operator,
             entry,
             provider=provider,
             model=model,
             trigger=AgentRunTrigger.SCHEDULED,
         )
+        # No-input guard (#1505): a scheduled trigger fired with no usable
+        # user prompt (the common cause: created without ``inputs``) would
+        # reach the provider as a system-prompt-only request with an empty
+        # ``messages`` array and come back as an opaque provider 400. Fail
+        # the run typed *before* launching the doomed loop. The row is
+        # created first so the refusal is visible in the runs table the
+        # same as any other terminal scheduled run.
+        if prompt_is_effectively_empty(inputs):
+            return await self._refuse_scheduled_no_input(run_id, name, operator)
         # No actor_delegation: the agent is the subject, not an actor on behalf
         # of a human, so actor_sub stays NULL.
-        task = self._launch_run(run_id, definition, operator, inputs)
+        task = self._launch_run(
+            run_id,
+            definition,
+            operator,
+            inputs,
+            meta=AgentRunAuditMeta(model=model, provider=provider),
+            lease_owner=lease_owner,
+        )
         _log.info(
             "agent_scheduled_started",
             run_id=str(run_id),
@@ -575,7 +1061,27 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
-        await task
+        try:
+            # Bound the wait so a hung/approval-gated run cannot block the
+            # serial scheduler tick (and strand its advisory lock) until a
+            # pod restart (#1502). Shield so the timeout abandons the *wait*,
+            # not the run — the loop keeps going in the background and stays
+            # pollable / reapable; the reaper owns reclaiming an abandoned run.
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=settings.agent_sync_timeout_seconds,
+            )
+        except TimeoutError:
+            _log.info(
+                "agent_scheduled_converted_to_async",
+                run_id=str(run_id),
+                timeout=settings.agent_sync_timeout_seconds,
+            )
+            return AgentRunOutcome(
+                run_id=run_id,
+                status=AgentRunStatus.RUNNING,
+                converted_to_async=True,
+            )
         view = await self.poll(operator, run_id)
         return AgentRunOutcome(
             run_id=run_id,
@@ -590,6 +1096,9 @@ class AgentInvoker:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        meta: AgentRunAuditMeta,
+        lease_owner: str,
     ) -> asyncio.Task[None]:
         """Launch the loop as a background task anchored in the run store.
 
@@ -597,9 +1106,24 @@ class AgentInvoker:
         mid-flight (asyncio weakly references bare tasks) and survives the
         request that created it; a done-callback evicts the entry on
         completion so a long-lived worker does not accumulate finished runs.
+
+        *meta* is the agent-run audit snapshot threaded into every
+        per-tool-call audit row's payload (G11.4-T5 #1074) -- carried
+        into the background task via
+        :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
+        in :meth:`_run_loop_to_completion`. *lease_owner* is the
+        per-process stamp :meth:`_create_run_row` wrote with the lease;
+        the loop's heartbeat sidecar reuses it (#1501).
         """
         task = asyncio.create_task(
-            self._run_loop_to_completion(run_id, definition, operator, inputs),
+            self._run_loop_to_completion(
+                run_id,
+                definition,
+                operator,
+                inputs,
+                meta=meta,
+                lease_owner=lease_owner,
+            ),
             name=f"agent-invoke-{run_id}",
         )
         self._store[run_id] = _RunState(
@@ -646,12 +1170,24 @@ class AgentInvoker:
 
         Raises:
             AgentNotFoundError / AgentDisabledError: same as :meth:`run`.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run
+                (G11.5-T6 #1080). The boundary maps it to a 4xx
+                response before the SSE connection is opened.
         """
         entry = await self._load_definition(operator, name)
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — pre-execution budget gate. Raised
+        # *before* the durable row is created so the SSE consumer
+        # gets a clean 4xx rather than a stream that opens and
+        # immediately emits a terminal ERROR event (which an
+        # ``EventSource`` client would auto-reconnect into).
+        definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
-        run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
+        run_id, lease_owner = await self._create_run_row(
+            operator, entry, provider=provider, model=model
+        )
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
@@ -659,7 +1195,25 @@ class AgentInvoker:
         # streamed run records its child against this run (G11.1-T7 #1067). The
         # stream runs inline in the SSE response coroutine, so the token reset
         # in ``finally`` keeps the bind from leaking past the stream.
+        #
+        # G11.4-T5 #1074 -- also bind the session id + audit meta
+        # contextvars so the dispatcher's per-tool-call audit rows
+        # carry the run's lineage key + the model/provider snapshot.
+        # Same finally-token discipline; identical inline scope.
         run_token = current_agent_run_id_var.set(run_id)
+        session_token = agent_session_id_var.set(run_id)
+        meta_token = agent_run_audit_meta_var.set(
+            AgentRunAuditMeta(model=model, provider=provider),
+        )
+        # Heartbeat sidecar (#1501): the streamed run executes inline in the
+        # SSE coroutine, so a hung tool call or a slow model would let the
+        # lease lapse and the reaper reclaim a live stream. Keep the lease
+        # fresh for the stream's lifetime; cancel it once the stream
+        # terminates (final/error event, client disconnect, cancel).
+        heartbeat = asyncio.create_task(
+            _heartbeat_loop(run_id, lease_owner),
+            name=f"agent-heartbeat-{run_id}",
+        )
         try:
             async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
                 if event.kind is AgentRunEventKind.FINAL:
@@ -668,6 +1222,11 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 yield run_id, event
         finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            agent_run_audit_meta_var.reset(meta_token)
+            agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
             await self._finalize_run(run_id, output=terminal_output, error=terminal_error)
 
@@ -699,8 +1258,8 @@ async def _record_child_run(
     operator: Operator,
     definition: AgentDefinition,
     parent_run_id: uuid.UUID | None,
-) -> uuid.UUID:
-    """Persist a child ``agent_run`` row linked to its parent; return its id.
+) -> tuple[uuid.UUID, str]:
+    """Persist a child ``agent_run`` row linked to its parent; return ``(id, owner)``.
 
     The :class:`~meho_backplane.agent.invoke.ChildRunRecorder` the live invoker
     injects (G11.1-T7 #1067). The seam value object carries neither the
@@ -711,12 +1270,15 @@ async def _record_child_run(
     so the child run is inspectable while it executes (mirrors
     :meth:`AgentInvoker._create_run_row`).
 
-    The row's *terminal* state is deliberately not written here: the
-    ``ChildRunRecorder`` protocol returns only the new id, and the child loop's
-    success/failure surfaces through the parent run. Finalizing child rows to
-    ``succeeded`` / ``failed`` is a follow-up — it needs a protocol extension
-    (a finalizer hook), out of #1067's "wire the existing mechanism" scope. A
-    definition deleted between resolution and recording raises
+    Like the top-level path (#1501), the row is leased in the same
+    transaction as the ``running`` transition; the lease owner is returned so
+    the ``invoke_agent`` tool can heartbeat the child for its loop's lifetime
+    and the reaper can reclaim a child whose worker died mid-flight.
+
+    The row's *terminal* state is closed by the companion
+    :func:`_finalize_child_run` (G11.1-T8 #1087) after the child loop returns,
+    so the child reaches ``succeeded`` / ``failed``. A definition deleted
+    between resolution and recording raises
     :class:`~meho_backplane.agent.run.AgentRunError`, surfaced by
     ``invoke_agent`` as a ``ModelRetry``.
     """
@@ -726,6 +1288,7 @@ async def _record_child_run(
         raise AgentRunError(f"agent definition {definition.name!r} no longer exists")
     settings = get_settings()
     provider, model = _split_model_id(settings.agent_default_model)
+    owner = _lease_owner()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await run_lifecycle.create_run(
@@ -738,9 +1301,15 @@ async def _record_child_run(
             parent_run_id=parent_run_id,
         )
         await run_lifecycle.start_run(session, row, provider=provider, model=model)
+        await run_lifecycle.claim_lease(
+            session,
+            row,
+            owner=owner,
+            ttl_seconds=settings.agent_run_lease_ttl_seconds,
+        )
         child_run_id = row.id
         await session.commit()
-    return child_run_id
+    return child_run_id, owner
 
 
 async def _finalize_child_run(

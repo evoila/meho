@@ -58,6 +58,9 @@ from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
     register_vault_auth_operations,
 )
+from meho_backplane.connectors.vault.ops_identity_token import (
+    register_vault_identity_token_operations,
+)
 from meho_backplane.connectors.vault.ops_sys import (
     register_vault_sys_typed_operations,
 )
@@ -67,6 +70,19 @@ register_connector_v2(
     product="vault",
     version="1.x",
     impl_id="vault",
+    cls=VaultConnector,
+)
+
+# G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
+# out so a target with ``version=None`` (fresh, unfingerprinted, no
+# operator-asserted version yet) resolves to this connector through
+# the resolver's ``versioned_over_wildcard`` step rather than 501-ing
+# with ``no_connector``. The versioned entry above always wins when
+# both are present (resolver tie-break step 1).
+register_connector_v2(
+    product="vault",
+    version="",
+    impl_id="",
     cls=VaultConnector,
 )
 
@@ -81,11 +97,18 @@ register_typed_op_registrar(register_vault_typed_operations)
 # the KV-v2 (#545) and sys surfaces register independently — no shared
 # handler state, distinct endpoint_descriptor rows.
 register_typed_op_registrar(register_vault_sys_typed_operations)
+# The identity (entity/group/alias) + token (create/revoke_accessor/
+# list_accessors) op groups (G3.15-T4 #1412) ship their own registrar so
+# they register independently of the KV / sys / auth surfaces. Writes are
+# requires_approval=True; vault.token.create's response token is redacted
+# via the credential_mint op-class allowlist.
+register_typed_op_registrar(register_vault_identity_token_operations)
 
 __all__ = [
     "VaultAuthBackendNotMountedError",
     "VaultConnector",
     "register_vault_auth_operations",
+    "register_vault_identity_token_operations",
     "register_vault_sys_typed_operations",
     "register_vault_typed_operations",
     "vault_kv_delete",

@@ -17,7 +17,8 @@ import (
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store that
-// backplane.Resolve / doAuthedRequest read. Mirrors the same helper in
+// backplane.Resolve and the generated typed client (via
+// api.NewAuthedClient) read. Mirrors the same helper in
 // cli/internal/cmd/kb/kb_test.go.
 func seedXDGAndToken(t *testing.T, backplaneURL string) string {
 	t.Helper()

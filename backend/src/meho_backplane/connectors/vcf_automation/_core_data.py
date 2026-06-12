@@ -271,8 +271,9 @@ VCFA_CORE_GROUPS: Final[tuple[VcfaCoreGroup, ...]] = (
             "deployed', 'what is the status of deployment X', or 'who owns "
             "deployment Y'. Deployment list is the largest payload on the "
             "tenant surface; the dispatcher's JSONFlux seam wraps oversized "
-            "responses in a ResultHandle for follow-up navigation via "
-            "result_describe / result_query."
+            "responses in a ResultHandle with a bounded inline sample plus a "
+            "``fetch_more`` envelope. Re-call with an OData ``$filter`` to "
+            "scope down rather than expecting a handle read-back tool."
         ),
     ),
     VcfaCoreGroup(
@@ -507,9 +508,10 @@ VCFA_CORE_OPS: Final[tuple[VcfaCoreOp, ...]] = (
                 "running instances of blueprints). The largest payload on "
                 "the tenant surface -- large tenants return hundreds of "
                 "deployments. The dispatcher's JSONFlux seam wraps oversized "
-                "responses in a ResultHandle; use result_describe + "
-                "result_query to navigate the handle. Supports OData filters "
-                "($filter=projectId eq '<id>' is the canonical scope-down)."
+                "responses in a ResultHandle with a bounded inline sample plus "
+                "a ``fetch_more`` envelope; re-call with an OData ``$filter`` "
+                "to scope down ($filter=projectId eq '<id>' is the canonical "
+                "scope-down) rather than expecting a handle read-back tool."
             ),
             output_shape=(
                 "Object with a 'content' array of deployment entries; each "

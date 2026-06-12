@@ -5,25 +5,16 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// EditGroupBody mirrors the backend EditGroupBody Pydantic model.
-// Both fields are nullable on the wire so the operator can patch
-// one field without clobbering the other; we use `omitempty` +
-// pointer types so json.Marshal omits unset fields entirely (rather
-// than sending explicit null, which T6 might or might not
-// distinguish from absent).
-type EditGroupBody struct {
-	WhenToUse *string `json:"when_to_use,omitempty"`
-	Name      *string `json:"name,omitempty"`
-}
 
 // newEditGroupCmd returns the `meho connector edit-group` command.
 //
@@ -35,7 +26,7 @@ type EditGroupBody struct {
 //	  [--json] [--backplane <url>]
 //
 // Hits PATCH /api/v1/connectors/<connector_id>/groups/<group_key>
-// with an EditGroupBody. tenant_admin role required.
+// with an api.EditGroupBody. tenant_admin role required.
 func newEditGroupCmd() *cobra.Command {
 	var (
 		whenToUseFlag     string
@@ -106,7 +97,7 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 			opts.JSONOut,
 		)
 	}
-	body := EditGroupBody{}
+	body := api.EditGroupBody{}
 	if whenSet {
 		body.WhenToUse = &whenToUse
 	}
@@ -119,6 +110,10 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
 	if err := patchGroup(cmd.Context(), backplaneURL, opts.ConnectorID, opts.GroupKey, body); err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -137,24 +132,39 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 	return nil
 }
 
-// patchGroup issues the PATCH against T6's route. The route returns
-// HTTP 204 No Content — no JSON body, so we deliberately don't
-// decode anything. A non-2xx surfaces as *httpError via
-// doAuthedRequest's status check.
+// patchGroup drives the typed-client edit-group endpoint with a
+// one-shot 401-retry. The route returns HTTP 204 No Content; the
+// typed envelope's body is empty on success and we deliberately
+// don't decode anything. Non-2xx surfaces as *httpResponseError for
+// the caller to route through renderHTTPStatus.
 func patchGroup(
 	ctx context.Context,
 	backplaneURL, connectorID, groupKey string,
-	body EditGroupBody,
+	body api.EditGroupBody,
 ) error {
-	raw, err := json.Marshal(body)
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return fmt.Errorf("marshal edit-group request: %w", err)
-	}
-	path := fmt.Sprintf("/api/v1/connectors/%s/groups/%s",
-		pathEscapeOpID(connectorID), pathEscapeOpID(groupKey),
-	)
-	if _, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw); err != nil {
 		return err
+	}
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
+			return authed.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(
+				ctx,
+				connectorID,
+				groupKey,
+				&api.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams{},
+				body,
+			)
+		},
+		func(r *api.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) int {
+			return r.StatusCode()
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusNoContent {
+		return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
 	return nil
 }
@@ -165,12 +175,12 @@ func patchGroup(
 // which this envelope echoes back together with the path coordinates
 // for downstream tooling.
 type editGroupResult struct {
-	ConnectorID string        `json:"connector_id"`
-	GroupKey    string        `json:"group_key"`
-	Patched     EditGroupBody `json:"patched"`
+	ConnectorID string            `json:"connector_id"`
+	GroupKey    string            `json:"group_key"`
+	Patched     api.EditGroupBody `json:"patched"`
 }
 
-func printEditGroupResult(w io.Writer, connectorID, groupKey string, body EditGroupBody) {
+func printEditGroupResult(w io.Writer, connectorID, groupKey string, body api.EditGroupBody) {
 	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, groupKey)
 	if body.Name != nil {
 		fmt.Fprintf(w, "  name: %s\n", *body.Name)

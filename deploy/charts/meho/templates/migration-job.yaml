@@ -26,6 +26,18 @@ metadata:
     # hook resources resolve). The negative weight is documentary — even
     # at weight 0 the migration Job would precede the Deployment because
     # only hooks weighted in this Job render at the pre-install phase.
+    # ROLLBACK CONTRACT (#1607): this hook's schema commit is a side
+    # effect Helm does NOT revert — `helm rollback` / `--atomic`
+    # restores manifests only, so after any rollback across a
+    # migration the DB stays at the *newer* revision. That is safe
+    # (not an outage) only because (a) upgrade() is additive-only
+    # (CI: scripts/ci/check_migration_compat.py) and (b) the backend's
+    # `db` readiness probe tolerates a DB ahead of the image's head.
+    # Do NOT add a pre-rollback `alembic downgrade` hook: rollback
+    # hooks render from the *previous* release's manifests (old image,
+    # which lacks the newer migration scripts) and would brick the
+    # rollback itself. See docs/codebase/migrations.md § "Rollback
+    # contract" and docs/RELEASING.md § 6b.
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-10"
     # `before-hook-creation` lets a fresh `helm upgrade` retry overwrite

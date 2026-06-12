@@ -41,11 +41,14 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
+    ConnectorNotIngestedError,
     OperationDescriptor,
+    PreviewOperationBody,
     UnknownConnectorError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
+    preview_operation,
     search_operations,
 )
 
@@ -89,12 +92,56 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
+def _connector_not_ingested_404(exc: ConnectorNotIngestedError) -> HTTPException:
+    """Map :class:`ConnectorNotIngestedError` to a structured ``404``.
+
+    Both the registered-but-not-ingested case and the genuinely-unknown
+    case are ``404`` on REST (no resolvable connector to dispatch), but
+    they stay distinguishable: this one carries a structured ``detail``
+    with ``reason="connector_not_ingested"`` and the ``meho connector
+    ingest …`` ``next_step`` hint, mirroring the ``state="registered"``
+    row ``GET /api/v1/connectors`` already emits (#1482). An *unknown*
+    connector keeps its plain-string ``detail`` (the long-form mistyped-id
+    recovery hint).
+    """
+    return HTTPException(
+        status_code=404,
+        detail={
+            "message": str(exc),
+            "reason": "connector_not_ingested",
+            "connector_id": exc.connector_id,
+            "next_step": exc.next_step,
+        },
+    )
+
+
 @router.get("/groups")
 async def get_groups(
     connector_id: str = Query(
         min_length=1,
         description=_CONNECTOR_ID_DESCRIPTION,
         openapi_examples=_CONNECTOR_ID_EXAMPLES,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description=(
+            "Page size. Default 100; max 500. Matches `list_targets` "
+            "paging — sibling list surfaces share one ceiling "
+            "(G0.18-T5 #1358)."
+        ),
+    ),
+    cursor: str | None = Query(
+        default=None,
+        max_length=256,
+        description=(
+            "Keyset-pagination cursor: pass the last `group_key` from "
+            "the previous page to fetch the next. Results are ordered "
+            "by `group_key` ascending. A `null` `next_cursor` in the "
+            "response means this page is the end of the listing "
+            "(G0.18-T5 #1358)."
+        ),
     ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
@@ -104,11 +151,25 @@ async def get_groups(
     ``connector_id`` (no operations registered for the parsed triple)
     is a ``404`` — not an empty ``200``: the empty-catalog trap was
     that a mis-shaped id looked identical to an empty connector. A
-    *known* connector with zero enabled groups still returns
-    ``{"groups": []}`` (that empty is operationally meaningful).
+    *registered-but-not-ingested* connector (v2-registered class, zero
+    DB rows) is also a ``404`` but with a structured ``detail``
+    carrying ``reason="connector_not_ingested"`` and the ``meho
+    connector ingest …`` ``next_step`` hint, distinct from the
+    unknown-connector ``404`` (#1482). A *known* connector with zero
+    enabled groups still returns ``{"groups": [], "next_cursor": null}``
+    (that empty is operationally meaningful).
+
+    Pagination is keyset on ``group_key`` (G0.18-T5 #1358); the
+    response carries ``next_cursor`` set to the last returned
+    ``group_key`` when a page is full, ``null`` otherwise.
     """
     try:
-        return await list_operation_groups(operator, {"connector_id": connector_id})
+        return await list_operation_groups(
+            operator,
+            {"connector_id": connector_id, "limit": limit, "cursor": cursor},
+        )
+    except ConnectorNotIngestedError as exc:
+        raise _connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -128,9 +189,11 @@ async def get_search(
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
 
     Delegates to :func:`search_operations`. See its docstring for the
-    full algorithm and tenant scoping. Unknown ``connector_id`` → ``404``
-    (same unknown-vs-known-empty contract as ``/groups``); a known
-    connector with no matching ops returns ``200`` with an empty list.
+    full algorithm and tenant scoping. Unknown ``connector_id`` → ``404``;
+    a registered-but-not-ingested connector → ``404`` with the typed
+    ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
+    #1482); a known connector with no matching ops returns ``200`` with
+    an empty list.
     """
     try:
         return await search_operations(
@@ -142,6 +205,8 @@ async def get_search(
                 "limit": limit,
             },
         )
+    except ConnectorNotIngestedError as exc:
+        raise _connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -164,6 +229,37 @@ async def post_call(
     """
     try:
         return await call_operation(operator, body.model_dump())
+    except ValueError as exc:
+        # Missing `target.name` is the only ValueError the meta-tool raises.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/preview")
+async def post_preview(
+    body: PreviewOperationBody,
+    operator: Operator = _require_operator,
+) -> dict[str, Any]:
+    """Resolve an op + params to the literal would-be HTTP request, without sending.
+
+    Delegates to :func:`preview_operation` (#1683). The read-only diagnosis
+    sibling of ``POST /api/v1/operations/call``: it resolves the same op +
+    target + params and returns the literal request
+    (``{method, resolved_path, query, redacted_body}``) for an
+    ``source_kind='ingested'`` op **instead of dispatching it**. Use it to
+    diagnose a write 4xx from the inside -- the audit row persists only a
+    hashed ``params_hash``, so the wire shape is otherwise unrecoverable.
+
+    Returns ``200`` with the structured envelope; operator-input faults
+    (unknown op, invalid params, unresolvable connector) land inside the
+    envelope (``status="error"`` / ``status="unavailable"`` +
+    ``extras.error_code``) rather than as HTTP 4xx, the same contract as
+    ``/call``. The one HTTP-side gate is target resolution: a missing-target
+    name (``{"target": {}}`` without ``"name"``) surfaces as a ``400``. The
+    body is redacted through the same connector-boundary pipeline the
+    response path uses; nothing is written to the audit row.
+    """
+    try:
+        return await preview_operation(operator, body.model_dump())
     except ValueError as exc:
         # Missing `target.name` is the only ValueError the meta-tool raises.
         raise HTTPException(status_code=400, detail=str(exc)) from exc

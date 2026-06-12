@@ -93,8 +93,14 @@ class VcfFleetTargetLike(Protocol):
     No ``sso_realm`` field — Fleet's local user store accepts
     ``admin@local`` as the literal Basic-auth username; no realm suffix
     is appended by the connector.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)`` cache
+    key the shared :class:`CredentialsCache` uses, so two same-named targets
+    in different tenants never share a cached credential (#1642).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

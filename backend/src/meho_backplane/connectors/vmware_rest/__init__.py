@@ -54,6 +54,23 @@ register_connector_v2(
     cls=VmwareRestConnector,
 )
 
+# G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
+# out so a target with ``version=None`` (fresh, unfingerprinted, no
+# operator-asserted version yet) resolves to this connector through
+# the resolver's ``versioned_over_wildcard`` step rather than 501-ing
+# with ``no_connector``. The wildcard's ``supported_version_range`` is
+# inherited from :class:`VmwareRestConnector`'s class attribute
+# (currently ``">=8.5,<10.0"``); when the target *does* carry a
+# version that the range filters out, the wildcard demotes to the
+# versioned candidate as designed. The versioned entry above always
+# wins when both are present (resolver tie-break step 1).
+register_connector_v2(
+    product="vmware",
+    version="",
+    impl_id="",
+    cls=VmwareRestConnector,
+)
+
 # Side-effect import for the read-composites registrar wiring (G3.1-T5
 # #508). The package's __init__ appends
 # ``register_vmware_composite_operations`` onto the lifespan-driven

@@ -108,8 +108,33 @@ _TENANT_CACHE: dict[UUID, tuple[list[BroadcastOverride], float]] = {}
 #: ``docs/planning/v0.2-decisions.md``. The resolver consults this set
 #: rather than re-importing the classifier's internal vocabulary, so a
 #: future change to :func:`classify_op`'s output taxonomy lands in one
-#: place.
-_SENSITIVE_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_read", "audit_query"})
+#: place. MUST stay in lockstep with the aggregate-by-default set in
+#: :func:`meho_backplane.broadcast.events.redact_payload` — both encode
+#: decision #3.
+#:
+#: Two tiers of sensitivity, differing on whether a per-call
+#: request-override may upgrade them to ``full``:
+#:
+#: * ``credential_read`` / ``audit_query`` — aggregate by default but an
+#:   operator may opt into full detail on their own feed (G6.3 #379): the
+#:   "secret" is a path string or an audit filter the requesting operator
+#:   already has the right to see.
+#: * ``credential_mint`` (G3.5-T9 #621) / ``credential_write``
+#:   (G11.7-T1 #1401) — aggregate by default AND non-upgradeable: the
+#:   payload is freshly-minted (response) or freshly-written (request)
+#:   *secret material*. Letting a request-override surface it on the feed
+#:   would defeat the redaction guarantee, so these are excluded from the
+#:   upgrade branch (:data:`_UPGRADEABLE_OP_CLASSES`).
+_SENSITIVE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_mint", "credential_write", "audit_query"}
+)
+
+#: Subset of :data:`_SENSITIVE_OP_CLASSES` a per-call ``"full"``
+#: request-override is permitted to upgrade. Secret-material classes
+#: (``credential_mint`` / ``credential_write``) are deliberately absent —
+#: their broadcast stays aggregate-only no matter what override a caller
+#: requests, so the minted/written credential never reaches the feed.
+_UPGRADEABLE_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_read", "audit_query"})
 
 
 #: Origin label for the default branch (no override matched).
@@ -295,15 +320,21 @@ async def compute_effective_broadcast_detail(
 
     Precedence ladder (load-bearing -- the order is the policy):
 
-    1. ``request_override == "full"`` AND ``op_class`` is sensitive →
+    1. ``request_override == "full"`` AND ``op_class`` is
+       *upgradeable*-sensitive (``credential_read`` / ``audit_query``) →
        ``(op_class, "full", "request_override")``. The
        :func:`read_request_override` shim guarantees the only value
        reaching this branch is the literal ``"full"``; ``"aggregate"``
        requests are silently dropped at the shim, never here.
+       Secret-material classes (``credential_mint`` /
+       ``credential_write``) are *not* upgradeable and skip this branch.
     2. Per-tenant override row from the cache, glob-matched on
        ``op_id_pattern`` and scope-matched on ``raw_params`` →
        ``(op_class, row.detail, f"tenant_rule:{row.id}")``. Most
-       specific (scoped) beats op-wide; id-order tie-break.
+       specific (scoped) beats op-wide; id-order tie-break. A rule that
+       would upgrade a secret-material class to ``full`` is clamped back
+       to ``aggregate`` (G11.7-T1 #1401) — no override path may surface
+       a minted/written credential on the feed.
     3. Default → ``(op_class, _default_detail(op_class), "default")``.
 
     ``op_class_override`` lets the HTTP audit middleware honour a
@@ -325,7 +356,7 @@ async def compute_effective_broadcast_detail(
     """
     op_class = op_class_override if op_class_override else classify_op(op_id)
 
-    if request_override == "full" and op_class in _SENSITIVE_OP_CLASSES:
+    if request_override == "full" and op_class in _UPGRADEABLE_OP_CLASSES:
         return op_class, "full", _ORIGIN_REQUEST_OVERRIDE
 
     rules = await _load_tenant_rules(tenant_id)
@@ -341,6 +372,11 @@ async def compute_effective_broadcast_detail(
         # the runtime invariant for mypy without trusting an unchecked
         # str.
         detail: Literal["full", "aggregate"] = "full" if winner.detail == "full" else "aggregate"
+        # Secret-material classes are non-upgradeable (G11.7-T1 #1401):
+        # clamp a "full" tenant rule back to aggregate so no per-tenant
+        # override can surface a minted/written credential on the feed.
+        if detail == "full" and op_class in _SENSITIVE_OP_CLASSES - _UPGRADEABLE_OP_CLASSES:
+            detail = "aggregate"
         return op_class, detail, f"tenant_rule:{winner.id}"
 
     return op_class, _default_detail(op_class), _ORIGIN_DEFAULT

@@ -83,6 +83,16 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: dict[str, Any]
+    # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
+    # id)``); a double missing either field hits ``AttributeError`` at the
+    # pool (evoila/meho#1682). ``id`` defaults off ``name`` so distinct
+    # targets in one tenant land on distinct pool keys.
+    id: str = ""
+    tenant_id: str = "00000000-0000-0000-0000-000000000000"
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = f"id-{self.name}"
 
 
 _KEY_TARGET = _StubTarget(
@@ -156,9 +166,12 @@ def test_package_import_registers_v2_entry_only() -> None:
 
     v2 = all_connectors_v2()
     assert v2[("pfsense", "2.7", "pfsense-ssh")] is PfSenseConnector
-    # pfsense has no v1 chassis history; the v1 ``register_connector``
-    # write is intentionally absent. No ``("pfsense", "", "")`` entry.
-    assert ("pfsense", "", "") not in v2
+    # G0.15-T6 (#1215) wildcard fanout -- the sibling ``("pfsense", "",
+    # "")`` registration keeps a fresh target with ``version=None``
+    # resolvable to ``PfSenseConnector``. The wildcard lands via
+    # :func:`register_connector_v2` directly, not the v1 dual-write
+    # surface, so pfsense still has no v1 chassis history.
+    assert v2[("pfsense", "", "")] is PfSenseConnector
 
 
 def test_pfsense_connector_registered_under_v2_triple() -> None:
@@ -583,7 +596,7 @@ async def test_execute_about_unreachable_returns_connector_error_not_ok() -> Non
 
 
 async def test_per_target_connection_isolation() -> None:
-    """Distinct targets get distinct connections -- pool is keyed by target.name."""
+    """Distinct targets get distinct connections -- pool keyed by ``(tenant_id, id)``."""
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
 

@@ -76,26 +76,36 @@ cross-tenant rows are structurally invisible: `get` / `update` /
 `AgentDefinitionExistsError` (narrowed from the unique-index
 `IntegrityError`).
 
-**`identity_ref` validation (G11.2-T8 #1099)**: `create` and any
-`update` that touches `identity_ref` validate the value against
-`agent_principal.keycloak_client_id` scoped to the operator's tenant
-and require `revoked=False` — raising `AgentIdentityRefInvalidError`
-otherwise (REST: 422 `identity_ref_unknown`; MCP: Invalid Params
-`identity_ref_unknown`). The validator runs inside the same session
-as the write so a concurrent revoke can't make the check stale
-within the same transaction's snapshot. The reason (`unknown` /
-`revoked`) is collapsed into one boundary code so cross-tenant
-existence isn't leaked; operators see the structured reason in the
-structlog event. A PATCH that doesn't include `identity_ref` skips
-the validation — the runtime-time check that the principal is still
-live at invocation time is G11.3's responsibility (the scheduler's
-`run_scheduled` enforces `identity_ref == agent_client_id` under the
-`client_credentials` grant). Validating at the write boundary makes
-the G11.2-T2 (#816) contracts — `actor_sub = identity_ref` on
-user-initiated runs, `identity_ref == agent_client_id` enforcement on
-`run_scheduled` — well-formed by construction: a typo'd
-`identity_ref` can never produce a meaningless `actor_sub` or a
-confusing scheduled-run rejection later.
+**`identity_ref` validation (G11.2-T8 #1099, refined in G11.2-T9
+#1112)**: `create` and any `update` that touches `identity_ref`
+validate the value against `agent_principal.keycloak_client_id`
+scoped to the operator's tenant and require `revoked=False` — raising
+`AgentIdentityRefInvalidError` otherwise (REST: 422
+`identity_ref_unknown`; MCP: Invalid Params `identity_ref_unknown`).
+The validator (`meho_backplane.agents.identity_ref.validate_identity_ref`,
+re-exported from `service` as `_validate_identity_ref`) runs inside
+the caller's session, so the SELECT and the write share one
+transaction. The chassis does not configure `REPEATABLE READ` —
+PostgreSQL defaults to `READ COMMITTED`, where each statement gets
+its own snapshot — so a revoke that lands between the SELECT and the
+write *is* visible to the write statement: the TOCTOU window is
+small but real. The authoritative gate against a principal being
+revoked between validation and use is the runtime check in G11.3's
+`run_scheduled`, which enforces `identity_ref == agent_client_id`
+under the `client_credentials` grant. The write-boundary validator
+is the hygiene check that keeps a typo'd or never-existed
+`identity_ref` from ever landing in the first place.
+The reason (`unknown` / `revoked`) is collapsed into one boundary
+code so cross-tenant existence isn't leaked; operators see the
+precise reason on the `identity_ref_invalid` structlog `warning`
+event emitted before each raise (carries `identity_ref`, `reason`,
+`tenant_id`). A PATCH that doesn't include `identity_ref` skips the
+validation. Validating at the write boundary makes the G11.2-T2
+(#816) contracts — `actor_sub = identity_ref` on user-initiated runs,
+`identity_ref == agent_client_id` enforcement on `run_scheduled` —
+well-formed by construction: a typo'd `identity_ref` can never
+produce a meaningless `actor_sub` or a confusing scheduled-run
+rejection later.
 
 ## Control flow
 
@@ -131,6 +141,17 @@ existence is not leaked across the tenant boundary.
 cross-tenant returns `False` → 404. The CLI `delete` verb prompts for
 confirmation unless `--confirm` is passed.
 
+The delete is a **bulk Core** `DELETE`, so a definition's dependent
+`scheduled_trigger` rows are removed by the DB-level
+`ON DELETE CASCADE` on `scheduled_trigger.agent_definition_id`
+(migration `0035`, #1480), not by an ORM relationship cascade (which a
+bulk delete bypasses). This covers a cancelled trigger the scheduler
+retains for audit too — before 0035 such a row left an FK violation
+that surfaced as an opaque `-32603 "internal error: IntegrityError"`
+(MCP) / unhandled 500 (REST), making a once-scheduled definition
+undeletable via the API. `agent_run` history is a nullable soft-FK with
+no `ForeignKey` clause, so runs never block deletion and survive it.
+
 ## RBAC
 
 Reads (`list` / `show`) require `operator`; writes (`create` / `edit` /
@@ -164,9 +185,17 @@ event regardless of transport (REST vs MCP).
 - `mcp/registry.py` — `register_mcp_tool` (auto-discovered at startup
   via `eager_import_mcp_modules`).
 - CLI: `cli/internal/cmd/agent/` (cobra package) + `cli/internal/backplane`
-  (shared backplane resolution) + a local `doAuthedRequest` /
-  `renderRequestError` pair (the import-cycle-avoidance convention every
-  sibling CLI verb tree follows).
+  (shared backplane resolution). The verbs call the generated
+  oapi-codegen typed client (`cli/internal/api/client.gen.go`) via
+  `api.AuthedClient` for bearer injection + one-shot 401-refresh; a
+  small per-package `retryOn401` helper runs the same retry contract
+  per typed endpoint that `AuthedClient.GetHealth` runs for `/health`.
+  The package-local `renderRequestError` / `renderHTTPStatus` pair
+  preserves the agents REST surface's status-code → category mapping
+  (401 → `auth_expired`, 403 → `insufficient_role`, 404 →
+  `agent_not_found`, 409 / 422 → backend detail, etc.). G0.12-T3
+  (#1261, Initiative #1118) flipped the verbs off the per-verb
+  hand-rolled `doAuthedRequest` onto this typed-client transport.
 
 ## Known issues
 
@@ -190,3 +219,7 @@ event regardless of transport (REST vs MCP).
   `kb/service.py`.
 - Migration FK + dialect-portability discipline:
   `alembic/versions/0008_create_broadcast_override.py`.
+- Delete cascade onto `scheduled_trigger` (#1480):
+  `alembic/versions/0035_scheduled_trigger_fk_cascade.py` — dialect-split
+  FK rebuild (PG online `ALTER`, SQLite `batch_alter_table` table
+  recreate with a `naming_convention`).

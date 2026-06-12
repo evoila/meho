@@ -37,6 +37,7 @@ defaults hold without a redactor pass (Initiative #363 item 11).
 
 from __future__ import annotations
 
+import inspect
 import time
 import uuid
 from datetime import UTC, datetime
@@ -931,6 +932,46 @@ async def _apply_reconcile(
     return result
 
 
+async def _invoke_discover_topology(
+    connector: Connector,
+    target: Any,
+    operator: Operator,
+) -> TopologyHints:
+    """Call ``connector.discover_topology(target)``, forwarding the operator when accepted.
+
+    G0.14-T12 (#1201) lands the first
+    :class:`~meho_backplane.connectors.base.Connector` override that needs
+    the acting operator in scope — the populator on
+    :class:`~meho_backplane.connectors.kubernetes.connector.KubernetesConnector`
+    re-uses the per-target ``_get_api_client(target, operator)`` chain to
+    read the cluster's namespaces + nodes under the per-tenant system
+    operator the scheduler already synthesises. Out of scope for that
+    Task: changing the :class:`Connector` ABC signature (refresh-service
+    internal, not a connector-level contract change).
+
+    The refresh service therefore forwards ``operator`` as a
+    **refresh-private bound keyword argument** when the override
+    declares it. Connectors that inherit the base no-op default (every
+    shipped connector except K8s as of v0.7.x) keep their
+    ``(self, target)`` signature and are invoked unchanged. Signature
+    introspection on the bound method is the same shape the K8s
+    dispatcher shim already uses in
+    :meth:`~meho_backplane.connectors.kubernetes.connector.KubernetesConnector.execute`
+    to detect operator-aware typed handlers.
+    """
+    method = connector.discover_topology
+    params = inspect.signature(method).parameters
+    if "operator" in params:
+        # Forwarded as a refresh-private bound keyword argument; the
+        # Connector ABC declares ``discover_topology(self, target)`` so
+        # mypy sees the base signature here. Overrides that opt into
+        # the keyword (currently KubernetesConnector — G0.14-T12 #1201)
+        # declare ``operator`` keyword-only so this call lands on the
+        # override unambiguously.
+        return await method(target, operator=operator)  # type: ignore[call-arg]
+    return await method(target)
+
+
 async def refresh_target_topology(
     target: Any,
     operator: Operator,
@@ -970,7 +1011,7 @@ async def refresh_target_topology(
 
     connector_cls = resolve_connector(target)
     connector: Connector = get_or_create_connector_instance(connector_cls)
-    hints: TopologyHints = await connector.discover_topology(target)
+    hints: TopologyHints = await _invoke_discover_topology(connector, target, operator)
 
     audit_id = uuid.uuid4()
     result = await _apply_reconcile(

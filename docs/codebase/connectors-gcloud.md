@@ -215,7 +215,8 @@ All 8 ops are reachable via `meho gcloud …`. Source:
 
 | File | Commands |
 |---|---|
-| `gcloud.go` | `NewRootCmd()`, helper types (`CallResult`, `dispatchOp`, decoders) |
+| `gcloud.go` | `NewRootCmd()`, `renderRequestError`, `resolveBackplane`, helpers |
+| `dispatch.go` | Aliases `CallResult` / `callRequestBody` to `dispatch` package types + `var conn = dispatch.New(ConnectorID)` (shared transport); `dispatchOp` / `renderCallResult` thin wrappers; `decodeFlatResult` / `decodeRowsResult` decoders |
 | `about.go` | `meho gcloud about` |
 | `project.go` | `meho gcloud project describe` |
 | `services.go` | `meho gcloud services list [--all]` |

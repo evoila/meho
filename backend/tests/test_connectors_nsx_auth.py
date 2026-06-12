@@ -15,15 +15,16 @@ response (not JSON-string token), and the connector-level 401 retry
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import parse_qsl
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx import (
     NsxConnector,
@@ -83,6 +84,10 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -118,11 +123,32 @@ def test_nsx_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(NsxConnector, HttpConnector)
     assert NsxConnector.product == "nsx"
-    assert NsxConnector.version == "4.2"
+    # #1530: VCF-9 renumber — class pin tracks the "9.0" line, range
+    # keeps the standalone NSX-T 4.x line dispatchable.
+    assert NsxConnector.version == "9.0"
     assert NsxConnector.impl_id == "nsx-rest"
-    assert NsxConnector.supported_version_range == ">=4.0,<5.0"
+    assert NsxConnector.supported_version_range == ">=4.0,<10.0"
     # Outranks a future GenericRestConnector auto-shim defensively.
     assert NsxConnector.priority == 1
+
+
+def test_nsx_supported_range_covers_both_4x_and_vcf9_9x() -> None:
+    """The widened range covers standalone NSX-T 4.x and VCF-9-aligned 9.x.
+
+    #1530: a VCF-9 appliance reports NSX 9.0.x and its spec carries
+    ``info.version`` in the 9.x scheme (e.g. 9.1.0.0). The widened
+    ``>=4.0,<10.0`` advertisement is what lets the ingest version-range
+    pre-flight and the runtime resolver accept a 9.x label against this
+    one class; 10.0 and above stay out of band.
+    """
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    spec = SpecifierSet(NsxConnector.supported_version_range)
+    for covered in ("4.0", "4.2", "9.0", "9.0.2", "9.1.0.0", "9.9"):
+        assert Version(covered) in spec, f"{covered} should be covered by {spec}"
+    for excluded in ("3.9", "10.0", "10.1"):
+        assert Version(excluded) not in spec, f"{excluded} should be out of band for {spec}"
 
 
 def test_importing_package_registers_against_v2_registry() -> None:
@@ -130,7 +156,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("nsx", "4.2", "nsx-rest")
+    key = ("nsx", "9.0", "nsx-rest")
     assert key in registry
     assert registry[key] is NsxConnector
 
@@ -245,14 +271,72 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     assert h_a == {"X-XSRF-TOKEN": "xsrf-a"}
     assert h_b == {"X-XSRF-TOKEN": "xsrf-b"}
     assert connector._session_tokens == {
-        "nsx-a": "xsrf-a",
-        "nsx-b": "xsrf-b",
+        target_cache_key(_TARGET_A): "xsrf-a",
+        target_cache_key(_TARGET_B): "xsrf-b",
     }
     # Cookie jars are also isolated -- one client per target.
     client_a = await connector._http_client(_TARGET_A)
     client_b = await connector._http_client(_TARGET_B)
     assert client_a.cookies.get("JSESSIONID") == "jsess-a"
     assert client_b.cookies.get("JSESSIONID") == "jsess-b"
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_sessions() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached session.
+
+    Regression guard for #1642: the session-token cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry and one tenant could be served another
+    tenant's session. The cache keys on the tenant-unique
+    ``(tenant_id, id)`` tuple instead. Both stub targets share one host
+    (same appliance) so the established session token, not the HTTP-client
+    pool, is the variable under test.
+    """
+    connector = _make_connector()
+    host = "https://nsx-shared.test.invalid"
+    tenant_one = _StubTarget(
+        name="nsx-shared",
+        host="nsx-shared.test.invalid",
+        port=443,
+        secret_ref="nsx/nsx-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="nsx-shared",
+        host="nsx-shared.test.invalid",
+        port=443,
+        secret_ref="nsx/nsx-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    async with respx.mock() as mock:
+        route = mock.post(f"{host}/api/session/create").mock(
+            side_effect=[
+                httpx.Response(200, headers={"X-XSRF-TOKEN": "xsrf-tenant-one"}),
+                httpx.Response(200, headers={"X-XSRF-TOKEN": "xsrf-tenant-two"}),
+            ]
+        )
+        h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+        h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    # Each tenant established its own session -- no cross-tenant cache hit.
+    assert route.call_count == 2
+    assert h_one == {"X-XSRF-TOKEN": "xsrf-tenant-one"}
+    assert h_two == {"X-XSRF-TOKEN": "xsrf-tenant-two"}
+    assert connector._session_tokens == {
+        target_cache_key(tenant_one): "xsrf-tenant-one",
+        target_cache_key(tenant_two): "xsrf-tenant-two",
+    }
+
+    # Same-tenant re-fetch is a cache HIT -- behaviour unchanged.
+    h_one_again = await connector.auth_headers(tenant_one, operator=_make_operator())
+    assert h_one_again == {"X-XSRF-TOKEN": "xsrf-tenant-one"}
+    assert route.call_count == 2
 
     await connector.aclose()
 
@@ -430,7 +514,7 @@ async def test_downstream_401_triggers_relogin_and_retry_once() -> None:
     # Downstream GET fired twice -- the original 401 + the post-relogin retry.
     assert node_route.call_count == 2
     # The post-relogin XSRF replaced the stale one.
-    assert connector._session_tokens == {"nsx-a": "xsrf-second"}
+    assert connector._session_tokens == {target_cache_key(_TARGET_A): "xsrf-second"}
     await connector.aclose()
 
 
@@ -615,7 +699,7 @@ async def test_aclose_clears_session_token_cache_and_pool() -> None:
         )
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert connector._session_tokens == {"nsx-a": "xsrf"}
+    assert connector._session_tokens == {target_cache_key(_TARGET_A): "xsrf"}
     await connector.aclose()
     assert connector._session_tokens == {}
     assert connector._clients == {}
@@ -628,3 +712,118 @@ async def test_aclose_with_no_cached_sessions_is_a_noop() -> None:
     await connector.aclose()
     assert connector._clients == {}
     assert connector._session_tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T4 (#1306) probe-vs-dispatch convergence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_forwards_route_operator_to_session_loader() -> None:
+    """G0.16-T4 (#1306) probe-vs-dispatch convergence regression for nsx.
+
+    Pre-#1306 the probe route called ``cls().fingerprint(target)``
+    without an operator; the connector synthesised a system operator
+    whose placeholder ``raw_jwt`` is not a compact-JWS. Vault's
+    JWT/OIDC auth method rejected it before the per-target read,
+    surfacing as ``vault OIDC malformed jwt: must have three parts``
+    on the v0.8.0 dogfood's ``vcf9-nsx`` probe.
+
+    Post-#1306 the probe route forwards its operator — the same code
+    path the dispatch surface uses. Test pins:
+    1. The session loader receives the route operator.
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
+       parts).
+    """
+    from meho_backplane.connectors._shared.system_operator import (
+        SYSTEM_OPERATOR_SUB,
+    )
+
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: NsxTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = NsxConnector(session_loader=_capturing_loader)
+
+    route_operator = Operator(
+        sub="op-rdc",
+        name="RDC Operator",
+        email=None,
+        raw_jwt="header.payload.signature",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    async with respx.mock(base_url="https://nsx-a.test.invalid") as mock:
+        mock.post("/api/session/create").respond(
+            200,
+            headers={"X-XSRF-TOKEN": "xsrf-1", "Set-Cookie": "JSESSIONID=js"},
+        )
+        mock.get("/api/v1/node").respond(
+            200,
+            json={
+                "node_version": "4.2.0.0.0.21761695",
+                "kernel_version": "5.10.0-nsx",
+                "node_uuid": "abc-uuid-1",
+                "hostname": "nsx-a.test.invalid",
+                "external_id": "ext-1",
+            },
+        )
+        await connector.fingerprint(_TARGET_A, operator=route_operator)
+
+    assert len(captured) == 1
+    fwd = captured[0]
+    assert fwd.sub == route_operator.sub
+    assert fwd.sub != SYSTEM_OPERATOR_SUB
+    assert len(fwd.raw_jwt.split(".")) >= 3, (
+        "forwarded JWT must look like a compact-JWS so Vault accepts it"
+    )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_operator_falls_back_to_system_operator() -> None:
+    """``fingerprint(target)`` without ``operator`` synthesises the
+    system operator (the system-call carve-out).
+    """
+    from meho_backplane.connectors._shared.system_operator import (
+        SYSTEM_OPERATOR_SUB,
+    )
+
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: NsxTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = NsxConnector(session_loader=_capturing_loader)
+
+    async with respx.mock(base_url="https://nsx-a.test.invalid") as mock:
+        mock.post("/api/session/create").respond(
+            200,
+            headers={"X-XSRF-TOKEN": "xsrf-1", "Set-Cookie": "JSESSIONID=js"},
+        )
+        mock.get("/api/v1/node").respond(
+            200,
+            json={
+                "node_version": "4.2.0.0.0.21761695",
+                "kernel_version": "5.10.0-nsx",
+                "node_uuid": "abc-uuid-1",
+                "hostname": "nsx-a.test.invalid",
+                "external_id": "ext-1",
+            },
+        )
+        await connector.fingerprint(_TARGET_A)
+
+    assert len(captured) == 1
+    assert captured[0].sub == SYSTEM_OPERATOR_SUB
+    await connector.aclose()

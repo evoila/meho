@@ -9,56 +9,39 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-// TestBuildWhoTouchedPathOmitsEmptyParams — the no-flag form sends a
-// bare path so the backend's defaults (since=24h, limit=100) take
-// over.
-func TestBuildWhoTouchedPathOmitsEmptyParams(t *testing.T) {
-	got := buildWhoTouchedPath("rdc-vcenter", "", 0)
-	if got != "/api/v1/audit/who-touched/rdc-vcenter" {
-		t.Errorf("buildWhoTouchedPath empty: got %q", got)
+// TestBuildWhoTouchedParamsOmitsEmptyParams — the no-flag form
+// leaves every pointer field nil so the query-string builder emits
+// no `since` / `limit` keys and the backend's defaults take over.
+func TestBuildWhoTouchedParamsOmitsEmptyParams(t *testing.T) {
+	p := buildWhoTouchedParams(whoTouchedOptions{})
+	if p.Since != nil {
+		t.Errorf("Since should be nil; got %v", *p.Since)
+	}
+	if p.Limit != nil {
+		t.Errorf("Limit should be nil; got %v", *p.Limit)
 	}
 }
 
-// TestBuildWhoTouchedPathEmitsParams — every set flag lands on the
-// wire as a query string param.
-func TestBuildWhoTouchedPathEmitsParams(t *testing.T) {
-	got := buildWhoTouchedPath("rdc-vcenter", "7d", 50)
-	if !strings.Contains(got, "since=7d") {
-		t.Errorf("missing since: %q", got)
+// TestBuildWhoTouchedParamsEmitsParams — every set flag lands on the
+// params struct with the correct value.
+func TestBuildWhoTouchedParamsEmitsParams(t *testing.T) {
+	p := buildWhoTouchedParams(whoTouchedOptions{Since: "7d", Limit: 50})
+	if p.Since == nil || *p.Since != "7d" {
+		t.Errorf("Since: got %v; want 7d", p.Since)
 	}
-	if !strings.Contains(got, "limit=50") {
-		t.Errorf("missing limit: %q", got)
-	}
-}
-
-// TestBuildWhoTouchedPathEscapesTarget — a target name with a slash
-// (operator typo) doesn't collapse the URL path.
-func TestBuildWhoTouchedPathEscapesTarget(t *testing.T) {
-	got := buildWhoTouchedPath("foo/bar", "", 0)
-	if !strings.Contains(got, "foo%2Fbar") {
-		t.Errorf("buildWhoTouchedPath did not URL-encode slash: %q", got)
-	}
-}
-
-// TestRunWhoTouchedRequiresTarget — the cobra `ExactArgs(1)` gate
-// already catches missing args at the parser level; this exercises
-// the defence-in-depth path inside runWhoTouched.
-func TestRunWhoTouchedRequiresTarget(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runWhoTouched(cmd, whoTouchedOptions{Target: ""})
-	if err == nil {
-		t.Fatalf("expected error for empty target")
-	}
-	if !strings.Contains(stderr.String(), "non-empty <target>") {
-		t.Errorf("stderr missing target-required hint: %s", stderr.String())
+	if p.Limit == nil || *p.Limit != 50 {
+		t.Errorf("Limit: got %v; want 50", p.Limit)
 	}
 }
 
 // TestRunWhoTouchedHappyPath — the verb hits GET /api/v1/audit/who-
-// touched/{target} and renders the rows using the same table the
-// query verb emits.
+// touched/{target} with the typed path parameter, sends the query-
+// string params on the wire, and renders the response with the same
+// table the query verb emits.
 func TestRunWhoTouchedHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/who-touched/rdc-vcenter", func(w http.ResponseWriter, r *http.Request) {
@@ -70,16 +53,16 @@ func TestRunWhoTouchedHappyPath(t *testing.T) {
 		}
 		tname := "rdc-vcenter"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(QueryResult{
-			Rows: []Entry{{
-				ID:           "00000000-0000-0000-0000-000000000001",
-				TS:           "2026-05-12T12:00:00Z",
+		_ = json.NewEncoder(w).Encode(api.AuditQueryResult{
+			Rows: []api.AuditEntry{{
+				Id:           mustUUID(t, "00000000-0000-0000-0000-000000000001"),
+				Ts:           mustTS(t, "2026-05-12T12:00:00Z"),
 				PrincipalSub: "tarik",
 				TargetName:   &tname,
 				Method:       "POST",
 				Path:         "/api/v1/vsphere/nsx/firewall/update",
 				StatusCode:   200,
-				OpID:         "nsx.firewall.update",
+				OpId:         "nsx.firewall.update",
 				OpClass:      "write",
 				ResultStatus: "ok",
 				Payload:      map[string]any{},
@@ -107,9 +90,50 @@ func TestRunWhoTouchedHappyPath(t *testing.T) {
 	}
 }
 
-// TestRunWhoTouchedJSONRoundTrips — --json emits the same wire shape
-// the substrate returns; pinning the key set keeps jq pipelines
-// stable.
+// TestRunWhoTouchedEscapesTargetInPath — a target name with a slash
+// is URL-encoded by the generated request builder so the path
+// doesn't collapse.
+func TestRunWhoTouchedEscapesTargetInPath(t *testing.T) {
+	var seenPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rows":[],"next_cursor":null}`))
+	}))
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runWhoTouched(cmd, whoTouchedOptions{
+		Target:            "foo/bar",
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runWhoTouched: %v; stderr=%s", err, stderr.String())
+	}
+	// The slash must appear as %2F in the wire path; otherwise the
+	// HTTP router would split it into a different sub-path.
+	if !strings.Contains(seenPath, "foo%2Fbar") {
+		t.Errorf("target slash not percent-encoded in wire path: %q", seenPath)
+	}
+}
+
+// TestRunWhoTouchedRequiresTarget — the cobra `ExactArgs(1)` gate
+// already catches missing args at the parser level; this exercises
+// the defence-in-depth path inside runWhoTouched.
+func TestRunWhoTouchedRequiresTarget(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runWhoTouched(cmd, whoTouchedOptions{Target: ""})
+	if err == nil {
+		t.Fatalf("expected error for empty target")
+	}
+	if !strings.Contains(stderr.String(), "non-empty <target>") {
+		t.Errorf("stderr missing target-required hint: %s", stderr.String())
+	}
+}
+
+// TestRunWhoTouchedJSONRoundTrips — --json emits the raw server
+// bytes; pinning the key set keeps jq pipelines stable.
 func TestRunWhoTouchedJSONRoundTrips(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/who-touched/rdc-vcenter", func(w http.ResponseWriter, _ *http.Request) {
@@ -129,7 +153,7 @@ func TestRunWhoTouchedJSONRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runWhoTouched --json: %v", err)
 	}
-	var decoded QueryResult
+	var decoded api.AuditQueryResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

@@ -6,9 +6,11 @@ package kb
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -126,8 +128,19 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	if err := callDelete(cmd.Context(), backplaneURL, opts.Slug); err != nil {
+	resp, err := callDelete(cmd.Context(), backplaneURL, opts.Slug)
+	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	// The kb delete route is idempotent server-side: a delete
+	// against an absent slug returns 204. Treat anything other than
+	// 204 as a non-success and route through renderHTTPStatus — the
+	// pre-migration ladder rejected non-2xx via the local httpError
+	// sentinel, and the typed-client equivalent is to gate on the
+	// 204 status code (the only success code the substrate emits
+	// for this route).
+	if resp.StatusCode() != http.StatusNoContent {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	result := deleteResult{Slug: opts.Slug, Status: "deleted"}
 	if opts.JSONOut {
@@ -137,17 +150,18 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	return nil
 }
 
-// buildDeletePath assembles the DELETE path. Exposed for unit tests
-// so URL encoding of slugs with dots stays covered.
-func buildDeletePath(slug string) string {
-	return "/api/v1/kb/" + pathEscape(slug)
-}
-
-func callDelete(ctx context.Context, backplaneURL, slug string) error {
-	// doAuthedRequest returns (nil, nil) on a 204; the kb delete
-	// route emits an empty 204 body whether or not the row existed
-	// server-side. We discard the (nil) response — the success
-	// signal is the absence of an error.
-	_, err := doAuthedRequest(ctx, backplaneURL, "DELETE", buildDeletePath(slug), nil)
-	return err
+func callDelete(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*api.DeleteKbApiV1KbSlugDeleteResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.DeleteKbApiV1KbSlugDeleteResponse, error) {
+			return authed.DeleteKbApiV1KbSlugDeleteWithResponse(ctx, slug, nil)
+		},
+		func(r *api.DeleteKbApiV1KbSlugDeleteResponse) int { return r.StatusCode() },
+	)
 }

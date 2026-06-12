@@ -71,17 +71,23 @@ from typing import Any
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
+from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
+from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
     "VAULT_KV_READ_PARAMETER_SCHEMA",
+    "VAULT_KV_WRITE_CAPABILITIES",
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
+    "vault_kv_patch",
     "vault_kv_put",
     "vault_kv_read",
     "vault_kv_versions",
+    "vault_kv_write_capability_preflight",
+    "vault_kv_write_target_path",
 ]
 
 #: Default KV-v2 mount point. hvac's ``mount_point`` parameter defaults
@@ -289,6 +295,12 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
+    # Defense-in-depth tenant-scope check (#1643): deny a path outside the
+    # operator's tenant namespace BEFORE the hvac call. No-op unless
+    # ``vault_kv_tenant_scope_prefix`` is configured. Behind the Vault
+    # ``meho-mcp`` ACL policy, never a replacement for it.
+    enforce_tenant_scope(operator, mount=mount, path=path)
+
     # vault_client_for_operator is accessed via the module reference so
     # test monkeypatches on vault_module._build_client propagate through
     # the call chain. It reads operator.raw_jwt for the JWT/OIDC login.
@@ -385,6 +397,9 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     """
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
+
+    # Tenant-scope guard (#1643) — see vault_kv_read.
+    enforce_tenant_scope(operator, mount=mount, path=path)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         list_payload = await asyncio.to_thread(
@@ -490,6 +505,9 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
     secret: dict[str, Any] = params["data"]
     cas = params.get("cas")
 
+    # Tenant-scope guard (#1643) — see vault_kv_read.
+    enforce_tenant_scope(operator, mount=mount, path=path)
+
     async with _auth_vault.vault_client_for_operator(operator) as client:
         write_payload = await asyncio.to_thread(
             client.secrets.kv.v2.create_or_update_secret,
@@ -499,6 +517,168 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
             mount_point=mount,
         )
         version = write_payload["data"]["version"]
+        return {"version": version}
+
+
+# ---------------------------------------------------------------------------
+# vault.kv.patch — merge-write fields onto the current version
+# ---------------------------------------------------------------------------
+
+#: ``vault.kv.patch`` param schema. ``data`` carries only the fields to
+#: merge; unlike ``kv.put`` it is NOT the full secret body — Vault reads
+#: the current version, JSON-merges ``data`` over it, and writes the
+#: result as a new version. hvac's ``patch`` exposes no ``cas`` guard
+#: (it issues its own internal read+write), so the schema omits one.
+#:
+#: ``data``'s values are constrained to a *recursive* non-null JSON
+#: subschema (:data:`_NON_NULL_JSON_VALUE_REF` → ``#/$defs/nonNullJsonValue``):
+#: a value may be a ``string``/``number``/``boolean``, or an ``object``
+#: whose every value recurses the same constraint, or an ``array`` whose
+#: every item recurses it — but never ``null`` at *any* depth. This is
+#: load-bearing: hvac's ``secrets.kv.v2.patch`` uses HashiCorp Vault's
+#: JSON Merge Patch (RFC 7396), whose merge algorithm is **recursive** —
+#: a ``null`` value deletes its key whether it sits at the top level or
+#: nested inside a merged object. The op is documented as
+#: add/overwrite-only (keys absent from ``data`` are preserved, keys
+#: present are added/overwritten), so a ``null`` slipping through at any
+#: nesting depth would silently delete a secret field — a contract the
+#: schema now rejects at validation time (``invalid_params``). Field
+#: deletion, when wanted, goes through ``kv.put`` (wholesale replace) or
+#: ``kv.delete`` (version soft-delete), not a surprising side effect of
+#: patch.
+#:
+#: ``$defs``/``$ref`` resolve as a same-document reference: the
+#: dispatcher constructs ``Draft202012Validator(parameter_schema)`` with
+#: this dict as the root, so ``#/$defs/nonNullJsonValue`` resolves
+#: against it without an external registry.
+_NON_NULL_JSON_VALUE_REF: dict[str, Any] = {"$ref": "#/$defs/nonNullJsonValue"}
+
+VAULT_KV_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "$defs": {
+        # A JSON value that contains no ``null`` at any depth: a scalar,
+        # an object whose values recurse this same constraint, or an
+        # array whose items recurse it. Mirrors RFC 7396's recursive
+        # merge so a nested ``null`` cannot reach Vault as a key DELETE.
+        "nonNullJsonValue": {
+            "oneOf": [
+                {"type": ["string", "number", "boolean"]},
+                {
+                    "type": "object",
+                    "additionalProperties": _NON_NULL_JSON_VALUE_REF,
+                },
+                {"type": "array", "items": _NON_NULL_JSON_VALUE_REF},
+            ],
+        },
+    },
+    "properties": {
+        "mount": _MOUNT_PROPERTY,
+        "path": _PATH_PROPERTY,
+        "data": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": _NON_NULL_JSON_VALUE_REF,
+            "description": (
+                "Fields to merge onto the current version. Unlike "
+                "kv.put this is a partial — keys present here are added "
+                "or overwritten; keys absent here are preserved from the "
+                "current version. Values may not be null at any depth: "
+                "Vault's JSON Merge Patch recurses, treating a null value "
+                "as a key DELETE whether it is top-level or nested inside "
+                "a merged object/array, which this add/overwrite-only op "
+                "rejects (use kv.put or kv.delete to remove data). The "
+                "secret must already exist."
+            ),
+        },
+    },
+    "required": ["path", "data"],
+    "additionalProperties": False,
+}
+
+_VAULT_KV_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "version": {
+            "type": ["integer", "null"],
+            "description": "The newly written KV v2 version number.",
+        },
+    },
+    "required": ["version"],
+}
+
+_VAULT_KV_PATCH_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Merge one or more fields into an existing KV v2 secret without "
+        "supplying the whole body. Mutating — Vault reads the current "
+        "version, JSON-merges the supplied fields, and writes the result "
+        "as a new version (history is kept). Use to set or rotate a "
+        "single field ('vault-store patch --field') when you do not have "
+        "(or do not want to re-send) the other keys. The secret must "
+        "already exist — patching a missing path fails."
+    ),
+    "parameter_hints": {
+        "mount": "Optional. KV v2 mount point; defaults to 'secret'.",
+        "path": "Required. The existing secret path under the mount.",
+        "data": (
+            "Required. The fields to merge. Only these keys are "
+            "added/overwritten; every other key on the current version "
+            "is carried forward unchanged. Values must not be null at any "
+            "depth — Vault's JSON Merge Patch recurses and reads a null "
+            "(top-level or nested inside a merged object/array) as 'delete "
+            "this key', which this add/overwrite-only op rejects. To remove "
+            "a field, use kv.put (full replace) or kv.delete (version "
+            "soft-delete)."
+        ),
+    },
+    "output_shape": (
+        "On success: {'version': <new int version>}. On failure: a "
+        "connector_error OperationResult with extras.exception_class — "
+        "patching a non-existent path surfaces as hvac's InvalidPath "
+        "class."
+    ),
+}
+
+
+async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Merge fields onto the current version of a KV v2 secret.
+
+    Op-id: ``vault.kv.patch``. Mutating (``op_class=credential_write``,
+    ``safety_level=caution``, ``requires_approval=True``). Delegates to
+    hvac's ``secrets.kv.v2.patch`` (``PATCH
+    /v1/<mount>/data/<path>`` with the JSON-merge content type), which
+    reads the current version, merges the supplied fields over it, and
+    writes a new version. Unlike :func:`vault_kv_put` this is a partial
+    write — keys absent from ``data`` are preserved. The secret must
+    already exist; patching a missing path raises (surfaced as a
+    structured ``connector_error``). The structural unwrap raises on a
+    malformed hvac payload.
+
+    JSON Merge Patch (RFC 7396) — which hvac's ``patch`` uses — treats a
+    ``null`` value as a key DELETE, and its merge algorithm is
+    *recursive*: a ``null`` nested inside a merged object deletes that
+    nested key too. To keep this op genuinely add/overwrite-only at every
+    depth, :data:`VAULT_KV_PATCH_PARAMETER_SCHEMA` constrains each
+    ``data`` value to a recursive non-null JSON subschema, so a ``null``
+    anywhere in the payload is rejected as ``invalid_params`` before
+    reaching Vault rather than silently deleting a secret field. Field
+    removal goes through :func:`vault_kv_put` (wholesale replace) or
+    :func:`vault_kv_delete` (version soft-delete).
+    """
+    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
+    path: str = str(params["path"]).strip()
+    secret: dict[str, Any] = params["data"]
+
+    # Tenant-scope guard (#1643) — see vault_kv_read.
+    enforce_tenant_scope(operator, mount=mount, path=path)
+
+    async with _auth_vault.vault_client_for_operator(operator) as client:
+        patch_payload = await asyncio.to_thread(
+            client.secrets.kv.v2.patch,
+            path=path,
+            secret=secret,
+            mount_point=mount,
+        )
+        version = patch_payload["data"]["version"]
         return {"version": version}
 
 
@@ -564,6 +744,9 @@ async def vault_kv_versions(
     """
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
+
+    # Tenant-scope guard (#1643) — see vault_kv_read.
+    enforce_tenant_scope(operator, mount=mount, path=path)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         meta_payload = await asyncio.to_thread(
@@ -657,6 +840,9 @@ async def vault_kv_delete(
     path: str = str(params["path"]).strip()
     versions: list[int] = list(params["versions"])
 
+    # Tenant-scope guard (#1643) — see vault_kv_read.
+    enforce_tenant_scope(operator, mount=mount, path=path)
+
     async with _auth_vault.vault_client_for_operator(operator) as client:
         await asyncio.to_thread(
             client.secrets.kv.v2.delete_secret_versions,
@@ -665,6 +851,156 @@ async def vault_kv_delete(
             mount_point=mount,
         )
         return {"deleted_versions": versions}
+
+
+# ---------------------------------------------------------------------------
+# Park-time write-capability preflight (G0.20-T4 #1504)
+# ---------------------------------------------------------------------------
+
+#: Vault ACL capabilities each KV-v2 write op needs on its target
+#: ``<mount>/data/<path>``, keyed by op-id. ``put`` / ``patch`` create
+#: a new secret version (``create`` for a first write, ``update`` for a
+#: subsequent one — Vault requires *both* on the path for an
+#: unconditional write); ``delete`` soft-deletes versions via
+#: ``POST <mount>/delete/<path>``, which Vault authorizes with ``update``
+#: on the *data* path (the canonical KV-v2 write capability). The doc
+#: stanza in ``docs/cross-repo/connector-vault-policy.md`` §6 grants
+#: exactly ``["create", "update"]`` on the templated write path, which
+#: satisfies every op here. A token "passes" the preflight when its
+#: capabilities on the data path are a superset of the op's requirement.
+VAULT_KV_WRITE_CAPABILITIES: dict[str, frozenset[str]] = {
+    "vault.kv.put": frozenset({"create", "update"}),
+    "vault.kv.patch": frozenset({"create", "update"}),
+    "vault.kv.delete": frozenset({"update"}),
+}
+
+
+def vault_kv_write_target_path(params: dict[str, Any]) -> str:
+    """Render the ``<mount>/data/<path>`` a KV-v2 write op authorizes against.
+
+    KV-v2 splits the API surface: the value lives under ``<mount>/data/``
+    and Vault authorizes a write (``put`` / ``patch`` / version
+    soft-delete) against that data path. The preflight queries
+    ``sys/capabilities-self`` on this exact string so the answer matches
+    what the real write would be authorized against.
+
+    Mirrors the ``mount`` / ``path`` defaulting + ``.strip()`` the write
+    handlers apply (default mount ``"secret"``; ``path`` is the location
+    under the mount, no leading slash). A ``KeyError`` propagates if
+    ``path`` is absent — but the dispatcher only reaches the preflight
+    after :func:`~meho_backplane.operations.dispatcher.validate_params`
+    has confirmed ``path`` is present, so the key is always set here.
+    """
+    mount = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
+    path = str(params["path"]).strip().lstrip("/")
+    return f"{mount}/data/{path}"
+
+
+def _capabilities_grant_write(granted: list[str], required: frozenset[str]) -> bool:
+    """Decide whether *granted* Vault capabilities satisfy *required*.
+
+    Vault's ``root`` pseudo-capability (held by a root-class token)
+    authorizes everything, so its presence is a pass regardless of the
+    fine-grained list. The ``deny`` capability explicitly revokes access
+    even when paired with grants — an explicit ``deny`` on the path wins,
+    so it forces a fail. Otherwise the token passes only when every
+    required capability is present in the grant.
+    """
+    granted_set = set(granted)
+    if "deny" in granted_set:
+        return False
+    if "root" in granted_set:
+        return True
+    return required.issubset(granted_set)
+
+
+async def vault_kv_write_capability_preflight(
+    operator: Operator,
+    op_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Check, via ``sys/capabilities-self``, whether a KV-v2 write will be denied.
+
+    G0.20-T4 (#1504). Called at approval-park time (the dispatcher's
+    :func:`~meho_backplane.operations.dispatcher._handle_needs_approval`)
+    so a write Vault would reject surfaces a clear "this write will be
+    denied" on the approval row instead of failing only *after* a human
+    has spent a four-eyes review approving it.
+
+    The probe logs in exactly as the real write does
+    (:func:`~meho_backplane.auth.vault.vault_client_for_operator`, the
+    ``meho-mcp`` OIDC role) and issues ``POST sys/capabilities-self`` on
+    the op's ``<mount>/data/<path>``. ``sys/capabilities-self`` returns
+    only the *capability names* the calling token holds on the path
+    (``["create", "update"]`` / ``["read"]`` / ``["deny"]``) — **never
+    any secret material** — so it sidesteps the credential-class
+    preview-suppression rule that bars a value-revealing dry-run for a
+    credential write.
+
+    Identity caveat (documented, not enforced here): this probe runs
+    under the **dispatching** operator's token, but an approved
+    re-dispatch executes under the **reviewing** operator's token
+    (:func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`).
+    The two usually share the ``meho-mcp`` role policy, so the
+    dispatcher's answer is the right early signal; the reviewer must
+    nonetheless carry the same write grant. The result dict names the
+    probed ``principal_sub`` so the caveat is auditable on the row.
+
+    Returns ``None`` (no preflight result — caller stores the
+    identifier-only / builder default) when *op_id* is not a KV-v2 write,
+    or — **fail-soft** — when the probe itself errors (Vault unreachable,
+    role login fault, malformed response): a missing preflight must never
+    block the park, exactly as the ``proposed_effect`` builder hook
+    degrades. On success returns a redaction-safe summary:
+
+    ``{"check": "vault.capabilities-self", "path": <data-path>,
+    "required": [...], "granted": [...], "will_be_denied": bool,
+    "principal_sub": <dispatching-operator-sub>}``.
+    """
+    required = VAULT_KV_WRITE_CAPABILITIES.get(op_id)
+    if required is None:
+        return None
+
+    data_path = vault_kv_write_target_path(params)
+    try:
+        async with _auth_vault.vault_client_for_operator(operator) as client:
+            response = await asyncio.to_thread(
+                client.sys.get_capabilities,
+                paths=[data_path],
+            )
+    except Exception:
+        # Fail-soft: the park is the safety-relevant action; a probe that
+        # cannot reach Vault (or whose role login transiently fails) must
+        # not block it. The reviewer falls back to the identifier-only
+        # default and the post-approval write surfaces any real denial.
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "vault_capability_preflight_failed",
+            op_id=op_id,
+            path=data_path,
+            operator_sub=operator.sub,
+            exc_info=True,
+        )
+        return None
+
+    # ``sys/capabilities-self`` returns the per-path capability list under
+    # the path key, with a top-level ``capabilities`` mirror for a single
+    # path. Prefer the path key; fall back to the mirror.
+    granted_raw = response.get(data_path)
+    if granted_raw is None:
+        granted_raw = response.get("capabilities")
+    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
+
+    will_be_denied = not _capabilities_grant_write(granted, required)
+    return {
+        "check": "vault.capabilities-self",
+        "path": data_path,
+        "required": sorted(required),
+        "granted": sorted(granted),
+        "will_be_denied": will_be_denied,
+        "principal_sub": operator.sub,
+    }
 
 
 #: Per-op registration specs for the KV-v2 group. One dict per op
@@ -727,15 +1063,39 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
             "v2 keeps version history; the write replaces the latest "
             "version wholesale (no merge). Optional Check-And-Set guard "
             "('cas'). safety_level=caution; the production-path "
-            "approval gate is G7/G10 policy territory. Failures land as "
-            "a connector_error OperationResult with "
-            "extras.exception_class naming the failure class."
+            "approval gate routes humans to the approval queue "
+            "(G11.7-T1 #1401). Failures land as a connector_error "
+            "OperationResult with extras.exception_class naming the "
+            "failure class."
         ),
         "parameter_schema": VAULT_KV_PUT_PARAMETER_SCHEMA,
         "response_schema": _VAULT_KV_PUT_RESPONSE_SCHEMA,
         "tags": ["write", "secret-write"],
         "safety_level": "caution",
+        "requires_approval": True,
         "llm_instructions": _VAULT_KV_PUT_LLM_INSTRUCTIONS,
+    },
+    {
+        "op_id": "vault.kv.patch",
+        "handler": vault_kv_patch,
+        "summary": "Merge fields onto the current version of a KV v2 secret.",
+        "description": (
+            "Merges the supplied fields onto the current version of the "
+            "secret at the KV v2 path via the operator's OIDC-forwarded "
+            "JWT, writing the result as a new version. Mutating partial "
+            "write — keys absent from the request are preserved (unlike "
+            "kv.put, which replaces wholesale). The secret must already "
+            "exist. safety_level=caution; requires_approval=True routes "
+            "humans to the approval queue (G11.7-T1 #1401). Failures "
+            "land as a connector_error OperationResult with "
+            "extras.exception_class naming the failure class."
+        ),
+        "parameter_schema": VAULT_KV_PATCH_PARAMETER_SCHEMA,
+        "response_schema": _VAULT_KV_PATCH_RESPONSE_SCHEMA,
+        "tags": ["write", "secret-write"],
+        "safety_level": "caution",
+        "requires_approval": True,
+        "llm_instructions": _VAULT_KV_PATCH_LLM_INSTRUCTIONS,
     },
     {
         "op_id": "vault.kv.versions",
@@ -765,15 +1125,16 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
             "operator's OIDC-forwarded JWT. Reversible — Vault marks "
             "the versions deleted and stops returning them from reads "
             "while retaining the underlying data (undeletable until "
-            "destroyed). safety_level=dangerous; the production-path "
-            "approval gate is G7/G10 policy territory. Failures land as "
-            "a connector_error OperationResult with "
+            "destroyed). safety_level=dangerous; requires_approval=True "
+            "routes humans to the approval queue (G11.7-T1 #1401). "
+            "Failures land as a connector_error OperationResult with "
             "extras.exception_class naming the failure class."
         ),
         "parameter_schema": VAULT_KV_DELETE_PARAMETER_SCHEMA,
         "response_schema": _VAULT_KV_DELETE_RESPONSE_SCHEMA,
         "tags": ["write", "destructive", "reversible"],
         "safety_level": "dangerous",
+        "requires_approval": True,
         "llm_instructions": _VAULT_KV_DELETE_LLM_INSTRUCTIONS,
     },
 )
@@ -799,8 +1160,9 @@ async def register_vault_typed_operations(
     process-wide singleton via the ``register_typed_operation`` body.
 
     Scope: G3.3-T1 registers the full KV-v2 group — ``vault.kv.read``,
-    ``vault.kv.list``, ``vault.kv.put``, ``vault.kv.versions``,
-    ``vault.kv.delete``. The identity-read group (Task #547,
+    ``vault.kv.list``, ``vault.kv.put``, ``vault.kv.patch``,
+    ``vault.kv.versions``, ``vault.kv.delete`` (``vault.kv.patch`` added
+    by G3.15-T1 #1409). The identity-read group (Task #547,
     ``vault.auth.userpass.list/read`` / ``vault.auth.approle.list/read``)
     is registered from its own module via the
     :func:`~meho_backplane.connectors.vault.ops_auth.register_vault_auth_operations`
@@ -811,15 +1173,14 @@ async def register_vault_typed_operations(
     are needed.
 
     ``requires_approval`` for the mutating ops (``kv.put`` /
-    ``kv.delete``) is registered ``False`` (the dev default). The
-    shipped G0.6 substrate has no per-path approval predicate —
-    ``requires_approval`` is a static boolean on the descriptor and the
-    production-path gate is G7/G10 policy territory (see the
-    :class:`~meho_backplane.db.models.EndpointDescriptor` docstring:
-    ``caution``/``dangerous`` ops "flow through G7 / G10 policy logic
-    once those Goals land"). ``safety_level`` (``caution`` for
-    ``kv.put``, ``dangerous`` for ``kv.delete``) is the load-bearing
-    signal the future policy gate keys on.
+    ``kv.patch`` / ``kv.delete``) is registered ``True`` (G3.15-T1
+    #1409). It became meaningful once G11.7-T1 (#1401) routed human
+    principals hitting a ``requires_approval`` op to the approval queue
+    instead of hard-denying — so the gate parks the write for review
+    rather than blocking the operator. The read ops (``kv.read`` /
+    ``kv.list`` / ``kv.versions``) omit the key and default ``False``.
+    ``safety_level`` (``caution`` for ``kv.put`` / ``kv.patch``,
+    ``dangerous`` for ``kv.delete``) is the orthogonal posture signal.
     """
     # Curated by T4b (#732); surfaced verbatim by
     # ``list_operation_groups``. Differentiates the KV-v2 read/write
@@ -840,17 +1201,28 @@ async def register_vault_typed_operations(
         "value itself."
     )
     for spec in _KV_OP_SPECS:
+        # ``requires_approval`` is carried per-op in the spec (default
+        # False for the read ops, which omit the key). The mutating KV
+        # ops (put / patch / delete) set it True so the dispatcher routes
+        # human principals to the approval queue rather than executing
+        # the write inline (G3.15-T1 #1409, on the G11.7-T1 #1401 queue).
         await register_typed_operation(
             product="vault",
             version="1.x",
             impl_id="vault",
             group_key="kv",
             when_to_use=kv_when_to_use,
-            requires_approval=False,
+            requires_approval=spec.get("requires_approval", False),
             embedding_service=embedding_service,
-            **spec,
+            **{k: v for k, v in spec.items() if k != "requires_approval"},
         )
     # Identity-read group (Task #547) -- registered from its own
     # module so the auth surface stays independently reviewable while
     # the package keeps a single lifespan-driven registrar entry.
     await register_vault_auth_operations(embedding_service=embedding_service)
+    # Auth credential-lifecycle write group (G3.15-T3 #1411) -- the
+    # userpass/approle write half (create/update/delete + secret-id
+    # mint), all requires_approval=True with request/response secret
+    # redaction at the classification layer. Its own module, same
+    # single-registrar-entry discipline as the read group above.
+    await register_vault_auth_write_operations(embedding_service=embedding_service)

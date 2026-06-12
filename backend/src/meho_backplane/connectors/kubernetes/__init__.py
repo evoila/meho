@@ -98,17 +98,23 @@ __all__ = [
     "register_kubernetes_typed_operations",
 ]
 
-# v1 entry -- backward-compatible with the shipped chassis route.
-# Also writes to the v2 table as ``("k8s", "", "")`` so v2-aware code
-# that doesn't yet know the version/impl_id can still resolve through
-# the chassis fallback. Removed when T11 #412 deprecates the chassis
-# route.
+# v1 entry -- retained for ``get_connector("k8s")`` callers (the
+# ``/api/v1/targets/{name}/probe`` route at api/v1/targets.py reads
+# the v1 registry to fingerprint a target before any dispatch path
+# runs). Also writes to the v2 table as ``("k8s", "", "")``. The
+# v1 chassis dispatch route was removed by G0.6-T11 (#412); the v1
+# table itself stays because the probe route still keys on it.
 register_connector("k8s", KubernetesConnector)
 
-# v2 entry -- the canonical resolver key. Picked over the v1 fallback
-# by the resolver's tie-break ladder (most-specific-version-match
-# wins; this entry advertises a concrete version + impl_id, the v1
-# entry advertises empty strings).
+# v2 entry -- the canonical resolver key. ``connector_id="k8s-1.x"``
+# resolves through this entry. The resolver's tie-break ladder
+# (G0.14-T2 #1143 step 1, ``versioned_over_wildcard``) demotes the v1
+# wildcard ``("k8s", "", "")`` whenever this versioned entry is also
+# a candidate, so an unfingerprinted K8s target resolves cleanly to
+# the versioned class instead of bailing with
+# ``AmbiguousConnectorResolution``. The wildcard still wins when it
+# is the only candidate (no versioned entry registered for the
+# target's product), preserving the v1-only resolution path.
 register_connector_v2(
     product="k8s",
     version="1.x",

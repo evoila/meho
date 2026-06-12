@@ -6,11 +6,13 @@
 Module-level free functions split out of
 :mod:`meho_backplane.operations.ingest.service` so the public
 :class:`~meho_backplane.operations.ingest.service.ReviewService`
-stays under the project's per-file size budget. The functions here
-are all session-bound (they take an :class:`AsyncSession` plus a
+stays under the project's per-file size budget. The query/cascade
+helpers are session-bound (they take an :class:`AsyncSession` plus a
 scope and never open their own transaction) — composing them in
 :class:`ReviewService` keeps the public methods as thin
-transaction-scoped coordinators.
+transaction-scoped coordinators. The enable-time advisory builder at
+the bottom is the one session-free exception (it reads the in-process
+connector registry, not the DB).
 
 Underscore-prefixed names indicate non-public contract: the
 package's ``__init__.py`` does not re-export anything from this
@@ -26,11 +28,16 @@ from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
 
+import structlog
 from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.operations.ingest.api_schemas import EditOpWarning
+from meho_backplane.operations.ingest.connector_registration import resolved_auto_shim_class
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "AUDIT_METHOD",
@@ -42,12 +49,15 @@ __all__ = [
     "OP_LLM_GROUPING",
     "VALID_SAFETY_LEVELS",
     "ConnectorScope",
+    "apply_op_overrides",
     "cascade_is_enabled",
+    "enable_time_auto_shim_warnings",
     "load_group",
     "load_groups",
     "load_op",
     "load_ops_in_groups",
     "operator_disabled_op_ids",
+    "validate_edit_op_args",
     "write_audit_row",
 ]
 
@@ -391,3 +401,141 @@ async def cascade_is_enabled(
     result: CursorResult[Any] = await session.execute(stmt)  # type: ignore[assignment]
     rowcount = result.rowcount if result.rowcount is not None else 0
     return max(rowcount, 0)
+
+
+# ---------------------------------------------------------------------------
+# edit_op phase helpers (split from ReviewService.edit_op for the
+# per-function size budget — same rationale as this module's header)
+# ---------------------------------------------------------------------------
+
+
+def validate_edit_op_args(
+    *,
+    custom_description: str | None,
+    safety_level: str | None,
+    requires_approval: bool | None,
+    is_enabled: bool | None,
+    llm_instructions: dict[str, object] | None,
+) -> None:
+    """Reject an ``edit_op`` call that edits nothing or names a bad enum.
+
+    Raises :class:`ValueError` when every override is ``None`` (the
+    PATCH would be a silent no-op) or when ``safety_level`` falls
+    outside :data:`VALID_SAFETY_LEVELS`. Mirrors the checks the REST
+    body schema enforces, for callers that reach the service directly
+    (MCP tools, tests).
+    """
+    if (
+        custom_description is None
+        and safety_level is None
+        and requires_approval is None
+        and is_enabled is None
+        and llm_instructions is None
+    ):
+        raise ValueError(
+            "edit_op requires at least one of custom_description, "
+            "safety_level, requires_approval, is_enabled, llm_instructions",
+        )
+    if safety_level is not None and safety_level not in VALID_SAFETY_LEVELS:
+        raise ValueError(
+            f"safety_level {safety_level!r} not in {sorted(VALID_SAFETY_LEVELS)}",
+        )
+
+
+def apply_op_overrides(
+    op_row: EndpointDescriptor,
+    *,
+    custom_description: str | None,
+    safety_level: str | None,
+    requires_approval: bool | None,
+    is_enabled: bool | None,
+    llm_instructions: dict[str, object] | None,
+) -> list[str]:
+    """Set every non-``None`` override on *op_row*; return the field names set.
+
+    Pure PATCH application — ``None`` means "leave unchanged" (the
+    omitted-vs-null distinction is resolved by the callers before the
+    service layer). The returned list feeds the audit payload's
+    ``fields_updated`` key verbatim.
+    """
+    fields_updated: list[str] = []
+    if custom_description is not None:
+        op_row.custom_description = custom_description
+        fields_updated.append("custom_description")
+    if safety_level is not None:
+        op_row.safety_level = safety_level
+        fields_updated.append("safety_level")
+    if requires_approval is not None:
+        op_row.requires_approval = requires_approval
+        fields_updated.append("requires_approval")
+    if is_enabled is not None:
+        op_row.is_enabled = is_enabled
+        fields_updated.append("is_enabled")
+    if llm_instructions is not None:
+        op_row.llm_instructions = llm_instructions
+        fields_updated.append("llm_instructions")
+    return fields_updated
+
+
+# ---------------------------------------------------------------------------
+# Enable-time advisories (G0.23-T4 #1630)
+# ---------------------------------------------------------------------------
+
+
+def enable_time_auto_shim_warnings(
+    connector_id: str,
+    op_id: str,
+    scope: ConnectorScope,
+) -> list[EditOpWarning]:
+    """Build the ``unreplaced_auto_shim`` advisory for an op enable, if due.
+
+    Called by :meth:`ReviewService.edit_op` after a successful
+    ``is_enabled=True`` write. When
+    :func:`~meho_backplane.operations.ingest.connector_registration.resolved_auto_shim_class`
+    reports that dispatch for this op's ``(product, version)`` line
+    resolves to the unconfigured :class:`GenericRestConnector` ingest
+    shim, the enable is a guaranteed dispatch dead end
+    (``connector_unsupported`` / ``cause='unreplaced_auto_shim'``,
+    G0.23-T1 #1627) and the returned advisory says so up-front —
+    naming the missing per-product subclass with the same remediation
+    phrasing the dispatch-time error uses, so the proactive and
+    reactive surfaces read as one story.
+
+    Returns ``[]`` on the clean path (hand-rolled connector, resolver
+    miss, resolver tie). Never raises: the probe decorates the write,
+    it must not break it.
+    """
+    shim_class = resolved_auto_shim_class(
+        product=scope.product,
+        version=scope.version,
+    )
+    if shim_class is None:
+        return []
+    _log.info(
+        "edit_op_auto_shim_warning",
+        connector_id=connector_id,
+        op_id=op_id,
+        product=scope.product,
+        version=scope.version,
+        impl_id=scope.impl_id,
+        connector_class=shim_class,
+    )
+    message = (
+        f"is_enabled=True was applied to op {op_id!r} on connector "
+        f"{connector_id!r}, but its resolved connector ({shim_class}) is the "
+        f"auto-registered ingest shim, which cannot authenticate or execute "
+        f"against the upstream -- dispatching this op will fail with "
+        f"connector_unsupported (cause=unreplaced_auto_shim). Register the "
+        f"hand-rolled per-product Connector subclass for "
+        f"({scope.product!r}, {scope.version!r}, {scope.impl_id!r}) and "
+        f"redeploy before dispatching this connector's ops -- re-ingesting "
+        f"the spec will NOT replace the shim. See "
+        f"docs/codebase/spec-ingestion.md for the auto-shim lifecycle."
+    )
+    return [
+        EditOpWarning(
+            code="unreplaced_auto_shim",
+            connector_class=shim_class,
+            message=message,
+        )
+    ]

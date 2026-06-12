@@ -170,9 +170,55 @@ Two resources combine to materialise a Secret the chart can consume:
 | --- | --- | --- |
 | `secret/meho/postgres` (property `url`) | The full `DATABASE_URL`: `postgresql+asyncpg://<user>:<pass>@<host>:<port>/<db>` | The Deployment env `DATABASE_URL` via `postgres.credentialsSecret` |
 | `secret/meho/keycloak/client_secret` (property `client_secret`) | The Keycloak OAuth client secret backing `keycloak.audience` | v0.2 federation wiring (rendered optionally today for end-to-end sync verification) |
+| `secret/meho/agent` (property `api_key`) | The Anthropic API key the G11.1 agent LLM loop authenticates with | The Deployment env `ANTHROPIC_API_KEY` via `agent.secretName` (resolved through `meho.agentSecretName`) when `agent.enabled: true` |
+| `secret/meho/keycloak/admin_client_secret` (property `client_secret`) | The G11.2 Keycloak Admin client secret gating agent-principal registration | The Deployment env `KEYCLOAK_ADMIN_CLIENT_SECRET` via `keycloakAdmin.clientSecret.secretName` (resolved through `meho.keycloakAdminSecretName`) when `keycloakAdmin.enabled: true` |
 
 The `secret/meho` base is configurable via `vault.paths.kv` — adjust the
 KV paths above accordingly if you remount Vault elsewhere.
+
+## Agent-runtime credential wiring (G11.1 + G11.2)
+
+The chart wires two G11 credential groups as first-class chart values
+so an operator enables agent-runtime without hand-rolling Secrets +
+`extraEnv` `valueFrom` (G0.18-T10 #1363):
+
+| Group | Chart toggle | Env vars wired | Secret handling |
+| --- | --- | --- | --- |
+| **G11.1 agent LLM loop** | `agent.enabled: true` | `ANTHROPIC_API_KEY` | `secretKeyRef` only — never plaintext. |
+| **G11.2 agent-principal registration** | `keycloakAdmin.enabled: true` | `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` (plain env) + `KEYCLOAK_ADMIN_CLIENT_SECRET` (`secretKeyRef`) | URL + clientId are plain config; only the client secret is `secretKeyRef`. |
+
+Both default to `enabled: false` — the chart renders no env wiring and
+the backplane's fail-closed surface keeps both features inoperative
+(`/api/v1/agent-runs` 503 / "no credentials"; `POST /api/v1/agent-principals`
+`503 keycloak_admin_not_configured`) — same posture as a chart that
+doesn't ship these blocks at all.
+
+The Secret-name resolution allows two equally first-class paths:
+
+- **Bring-your-own Secret.** Set `agent.secretName` /
+  `keycloakAdmin.clientSecret.secretName` to a Kubernetes Secret your
+  consumer GitOps repo provisions. Leave `eso.agent.enabled` /
+  `eso.keycloakAdmin.enabled` at `false`.
+
+- **ESO-rendered.** Flip `eso.agent.enabled` / `eso.keycloakAdmin.enabled`
+  to `true` and provide `eso.secretStore.name`. The chart renders an
+  ExternalSecret targeted at `<release>-agent` / `<release>-keycloak-admin`
+  (keys `api_key` / `client_secret`). Leave the `secretName` fields
+  empty — the `meho.agentSecretName` / `meho.keycloakAdminSecretName`
+  helpers automatically resolve the ESO target name.
+
+A configuration that flips `enabled: true` but leaves both Secret-name
+paths empty fails at `helm template` / `helm install` time with an
+actionable message (the chart's `fail` gates in
+`templates/_helpers.tpl`).
+
+The CI `helm test <release>` Pod
+(`templates/tests/test-agent-runtime-config.yaml`) asserts the four
+env vars resolve when both opt-ins are enabled. The
+`.github/workflows/chart.yml` PR build gate additionally renders the
+chart with both opt-ins on and greps for the `secretKeyRef` shape so
+a regression flipping `ANTHROPIC_API_KEY` to plaintext is rejected
+before merge.
 
 ## Internal-CA trust bundle (`extraVolumes` / `extraEnv`)
 
@@ -261,8 +307,10 @@ the file is empty / wrong).
 > the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
 > The 2026-05-21 RDC dogfood walked the realm from scratch and paid
 > ~2.5 hours hitting four sequential walls — none of them documented
-> in one place at the time. This section is the consolidated 5-step
-> recipe + 4-wall symptom→cause→fix matrix that closes that gap.
+> in one place at the time; a follow-up 2026-05-22 dogfood added a
+> fifth (W7, `offline_access` for Claude Code's MCP refresh-token
+> request). This section is the consolidated 5-step recipe +
+> five-wall symptom→cause→fix matrix that closes that gap.
 > Companion to [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
 > (MCP-client-side configuration) and
 > [`docs/acceptance/install.md`](../../docs/acceptance/install.md)
@@ -353,10 +401,15 @@ mappers — keep the **claim names** identical (`tenant_id`,
 `tenant_role`) because that's what the backplane validates against.
 
 Validator-side errors at the decode stage are made specific by
-[#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12):
-once that lands, `invalid_audience` / `missing_sub` / `token_expired`
-/ `invalid_signature` / `invalid_issuer` are distinguished in the
-401 `detail` body instead of all collapsing to `invalid_token`.
+[#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12) and
+[#1131](https://github.com/evoila/meho/issues/1131) (G0.13-T1):
+`invalid_audience` / `missing_sub` / `token_expired` /
+`signature_verification_failed` / `invalid_issuer` /
+`token_not_yet_valid` / `malformed_jws` are distinguished in the
+401 `detail` body instead of all collapsing to `invalid_token`. The
+residual `invalid_token` is reserved for failures that aren't
+`DecodeError` (`alg: none` via `UnsupportedAlgorithmError`, future
+authlib `JoseError` subclasses, post-refresh kid miss).
 
 #### Step 4 — Explicitly assign the 4 default client scopes
 
@@ -415,9 +468,16 @@ client-shape contrast with `meho-cli`:
 | Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude.ai Custom Connector and any localhost MCP Inspector. |
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
+| **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client deliberately doesn't get this scope (RFC 8628 device-code clients re-run the device dance instead of holding a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than a fresh dance prompt). |
 
 The 5 protocol mappers + 4 default client scopes from Steps 3–4
-apply identically. The recipe at
+apply identically. The MCP client additionally carries
+`offline_access` as an **optional** client scope so Claude Code's
+auth-code + PKCE flow — which always lists `offline_access` in its
+scope parameter — can mint a refresh token; without it Keycloak
+returns `invalid_scope` (Wall #7). The CLI device-code client does
+**not** get `offline_access`: it re-runs the device dance instead of
+holding a refresh token. The recipe at
 [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
 documents the per-client configuration step for each MCP client.
 
@@ -439,7 +499,268 @@ documents the per-client configuration step for each MCP client.
 > through `mcp-remote` (or an equivalent stdio→HTTP proxy)
 > and bake the Bearer token into the wrapper. The right
 > long-term fix is upstream MCP-client `client_id` support,
-> not opening DCR on a prod realm.
+> not opening DCR on a prod realm. The **third path**,
+> documented in [§ CIMD onramp](#cimd-onramp--no-pre-registered-client-keycloak--2660-experimental)
+> below, dissolves this wall entirely for CIMD-capable
+> clients — a CIMD-mode client_id is an HTTPS URL the
+> authorization server fetches, so neither DCR nor a
+> deployer-side pre-registered client is needed.
+
+### CIMD onramp — no pre-registered client (Keycloak ≥ 26.6.0, experimental)
+
+> **Optional alternative to the pre-registration path above.** This
+> section configures the realm to accept **Client ID Metadata
+> Documents (CIMD)** — an OAuth extension where the client presents
+> an HTTPS URL as its `client_id` and the authorization server
+> fetches the JSON metadata at that URL on the fly. A CIMD-capable
+> MCP client (Claude Code's HTTP MCP as of MCP protocol version
+> `2025-11-25`) consequently authenticates with **no pre-registered
+> client and no DCR**, dissolving Wall #6 for those clients. The
+> pre-registration recipe above (Steps 1–5 + the MCP onramp) is
+> unchanged and remains the required path for older Keycloak realms
+> and for MCP clients that don't yet implement CIMD.
+>
+> **Read the framing carefully.** In CIMD the *client* (Claude
+> Code / Anthropic) hosts its own metadata document and brings
+> the URL as `client_id`; MEHO does not host that document and is
+> not the publisher. MEHO is the resource server + MCP server.
+> The realm-side deliverable below is **enabling and validating
+> CIMD on the MEHO-fronted Keycloak realm** so that CIMD-mode
+> `client_id` URLs are accepted, not anything MEHO publishes.
+> MEHO's RFC 9728 protected-resource metadata surface is
+> unchanged.
+>
+> **Stability disclaimer (load-bearing).** CIMD shipped
+> **experimental** in Keycloak 26.6.0 (2026-04;
+> [release notes](https://www.keycloak.org/2026/04/keycloak-2660-released))
+> and is off by default. The Keycloak project documents it may
+> introduce breaking changes in a future release
+> ([CIMD config guide](https://www.keycloak.org/securing-apps/mcp-authz-server),
+> tracking [keycloak#45106](https://github.com/keycloak/keycloak/issues/45106) /
+> [keycloak#45284](https://github.com/keycloak/keycloak/issues/45284) /
+> discussion [#44711](https://github.com/keycloak/keycloak/discussions/44711)).
+> Treat this section's recipe as a moving target until CIMD goes
+> GA; pin your Keycloak version. Realms on Keycloak < 26.6.0 must
+> use the pre-registration path above.
+
+#### When to use CIMD
+
+| You should use CIMD if … | You should stay on the pre-registration path if … |
+| --- | --- |
+| Your Keycloak runs ≥ 26.6.0 and you accept the **experimental** stability label. | Your Keycloak is < 26.6.0 (CIMD is not present at all). |
+| Your MCP client supports CIMD (Claude Code on MCP `2025-11-25+`). | Your MCP client doesn't carry a `client_id` field *and* doesn't implement CIMD — you're stuck on the `mcp-remote` workaround until the upstream client lands one or the other. |
+| You'd rather not maintain a per-deployer public client + chart wiring for every MCP client variant. | You want a stable, GA-supported Keycloak surface area and don't mind the one-time `meho admin keycloak bootstrap-clients` (#791) run per realm. |
+
+CIMD is **not** a replacement for `meho-cli` — the device-code
+flow continues to need a pre-registered public client because
+`meho login` is the CLI, not an MCP client, and the CIMD spec
+binds metadata-resolution to OAuth authorization-code + PKCE
+clients. Keep the `meho-cli` public client provisioned per
+Steps 2–4 above regardless.
+
+#### Step C1 — Enable the `cimd` feature flag on the Keycloak server
+
+CIMD is gated behind a server-side feature flag; the realm-level
+client-policy configuration in the following steps is a no-op
+until the flag is on. Start (or re-start) Keycloak with:
+
+```bash
+bin/kc.sh start --features=cimd
+# or, on a container deployment, set the env var:
+#   KC_FEATURES=cimd
+```
+
+Verify the flag took effect by reading the OpenID Connect
+authorization-server metadata document for the realm — once
+`cimd` is enabled, the document carries
+`"client_id_metadata_document_supported": true`:
+
+```bash
+curl -sf https://keycloak.example.com/realms/<realm>/.well-known/openid-configuration \
+  | jq .client_id_metadata_document_supported
+# true
+```
+
+If the field is missing or `false`, the flag did not propagate —
+re-check the server startup environment and the realm name.
+
+#### Step C2 — Create the three MCP capability scopes (Optional type)
+
+MCP `2025-11-25` introduces three protocol-level scopes the
+authorization server uses to bind tokens to specific MCP
+capabilities. Create each as a realm-level **client scope** with
+type **Optional** (not Default — the spec leaves them opt-in per
+session) and, on each scope, an Audience mapper whose **Included
+Custom Audience** is the MCP server URL (`<backplane-url>/mcp`,
+no trailing slash — same normalisation rule as the
+`meho-mcp-audience` mapper in Step 3 above):
+
+| Scope name | Type | Audience mapper (Included Custom Audience) |
+| --- | --- | --- |
+| `mcp:tools` | Optional | `<backplane-url>/mcp` |
+| `mcp:prompts` | Optional | `<backplane-url>/mcp` |
+| `mcp:resources` | Optional | `<backplane-url>/mcp` |
+
+> **Source-of-truth note.** Earlier internal references named
+> these scopes `mcp:read` / `mcp:execute`. That naming did not
+> match the published Keycloak guide — the canonical names from
+> [Keycloak's MCP authorization-server guide](https://www.keycloak.org/securing-apps/mcp-authz-server)
+> are the three above (`mcp:tools` / `mcp:prompts` /
+> `mcp:resources`), and that's what a CIMD-capable client
+> requests at the `/authorize` step.
+
+These scopes coexist with the `meho-mcp-audience` mapper +
+4 default scopes from Steps 3–4 — a CIMD client still needs the
+same downstream claim shape (`sub`, `aud`, `tenant_id`,
+`tenant_role`, `groups`) the backplane validator enforces. The
+shared claim-shape requirement is **not optional**: a CIMD
+client whose token reaches the backplane without `tenant_id` /
+`tenant_role` is rejected at the decode stage (Wall #2 / Wall
+#3) with `invalid_audience` / `missing_tenant_claim` /
+opaque `invalid_token`, the same failure modes the
+pre-registration recipe's Step 3 mappers exist to prevent.
+>
+> **Mechanism note (load-bearing).** The pre-registration
+> recipe at Step 3 above attaches the five claim mappers
+> (`audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
+> `tenant-role`, `groups-claim`) to each client **directly**
+> (per-client protocol mappers cloned from `meho-backplane`
+> onto `meho-cli` / `meho-mcp-client`). That mechanism does
+> **not** carry forward to a CIMD-resolved client — there is
+> no per-client mapper-cloning step in CIMD because the client
+> isn't pre-registered. A CIMD-capable client picks up its
+> claim shape through one of two surfaces, and the deployer
+> must choose one explicitly:
+>
+> - **(Preferred) Attach the equivalent mappers to a realm-
+>   level *default* client scope every client inherits.**
+>   Create a new realm client scope (e.g. `meho-backplane-
+>   claims`), assign it the five mappers Step 3 lists,
+>   mark it **Default** in **Realm Settings → Client
+>   Scopes → Default Client Scopes**, and every newly-
+>   resolved client — pre-registered *and* CIMD — gets the
+>   same claim shape automatically. This is the simpler
+>   deployer posture and the one the rest of this recipe
+>   assumes.
+> - **(Alternative) Carry the claims in the CIMD client's
+>   metadata document.** The `draft-ietf-oauth-client-id-
+>   metadata-document` shape allows clients to declare
+>   `client_metadata` fields the AS forwards into tokens;
+>   for a CIMD-only deployment posture this avoids the
+>   realm-default-scope edit. The trade-off is that
+>   the operator no longer owns the claim values — they
+>   live in whatever the CIMD client publishes — which is
+>   why the realm-default-scope form is recommended for
+>   MEHO's tenant-claim shape.
+>
+> Do **not** rely on the per-client mappers Step 3 attaches
+> to `meho-cli` / `meho-mcp-client` to reach a CIMD-resolved
+> client. They won't — and the failure presents as the same
+> `invalid_audience` / `missing_tenant_claim` wall a deployer
+> running the pre-registration recipe without Step 3 would
+> hit.
+
+#### Step C3 — Create the `cimd-profile` client-policy profile
+
+In **Realm Settings → Client Policies → Profiles**, create a
+profile named `cimd-profile` (the name is conventional; any
+identifier works as long as Step C4's policy references the
+same string) and attach a single executor:
+
+| Executor | Setting | Value | Why |
+| --- | --- | --- | --- |
+| `client-id-metadata-document` | **Allow http scheme** | **Off** (production); On only for a local dev realm | Per Keycloak's guide: production realms must reject `http://` `client_id` URLs and any `http://` URLs referenced in the metadata document (`logo_uri`, `policy_uri`, `tos_uri`, `jwks_uri`, …). |
+| `client-id-metadata-document` | **Trusted domains** | Wildcard list of domains you accept as `client_id` URLs (e.g. `*.anthropic.com`, `*.claude.ai`) | An empty list denies all domains, so this field is **required** to be non-empty for the policy to allow any CIMD client at all. List the MCP clients your operator population uses. |
+| `client-id-metadata-document` | **Only Allow Confidential Client** | **Off** | MCP clients (Claude Code) are public OAuth 2.1 + PKCE clients per the MCP spec; flipping this on rejects them at the executor. |
+| `client-id-metadata-document` | **Restrict same domain** | **On** (default) | Forces the `client_id` URL and any metadata-referenced URLs to share the same host, which closes a phishing surface where a metadata document references logos / redirect URIs on an attacker's host. |
+| `client-id-metadata-document` | **Required properties** | Leave default unless your operator policy demands specific metadata fields | Tightens metadata validation; the default set covers `redirect_uris` + `client_name`. |
+
+#### Step C4 — Create the `cimd-policy` client policy
+
+In **Realm Settings → Client Policies → Policies**, create a
+policy named `cimd-policy` and configure it to apply the
+`cimd-profile` profile to any client whose `client_id`
+matches a CIMD-shaped URL:
+
+- **Conditions → `client-id-uri`**:
+  - **URI scheme**: `https` (production) — the same posture as
+    the executor's `Allow http scheme: Off`.
+  - **Trusted domains**: must mirror Step C3's trusted-domains
+    list (the executor + condition both enforce the same allow-
+    list; mismatches surface as "policy passed but executor
+    denied" 400s that are tedious to diagnose).
+- **Associated client profiles**: add `cimd-profile`.
+- Save the policy.
+
+Once the policy is enabled, a CIMD-mode authorization request
+arriving at `/realms/<realm>/protocol/openid-connect/auth?client_id=https://…`
+triggers the `client-id-uri` condition (the `client_id` is a
+URL), the policy applies `cimd-profile`, and the executor
+fetches + validates the metadata document at that URL before
+proceeding.
+
+#### Step C5 — Verify against a CIMD-capable MCP client
+
+For the dogfood walkthrough, install Claude Code on a host
+that has the deployment's TLS CA in its OS trust store (Step 1
+above), point an `.mcp.json` at `https://<backplane-host>/mcp`
+**without** a `client_id` field, and run a `tools/list`. The
+OAuth flow should:
+
+1. `meho` returns `401 + WWW-Authenticate: Bearer
+   resource_metadata=…/.well-known/oauth-protected-resource`.
+2. Claude Code fetches the RFC 9728 metadata, reads the
+   `authorization_servers` URL, and constructs an authorization
+   request whose `client_id` is the URL of its own metadata
+   document (no DCR call is made).
+3. Keycloak's `cimd-policy` fires on the URL-shaped
+   `client_id`, the `client-id-metadata-document` executor
+   fetches the URL, validates it against the trusted-domains
+   list, and proceeds with the PKCE flow.
+4. The issued access token carries `sub`, `aud` (including
+   `<backplane-host>/mcp`), `tenant_id`, `tenant_role`,
+   `groups` — the same claim shape the backplane validator
+   requires of the pre-registered MCP client. `tools/list`
+   succeeds.
+
+> **The shared claim-shape requirement is not optional.** A
+> CIMD client that authenticates successfully but is missing
+> `tenant_id` / `tenant_role` / `sub` will still hit Walls
+> #2 / #3 from the 4-wall matrix below. CIMD removes the
+> *registration* step; it does not remove the *audience and
+> claim-mapper* requirement. The realm-level default client
+> scopes from Step 4 above are what make those claims appear
+> on CIMD-issued tokens too.
+
+If `tools/list` fails, the diagnostic path mirrors the
+4-wall matrix below — the only CIMD-specific failure modes
+are at the policy gate, and they're prefixed in the Keycloak
+event log with `CLIENT_REGISTER_ERROR` /
+`client_registration_policy_failed` referencing the
+`client-id-uri` condition or the
+`client-id-metadata-document` executor by name.
+
+#### Out of scope for CIMD onramp
+
+- **Anthropic's side of CIMD.** Whether and how Claude Code
+  hosts its CIMD metadata document is upstream tooling; this
+  recipe assumes the client implements CIMD per the IETF draft.
+- **Per-MCP-client CIMD enablement.** Each MCP client either
+  supports CIMD or doesn't (Claude Code's HTTP MCP on protocol
+  `2025-11-25+` does; older clients and Cursor as of 2026-05
+  don't). The realm-side recipe is the same regardless of which
+  CIMD-capable clients connect to it.
+- **Automated provisioning of `cimd-profile` / `cimd-policy`
+  via `meho admin keycloak bootstrap-clients`.** The bootstrap
+  helper (#791) provisions the pre-registration path today.
+  Extending it with a `--enable-cimd` step is a small follow-up
+  but out of scope for this Task — documented as the issue's
+  optional sub-deliverable (#911 Fix shape item 2).
+- **Helm chart values exposing CIMD knobs.** None today —
+  the realm-side configuration is per-realm rather than
+  per-MEHO-deployment, and the chart's auth-related values
+  (`config.keycloakIssuerUrl`, `config.keycloakCliClientId`)
+  are unaffected by enabling CIMD.
 
 ### Wire it into Helm
 
@@ -495,18 +816,22 @@ curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
 # }
 ```
 
-### Four-wall symptom → cause → fix matrix
+### Five-wall symptom → cause → fix matrix
 
-The deployer's first-login walk hits these four walls in sequence;
-each surfaces with a different symptom but the cause-and-fix chain
-is bounded. Walls are numbered for the dogfood-report cross-reference.
+The deployer's first-login walk hits these walls in sequence; each
+surfaces with a different symptom but the cause-and-fix chain is
+bounded. W1–W4 came out of the 2026-05-21 RDC dogfood; **W7** was
+added 2026-05-22 when the same operator's MCP client (Claude Code)
+hit `invalid_scope` after the W1–W4 fixes shipped. Walls are
+numbered for cross-reference with the originating dogfood reports.
 
 | Wall | Symptom | Cause | Fix |
 | --- | --- | --- | --- |
 | **W1** | Device-code initiation 401s with `{"error":"unauthorized_client","error_description":"Invalid client or Invalid client credentials"}`. Or DCR 403s with `{"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}`. | The CLI / MCP client tried to drive the device or authorization-code grant against a **confidential** client (typically `meho-backplane`), or anonymous DCR against a realm whose Trusted Hosts policy ships with an empty whitelist. Confidential clients require a `client_secret` the CLI can't carry; DCR on a prod realm is closed by design ([Keycloak docs](https://www.keycloak.org/securing-apps/client-registration)). | Pre-create a **public** client per Step 2 (and Step 2-MCP for the MCP path). Set `config.keycloakCliClientId` to the CLI client's ID so `/api/v1/auth-config` surfaces it. Operators on older backplanes can pass `--client-id <id>` per-invocation. Don't open DCR — the right fix is a deployer-side public client. |
-| **W2** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` (specifics post-[#797](https://github.com/evoila/meho/issues/797): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim`). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. | Clone all 5 mappers from the `meho-backplane` client onto the public client per Step 3. After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. |
+| **W2** | Token issuance succeeds; every backend call 401s with a structured `detail` code (post-[#797](https://github.com/evoila/meho/issues/797) + [#1131](https://github.com/evoila/meho/issues/1131): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` / `malformed_jws` if the `Authorization` header carries a non-JWT value at all). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. A `malformed_jws` instead means the `Authorization` header is not a JWT (typo, copy/paste truncation, or a probe like `Bearer not-a-real-jwt`). | Clone all 5 mappers from the `meho-backplane` client onto the public client per Step 3. After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. For `malformed_jws`: paste the bearer into `jwt.io` — if it doesn't decode, the header was sent with the wrong value, not the issued token. |
 | **W3** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` even after Wall #2 is closed; decoded token has `aud`, `tenant_id`, `tenant_role`, `groups` but **no `sub` claim**. | The `basic` client scope wasn't assigned. Keycloak 25 moved `sub` into the Subject (sub) protocol mapper inside the `basic` scope; clients created via the admin REST API don't auto-inherit realm default-default scopes the way the admin-console UI populates them. RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so rejection is spec-correct — the diagnostic is the opaque part. | Add `basic`, `roles`, `web-origins`, `acr` to the public client's **default** client scopes per Step 4. Re-issue (logout and re-login; existing tokens are stale) and confirm `sub` is now present. After [#797](https://github.com/evoila/meho/issues/797) lands the symptom is `{"detail":"missing_sub"}` instead of the opaque form. |
 | **W4** | `meho login` fails with `meho: token exchange failed: context deadline exceeded`, often before the human has a chance to approve the verification URL. | Not the device-code TTL (which is already 10 minutes per `cli/internal/auth/devicecode.go:355`'s `PollTimeout = 10 * time.Minute` — longer than Keycloak's default 600 s `expires_in`). The real cause is an **ambient parent deadline** on `cmd.Context()` (CI step timeout, `claude` bash-tool timeout, IDE-task wrapper) that truncates the approval wait far below the device-code lifetime. | (Until [#798](https://github.com/evoila/meho/issues/798) lands) run `meho login` in a real interactive terminal without a short wrapper deadline; or raise the wrapper timeout to ≥ `expires_in` + headroom. After #798 lands the message distinguishes "parent deadline fired" from "device code expired" and the device-flow approval wait detaches from a too-short parent context. |
+| **W7** | Browser-flow MCP client (Claude Code, MCP Inspector) authorization request 400s with `{"error":"invalid_scope","error_description":"Invalid scopes: openid profile email offline_access"}` (or just `offline_access` in the failed-scopes list). Token endpoint never reached; the user never sees a Keycloak login page. | The MCP client requested `offline_access` to obtain a refresh token (Claude Code **always** includes it; OIDC Core §11 makes it the spec-defined signal for a refresh token), but the `meho-mcp-client` public client doesn't have `offline_access` in either its default or optional client-scope list. Keycloak rejects unknown / unassigned scopes per OAuth 2.0 [RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2). The realm-built-in `offline_access` scope exists; it just isn't attached to the public MCP client. | Assign the realm's built-in `offline_access` client scope to `meho-mcp-client` as an **optional** scope (not default — only flows that ask for a refresh token should mint one). In the Keycloak admin console: `meho-mcp-client` → Client scopes → Add client scope → pick `offline_access` → **Optional**. `meho admin keycloak bootstrap-clients` does this automatically from the next release after v0.6.0 ([#912](https://github.com/evoila/meho/issues/912)). The CLI device-code client (`meho-cli`) deliberately is **not** given `offline_access` — device-code clients re-run the device dance rather than hold a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than re-prompting the operator. |
 
 ### Out of scope for this recipe
 
@@ -518,10 +843,12 @@ is bounded. Walls are numbered for the dogfood-report cross-reference.
   authoritative deployer doc for the chart values + the auth-onramp
   recipe.
 - **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
-  (G0.9.1-T11) ships `meho admin keycloak bootstrap-cli-client` — an
+  (G0.9.1-T11) ships `meho admin keycloak bootstrap-clients` — an
   idempotent verb that creates the two public clients + 5 mappers +
-  4 default scopes from one invocation. The recipe above is the
-  manual path until that automation lands.
+  4 default scopes from one invocation, plus (from the next release
+  after v0.6.0 via [#912](https://github.com/evoila/meho/issues/912))
+  the `offline_access` optional scope on the MCP client (W7). The recipe
+  above is the manual path; the helper is the supported automation.
 - **Confidential `meho-backplane` client.** Out of scope — it's
   created at realm-install time alongside the Keycloak realm itself
   and isn't touched by this recipe. Rotating its client secret is

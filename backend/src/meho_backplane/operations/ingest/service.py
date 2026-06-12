@@ -87,16 +87,19 @@ from meho_backplane.operations.ingest._internals import (
     OP_EDIT_OP,
     OP_ENABLE_CONNECTOR,
     OP_ENABLE_GROUP,
-    VALID_SAFETY_LEVELS,
     ConnectorScope,
+    apply_op_overrides,
     cascade_is_enabled,
+    enable_time_auto_shim_warnings,
     load_group,
     load_groups,
     load_op,
     load_ops_in_groups,
     operator_disabled_op_ids,
+    validate_edit_op_args,
     write_audit_row,
 )
+from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.exceptions import (
     ConnectorNotFoundError,
     InvalidStateTransitionError,
@@ -227,8 +230,54 @@ class ReviewService:
 
         No audit row is written; the surrounding HTTP / MCP request
         already audits the read at the chassis layer.
+
+        Visibility scope mirrors :func:`list_ingested_connectors`:
+        an operator sees rows under their own tenant **and** built-in
+        (``tenant_id IS NULL``) rows. When *tenant_id* equals the
+        operator's tenant and that probe misses, the lookup falls
+        back to ``tenant_id IS NULL`` so a ``GET
+        /api/v1/connectors/{id}/review`` against a global connector
+        returns 200 instead of 404 (G0.13-T5 #1135). When *tenant_id*
+        is passed explicitly as ``None`` (MCP admin path), the
+        existing admin-only gate stays; when it's any other UUID
+        (cross-tenant probe), the lookup stays single-pass and the
+        cross-tenant 404 conflation is preserved.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
+        try:
+            return await self._render_payload(connector_id, scope)
+        except ConnectorNotFoundError:
+            if tenant_id is None or tenant_id != self._operator.tenant_id:
+                # Explicit built-in probe (MCP admin path) or genuine
+                # cross-tenant probe — no fall-through. The original
+                # 404 stays.
+                raise
+            # Operator's own-tenant probe missed; try the built-in
+            # scope. Build a fresh scope tuple with tenant_id=None;
+            # bypass _authorize_scope's admin-only gate intentionally
+            # because read access to built-ins is operator-level
+            # (matches the list endpoint).
+            fallback_scope = ConnectorScope(
+                product=scope.product,
+                version=scope.version,
+                impl_id=scope.impl_id,
+                tenant_id=None,
+            )
+            return await self._render_payload(connector_id, fallback_scope)
+
+    async def _render_payload(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+    ) -> ConnectorReviewPayload:
+        """Load groups + ops for *scope* and pack them into the payload.
+
+        Raises :class:`ConnectorNotFoundError` when no group rows
+        exist under *scope*. Extracted from :meth:`get_review_payload`
+        so the two-pass tenant lookup there can reuse the same
+        rendering pipeline against a fallback scope without
+        duplicating the DB roundtrip + payload assembly.
+        """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             groups = await load_groups(session, scope, connector_id)
@@ -334,11 +383,20 @@ class ReviewService:
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
         llm_instructions: dict[str, object] | None = None,
-    ) -> None:
+    ) -> list[EditOpWarning]:
         """Update operator-controlled overrides on one :class:`EndpointDescriptor`.
 
         Passing none of the five fields raises :class:`ValueError`.
         Out-of-enum ``safety_level`` raises :class:`ValueError`.
+
+        Returns :class:`EditOpWarning` advisories — empty on the
+        common path. ``is_enabled=True`` runs the enable-time
+        auto-shim probe (G0.23-T4 #1630): a shim-resolved op is a
+        guaranteed ``connector_unsupported`` /
+        ``cause='unreplaced_auto_shim'`` dispatch dead end (G0.23-T1
+        #1627), so the advisory names the missing per-product
+        subclass up-front. Never blocks the write — flag set, audit
+        row written, warnings or not.
 
         ``is_enabled`` override is load-bearing for post-enable
         behaviour: once an operator sets ``is_enabled=False`` on a
@@ -370,41 +428,25 @@ class ReviewService:
         enough to bloat the audit table without value, same
         rationale ``edit_group`` uses for ``when_to_use``).
         """
-        if (
-            custom_description is None
-            and safety_level is None
-            and requires_approval is None
-            and is_enabled is None
-            and llm_instructions is None
-        ):
-            raise ValueError(
-                "edit_op requires at least one of custom_description, "
-                "safety_level, requires_approval, is_enabled, llm_instructions",
-            )
-        if safety_level is not None and safety_level not in VALID_SAFETY_LEVELS:
-            raise ValueError(
-                f"safety_level {safety_level!r} not in {sorted(VALID_SAFETY_LEVELS)}",
-            )
+        validate_edit_op_args(
+            custom_description=custom_description,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            is_enabled=is_enabled,
+            llm_instructions=llm_instructions,
+        )
         scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             op_row = await load_op(session, scope, connector_id, op_id)
-            fields_updated: list[str] = []
-            if custom_description is not None:
-                op_row.custom_description = custom_description
-                fields_updated.append("custom_description")
-            if safety_level is not None:
-                op_row.safety_level = safety_level
-                fields_updated.append("safety_level")
-            if requires_approval is not None:
-                op_row.requires_approval = requires_approval
-                fields_updated.append("requires_approval")
-            if is_enabled is not None:
-                op_row.is_enabled = is_enabled
-                fields_updated.append("is_enabled")
-            if llm_instructions is not None:
-                op_row.llm_instructions = llm_instructions
-                fields_updated.append("llm_instructions")
+            fields_updated = apply_op_overrides(
+                op_row,
+                custom_description=custom_description,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                is_enabled=is_enabled,
+                llm_instructions=llm_instructions,
+            )
             payload: dict[str, Any] = {
                 "connector_id": connector_id,
                 "op_id": op_id,
@@ -420,6 +462,11 @@ class ReviewService:
                 payload=payload,
             )
             await session.commit()
+        # Probe only after the write landed: a 404/400 path above must
+        # never emit an advisory for an edit that didn't happen.
+        if is_enabled is True:
+            return enable_time_auto_shim_warnings(connector_id, op_id, scope)
+        return []
 
     # -- public write API: state transitions ------------------------------
 

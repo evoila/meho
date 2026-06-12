@@ -17,9 +17,13 @@ and documented in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
 The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
-read workflows -- inventory listing, workload inspection, log fetching.
-Write operations stay in the wrapper until v0.2.next ships policy +
-approval flow.
+read workflows -- inventory listing, workload inspection, log fetching --
+and, as of G3.14-T1 (#1403), for the single-call **write** surface
+(scale / rollout-restart / namespace-create / annotate / label / cordon /
+apply / delete / secret-create / job-create). Every write op is
+`requires_approval=True`, so once #1401's human-queue routing is live an
+operator's write dispatch is parked for approval rather than auto-run or
+hard-denied. `k8s.exec` (G3.14-T2) and `k8s.drain` stay in the wrapper.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
@@ -88,6 +92,44 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   before Vault is touched. This is the rubric **State 2** wiring
   (`shared_service_account` only). Decision: [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
+## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
+
+The `Connector.fingerprint(target, operator=None)` ABC signature
+gained the optional `operator` parameter in G0.16-T4. The four
+fingerprint surfaces that authenticate via Vault (this connector,
+`vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) now read the
+per-target credentials under the **same identity** the dispatch path
+uses:
+
+- **REST probe route** (`POST /api/v1/targets/{name}/probe`) — the
+  `require_operator` dependency lifts the chassis-validated operator
+  and the handler forwards it via
+  `cls().fingerprint(target, operator=operator)`.
+- **UI re-probe route** (`POST /ui/connectors/{name}/probe`) —
+  `resolve_operator_or_403` lifts an operator gated on
+  `TENANT_ADMIN`, and the handler forwards it identically.
+- **Dispatch path** (`POST /api/v1/operations/call`) — unchanged; the
+  dispatcher has always threaded the operator into the connector's
+  HTTP auth surface.
+
+The fallback `operator=None` synthesises a system operator (whose
+non-empty placeholder JWT fails closed at the live Vault round-trip)
+for callers that have no real operator in scope (the readiness probe
+worker, the K8s topology refresh service). This preserves the
+locked Option A decision's system-call carve-out — *system-initiated
+calls cannot perform an operator-context Vault read*.
+
+Pre-#1306 the probe routes hard-coded the system operator
+synthesis inside each connector's `fingerprint()`. Vault's JWT/OIDC
+auth method rejected the placeholder JWT as `malformed jwt: must
+have three parts` (compact-JWS format requires three dot-separated
+parts; the placeholder
+`"system:connector-probe-placeholder-jwt"` has zero), which surfaced
+on every probe of the four affected connectors in the v0.8.0 dogfood
+cycle (`claude-rdc-hetzner-dc#771` Finding 4). The fix is the
+single-source-of-truth shape — probe + dispatch both flow the same
+real operator through the same loader.
+
 ## Shipped op surface
 
 | op_id                  | safety | description                                                       |
@@ -100,12 +142,57 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
-| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` -- type / cluster_ip / ports / selector. |
-| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` -- class / hosts / TLS / rules. |
-| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` -- **keys only, NO values**. |
+| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector + `label_selector`. |
+| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
+| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
-| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
+| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
+| `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+
+### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
+
+`k8s.exec` is the one op that cannot ride the cached read `ApiClient`.
+Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
+`v4.channel.k8s.io` sub-protocol, which `kubernetes_asyncio` only speaks
+through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
+connector therefore keeps a **parallel** per-target cache
+(`KubernetesConnector._ws_api_clients`, keyed on `secret_ref` exactly
+like `_api_clients`), built lazily from the same operator-identity
+kubeconfig via `_get_ws_api_client` and closed alongside the read
+clients in `aclose` (no leaked sockets).
+
+The library's `WsApiClient.request` with `_preload_content=True` (the
+default) concatenates stdout + stderr into one blob *and discards the
+status frame* -- so the exit code is lost and the two streams can no
+longer be told apart. To meet the op's contract the handler passes
+`_preload_content=False`, which returns the raw aiohttp websocket
+context manager; it then `async with`-es the socket, demuxes the leading
+channel byte itself (1 = stdout, 2 = stderr, 3 = error/status), and
+parses the exit code from the channel-3 frame via
+`WsApiClient.parse_error_data` (`status == "Success"` -> 0; otherwise the
+code in `details.causes[0].message`).
+
+A bounded `timeout_seconds` (default 30, capped 300) wraps the drain in
+`asyncio.wait_for`. On expiry the socket is closed explicitly and partial
+output is returned with `timed_out=true` and `exit_code=null`. The
+partial-output guarantee is why the demux writes into a caller-owned
+`_ExecCapture` accumulator rather than returning a tuple: a `wait_for`
+cancellation discards a coroutine's return value but not the bytes
+already written to the shared accumulator.
+
+Each stream is capped at 1 MiB independently and front-truncated when
+oversize (`*_truncated_byte_count` recorded), reusing the never-log
+posture of `k8s.logs` -- the audit row hashes only the request params,
+never the captured bytes. Pod / container resolution reuses
+`resolve_pod_and_container` from `ops_logs`.
+
+Interactive exec (`kubectl exec -it` -- a live PTY/shell) is
+**deliberately out of scope**: the dispatcher returns a single
+`OperationResult` with no incremental stdin/stdout envelope, the same
+deferral `k8s.logs -f` took. `stdin` and `tty` are pinned `False` on the
+wire and no code path flips them; both land once the MCP `tools/call`
+envelope grows a streaming shape.
 
 G3.2-T6 (CLI alias verbs + k3d E2E acceptance + operator-facing
 onboarding doc) layers operator ergonomics on top of this surface
@@ -120,24 +207,93 @@ op; the onboarding recipe in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md)
 is the operator cookbook for migrating off `kubectl-vcf.sh`.
 
-### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
+### Write op surface (G3.14-T1, #1403)
 
-The list handlers forward the standard k8s `label_selector` /
-`field_selector` / `limit` / `_continue` filter knobs to the API
-server so heavy-tenancy clusters can paginate server-side without
-streaming every row through the connector. The operator passes
-`limit=N` plus optional `continue_token=<cursor>` on each call; the
-response carries `next_continue` whenever the server signals more
-pages. Tokens are server-defined and expire after ~5-15 minutes; a
-stale token returns 410 ResourceExpired, and the handler propagates
-the API exception verbatim so the caller can restart without the
-token.
+The single-call write ops live in `ops_write.py` (caution-class
+handlers + the annotate/label kind dispatch table),
+`ops_write_dangerous.py` (dangerous-class handlers + the delete dispatch
+table), and `ops_write_meta.py` (the JSON-Schema parameter shapes +
+`KubernetesOp` registration rows for **all** write ops, split out so each
+handler file stays under the 600-line code-quality cap and the
+operator-facing surface reads in one place). Handlers are bound-method
+shims on `KubernetesConnector` forwarding to module-level functions --
+the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
+`safety_level` caution|dangerous and `requires_approval=True`.
 
-`namespace` and `all_namespaces` are mutually exclusive in the
-schema's `oneOf` clause -- exactly one must be supplied. The
-`all_namespaces=true` path routes through
-`list_pod_for_all_namespaces` / `list_deployment_for_all_namespaces`;
-the per-namespace path uses the `_namespaced_` variants.
+| op_id                  | safety    | k8s call                                                          |
+| ---------------------- | --------- | ---------------------------------------------------------------- |
+| `k8s.scale`            | caution   | `AppsV1Api.patch_namespaced_deployment_scale` -- before/after replicas in result. |
+| `k8s.rollout.restart`  | caution   | Stamp `kubectl.kubernetes.io/restartedAt` on the pod template (kubectl parity). |
+| `k8s.namespace.create` | caution   | `CoreV1Api.create_namespace` -- create-or-ignore-409 (idempotent). |
+| `k8s.annotate`         | caution   | Strategic-merge patch of `metadata.annotations` over a kind table (deployment/pod/service/namespace/node); null value removes a key. |
+| `k8s.label`            | caution   | Same as annotate over `metadata.labels`; relabeling a Service-selected workload can re-route traffic. |
+| `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
+| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
+| `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). |
+| `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+
+**Secret redaction reuses the shipped `credential_write` op-class
+(#1401), not a new mechanism.** `k8s.secret.create` was already in
+`_CREDENTIAL_WRITE_OPS` (`broadcast/events.py`); G3.14-T1 adds
+`k8s.job.create` (a Job pod-template's inline `env` can carry secret
+material in `params`). `classify_op` returns `credential_write`, so
+`redact_payload` collapses the broadcast event to aggregate-only
+`{op_class, result_status}` -- the secret never reaches the SSE stream or
+a Slack mirror. The handlers also return value-free summaries, so the
+`OperationResult` itself carries no secret.
+
+**`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
+to the API's `?dryRun=All`) so the would-be object is returned without
+mutating -- the diff-preview an agent or reviewer runs before the real
+apply. Note: the dispatcher / approval-queue substrate has **no per-op
+`proposed_effect` builder hook**, so the dry-run result is not
+auto-populated into the approval row at queue time today; the dry-run is
+expressible + returned by the op, and queue-time auto-population is a
+follow-up that needs a dispatcher hook.
+
+### Shared list-op request shape (`ops_listparams.py`)
+
+Every namespaced list op on this connector
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.event.list`,
+`k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
+the same input-parameter shape via the building blocks in
+[`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
+
+- `namespace` XOR `all_namespaces` -- the `oneOf` clause
+  (`NAMESPACE_XOR_ALL_NAMESPACES`) enforces exactly-one. The
+  `all_namespaces=true` path routes through the
+  `list_X_for_all_namespaces` variant; the per-namespace path uses
+  the `_namespaced_` variant.
+- `label_selector` -- forwarded server-side; same K8s selector syntax
+  for every op.
+
+Pod / deployment list additionally use the full base via
+`LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
+`continue_token`. The operator passes `limit=N` plus optional
+`continue_token=<cursor>` on each call; the response carries
+`next_continue` whenever the server signals more pages. Tokens are
+server-defined and expire after ~5-15 minutes; a stale token returns
+410 ResourceExpired, and the handler propagates the API exception
+verbatim so the caller can restart without the token.
+
+The event / service / ingress / configmap list ops deliberately omit
+some knobs of the full base:
+
+- `k8s.event.list` keeps `field_selector` + `limit` but omits
+  `continue_token` -- the handler's client-side recency-sort +
+  truncation contract supersedes server-side paging; the omission is
+  documented in `K8S_EVENT_LIST_PAGINATION_HINT`.
+- `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list` omit
+  `field_selector` + `limit` + `continue_token` -- these resources
+  are typically O(10) per namespace and the
+  [G0.17-T1](https://github.com/evoila/meho/issues/1330) sweep
+  deferred the paging widening as a mechanical follow-up.
+
+See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
+§10 for the convention this shared shape anchors (intra-connector
+list-op request-shape parity); the rule applies across connectors
+once siblings adopt the pattern.
 
 ### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
 
@@ -183,7 +339,9 @@ upgrade specific configmap-name patterns (managed-by
 1. The connector package's `__init__.py` calls
    `register_connector_v2(product="k8s", version="1.x",
    impl_id="k8s", cls=KubernetesConnector)` at import time. The v1
-   entry under `"k8s"` is preserved for chassis-route compat.
+   entry under `"k8s"` is preserved so `get_connector("k8s")`-keyed
+   callers (`/api/v1/targets/{name}/probe`) keep resolving the class
+   without the dispatcher's v2 resolver path.
 2. The same module appends
    `register_kubernetes_typed_operations` to the typed-op registrar
    list via `register_typed_op_registrar`.
@@ -195,6 +353,33 @@ upgrade specific configmap-name patterns (managed-by
 The walk is **idempotent**: a second registrar run hits the body-hash
 skip-re-embed branch and avoids re-encoding the descriptions, so pod
 restarts on unchanged code stay cheap.
+
+### Resolver tie-break (wildcard vs. versioned)
+
+K8s is the shipped case for the resolver's
+**`versioned_over_wildcard`** demotion step (G0.14-T2 #1143): the
+package registers under both `("k8s", "", "")` (v1 wildcard, for
+`get_connector` callers) and `("k8s", "1.x", "k8s")` (v2 versioned,
+for `connector_id="k8s-1.x"`-keyed dispatch). When a Target is
+created with `product="k8s"` and no fingerprint version (the common
+first-use case — the operator runs `POST /api/v1/targets` before
+`POST /api/v1/targets/{name}/probe`), both registry entries match
+the `(product=k8s, version=None)` filter step. The
+`KubernetesConnector` class doesn't advertise a
+`supported_version_range`, so both entries score
+`(_SPECIFICITY_UNBOUNDED, 0.0)` on the specificity ladder.
+
+The resolver's step 1 catches this: when ≥1 entry carries a
+non-empty `(version, impl_id)` slot, the wildcard `(product, "", "")`
+is demoted before the rest of the ladder runs. The versioned entry
+wins; the operator never sees the
+`AmbiguousConnectorResolution` bare-500 (signal 9 in
+`claude-rdc-hetzner-dc#697`). The rule generalizes to any future
+connector that uses the same double-registration shape — only
+wildcards lose to a co-registered versioned sibling, never the
+reverse. When the wildcard is the *only* candidate (a connector
+that registered v1-only), it still wins; the demotion step is
+conditional on a versioned entry being present.
 
 ### Op dispatch (per request)
 
@@ -215,6 +400,86 @@ restarts on unchanged code stay cheap.
    #750) — large row lists materialize into a `ResultHandle`, small
    ones pass through — writes the audit row, fires the broadcast event,
    and wraps the result in `OperationResult.status="ok"`.
+
+### Topology discovery (`discover_topology`)
+
+G0.14-T12 (#1201) lands the first
+[`Connector.discover_topology`](../../backend/src/meho_backplane/connectors/base.py)
+override against a shipped connector. The populator emits the minimum
+the v0.6.0 release-body amendment promised: cluster + namespaces +
+nodes, with `belongs-to` edges from each namespace and each cluster
+node to the target. The
+[refresh service](../../backend/src/meho_backplane/topology/refresh.py)
+calls the override on demand
+(`POST /api/v1/topology/refresh/{target_name}`) and on the per-tenant
+scheduled cadence, diffs the snapshot against `graph_node` +
+`graph_edge` rows for `(tenant_id, target_id)`, and applies inserts /
+updates / soft-deletes in one transaction.
+
+**What lands on the graph (v0.7-shape)**
+
+| `NodeHint.kind` | Count             | Properties carried                              |
+| --------------- | ----------------- | ----------------------------------------------- |
+| `target`        | exactly 1         | `git_version` / `major` / `minor` / `platform` from `VersionApi.get_code()` (same payload `k8s.about` returns) |
+| `namespace`     | N (≥ 4 on k3s)    | Mirrors [`namespace_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `age_seconds` / `labels` |
+| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` |
+
+`EdgeHint` rows: one `belongs-to` from every namespace to the target,
+one `belongs-to` from every cluster node to the target. `cluster` is
+**not** in the v0.2 [`NodeKind` enum](../../backend/src/meho_backplane/connectors/schemas.py)
+(the enum is closed per the module docstring); the cluster manifests
+as a `target`-kinded node so the refresh service's natural-key
+contract holds without enum changes (which are a G9.2 concern).
+
+**Explicit out-of-scope (sibling Tasks)**
+
+- **Pods** — `CoreV1Api.list_pod_for_all_namespaces()` or N
+  `list_namespaced_pod(namespace)` calls. A 100-namespace cluster
+  would mean 100 list calls per refresh tick; the v0.7.x deploy
+  hasn't surfaced refresh-cost data yet.
+- **Services** — same scaling concern as pods.
+- **Ingresses** — same.
+- **Deployments** — same.
+- **Volumes** (`PersistentVolume` cluster-scope + `PersistentVolumeClaim`
+  namespaced) — same.
+
+When the cost picture and operator demand justify them, file sibling
+Tasks against [Initiative #1139](https://github.com/evoila/meho/issues/1139)
+or a future G9.4 Initiative.
+
+**Operator threading**
+
+The [`Connector.discover_topology(self, target)`](../../backend/src/meho_backplane/connectors/base.py)
+ABC signature stays unchanged at v0.7 (out of scope for T12). The K8s
+override extends the signature with a keyword-only `operator: Operator
+| None = None` parameter; the refresh service introspects the bound
+method via [`inspect.signature`](https://docs.python.org/3/library/inspect.html#inspect.signature)
+and forwards the per-tenant system operator the scheduler synthesises
+([`_system_operator`](../../backend/src/meho_backplane/topology/scheduler.py))
+when the keyword is declared. Connectors whose override doesn't
+declare `operator` (the inherited no-op default, plus any future
+override that doesn't need credentials) are invoked verbatim. The
+forwarded operator flows through
+[`_get_api_client(target, operator)`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py)
+so the operator-context Vault → kubeconfig chain reads under the
+synthesised identity (the same chain `k8s.about` and every other
+operator-aware op already use).
+
+**Where the helpers live**
+
+[`backend/src/meho_backplane/connectors/kubernetes/_topology.py`](../../backend/src/meho_backplane/connectors/kubernetes/_topology.py)
+exposes pure functions (`build_target_node_hint`,
+`namespace_node_hint`, `node_node_hint`,
+`namespace_to_target_edge`, `node_to_target_edge`,
+`build_topology_hints`) that re-use `namespace_row` / `node_row` so
+the populator and the inventory ops share their wire shape. The
+unit suite at
+[`backend/tests/test_connectors_k8s_topology.py`](../../backend/tests/test_connectors_k8s_topology.py)
+drives synthetic `V1Namespace` / `V1Node` / `VersionInfo` fixtures;
+the k3s testcontainer slice in
+[`backend/tests/integration/test_connectors_k8s_k3d.py`](../../backend/tests/integration/test_connectors_k8s_k3d.py)
+covers the live API round-trip plus the
+`(kind, name)` idempotency property the refresh service depends on.
 
 ### `k8s.ls` three-way dispatch
 
@@ -293,6 +558,10 @@ just `len(rows)` because nothing reduces.
 
 ## References
 
+- Topology populator: [#1201 G0.14-T12](https://github.com/evoila/meho/issues/1201)
+  -- `KubernetesConnector.discover_topology` (cluster + namespaces +
+  nodes); closes the v0.6.0 release-body amendment promise on
+  `claude-rdc-hetzner-dc#697` signal 13.
 - Parent Initiative: [#320 G3.2](https://github.com/evoila/meho/issues/320)
   -- `k8s-1.x` typed connector (library: `kubernetes_asyncio`).
 - Predecessor Tasks:
@@ -302,9 +571,14 @@ just `len(rows)` because nothing reduces.
   - [#323 G3.2-T3](https://github.com/evoila/meho/issues/323) -- workload
     ops (`k8s.pod.{list,info}` / `k8s.deployment.{list,info}`).
   - [#325 G3.2-T5](https://github.com/evoila/meho/issues/325) -- `k8s.logs`.
-- This Task: [#324 G3.2-T4](https://github.com/evoila/meho/issues/324)
-  -- network + config + event ops (`k8s.service.list` /
-  `k8s.ingress.list` / `k8s.configmap.list/info` / `k8s.event.list`).
+  - [#324 G3.2-T4](https://github.com/evoila/meho/issues/324) -- network +
+    config + event ops (`k8s.service.list` / `k8s.ingress.list` /
+    `k8s.configmap.list/info` / `k8s.event.list`).
+- This Task: [#1404 G3.14-T2](https://github.com/evoila/meho/issues/1404)
+  -- `k8s.exec` bounded command-and-capture over the `WsApiClient`
+  websocket transport (interactive `-it` deferred). Parent Initiative:
+  [#1398 G3.14](https://github.com/evoila/meho/issues/1398) -- kubernetes
+  write/exec op surface.
 - Substrate Initiative: [#388 G0.6](https://github.com/evoila/meho/issues/388)
   -- operation registry + dispatcher + JSONFlux substrate.
 - `kubernetes_asyncio`: https://github.com/tomplus/kubernetes_asyncio

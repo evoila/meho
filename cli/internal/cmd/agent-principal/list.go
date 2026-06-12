@@ -5,13 +5,13 @@ package agentprincipal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -61,42 +61,52 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := fetchList(cmd.Context(), backplaneURL, opts)
+	resp, err := getList(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printListTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. include_revoked is omitted from the wire when the operator
+// didn't ask for it so the backplane's own default (excluding
+// revoked rows) applies cleanly.
+func listQueryParams(opts listOptions) *api.ListAgentPrincipalsApiV1AgentPrincipalsGetParams {
+	params := &api.ListAgentPrincipalsApiV1AgentPrincipalsGetParams{}
 	if opts.IncludeRevoked {
-		q.Set("include_revoked", "true")
+		flag := true
+		params.IncludeRevoked = &flag
 	}
-	path := "/api/v1/agent-principals"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func fetchList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getList(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+) (*api.ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent-principal list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error) {
+			return authed.ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx, params)
+		},
+		func(r *api.ListAgentPrincipalsApiV1AgentPrincipalsGetResponse) int { return r.StatusCode() },
+	)
 }
 
-func printListTable(w io.Writer, r *ListResponse) {
+func printListTable(w io.Writer, r *api.AgentPrincipalListResponse) {
 	if r == nil || len(r.Principals) == 0 {
 		fmt.Fprintln(w, "no agent principals registered in this tenant")
 		return
@@ -104,6 +114,6 @@ func printListTable(w io.Writer, r *ListResponse) {
 	fmt.Fprintf(w, "%-32s %-8s %-20s %s\n", "NAME", "REVOKED", "OWNER", "KEYCLOAK CLIENT ID")
 	for _, e := range r.Principals {
 		fmt.Fprintf(w, "%-32s %-8v %-20s %s\n",
-			e.Name, e.Revoked, e.OwnerSub, e.KeycloakClientID)
+			e.Name, e.Revoked, e.OwnerSub, e.KeycloakClientId)
 	}
 }

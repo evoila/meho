@@ -8,25 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// createRequest mirrors the backend ConventionCreate pydantic model.
-// `Priority` is a pointer so the field is omitted from the JSON body
-// when the operator doesn't pass --priority (backend defaults to 0,
-// matching the SmallInteger column's server_default; round-trips
-// identically through create + show).
-type createRequest struct {
-	Slug     string `json:"slug"`
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	Kind     string `json:"kind"`
-	Priority *int   `json:"priority,omitempty"`
-}
 
 // newCreateCmd returns the `meho conventions create` command.
 //
@@ -163,58 +152,90 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	req := createRequest{
+	resp, err := postCreate(cmd.Context(), backplaneURL, opts, body)
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
+	}
+	var conv api.Convention
+	if err := json.Unmarshal(resp.Body, &conv); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode conventions create response: %v", err)),
+			opts.JSONOut)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), conv)
+	}
+	printCreateSummary(cmd.OutOrStdout(), &conv)
+	return nil
+}
+
+// buildCreateBody maps the verb's validated options + loaded body onto
+// the generated ConventionCreate body. Priority is a *int in the
+// generated type (the backend's pydantic model treats null/omitted as
+// "use the column's server_default of 0"); we send the pointer only
+// when the operator passed --priority so an unset flag leaves the
+// field absent on the wire instead of stamping an explicit 0 the
+// backend would treat as "operator pinned to 0" vs "operator didn't
+// say" — the latter being important if the column default ever moves.
+func buildCreateBody(opts createOptions, body string) api.ConventionCreate {
+	out := api.ConventionCreate{
 		Slug:  opts.Slug,
-		Kind:  opts.Kind,
+		Kind:  api.ConventionKind(opts.Kind),
 		Title: opts.Title,
 		Body:  body,
 	}
 	if opts.prioritySet {
 		p := opts.Priority
-		req.Priority = &p
+		out.Priority = &p
 	}
-	conv, err := postCreate(cmd.Context(), backplaneURL, req)
-	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
-	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), conv)
-	}
-	printCreateSummary(cmd.OutOrStdout(), conv)
-	return nil
+	return out
 }
 
-func postCreate(ctx context.Context, backplaneURL string, req createRequest) (*Convention, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal conventions create request: %w", err)
-	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/conventions", body)
+func postCreate(
+	ctx context.Context,
+	backplaneURL string,
+	opts createOptions,
+	body string,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Convention
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode conventions create response: %w", err)
-	}
-	return &out, nil
+	reqBody := buildCreateBody(opts, body)
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.CreateConventionApiV1ConventionsPost(
+				ctx,
+				&api.CreateConventionApiV1ConventionsPostParams{},
+				reqBody,
+			)
+		},
+	)
 }
 
 // printCreateSummary renders the created convention as a compact
 // one-line confirmation plus the round-tripped slug / timestamps /
 // body length. Operators who want the full body should chase with
 // `meho conventions show <slug>`.
-func printCreateSummary(w io.Writer, c *Convention) {
+//
+// CreatedAt / UpdatedAt arrive as typed time.Time off the generated
+// Convention type (were strings on the pre-migration consumer-side
+// duplicate); we format them back to the RFC 3339 shape the
+// operator-facing summary contract has always used.
+func printCreateSummary(w io.Writer, c *api.Convention) {
 	if c == nil {
 		return
 	}
 	fmt.Fprintf(w, "created convention %q\n", c.Slug)
-	fmt.Fprintf(w, "%-14s %s\n", "id:", c.ID)
-	fmt.Fprintf(w, "%-14s %s\n", "tenant_id:", c.TenantID)
+	fmt.Fprintf(w, "%-14s %s\n", "id:", c.Id.String())
+	fmt.Fprintf(w, "%-14s %s\n", "tenant_id:", c.TenantId.String())
 	fmt.Fprintf(w, "%-14s %s\n", "kind:", c.Kind)
 	fmt.Fprintf(w, "%-14s %d\n", "priority:", c.Priority)
 	fmt.Fprintf(w, "%-14s %s\n", "title:", c.Title)
-	fmt.Fprintf(w, "%-14s %s\n", "created_at:", c.CreatedAt)
-	fmt.Fprintf(w, "%-14s %s\n", "updated_at:", c.UpdatedAt)
+	fmt.Fprintf(w, "%-14s %s\n", "created_at:", c.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintf(w, "%-14s %s\n", "updated_at:", c.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %d bytes\n", "body:", len(c.Body))
 }

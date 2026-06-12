@@ -183,6 +183,44 @@ async def test_target_round_trip_with_nullable_fields_omitted() -> None:
     assert row.auth_model == "shared_service_account"
     assert row.vpn_required is False
     assert row.extras == {}
+    # G0.14-T4 #1145: deleted_at column defaults to NULL for live rows.
+    assert row.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_target_deleted_at_round_trips() -> None:
+    """A :class:`Target` row with ``deleted_at`` set survives the round-trip.
+
+    G0.14-T4 (#1145): the soft-delete handler stamps ``deleted_at``;
+    audit-history readers (G8) need the column to round-trip with the
+    expected wall-clock semantics for forensic queries against
+    retired targets.
+    """
+    sessionmaker = get_sessionmaker()
+    target_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+
+    async with sessionmaker() as session:
+        session.add(
+            Target(
+                id=target_id,
+                tenant_id=tenant_id,
+                name="retired",
+                product="ssh",
+                host="10.0.0.1",
+                deleted_at=now,
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await session.execute(select(Target).where(Target.id == target_id))
+        row = result.scalar_one()
+
+    # SQLite strips tzinfo — compare wall-clock parts only.
+    assert row.deleted_at is not None
+    assert row.deleted_at.replace(tzinfo=None) == now.replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------

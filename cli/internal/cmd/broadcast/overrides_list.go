@@ -5,13 +5,13 @@ package broadcast
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -55,13 +55,17 @@ type overridesListOptions struct {
 }
 
 func runOverridesList(cmd *cobra.Command, opts overridesListOptions) error {
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entries, err := listOverrides(cmd.Context(), backplaneURL, opts.OpIDPattern)
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+	entries, err := listOverrides(cmd.Context(), client, opts.OpIDPattern)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entries)
@@ -70,31 +74,49 @@ func runOverridesList(cmd *cobra.Command, opts overridesListOptions) error {
 	return nil
 }
 
-// buildListPath assembles the GET path including the optional
-// query parameter. Exposed for unit tests so URL encoding stays
-// covered when the pattern contains special characters.
-func buildListPath(opIDPattern string) string {
-	if opIDPattern == "" {
-		return "/api/v1/broadcast/overrides"
+// listOverrides drives the typed-client
+// `ListOverridesApiV1BroadcastOverridesGet` endpoint with a one-shot
+// 401-retry around the underlying AuthedClient's refresh path
+// (mirrors `AuthedClient.GetHealth`'s pattern in client.go). Non-2xx
+// responses are returned as `*httpResponseError` so the caller can
+// route them through `renderHTTPStatus`; transport-layer errors
+// return verbatim.
+func listOverrides(
+	ctx context.Context,
+	client *api.AuthedClient,
+	opIDPattern string,
+) ([]api.BroadcastOverrideRead, error) {
+	params := &api.ListOverridesApiV1BroadcastOverridesGetParams{}
+	if opIDPattern != "" {
+		p := opIDPattern
+		params.OpIdPattern = &p
 	}
-	q := url.Values{}
-	q.Set("op_id_pattern", opIDPattern)
-	return "/api/v1/broadcast/overrides?" + q.Encode()
-}
-
-func listOverrides(ctx context.Context, backplaneURL, opIDPattern string) ([]Entry, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opIDPattern), nil)
+	resp, err := client.ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx, params)
 	if err != nil {
 		return nil, err
 	}
-	var out []Entry
-	if jerr := json.Unmarshal(raw, &out); jerr != nil {
-		return nil, fmt.Errorf("decode broadcast overrides list: %w", jerr)
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx, params)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, nil
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	if resp.JSON200 == nil {
+		// 2xx without a JSON200 means the response body didn't
+		// decode against BroadcastOverrideRead -- treat as the empty
+		// list rather than NPE'ing.
+		return nil, nil
+	}
+	return *resp.JSON200, nil
 }
 
-func printOverridesTable(w io.Writer, entries []Entry) {
+func printOverridesTable(w io.Writer, entries []api.BroadcastOverrideRead) {
 	if len(entries) == 0 {
 		fmt.Fprintln(w, "(no broadcast-detail overrides in this tenant)")
 		return
@@ -104,12 +126,23 @@ func printOverridesTable(w io.Writer, entries []Entry) {
 	fmt.Fprintln(w, "  ---")
 	for _, e := range entries {
 		fmt.Fprintf(w, "%-36s  %-30s  %-12s  %-20s  %-9s  %s\n",
-			e.ID,
-			e.OpIDPattern,
+			e.Id.String(),
+			e.OpIdPattern,
 			strDerefOrDash(e.ScopeField),
 			strDerefOrDash(e.ScopeValue),
 			e.Detail,
 			e.CreatedBySub,
 		)
 	}
+}
+
+// strDerefOrDash renders an optional string field as "-" when nil
+// or empty, otherwise as the underlying value. Used by both the
+// list table and the set summary so an op-wide rule (scope_field /
+// scope_value both null) renders consistently across verbs.
+func strDerefOrDash(s *string) string {
+	if s == nil || *s == "" {
+		return "-"
+	}
+	return *s
 }

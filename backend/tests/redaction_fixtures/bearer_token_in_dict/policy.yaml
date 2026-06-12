@@ -1,0 +1,14 @@
+# Bearer-token round-trip fixture policy.
+# Pins: a bare ``Bearer <opaque>`` string in a nested handler-return
+# value is redacted with the fixed marker ``[REDACTED:bearer_token]``.
+
+id: roundtrip-bearer-token
+version: 1
+description: |
+  Round-trip fixture: bearer tokens in nested connector responses
+  must be redacted with the default ``redact`` action's marker.
+rules:
+  - name: strip-bearer-token
+    pattern: bearer_token
+    action: redact
+    reason: "round-trip fixture: bearer token outside Authorization header"

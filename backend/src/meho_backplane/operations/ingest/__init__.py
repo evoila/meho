@@ -16,14 +16,22 @@ routes at T6, admin MCP tools at T7) import from
 private module layout.
 """
 
+from meho_backplane.operations.ingest.anthropic_client import (
+    AnthropicMessagesLlmClient,
+    build_anthropic_ingest_llm_client,
+)
 from meho_backplane.operations.ingest.api_schemas import (
     ConnectorListItem,
     ConnectorListResponse,
     ConnectorStatusFilter,
     EditGroupBody,
     EditOpBody,
+    EditOpResponse,
+    EditOpWarning,
     GroupingResultModel,
     IngestionResultModel,
+    IngestJobHandle,
+    IngestJobStatusResponse,
     IngestRequest,
     IngestResponse,
     SpecSource,
@@ -43,7 +51,17 @@ from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.error_envelopes import (
+    build_catalog_entry_malformed_detail,
+    build_catalog_entry_not_found_detail,
+    build_catalog_entry_typed_connector_detail,
+    build_catalog_entry_upstream_not_spec_detail,
+    build_invalid_schema_detail,
+    build_invalid_spec_detail,
+    build_llm_output_invalid_detail,
+    build_op_id_collision_detail,
     build_uncovered_version_label_detail,
+    build_unsupported_spec_detail,
+    build_upstream_not_spec_detail,
     build_version_mismatch_detail,
 )
 from meho_backplane.operations.ingest.exceptions import (
@@ -55,7 +73,17 @@ from meho_backplane.operations.ingest.exceptions import (
     OpIdCollision,
     UncoveredVersionLabel,
     UnsupportedSpecError,
+    UpstreamNotSpecError,
     VersionMismatchError,
+)
+from meho_backplane.operations.ingest.jobs import (
+    IngestJob,
+    IngestJobNotFoundError,
+    IngestJobRegistry,
+    IngestJobStatus,
+    get_job_registry,
+    reset_job_registry_for_tests,
+    run_ingest_job,
 )
 from meho_backplane.operations.ingest.list_connectors import (
     list_ingested_connectors,
@@ -97,6 +125,7 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "AnthropicMessagesLlmClient",
     "CatalogError",
     "CatalogListResponse",
     "ConnectorListItem",
@@ -110,11 +139,19 @@ __all__ = [
     "ConnectorStatusFilter",
     "EditGroupBody",
     "EditOpBody",
+    "EditOpResponse",
+    "EditOpWarning",
     "EndpointDescriptorProto",
     "GenericRestConnector",
     "GroupProposal",
     "GroupingResult",
     "GroupingResultModel",
+    "IngestJob",
+    "IngestJobHandle",
+    "IngestJobNotFoundError",
+    "IngestJobRegistry",
+    "IngestJobStatus",
+    "IngestJobStatusResponse",
     "IngestRequest",
     "IngestResponse",
     "IngestionPipelineResult",
@@ -134,13 +171,26 @@ __all__ = [
     "SpecSource",
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
+    "UpstreamNotSpecError",
     "VersionMismatchError",
+    "build_anthropic_ingest_llm_client",
+    "build_catalog_entry_malformed_detail",
+    "build_catalog_entry_not_found_detail",
+    "build_catalog_entry_typed_connector_detail",
+    "build_catalog_entry_upstream_not_spec_detail",
+    "build_invalid_schema_detail",
+    "build_invalid_spec_detail",
+    "build_llm_output_invalid_detail",
+    "build_op_id_collision_detail",
     "build_uncovered_version_label_detail",
+    "build_unsupported_spec_detail",
+    "build_upstream_not_spec_detail",
     "build_version_mismatch_detail",
     "check_version_covered_by_registered_class",
     "default_llm_client_factory",
     "detect_spec_format",
     "ensure_connector_class_registered",
+    "get_job_registry",
     "list_ingested_connectors",
     "load_catalog",
     "parse_catalog",
@@ -148,6 +198,8 @@ __all__ = [
     "parse_openapi",
     "read_spec_info_version",
     "register_ingested_operations",
+    "reset_job_registry_for_tests",
+    "run_ingest_job",
     "run_llm_grouping",
     "validate_catalog_registry_coverage",
 ]

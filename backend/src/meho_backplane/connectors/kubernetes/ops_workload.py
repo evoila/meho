@@ -94,6 +94,10 @@ from kubernetes_asyncio import client
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_core import age_seconds
+from meho_backplane.connectors.kubernetes.ops_listparams import (
+    LIST_BASE_PROPERTIES,
+    NAMESPACE_XOR_ALL_NAMESPACES,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -786,94 +790,20 @@ async def k8s_deployment_info(
 # ---------------------------------------------------------------------------
 
 
-#: Shared by both list ops: namespace XOR all_namespaces, plus the
-#: standard k8s ``label_selector`` / ``field_selector`` / ``limit`` /
-#: ``continue_token`` filter knobs. The ``oneOf`` clause enforces
-#: exactly-one of the namespace selectors so the operator can't
-#: accidentally pass both (which would be ambiguous about whether
-#: ``all_namespaces`` overrides ``namespace`` or vice-versa).
-_LIST_BASE_PROPERTIES: dict[str, Any] = {
-    "namespace": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Namespace to list in. Required unless ``all_namespaces`` is true.",
-    },
-    "all_namespaces": {
-        "type": "boolean",
-        "default": False,
-        "description": (
-            "List across every namespace the kubeconfig's service "
-            "account can read. Mutually exclusive with ``namespace``."
-        ),
-    },
-    "label_selector": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Standard k8s label selector (e.g. ``app=argocd-server``, "
-            "``app in (frontend,backend)``). Forwarded server-side."
-        ),
-    },
-    "field_selector": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Standard k8s field selector (e.g. ``status.phase=Running``, "
-            "``spec.nodeName=node-1``). Forwarded server-side."
-        ),
-    },
-    "limit": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000,
-        "description": (
-            "Server-side ``?limit=`` for paginated reads. Combine with "
-            "``continue_token`` from a prior response's ``next_continue`` "
-            "field to walk pages. Capped at 1000 to bound per-call "
-            "payload."
-        ),
-    },
-    "continue_token": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Server-emitted pagination cursor from a prior list call's "
-            "``next_continue`` field. Pass it back unchanged to fetch the "
-            "next page; passing a stale token (>5..15 min old) returns a "
-            "410 ResourceExpired -- restart the list without it."
-        ),
-    },
-}
-
-
-#: ``oneOf`` clause: exactly one of {namespace, all_namespaces=true}.
-#:
-#: The ``not`` branches encode "the other selector is absent" for the
-#: namespace branch and "all_namespaces is false-or-absent" for the
-#: missing-both branch. Draft 2020-12 evaluates each branch
-#: independently; the combined effect is the operator must supply
-#: exactly one selector.
-_NAMESPACE_XOR_ALL_NAMESPACES: list[dict[str, Any]] = [
-    {
-        "required": ["namespace"],
-        "not": {"required": ["all_namespaces"]},
-    },
-    {
-        "required": ["namespace", "all_namespaces"],
-        "properties": {"all_namespaces": {"const": False}},
-    },
-    {
-        "required": ["all_namespaces"],
-        "properties": {"all_namespaces": {"const": True}},
-        "not": {"required": ["namespace"]},
-    },
-]
-
-
+#: ``k8s.pod.list`` parameter schema. The shared
+#: :data:`~meho_backplane.connectors.kubernetes.ops_listparams.LIST_BASE_PROPERTIES`
+#: + :data:`~meho_backplane.connectors.kubernetes.ops_listparams.NAMESPACE_XOR_ALL_NAMESPACES`
+#: are the reference shape for every list op in this connector
+#: (`docs/codebase/api-shape-conventions.md` §10). Pod / deployment
+#: list adopt the full base; event / service / ingress / configmap
+#: list adopt the subset that maps to their server-side API surface
+#: (e.g. ``k8s.event.list`` keeps the namespace XOR + ``label_selector``
+#: but omits ``continue_token`` -- the omission is documented in
+#: :data:`~meho_backplane.connectors.kubernetes.ops_events.K8S_EVENT_LIST_PAGINATION_HINT`).
 K8S_POD_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": _LIST_BASE_PROPERTIES,
-    "oneOf": _NAMESPACE_XOR_ALL_NAMESPACES,
+    "properties": LIST_BASE_PROPERTIES,
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -903,8 +833,8 @@ K8S_POD_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
 
 K8S_DEPLOYMENT_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": _LIST_BASE_PROPERTIES,
-    "oneOf": _NAMESPACE_XOR_ALL_NAMESPACES,
+    "properties": LIST_BASE_PROPERTIES,
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -925,6 +855,46 @@ K8S_DEPLOYMENT_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": ["deployment_name", "namespace"],
     "additionalProperties": False,
+}
+
+
+#: Pagination hint surfaced by the JsonFlux reducer on every reducing
+#: ``k8s.pod.list`` response. G0.15-T8 (#1219): consumers reading the
+#: reduced envelope's ``fetch_more.native_pagination`` block see the
+#: param vocabulary + a curated example next call without re-deriving
+#: the contract. ``continue_token`` is the connector-side name for the
+#: server's ``_continue`` cursor (the connector renames it on the way
+#: out so the operator-facing surface stays kubectl-shaped); the hint
+#: documents both so a consumer can map either direction.
+K8S_POD_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "continue_token": (
+            "Server-emitted pagination cursor from the prior response's "
+            "``next_continue`` field. Pass back unchanged to fetch the "
+            "next page; stale tokens (>5..15 min) return 410 -- restart "
+            "the list without it."
+        ),
+        "label_selector": (
+            "Standard k8s label selector (e.g. ``app=argocd-server``, "
+            "``app in (frontend,backend)``). Forwarded server-side."
+        ),
+        "field_selector": (
+            "Standard k8s field selector (e.g. ``status.phase=Running``, "
+            "``spec.nodeName=node-1``). Forwarded server-side."
+        ),
+        "namespace": "Narrow to one namespace.",
+        "limit": "Server-side page size (1..1000).",
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.pod.list",
+            "params": {
+                "all_namespaces": True,
+                "field_selector": "status.phase!=Running",
+            },
+        },
+    },
 }
 
 
@@ -954,6 +924,7 @@ K8S_POD_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "``restarts`` is the sum across main containers. "
         "``next_continue`` is present iff the server has more pages."
     ),
+    "pagination_hint": K8S_POD_LIST_PAGINATION_HINT,
 }
 
 
@@ -980,6 +951,36 @@ K8S_POD_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+#: Same shape as :data:`K8S_POD_LIST_PAGINATION_HINT` -- the k8s server-
+#: side pagination contract is identical across list ops. G0.15-T8
+#: (#1219). The example_next_call uses a deployment-shaped narrowing
+#: filter so an agent reading this hint doesn't carry pod-shaped
+#: intuition over.
+K8S_DEPLOYMENT_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "continue_token": (
+            "Server-emitted pagination cursor from the prior response's "
+            "``next_continue`` field. Pass back unchanged to fetch the "
+            "next page; stale tokens return 410."
+        ),
+        "label_selector": "Standard k8s label selector. Forwarded server-side.",
+        "field_selector": "Standard k8s field selector. Forwarded server-side.",
+        "namespace": "Narrow to one namespace.",
+        "limit": "Server-side page size (1..1000).",
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.deployment.list",
+            "params": {
+                "namespace": "kube-system",
+                "label_selector": "app in (coredns,kube-proxy)",
+            },
+        },
+    },
+}
+
+
 K8S_DEPLOYMENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call when the operator asks 'what's deployed in <ns>?' or "
@@ -1001,6 +1002,7 @@ K8S_DEPLOYMENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "'next_continue'?}. ``image`` is the first container's image "
         "(kubectl convention); full template is on the info path."
     ),
+    "pagination_hint": K8S_DEPLOYMENT_LIST_PAGINATION_HINT,
 }
 
 

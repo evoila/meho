@@ -4,16 +4,13 @@
 package vcfautomation
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -33,23 +30,14 @@ func newOperationCmd() *cobra.Command {
 	return cmd
 }
 
-// searchHit mirrors the backend OperationSearchHit Pydantic model.
-type searchHit struct {
-	OpID             string   `json:"op_id"`
-	Summary          *string  `json:"summary"`
-	Description      *string  `json:"description"`
-	GroupKey         *string  `json:"group_key"`
-	SafetyLevel      string   `json:"safety_level"`
-	RequiresApproval bool     `json:"requires_approval"`
-	FusedScore       float64  `json:"fused_score"`
-	Bm25Score        *float64 `json:"bm25_score"`
-	CosineScore      *float64 `json:"cosine_score"`
-}
-
-type searchResponse struct {
-	Hits            []searchHit `json:"hits"`
-	QueryDurationMs float64     `json:"query_duration_ms"`
-}
+// searchHit + searchResponse alias the dispatch-package types
+// promoted from this dir's pre-#1274 copies. The verb file references
+// the unqualified names so the per-verb pretty-printers + tests stay
+// readable; the underlying types live once in dispatch.
+type (
+	searchHit      = dispatch.SearchHit
+	searchResponse = dispatch.SearchResponse
+)
 
 func newOperationSearchCmd() *cobra.Command {
 	var (
@@ -93,7 +81,7 @@ func runOperationSearch(cmd *cobra.Command, query, groupKey string, limit int, j
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	result, err := getSearch(cmd.Context(), backplaneURL, query, groupKey, limit)
+	result, err := conn.Search(cmd.Context(), backplaneURL, query, groupKey, limit)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
@@ -102,28 +90,6 @@ func runOperationSearch(cmd *cobra.Command, query, groupKey string, limit int, j
 	}
 	printSearchTable(cmd.OutOrStdout(), query, result)
 	return nil
-}
-
-func getSearch(ctx context.Context, backplaneURL, query, groupKey string, limit int) (*searchResponse, error) {
-	q := url.Values{}
-	q.Set("connector_id", ConnectorID)
-	q.Set("query", query)
-	if groupKey != "" {
-		q.Set("group", groupKey)
-	}
-	if limit > 0 {
-		q.Set("limit", strconv.Itoa(limit))
-	}
-	path := "/api/v1/operations/search?" + q.Encode()
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	var out searchResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode search response: %w", err)
-	}
-	return &out, nil
 }
 
 func printSearchTable(w io.Writer, query string, r *searchResponse) {

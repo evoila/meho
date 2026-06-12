@@ -50,7 +50,7 @@ class _FakeConnector(Connector):
 
     product = "fake"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -63,7 +63,7 @@ class _FakeConnector(Connector):
 class _AnotherFakeConnector(Connector):
     product = "another"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -324,16 +324,20 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             # G5.2-T1 (#623) added a memory-expiry sweeper start to the
             # lifespan body; G9.3-T6 (#858) added a topology-history
             # retention sweeper; G11.2-T6 (#819) added a grant-expiry
-            # sweeper. All read ``get_settings`` to decide whether to
-            # start; patch all flags off so this test (which doesn't
-            # pin env vars) does not regress on the env-var lookup
-            # ``get_settings`` would otherwise hit.
+            # sweeper; G11.3-T4 (#825) added an agent_run reaper. All
+            # read ``get_settings`` to decide whether to start; patch
+            # all flags off so this test (which doesn't pin env vars)
+            # does not regress on the env-var lookup ``get_settings``
+            # would otherwise hit.
             patch(
                 "meho_backplane.main.get_settings",
                 return_value=MagicMock(
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    scheduler_enabled=False,
+                    agent_run_reaper_enabled=False,
+                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -345,6 +349,28 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             ),
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
+            # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
+            # + G11.3-T3 (#824) event-drain patches combined via
+            # ``patch.multiple`` to stay under CPython's "too many
+            # statically nested blocks" limit (20) the parenthesised
+            # ``with`` form imposes.
+            # G3.11-T10 #1253 added validate_catalog_registry_coverage
+            # to the lifespan after load_catalog. With _eager_import_connectors
+            # mocked out the registry is empty by construction, so patch
+            # load_catalog + the validator into the same patch.multiple
+            # block (avoids tripping CPython's 20-statically-nested-block
+            # limit the parenthesised ``with`` form imposes).
+            patch.multiple(
+                "meho_backplane.main",
+                start_scheduler=MagicMock(),
+                stop_scheduler=AsyncMock(),
+                start_agent_run_reaper=MagicMock(),
+                stop_agent_run_reaper=AsyncMock(),
+                start_event_drain=MagicMock(),
+                stop_event_drain=AsyncMock(),
+                load_catalog=MagicMock(),
+                validate_catalog_registry_coverage=MagicMock(),
+            ),
         ):
             # Manually step through the lifespan async generator.
             gen = lifespan(None)  # type: ignore[arg-type]
@@ -388,17 +414,20 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
             patch("meho_backplane.main.get_embedding_service"),
-            # G5.2-T1 (#623) + G9.3-T6 (#858) + G11.2-T6 (#819) — same
-            # lifespan-task patches as the sibling test. All background-
-            # task flags are pinned off so this dispose-error test
-            # exercises only the disposer ordering, not the start-task
-            # race.
+            # G5.2-T1 (#623) + G9.3-T6 (#858) + G11.2-T6 (#819) +
+            # G11.3-T4 (#825) — same lifespan-task patches as the
+            # sibling test. All background-task flags are pinned off
+            # so this dispose-error test exercises only the disposer
+            # ordering, not the start-task race.
             patch(
                 "meho_backplane.main.get_settings",
                 return_value=MagicMock(
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    scheduler_enabled=False,
+                    agent_run_reaper_enabled=False,
+                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -410,6 +439,26 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             ),
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
+            # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
+            # + G11.3-T3 (#824) event-drain patches combined via
+            # ``patch.multiple`` to stay under CPython's "too many
+            # statically nested blocks" limit (20) the parenthesised
+            # ``with`` form imposes.
+            # Same G3.11-T10 #1253 shape as the sibling lifespan test —
+            # registry is empty under the mocks, so skip the catalog
+            # coverage validator. Folded into patch.multiple to fit
+            # under CPython's 20-statically-nested-block limit.
+            patch.multiple(
+                "meho_backplane.main",
+                start_scheduler=MagicMock(),
+                stop_scheduler=AsyncMock(),
+                start_agent_run_reaper=MagicMock(),
+                stop_agent_run_reaper=AsyncMock(),
+                start_event_drain=MagicMock(),
+                stop_event_drain=AsyncMock(),
+                load_catalog=MagicMock(),
+                validate_catalog_registry_coverage=MagicMock(),
+            ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]
             await gen.__aenter__()
@@ -420,3 +469,60 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
         broadcast_disposed.assert_awaited_once()
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# canonical_product_token — product-token alias reconciliation
+# (G0.18-T2 #1355, RDC #789 Finding 6; closes #1312 acceptance B)
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_product_token_maps_sddc_alias() -> None:
+    """``"sddc"`` (the connector-list spelling) canonicalises to ``"sddc-manager"``."""
+    from meho_backplane.connectors.registry import canonical_product_token
+
+    assert canonical_product_token("sddc") == "sddc-manager"
+
+
+def test_canonical_product_token_is_identity_for_canonical_tokens() -> None:
+    """A canonical registry token is returned verbatim (never re-aliased)."""
+    from meho_backplane.connectors.registry import canonical_product_token
+
+    assert canonical_product_token("sddc-manager") == "sddc-manager"
+    assert canonical_product_token("vmware") == "vmware"
+    assert canonical_product_token("k8s") == "k8s"
+
+
+def test_canonical_product_token_passes_unknown_tokens_through() -> None:
+    """An unknown / unregistered token is returned unchanged (no guessing).
+
+    Canonicalisation only normalises *known* aliases; an arbitrary
+    string is the validator's problem (it 422s with ``unknown_product``),
+    not the canonicaliser's.
+    """
+    from meho_backplane.connectors.registry import canonical_product_token
+
+    assert canonical_product_token("totally-unknown") == "totally-unknown"
+
+
+def test_canonical_product_token_is_idempotent() -> None:
+    """``canonical(canonical(x)) == canonical(x)`` for the alias + identity cases."""
+    from meho_backplane.connectors.registry import canonical_product_token
+
+    for token in ("sddc", "sddc-manager", "vmware", "totally-unknown"):
+        once = canonical_product_token(token)
+        assert canonical_product_token(once) == once
+
+
+def test_product_aliases_keys_are_not_themselves_canonical() -> None:
+    """No alias key is also an alias value — guards against a chained alias.
+
+    The canonicaliser is a single ``dict.get``; if an alias key were
+    also a value, a token would canonicalise to another alias and the
+    one-hop idempotency contract would break. Pin the invariant
+    structurally so a future alias addition can't introduce a chain.
+    """
+    from meho_backplane.connectors.registry import PRODUCT_ALIASES
+
+    alias_values = set(PRODUCT_ALIASES.values())
+    assert set(PRODUCT_ALIASES) & alias_values == set()

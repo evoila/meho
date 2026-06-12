@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""NsxConnector -- hand-rolled HttpConnector subclass for NSX 4.x.
+"""NsxConnector -- hand-rolled HttpConnector subclass for NSX.
 
 Skeleton-only -- auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #614 via G0.7 spec ingestion against
-``nsx-4.2/policy.yaml`` + ``nsx-4.2/manager.yaml``.
+Operations arrive in #614 via G0.7 spec ingestion against the NSX
+``policy.yaml`` + ``manager.yaml`` corpus the appliance serves.
 
 Registered against the v2 registry at module-import time via
 :func:`~meho_backplane.connectors.registry.register_connector_v2` in
@@ -13,8 +13,23 @@ Registered against the v2 registry at module-import time via
 idempotency check (in
 :func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
 once #408's pipeline lands in main) no-ops on subsequent ingests
-against the same ``(product="nsx", version="4.2", impl_id="nsx-rest")``
+against the same ``(product="nsx", version="9.0", impl_id="nsx-rest")``
 triple.
+
+VCF-9 version renumber (#1530)
+------------------------------
+
+NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live
+VCF-9 appliance reports NSX 9.0.x and the vendor spec carries
+``info.version`` in the 9.x scheme. The :attr:`supported_version_range`
+spans ``>=4.0,<10.0`` so a single class covers both the standalone
+NSX-T 4.x line and the VCF-9-aligned 9.x line; dispatch and the
+ingest version-range pre-flight key on the
+:class:`packaging.specifiers.SpecifierSet`, not the class-pinned
+:attr:`version`, so the one class resolves every label in the band.
+Same renumber posture :class:`VmwareRestConnector` took for the
+vSphere 8.x -> 9.0 jump (``version="9.0"``,
+``supported_version_range=">=8.5,<10.0"``).
 
 Auth divergence from the vSphere precedent
 ------------------------------------------
@@ -34,8 +49,9 @@ consumer wrapper repo). The flow:
    subsequent requests through the same per-target client carry the
    cookie without manual plumbing.
 3. The response's ``X-XSRF-TOKEN`` header is captured into
-   :attr:`_session_tokens` keyed on ``target.name`` (mirrors
-   :class:`VmwareRestConnector._session_tokens` per-target isolation).
+   :attr:`_session_tokens` keyed on the tenant-unique
+   ``(tenant_id, target.id)`` tuple (#1642), so two same-named targets in
+   different tenants never share a cached session.
 4. :meth:`auth_headers` returns ``{"X-XSRF-TOKEN": <cached>}`` on
    subsequent calls; the cookie travels via the client jar.
 5. On HTTP 401 from a downstream call, :meth:`_get_json_with_session_retry`
@@ -99,6 +115,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
@@ -156,7 +173,7 @@ def _is_acceptable_auth_model(value: Any) -> bool:
 
 
 class NsxConnector(HttpConnector):
-    """NSX 4.x REST connector with session-cookie + XSRF auth.
+    """NSX REST connector with session-cookie + XSRF auth.
 
     Per-target XSRF token cached in :attr:`_session_tokens`; the
     accompanying ``JSESSIONID`` cookie is held by the per-target
@@ -172,11 +189,14 @@ class NsxConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"nsx-rest-4.2"`` -> (``"nsx"``, ``"4.2"``, ``"nsx-rest"``).
+    # ``"nsx-rest-9.0"`` -> (``"nsx"``, ``"9.0"``, ``"nsx-rest"``). The
+    # version pin tracks the VCF-9-aligned product line (#1530); the
+    # ``>=4.0,<10.0`` range keeps the standalone NSX-T 4.x line
+    # dispatchable through the same class.
     product = "nsx"
-    version = "4.2"
+    version = "9.0"
     impl_id = "nsx-rest"
-    supported_version_range = ">=4.0,<5.0"
+    supported_version_range = ">=4.0,<10.0"
     priority = 1
 
     def __init__(
@@ -185,7 +205,7 @@ class NsxConnector(HttpConnector):
         session_loader: NsxSessionLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[str, str] = {}
+        self._session_tokens: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: NsxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -246,8 +266,9 @@ class NsxConnector(HttpConnector):
         read; injected test loaders accept the same
         ``(target, operator)`` pair.
         """
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            cached = self._session_tokens.get(target.name)
+            cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
             creds = await self._session_loader(target, operator)
@@ -291,7 +312,7 @@ class NsxConnector(HttpConnector):
                     f"POST {_SESSION_CREATE_PATH} returned 2xx with no "
                     f"{_XSRF_HEADER} response header"
                 )
-            self._session_tokens[target.name] = xsrf
+            self._session_tokens[cache_key] = xsrf
             _log.info(
                 "nsx_session_established",
                 target=target.name,
@@ -308,9 +329,14 @@ class NsxConnector(HttpConnector):
         Holds the lock so a concurrent re-establish doesn't race with
         the invalidation.
         """
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            self._session_tokens.pop(target.name, None)
-            client = self._clients.get(target.name)
+            self._session_tokens.pop(cache_key, None)
+            # The shared ``HttpConnector._clients`` pool is keyed on the
+            # same tenant-unique ``(tenant_id, id)`` tuple as the
+            # session-token cache (evoila/meho#1682), so the cookie jar we
+            # clear here belongs to exactly this tenant's host-bound client.
+            client = self._clients.get(cache_key)
             if client is not None:
                 client.cookies.clear()
 
@@ -352,7 +378,11 @@ class NsxConnector(HttpConnector):
                 ) from exc
             raise
 
-    async def fingerprint(self, target: NsxTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: NsxTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /api/v1/node``.
 
         The session is fetched lazily by :meth:`auth_headers` (called
@@ -368,11 +398,22 @@ class NsxConnector(HttpConnector):
         operator's first ``meho connector fingerprint`` against an
         unreachable NSX gets a structured response rather than a
         stack trace.
+
+        ``operator`` (optional) is the request-scoped operator forwarded
+        from the probe routes. When provided, the session credentials
+        loader reads the per-target Vault secret under that identity --
+        the same code path the dispatch surface uses. ``None`` falls
+        back to a system operator whose placeholder JWT fails closed
+        at the live Vault round-trip. G0.16-T4 (#1306) converged probe
+        + dispatch on this signature; pre-fix the probe path hard-coded
+        the placeholder JWT and surfaced as the v0.8.0 dogfood's
+        ``malformed jwt: must have three parts`` finding on ``vcf9-nsx``.
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
             payload = await self._get_json_with_session_retry(
-                target, "/api/v1/node", operator=synthesise_system_operator()
+                target, "/api/v1/node", operator=eff_operator
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
@@ -441,7 +482,7 @@ class NsxConnector(HttpConnector):
         nil-UUID tenant_id + a fixed system sentinel ``sub``; the
         connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"nsx-rest-4.2"`` -> (product=``"nsx"``, version=``"4.2"``,
+        ``"nsx-rest-9.0"`` -> (product=``"nsx"``, version=``"9.0"``,
         impl_id=``"nsx-rest"``).
         """
         # Lazy import -- meho_backplane.operations.dispatch transitively

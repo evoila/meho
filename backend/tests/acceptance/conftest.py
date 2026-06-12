@@ -197,6 +197,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "broadcast_override",
     "documents",
     "endpoint_descriptor",
+    # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0027`` (G11.3-T3 #824). PG rejects truncating ``tenant``
+    # unless every referencing table is listed in the same statement, so
+    # ``event_outbox`` must appear here or every PG-backed acceptance test
+    # errors at setup with ``cannot truncate a table referenced in a
+    # foreign key constraint`` (the recurring fixture gotcha #1064 / #1065).
+    "event_outbox",
     # ``graph_edge_history`` carries a real FK ``graph_edge(id) ON DELETE
     # SET NULL`` per migration ``0012`` (#856 T1); the same applies to
     # ``graph_node_history``. PG rejects a TRUNCATE on the parent table
@@ -211,6 +218,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "graph_edge_history",
     "graph_node",
     "graph_node_history",
+    # ``identity_budget.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0031`` (G11.5-T5 #1079). Same rule: PG rejects
+    # truncating ``tenant`` unless every referencing table is listed in
+    # the same statement, so ``identity_budget`` must appear here or every
+    # PG-backed acceptance test errors at setup with ``cannot truncate a
+    # table referenced in a foreign key constraint``.
+    "identity_budget",
     "operation_group",
     # ``scheduled_trigger.tenant_id`` and ``.agent_definition_id`` are real
     # ``REFERENCES`` FKs from migration ``0020`` (G11.3-T1 #822); the table

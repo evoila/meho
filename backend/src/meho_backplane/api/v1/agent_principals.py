@@ -60,11 +60,13 @@ from meho_backplane.auth.agent_principals import (
     AgentPrincipalService,
 )
 from meho_backplane.auth.keycloak_admin import (
+    KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
     KeycloakAdminError,
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
 
 __all__ = ["router"]
 
@@ -92,11 +94,31 @@ class AgentPrincipalListResponse(BaseModel):
 
 
 def _handle_admin_error(exc: Exception) -> HTTPException:
-    """Map Keycloak admin errors to HTTP responses."""
+    """Map Keycloak admin errors to HTTP responses.
+
+    Two failure modes get distinct status codes and shapes:
+
+    * :class:`KeycloakAdminNotConfiguredError` -> 503 with the
+      gold-standard three-clause detail (domain code + named env
+      vars + doc reference), built once as
+      :data:`~meho_backplane.auth.keycloak_admin.KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL`.
+      Compliant with the convention codified in
+      ``docs/codebase/error-message-shape.md`` (G0.14-T11 #1141);
+      symmetric with
+      :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
+      on ``/ui/auth/login`` (the consumer-flagged gold-standard).
+    * Any other :class:`KeycloakAdminError` -> 502 with the bare
+      ``keycloak_admin_error`` code. Intentionally bare per the
+      convention's *intentionally-bare* section: the remediation
+      depends on the upstream's actual fault and naming a specific
+      remediation would speculate. The structured log carries the
+      exception class + status code so an operator with cluster
+      access can resolve the underlying cause off the request path.
+    """
     if isinstance(exc, KeycloakAdminNotConfiguredError):
         return HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="keycloak_admin_not_configured",
+            detail=KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
         )
     return HTTPException(
         status_code=http_status.HTTP_502_BAD_GATEWAY,
@@ -179,6 +201,16 @@ async def register_agent_principal(
         ) from exc
     except KeycloakAdminError as exc:
         raise _handle_admin_error(exc) from exc
+    except SchedulerVaultBrokerError as exc:
+        # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
+        # (unreachable / denied). 502 upstream failure; the just-created
+        # Keycloak client is already rolled back. (An *unset* token is not
+        # an error — the service skips the write and the agent uses the
+        # env-var fallback.)
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail="scheduler_vault_write_error",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -76,11 +76,19 @@ are forwarded verbatim. On audit failure the buffer is discarded and
 a fresh 500 ``{"detail": "audit_write_failed"}`` response is sent.
 
 The buffer is bounded by the response itself (typical FastAPI JSON
-responses are kilobytes); v0.1 does not need streaming-response
-support on audited routes and the audit middleware would degrade
-streaming semantics regardless. When v0.2 adds streaming routes, the
-audit row must be written *after* the response body has streamed —
-a change tracked as a follow-up rather than landing here.
+responses are kilobytes). Streaming routes are the deliberate
+exception: a ``text/event-stream`` response (the SSE feeds at
+``/api/v1/feed`` and ``/ui/broadcast/stream``) is **not** buffered —
+buffering an open-ended SSE generator until the inner app returns
+delivers zero bytes to the client for the life of the connection
+(#1389). Such responses are forwarded chunk-by-chunk as the generator
+yields, and the audit row is written when the stream ends (normal
+completion or a client-disconnect ``CancelledError``). The fail-closed
+500 swap cannot apply once a stream's ``http.response.start`` is on the
+wire; the audit-write failure is still logged loudly, and the SSE
+handler surfaces transport faults to the subscriber as an
+``event: feed_error`` frame. Non-streaming JSON routes keep the
+buffered fail-closed-500 contract verbatim.
 
 References
 ----------
@@ -90,6 +98,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -119,6 +128,35 @@ _AUDIT_FAILURE_BODY: Final[bytes] = json.dumps({"detail": "audit_write_failed"})
 
 _RESPONSE_START: Final[str] = "http.response.start"
 _RESPONSE_BODY: Final[str] = "http.response.body"
+
+#: Content-type the middleware treats as a live stream that must NOT be
+#: buffered. Matched as a prefix against the lowercased ``content-type``
+#: header value on ``http.response.start`` so the ``; charset=utf-8``
+#: suffix Starlette's :class:`~starlette.responses.StreamingResponse`
+#: appends still matches. Both SSE surfaces — ``GET /api/v1/feed``
+#: (G6.1-T4) and ``GET /ui/broadcast/stream`` (G10.1) — set this media
+#: type; an open-ended SSE generator never completes, so buffering its
+#: send messages until the inner app returns delivers zero bytes to the
+#: client for the life of the connection (#1389).
+_EVENT_STREAM_MEDIA_TYPE: Final[bytes] = b"text/event-stream"
+
+
+def _is_event_stream_start(message: Message) -> bool:
+    """Return ``True`` when *message* is an ``http.response.start`` for an SSE body.
+
+    Inspects the ``content-type`` header on the start message. ASGI
+    header names are byte strings and case-insensitive per RFC 9110;
+    the value carries the ``; charset=...`` suffix Starlette appends,
+    so the comparison is a lowercased prefix match against
+    :data:`_EVENT_STREAM_MEDIA_TYPE`.
+    """
+    if message.get("type") != _RESPONSE_START:
+        return False
+    headers: list[tuple[bytes, bytes]] = message.get("headers") or []
+    for name, value in headers:
+        if name.lower() == b"content-type":
+            return bool(value.lower().startswith(_EVENT_STREAM_MEDIA_TYPE))
+    return False
 
 
 def _coerce_request_id(raw: object) -> uuid.UUID | None:
@@ -464,36 +502,88 @@ async def _publish_broadcast_event(
     await publish_event(event)
 
 
+class _InnerAppResult:
+    """Mutable view of the inner app's response, observable on exception.
+
+    ``status_code`` and ``streamed`` are written as the inner app emits
+    its first ``http.response.start`` message, so the audit-write code
+    can read them even when the inner app later raises
+    :class:`asyncio.CancelledError` (an SSE client disconnect, which
+    must still produce an audit row for the closed session — #1389).
+    ``handler_exc`` holds a non-cancellation :class:`Exception` the
+    inner app raised, mapped to the fail-closed 500 path.
+    """
+
+    __slots__ = ("handler_exc", "status_code", "streamed")
+
+    def __init__(self) -> None:
+        self.status_code: int = 0
+        self.handler_exc: BaseException | None = None
+        #: True once an ``http.response.start`` for ``text/event-stream``
+        #: was seen — its messages were forwarded live, not buffered.
+        self.streamed: bool = False
+
+
 async def _run_inner_app_buffered(
     app: ASGIApp,
     scope: Scope,
     receive: Receive,
+    send: Send,
     buffered: list[Message],
-) -> tuple[int, BaseException | None]:
-    """Invoke the inner app capturing its send messages.
+    result: _InnerAppResult,
+) -> None:
+    """Invoke the inner app, buffering its send messages — except SSE streams.
 
-    Returns ``(status_code, handler_exc)``. When the inner app raises a
-    non-cancellation :class:`Exception`, the buffered messages are
-    cleared (a partially-emitted response cannot be safely forwarded)
-    and ``status_code`` is synthesised to 500 so the audit row reflects
-    Starlette's :class:`~starlette.middleware.errors.ServerErrorMiddleware`
+    Populates the caller-owned *result* in place. The default contract
+    is unchanged: ``http.response.start`` + ``http.response.body``
+    messages are appended to *buffered* and the caller forwards them only
+    after the audit insert decides whether to keep them or replace them
+    with a fail-closed 500.
+
+    The exception is a ``text/event-stream`` response
+    (:func:`_is_event_stream_start`): an open-ended SSE generator never
+    completes, so buffering its messages until the inner app returns
+    delivers zero bytes to the client for the life of the connection
+    (#1389). Once the start message is recognised as a stream, that
+    message and every subsequent body chunk are forwarded through *send*
+    immediately, and :attr:`_InnerAppResult.streamed` is set so the
+    caller skips the post-audit re-forward and the fail-closed-500
+    replacement (the response headers are already on the wire — the SSE
+    feed handler surfaces a transport failure as an ``event: feed_error``
+    frame instead, see :mod:`meho_backplane.api.v1.feed`).
+
+    When the inner app raises a non-cancellation :class:`Exception`,
+    non-streamed buffered messages are cleared (a partially-emitted
+    response cannot be safely forwarded) and the status is synthesised
+    to 500 so the audit row reflects
+    :class:`~starlette.middleware.errors.ServerErrorMiddleware`'s
     eventual verdict. ``CancelledError`` is intentionally *not* caught
-    so client disconnects still cancel the task tree cleanly.
+    so client disconnects still cancel the task tree cleanly — and
+    because *result* is caller-owned, it is fully populated by the time
+    the cancellation propagates, so the caller's ``except`` arm still
+    writes the audit row for a streamed session that ended on disconnect.
     """
-    status_code: int = 0
 
     async def buffered_send(message: Message) -> None:
-        nonlocal status_code
         if message["type"] == _RESPONSE_START:
-            status_code = int(message.get("status", 0))
+            result.status_code = int(message.get("status", 0))
+            if _is_event_stream_start(message):
+                result.streamed = True
+        if result.streamed:
+            # SSE: forward live so each chunk reaches the client as the
+            # generator yields it, rather than after the (never-ending)
+            # stream closes.
+            await send(message)
+            return
         buffered.append(message)
 
     try:
         await app(scope, receive, buffered_send)
     except Exception as exc:
-        buffered.clear()
-        return 500, exc
-    return status_code, None
+        if not result.streamed:
+            buffered.clear()
+            result.status_code = 500
+        result.handler_exc = exc
 
 
 def _resolve_request_metadata(
@@ -634,7 +724,6 @@ class AuditMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    # code-quality-allow: pre-existing legacy __call__; G7.1-T2 only added audit_id pre-allocation
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -656,20 +745,122 @@ class AuditMiddleware:
 
         # Buffer the inner app's send messages so we can decide, after
         # the audit insert, whether to forward them or replace with a
-        # fresh 500. v0.1 routes return single-shot JSON responses; the
-        # buffer is small. The inner-app invocation is wrapped so a
-        # handler exception still produces an audit row for the failed
-        # action (the audit row is the operator-facing trace of "this
-        # action was attempted"); see :func:`_run_inner_app_buffered`.
+        # fresh 500. Single-shot JSON responses keep the buffer small.
+        # The exception is a ``text/event-stream`` response: its messages
+        # are forwarded live by :func:`_run_inner_app_buffered` (an
+        # open-ended SSE generator never returns, so buffering would
+        # deliver zero bytes — #1389). The inner-app invocation is
+        # wrapped so a handler exception still produces an audit row for
+        # the failed action.
+        #
+        # An SSE client disconnect raises :class:`asyncio.CancelledError`
+        # out of the inner app; the audit row for the now-closed session
+        # is still written (the ``result`` holder is fully populated by
+        # then) before the cancellation propagates to unwind the task
+        # tree per asyncio's contract. That disconnect-path write is
+        # shielded (#1599) so a second cancellation mid-INSERT cannot
+        # silently drop the row — see the ``except`` arm below.
         buffered: list[Message] = []
-        status_code, handler_exc = await _run_inner_app_buffered(
-            self.app,
-            scope,
-            receive,
-            buffered,
-        )
+        result = _InnerAppResult()
+        try:
+            await _run_inner_app_buffered(
+                self.app,
+                scope,
+                receive,
+                send,
+                buffered,
+                result,
+            )
+        except asyncio.CancelledError as cancelled:
+            # SSE client disconnect. ``result`` is caller-owned, so its
+            # ``streamed`` / ``status_code`` reflect the headers already
+            # sent on the first yield; write the audit row for the closed
+            # session, then re-raise to unwind the task tree (Sonar
+            # S7497 / asyncio cancellation contract).
+            #
+            # The write is run as a shielded task (#1599): a *second*
+            # ``CancelledError`` delivered while ``_finalize`` is awaiting
+            # the audit INSERT (task-tree teardown, server shutdown, an
+            # enclosing ``timeout()`` or anyio cancel scope) would
+            # otherwise propagate straight out of a bare ``await`` —
+            # ``CancelledError`` is a ``BaseException``, so ``_finalize``'s
+            # ``except Exception`` arm never sees it and the row is dropped
+            # with no log line at all.
+            #
+            # ``ensure_future`` schedules the write on the loop and we keep
+            # a strong reference (the loop holds only a weak one). We then
+            # drain it to completion under ``asyncio.shield``. The drain is
+            # a loop, not a single ``await``: cancellation can be delivered
+            # repeatedly (an ASGI server re-cancelling the task on a
+            # half-closed disconnect, an enclosing anyio cancel scope that
+            # is *level-triggered* and re-raises at every checkpoint while
+            # it stays cancelled), so a single ``await shield(write)`` may
+            # be interrupted before the shielded task finishes. Re-awaiting
+            # under a fresh shield each iteration lets the write run to
+            # completion regardless of how many cancellations are
+            # redelivered. The shielded task itself is never cancelled by
+            # these (that is what ``shield`` guarantees); only our wait is.
+            # Once the write is done we re-raise the original ``cancelled``
+            # so the disconnect is honored, without suppressing it (no
+            # ``Task.uncancel()``).
+            write = asyncio.ensure_future(
+                self._finalize(
+                    scope=scope,
+                    send=send,
+                    buffered=buffered,
+                    result=result,
+                    duration_ms=round((time.monotonic() - start) * 1000, 2),
+                ),
+            )
+            while not write.done():
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    # A redelivered cancellation interrupted the wait, not
+                    # the shielded write. Loop to finish draining it; the
+                    # original ``cancelled`` is re-raised below to honor the
+                    # disconnect.
+                    continue
+            # Surface a ``_finalize`` failure (the handler itself raised);
+            # ``write.result()`` re-raises it. An SSE disconnect never
+            # populates ``handler_exc`` (the inner app only catches
+            # ``Exception``), so a cleanly-closed stream's write returns
+            # ``None`` here.
+            write.result()
+            raise cancelled
 
         duration_ms = round((time.monotonic() - start) * 1000, 2)
+        await self._finalize(
+            scope=scope,
+            send=send,
+            buffered=buffered,
+            result=result,
+            duration_ms=duration_ms,
+        )
+
+    # code-quality-allow: relocated legacy __call__ body (audit-write +
+    # broadcast publish + forward control flow); #1389 only extracted it
+    # so the normal-return and SSE-disconnect paths share one finalizer.
+    async def _finalize(
+        self,
+        *,
+        scope: Scope,
+        send: Send,
+        buffered: list[Message],
+        result: _InnerAppResult,
+        duration_ms: float,
+    ) -> None:
+        """Write the audit row and forward / replace / re-raise the response.
+
+        Shared by the normal-return path and the SSE-disconnect
+        (``CancelledError``) path. ``result.streamed`` selects between
+        the buffered fail-closed-500 contract (non-streaming JSON routes,
+        unchanged) and the already-streamed contract (SSE: bytes are on
+        the wire, so the audit row is recorded but the response can no
+        longer be replaced or re-forwarded — #1389).
+        """
+        status_code = result.status_code
+        handler_exc = result.handler_exc
         operator_sub = structlog.contextvars.get_contextvars().get("operator_sub")
 
         if not isinstance(operator_sub, str) or not operator_sub:
@@ -677,11 +868,13 @@ class AuditMiddleware:
             # (public surfaces, 401s, and any other unauthenticated
             # path land here); forward the buffered response unchanged
             # — or, if the handler raised, re-raise so the outer
-            # ServerErrorMiddleware builds the 500.
-            if handler_exc is not None:
+            # ServerErrorMiddleware builds the 500. Streamed responses
+            # were already forwarded live, so there is nothing to flush.
+            if handler_exc is not None and not result.streamed:
                 raise handler_exc
-            for message in buffered:
-                await send(message)
+            if not result.streamed:
+                for message in buffered:
+                    await send(message)
             return
 
         method, path, request_id = _resolve_request_metadata(scope)
@@ -764,6 +957,18 @@ class AuditMiddleware:
                 status_code=status_code,
                 duration_ms=duration_ms,
             )
+            # Streamed (SSE) responses already sent ``http.response.start``
+            # live, so the fail-closed 500 swap is impossible — the bytes
+            # are on the wire. The audit-write failure is still logged
+            # loudly above; the SSE handler surfaces transport faults to
+            # the subscriber as an ``event: feed_error`` frame. Re-raise
+            # only when the handler itself faulted (the task is already
+            # unwinding); otherwise return so the live stream closes
+            # cleanly rather than being torn down by a synthesised 500.
+            if result.streamed:
+                if handler_exc is not None:
+                    raise handler_exc from None
+                return
             # If the handler itself also raised, the audit-failure
             # response cannot be sent (the outer ServerErrorMiddleware
             # is about to take over); prefer surfacing the original
@@ -809,11 +1014,18 @@ class AuditMiddleware:
         # ServerErrorMiddleware builds the canonical 500; the audit
         # row attributing the failed action is already persisted,
         # satisfying the "every authenticated action gets exactly one
-        # row" contract for the 5xx path.
+        # row" contract for the 5xx path. An SSE client disconnect
+        # surfaces as ``CancelledError`` re-raised by ``__call__`` after
+        # this method returns — it is never recorded in ``handler_exc``
+        # (``_run_inner_app_buffered`` only catches ``Exception``), so a
+        # cleanly-closed stream falls through to the no-op return below.
         if handler_exc is not None:
             raise handler_exc
 
-        # Audit committed and handler succeeded — forward the buffered
-        # response verbatim.
+        # Audit committed and handler succeeded. A streamed response was
+        # already forwarded chunk-by-chunk; only buffered (non-streaming)
+        # responses are flushed here.
+        if result.streamed:
+            return
         for message in buffered:
             await send(message)

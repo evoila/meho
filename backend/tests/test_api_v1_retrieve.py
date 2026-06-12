@@ -300,6 +300,218 @@ def test_oversized_query_rejects_with_422(retrieve_client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# metadata_filters: forwarding, validation, audit payload (G4.4-T1 / #1177)
+# ---------------------------------------------------------------------------
+
+
+def test_retrieve_route_threads_metadata_filters_to_substrate(
+    retrieve_client: TestClient,
+) -> None:
+    """``metadata_filters`` in the body reaches the substrate kwargs.
+
+    The route forwards the field verbatim to
+    :func:`~meho_backplane.retrieval.retriever.retrieve` so the
+    substrate's containment predicate scopes the candidate pull
+    identically to an in-process call.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-mf-1", tenant_role=TenantRole.OPERATOR.value)
+    fake_retrieve = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.retrieve.retrieve", new=fake_retrieve),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={
+                "query": "vsphere",
+                "metadata_filters": {"source_kind": "evoila-distilled"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    call_kwargs = fake_retrieve.await_args.kwargs
+    assert call_kwargs["metadata_filters"] == {"source_kind": "evoila-distilled"}
+
+
+def test_retrieve_route_rejects_nested_metadata_filter_values(
+    retrieve_client: TestClient,
+) -> None:
+    """A non-scalar value in ``metadata_filters`` fails 422 validation.
+
+    The substrate's contract is ``{key: scalar}``; nested objects /
+    arrays open DSL-creep and index-utility erosion the v0.2.next
+    surface does not want to inherit. Pinned by an explicit
+    field_validator so the rejection arrives at the Pydantic
+    boundary, not in the SQL layer.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-mf-bad", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={
+                "query": "q",
+                "metadata_filters": {"nested": {"oops": 1}},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # The error must reference the offending key so the operator can
+    # debug it without re-running with a logger attached.
+    serialised = json.dumps(detail)
+    assert "nested" in serialised
+
+
+def test_retrieve_route_rejects_array_metadata_filter_values(
+    retrieve_client: TestClient,
+) -> None:
+    """Array-shaped values are rejected for the same reasons as nested dicts."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-mf-arr", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={
+                "query": "q",
+                "metadata_filters": {"tags": ["a", "b"]},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 422
+
+
+def test_retrieve_route_rejects_oversized_metadata_filter_dict(
+    retrieve_client: TestClient,
+) -> None:
+    """A dict with > 20 keys fails the ``max_length`` cap (per-request DoS guard)."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-mf-many", tenant_role=TenantRole.OPERATOR.value)
+    payload = {f"k{i}": i for i in range(25)}
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={"query": "q", "metadata_filters": payload},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 422
+
+
+def test_retrieve_route_accepts_scalar_metadata_filter_values(
+    retrieve_client: TestClient,
+) -> None:
+    """Mixed scalar values (str / int / float / bool / None) all pass validation."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-mf-ok", tenant_role=TenantRole.OPERATOR.value)
+    fake_retrieve = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.retrieve.retrieve", new=fake_retrieve),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={
+                "query": "q",
+                "metadata_filters": {
+                    "source_kind": "evoila-distilled",
+                    "count": 7,
+                    "ratio": 0.42,
+                    "active": True,
+                    "missing": None,
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_audit_payload_carries_metadata_filter_keys_not_values(
+    retrieve_client: TestClient,
+) -> None:
+    """The audit_log row records ``metadata_filters_keys`` (sorted, no values).
+
+    Filter values may carry tenant-shaped identifiers; storing only
+    the sorted key list matches the same privacy posture
+    ``query_hash`` enforces for the raw query. The serialised payload
+    must not contain the literal value strings.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-audit-mf", tenant_role=TenantRole.OPERATOR.value)
+    fake_retrieve = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.retrieve.retrieve", new=fake_retrieve),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={
+                "query": "secret-query",
+                "metadata_filters": {
+                    "user_sub": "alice@example.com",
+                    "target_name": "vcenter-prod-01",
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/retrieve"))
+        rows = result.scalars().all()
+
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["metadata_filters_keys"] == ["target_name", "user_sub"]
+    # The values MUST NOT appear in the serialised payload.
+    serialised = json.dumps(payload)
+    assert "alice@example.com" not in serialised
+    assert "vcenter-prod-01" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_audit_payload_omits_metadata_filter_keys_when_unset(
+    retrieve_client: TestClient,
+) -> None:
+    """No ``metadata_filters`` in the request → no ``metadata_filters_keys`` in the payload.
+
+    The audit-payload resolver drops ``None``-valued contextvars so
+    the chassis-era empty-payload posture stays clean for requests
+    that don't scope by metadata.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-audit-no-mf", tenant_role=TenantRole.OPERATOR.value)
+    fake_retrieve = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.retrieve.retrieve", new=fake_retrieve),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retrieve_client.post(
+            "/api/v1/retrieve",
+            json={"query": "q"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/retrieve"))
+        rows = result.scalars().all()
+
+    assert len(rows) == 1
+    assert "metadata_filters_keys" not in rows[0].payload
+
+
+# ---------------------------------------------------------------------------
 # RBAC (401 / 403)
 # ---------------------------------------------------------------------------
 

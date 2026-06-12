@@ -91,6 +91,58 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
 _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
     {
         "harbor.robot.create",
+        # G11.7-T1 #1401 — Vault auth ops whose *response* carries a
+        # freshly-minted secret. ``vault.token.create`` returns a client
+        # token; ``vault.auth.approle.generate_secret_id`` returns a
+        # SecretID. Both must collapse to aggregate-only so the minted
+        # credential never reaches the SSE stream or a Slack mirror. The
+        # ``OperationResult`` returned to the caller still carries it.
+        "vault.token.create",
+        "vault.auth.approle.generate_secret_id",
+    }
+)
+
+#: Op-ids that classify as ``credential_write`` (G11.7-T1 #1401). Unlike
+#: :data:`_CREDENTIAL_MINT_OPS` (secret in the *response*), these ops
+#: carry the secret in their *request params* — the broadcast publisher
+#: ships ``params`` (request-side), so a plain ``write`` classification
+#: would leak the written credential to every operator on the feed.
+#: Collapsing them to aggregate-only keeps the team-coordination signal
+#: ("someone wrote a credential at 14:23") without the secret material.
+#: The explicit allowlist comes before the ``.write`` / ``.create`` /
+#: ``.update`` suffix branch so these win over the plain ``write`` class.
+#:
+#: * ``vault.auth.userpass.write`` / ``vault.auth.userpass.update_password``
+#:   — the userpass password is in ``params``.
+#: * ``vault.kv.put`` — the KV-v2 secret ``data`` is in ``params`` (this
+#:   op shipped pre-G11.7 classified as plain ``write``, which broadcast
+#:   the written secret in full; reclassifying it here closes that latent
+#:   leak — see ``docs/codebase/connectors-vault.md``).
+#: * ``vault.kv.patch`` — same posture as ``vault.kv.put``: the merged
+#:   fields ride in ``params`` (G3.15-T1 #1409). Without the explicit
+#:   pin the ``.patch`` write-suffix would classify it plain ``write``
+#:   and broadcast the partial secret in full.
+#: * ``k8s.secret.create`` — the Secret ``data`` / ``stringData`` is in
+#:   ``params``.
+#: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
+#:   inline ``env`` entries can hold credential material in ``params``
+#:   (G3.14-T1 #1403).
+_CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "vault.auth.userpass.write",
+        "vault.auth.userpass.update_password",
+        "vault.kv.put",
+        "vault.kv.patch",
+        "k8s.secret.create",
+        "k8s.job.create",
+        # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
+        # the password from Vault (it is never an inline param), so the
+        # request params carry only a Vault *path*. The pin is
+        # defence-in-depth: should a future param-shape change ever place
+        # credential material in params, the broadcast collapses to
+        # aggregate-only rather than shipping it on the feed.
+        "keycloak.user.create",
+        "keycloak.user.reset_password",
     }
 )
 
@@ -107,6 +159,17 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".delete",
     ".patch",
     ".put",
+    # ``.write`` is the Vault mutating-write verb spelling for the auth
+    # and sys-policy surfaces (G3.15 #1410/#1411): ``vault.auth.approle.write``
+    # creates an AppRole (no secret in params → plain ``write``),
+    # ``vault.sys.policy.write`` writes a policy document. Without this
+    # suffix they fall through to ``other`` and broadcast their full
+    # params. The secret-bearing ``.write`` ops
+    # (``vault.auth.userpass.write`` / ``vault.auth.userpass.update_password``)
+    # are pinned in :data:`_CREDENTIAL_WRITE_OPS`, which ``classify_op``
+    # consults BEFORE this suffix branch, so this addition never downgrades
+    # a credential write to plain ``write``.
+    ".write",
     # bind9 record-write verbs (G3.4-T3 #589). The bind9 connector
     # uses ``.add`` / ``.remove`` rather than ``.create`` / ``.delete``
     # to match the consumer wrapper's verb shape (``--add-a-record``
@@ -117,6 +180,13 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # branch.
     ".add",
     ".remove",
+    # keycloak role-mapping privilege-grant verb (G3.13-T4 #1406).
+    # ``keycloak.role_mapping.assign`` is a mutating privilege grant; its
+    # params (user id/username + role names) carry no secret, so the plain
+    # ``write`` class (full detail) is correct — but without this suffix it
+    # falls through to ``other``. Classifying it ``write`` keeps the feed's
+    # mutation signal accurate.
+    ".assign",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -177,6 +247,29 @@ class BroadcastEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    #: G0.16-T6 Finding F (#1312) discriminator per
+    #: ``docs/codebase/api-shape-conventions.md`` §6. Every entry on
+    #: ``meho:feed:{tenant_id}`` carries a top-level ``kind`` field that
+    #: consumers switch on:
+    #:
+    #: * ``"operation"`` -- audit-driven :class:`BroadcastEvent` (this
+    #:   class), one per audited operation.
+    #: * ``"agent_announcement"`` -- agent-authored
+    #:   :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`,
+    #:   published via ``meho.broadcast.announce``.
+    #:
+    #: Default value, not :class:`typing.Literal`-pinned, so the
+    #: history-parser's switch-on-``kind`` covers two cases under a
+    #: single read path: (a) post-migration entries XADD'd by the
+    #: current publisher (``kind: "operation"`` written on the wire),
+    #: and (b) pre-migration entries written before this field
+    #: existed -- those entries lack ``kind`` on the wire, and the
+    #: parser infers ``"operation"`` from the absence of
+    #: ``"agent_announcement"``-shape fields. The historical
+    #: ``event_kind`` field on the sibling agent-announcement class
+    #: stays accepted on read as a backward-compatible alias.
+    kind: str = "operation"
+
     event_id: UUID
     ts: datetime
     tenant_id: UUID
@@ -189,8 +282,8 @@ class BroadcastEvent(BaseModel):
     target_name: str | None = None
     op_id: str
     #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
-    #: ``"credential_mint"`` / ``"audit_query"`` / ``"other"``.
-    #: Derived from :func:`classify_op` at publish time.
+    #: ``"credential_mint"`` / ``"credential_write"`` / ``"audit_query"``
+    #: / ``"other"``. Derived from :func:`classify_op` at publish time.
     op_class: str
     #: One of ``"ok"`` / ``"error"`` / ``"denied"``. The handler
     #: produces it; the broadcast publisher does not re-classify.
@@ -201,8 +294,9 @@ class BroadcastEvent(BaseModel):
     #: queries audit_log by this id.
     audit_id: UUID
     #: Redacted view per :func:`redact_payload`. NEVER raw params for
-    #: ``credential_read``, ``credential_mint``, or ``audit_query`` classes —
-    #: the redaction contract is upstream of this field.
+    #: ``credential_read``, ``credential_mint``, ``credential_write``, or
+    #: ``audit_query`` classes — the redaction contract is upstream of
+    #: this field.
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -218,9 +312,17 @@ def classify_op(op_id: str) -> str:
        check.
     2. ``credential_mint`` — explicit allowlist for ops that return a
        freshly-minted secret in their response payload (e.g.
-       ``harbor.robot.create``). Checked before the ``.create`` suffix
-       so the allowlist wins over the mutation-suffix branch.
-    3. ``audit_query`` — every op-id with the ``audit.`` or
+       ``harbor.robot.create``, ``vault.token.create``). Checked before
+       the ``.create`` suffix so the allowlist wins over the
+       mutation-suffix branch.
+    3. ``credential_write`` — explicit allowlist for write ops whose
+       *request params* carry a secret (e.g.
+       ``vault.auth.userpass.write``, ``vault.kv.put``,
+       ``k8s.secret.create``). Checked before the write-suffix branch
+       so the secret-bearing params collapse to aggregate-only instead
+       of broadcasting in full under the plain ``write`` class
+       (G11.7-T1 #1401).
+    4. ``audit_query`` — every op-id with the ``audit.`` or
        ``meho.audit.`` prefix classifies as audit_query regardless of
        the verb suffix. The ``meho.audit.`` arm catches the admin
        replay meta-tool (``meho.audit.replay``, G8.2-T6 #1014): the
@@ -228,16 +330,25 @@ def classify_op(op_id: str) -> str:
        the tool name verbatim, so without this arm the replay tool
        would fall through to ``other`` and broadcast its full
        ``ReplayNode`` payload instead of the aggregate-only view.
-    4. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
+    5. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
        map to ``write``. Checked before the dot-suffix branches since
        ingested ops carry no meho verb suffix.
-    5. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch``).
-    6. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
-       ``.get`` / ``.about`` / ``.ls``).
-    7. ``other`` — everything else. Falls through to full-detail
+    6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
+       ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
+       ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
+       runs first, so a ``.write``-shaped secret-bearing op like
+       ``vault.auth.userpass.write`` keeps its ``credential_write``
+       class.
+    7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
+       ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
+       / ``.versions``). ``.read`` is deliberately **not** a read
+       suffix: it would over-match the ``credential_read``-allowlisted
+       ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
+       the policy single-sourced) and would reclassify the auth-config
+       ``.read`` ops that intentionally broadcast as ``other``.
+    8. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 
     Examples
@@ -247,6 +358,12 @@ def classify_op(op_id: str) -> str:
     'credential_read'
     >>> classify_op("harbor.robot.create")
     'credential_mint'
+    >>> classify_op("vault.token.create")
+    'credential_mint'
+    >>> classify_op("vault.auth.userpass.write")
+    'credential_write'
+    >>> classify_op("vault.kv.put")
+    'credential_write'
     >>> classify_op("audit.query")
     'audit_query'
     >>> classify_op("meho.audit.replay")
@@ -266,6 +383,8 @@ def classify_op(op_id: str) -> str:
         return "credential_read"
     if op_id in _CREDENTIAL_MINT_OPS:
         return "credential_mint"
+    if op_id in _CREDENTIAL_WRITE_OPS:
+        return "credential_write"
     if op_id.startswith(("audit.", "meho.audit.")):
         return "audit_query"
     # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
@@ -338,7 +457,8 @@ def redact_payload(
     pre-G6.3 default), the function falls back to decision #3 of
     ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
     classes (``credential_read`` / ``credential_mint`` /
-    ``audit_query``), full for everything else. When ``"aggregate"`` or ``"full"`` is passed
+    ``credential_write`` / ``audit_query``), full for everything else.
+    When ``"aggregate"`` or ``"full"`` is passed
     explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
     has already decided the effective detail and this function just
     renders it. Callers that don't go through the resolver
@@ -354,7 +474,7 @@ def redact_payload(
     if detail is None:
         effective_detail: Literal["full", "aggregate"] = (
             "aggregate"
-            if op_class in {"credential_read", "credential_mint", "audit_query"}
+            if op_class in {"credential_read", "credential_mint", "credential_write", "audit_query"}
             else "full"
         )
     else:

@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import (
     CandidateHint,
     FingerprintResult,
@@ -66,8 +67,39 @@ class Connector(ABC):
     priority: int = 0
 
     @abstractmethod
-    async def fingerprint(self, target: Target) -> FingerprintResult:
-        """Return the canonical fingerprint shape."""
+    async def fingerprint(
+        self,
+        target: Target,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
+        """Return the canonical fingerprint shape.
+
+        ``operator`` (optional) is the request-scoped operator. When the
+        fingerprint path needs to read per-target vendor credentials from
+        Vault (the K8s/vmware/sddc-manager/NSX surface, and any future
+        connector that authenticates a session against the fingerprint
+        endpoint), the operator's validated Keycloak ``raw_jwt`` flows to
+        Vault's JWT/OIDC auth method via
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator` —
+        the same code path the dispatch surface uses. The probe route
+        passes the real route operator; background callers (readiness
+        probe, K8s topology refresh) pass ``None`` and the implementation
+        falls back to
+        :func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`
+        which fails closed at the live Vault round-trip (its placeholder
+        JWT is deliberately not a valid Keycloak token).
+
+        G0.16-T4 (#1306) widened this signature to converge the probe
+        route's Vault credential read with the dispatch path's (the
+        ``vault OIDC malformed jwt: must have three parts`` error the
+        v0.8.0 dogfood surfaced was the placeholder JWT reaching the
+        live Vault loader on the probe route while dispatch passed a
+        real operator's JWT). Connectors whose fingerprint does not
+        touch Vault (bind9 over SSH, holodeck, the docs surface) accept
+        the parameter and ignore it — the widened signature is a
+        single-source convergence point, not a behaviour change for
+        those connectors.
+        """
 
     @abstractmethod
     async def probe(self, target: Target) -> ProbeResult:

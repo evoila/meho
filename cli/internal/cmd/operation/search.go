@@ -8,11 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -22,6 +22,13 @@ import (
 // nullable per the backend's frozen pydantic model — pointer-typed
 // here so the JSON unmarshal preserves the null vs. zero-value
 // distinction.
+//
+// Kept hand-written for the same reason as GroupSummary (see
+// groups.go): the FastAPI route types its response as
+// `dict[str, Any]`, so the oapi-codegen generator emits no
+// `OperationSearchHit` model worth using. Promoting the FastAPI
+// response to a typed model so the generator picks it up is a
+// separate backend Task explicitly out of scope for G0.12-T2 #1260.
 type SearchHit struct {
 	OpID             string   `json:"op_id"`
 	Summary          *string  `json:"summary"`
@@ -35,7 +42,8 @@ type SearchHit struct {
 }
 
 // SearchResponse is the JSON envelope returned by
-// GET /api/v1/operations/search.
+// GET /api/v1/operations/search. Hand-typed for the same reason as
+// SearchHit above.
 type SearchResponse struct {
 	Hits            []SearchHit `json:"hits"`
 	QueryDurationMs float64     `json:"query_duration_ms"`
@@ -119,7 +127,11 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getSearch(cmd.Context(), backplaneURL, opts)
+	client, err := newAuthedClient(cmd.Context(), backplaneURL)
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	result, err := getSearch(cmd.Context(), client, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -130,23 +142,43 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 	return nil
 }
 
-func getSearch(ctx context.Context, backplaneURL string, opts searchOptions) (*SearchResponse, error) {
-	q := url.Values{}
-	q.Set("connector_id", opts.ConnectorID)
-	q.Set("query", opts.Query)
+// getSearch issues the typed GET via the generated client. The
+// generated GetSearchApiV1OperationsSearchGetParams carries typed
+// pointer fields for the optional query params (Group, Limit) — the
+// generator emits them as *string / *int so a nil value omits the
+// param from the URL. ConnectorId and Query are required and stay
+// plain string.
+func getSearch(ctx context.Context, client operationsAPI, opts searchOptions) (*SearchResponse, error) {
+	params := &api.GetSearchApiV1OperationsSearchGetParams{
+		ConnectorId: opts.ConnectorID,
+		Query:       opts.Query,
+	}
 	if opts.GroupKey != "" {
-		q.Set("group", opts.GroupKey)
+		gk := opts.GroupKey
+		params.Group = &gk
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
-	path := "/api/v1/operations/search?" + q.Encode()
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+	resp, err := client.GetSearchApiV1OperationsSearchGetWithResponse(ctx, params)
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.GetSearchApiV1OperationsSearchGetWithResponse(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	}
 	var out SearchResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		return nil, fmt.Errorf("decode search response: %w", err)
 	}
 	return &out, nil

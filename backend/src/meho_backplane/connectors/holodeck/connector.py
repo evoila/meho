@@ -59,6 +59,7 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
@@ -204,7 +205,11 @@ class HolodeckConnector(SshConnector):
     version = "9.0"
     impl_id = "holodeck-ssh"
 
-    async def fingerprint(self, target: Target) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Target,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Read Photon release + ``Get-HoloDeckConfig`` -- canonical fingerprint.
 
         Runs (in order, sharing one pooled SSH connection):
@@ -227,7 +232,12 @@ class HolodeckConnector(SshConnector):
         cannot leak through because the connector handlers never
         interpolate ``target.secret_ref`` fields into the PowerShell
         text.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — Holodeck
+        authenticates via SSH key, not Vault OIDC, so the route operator
+        plays no role here.
         """
+        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
         # Phase 1: read /etc/photon-release. Failure here is a hard
@@ -470,10 +480,11 @@ class HolodeckConnector(SshConnector):
 
         Delegates to
         :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_pod_list`.
-        Large pod lists are paged via the future JSONFlux reducer
-        (HandleStore key ``holodeck_pod_list``); the handler emits the
-        ``{rows, total}`` envelope today so the reducer can switch
-        without a connector change.
+        A large pod list is reduced by the dispatcher's default
+        JsonFluxReducer into a ResultHandle (bounded inline sample plus a
+        ``fetch_more`` envelope); the handler emits the ``{rows, total}``
+        envelope so the reducer detects the collection without a connector
+        change.
         """
         from meho_backplane.connectors.holodeck.ops_read import (
             holodeck_pod_list as _holodeck_pod_list,

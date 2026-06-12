@@ -25,8 +25,6 @@ misconfigured tenants.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable
-from typing import cast
 
 from redis import exceptions as redis_exceptions
 
@@ -69,12 +67,11 @@ async def broadcast_readiness_probe() -> ProbeResult:
     """
     client = get_broadcast_client()
     try:
-        # redis-py's ``Redis.ping`` declares ``Awaitable[bool] | bool`` so
-        # the same class can serve both the sync and asyncio backends.
-        # Under :mod:`redis.asyncio` the runtime value is always the
-        # awaitable branch; the cast keeps strict mypy happy without
-        # widening the public surface.
-        await cast(Awaitable[bool], client.ping())
+        # redis-py 8's ``redis.asyncio`` stub types ``Redis.ping`` as a
+        # plain ``Awaitable[bool]`` (no longer the ``Awaitable[bool] | bool``
+        # union), so awaiting it directly type-checks under strict mypy --
+        # the earlier ``cast`` is now redundant.
+        await client.ping()
     except redis_exceptions.TimeoutError:
         return ProbeResult(name="broadcast", ok=False, detail="timeout")
     except redis_exceptions.ConnectionError as exc:

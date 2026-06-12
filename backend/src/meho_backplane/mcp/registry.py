@@ -75,10 +75,12 @@ __all__ = [
     "ToolHandler",
     "all_resource_templates_for",
     "all_tools_for",
+    "capability_satisfied",
     "clear_registries",
     "eager_import_mcp_modules",
     "get_resource_for_uri",
     "get_tool",
+    "register_deprecated_mcp_tool_alias",
     "register_mcp_resource",
     "register_mcp_tool",
     "role_at_least",
@@ -135,6 +137,31 @@ def role_at_least(actual: TenantRole, required: TenantRole) -> bool:
     return _ROLE_RANK.index(actual) >= _ROLE_RANK.index(required)
 
 
+def capability_satisfied(
+    operator: Operator,
+    required_capability: str | None,
+) -> bool:
+    """Return True when *operator* is admitted past the capability gate.
+
+    A tool / resource with ``required_capability=None`` has no capability
+    gate and is always admitted (only its role gate applies). When a
+    capability *is* required, the operator passes iff the key is in
+    :attr:`~meho_backplane.auth.operator.Operator.capabilities`. The
+    operator's set is fail-closed — empty when the JWT carries no
+    capability claim — so an unprovisioned tenant never satisfies a
+    capability gate.
+
+    Centralised so the gate shape stays single-source for both
+    :func:`all_tools_for` (list-time true-absence filter) and the
+    call-time re-check in :mod:`~meho_backplane.mcp.handlers`. Public so
+    the handlers module imports it at module level rather than dipping
+    into a private sibling symbol, exactly like :func:`role_at_least`.
+    """
+    if required_capability is None:
+        return True
+    return required_capability in operator.capabilities
+
+
 #: JSON-Schema combinator keywords the Anthropic Messages API rejects at
 #: the *top level* of a tool's ``input_schema``. A request carrying one
 #: 400s with ``input_schema does not support oneOf, allOf, or anyOf at
@@ -170,13 +197,22 @@ class ToolDefinition(BaseModel):
 
     The wire shape exposed via ``tools/list`` is derived through
     :meth:`to_wire`, which drops the MEHO-internal fields (``required_role``,
-    ``op_class``) — clients don't need them and they'd leak server-side
-    policy detail.
+    ``op_class``, ``required_capability``) — clients don't need them and
+    they'd leak server-side policy detail.
 
     ``inputSchema`` is a JSON Schema 2020-12 object the handler validates
     incoming ``tools/call.arguments`` against. ``outputSchema`` is
     optional; when present the handler's return value is also validated
     against it (T4 reference tool wires this).
+
+    ``required_capability`` (G4.5-T1) is an optional second gating axis
+    *orthogonal* to ``required_role``. When set, the tool is filtered out
+    of ``tools/list`` and rejected at ``tools/call`` for any operator
+    whose :attr:`~meho_backplane.auth.operator.Operator.capabilities`
+    set lacks the key — true absence for unprovisioned tenants, mirroring
+    the connector enable model rather than a packaging/entitlement
+    system. ``None`` (the default) means "no capability gate", so every
+    existing tool keeps its role-only behaviour.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -188,14 +224,26 @@ class ToolDefinition(BaseModel):
     outputSchema: dict[str, Any] | None = None  # noqa: N815
     required_role: TenantRole = TenantRole.OPERATOR
     op_class: str = "read"
+    required_capability: str | None = None
+    #: MEHO-internal deprecation marker (#1612). When set, this
+    #: definition is a deprecated alias for the named canonical tool:
+    #: same handler, same schema, kept resolvable for one release so
+    #: pinned callers keep working. The dispatcher emits a structured
+    #: ``mcp_tool_name_deprecated`` warning per call so operators can
+    #: watch consumers migrate before the alias is removed. Never
+    #: serialised to the wire (the MCP 2025-06-18 ``Tool`` object has
+    #: no deprecation field; the alias's *description* carries the
+    #: agent-visible DEPRECATED marker instead).
+    deprecated_alias_for: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields.
 
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
         optional ``title`` / ``outputSchema``. MEHO fields dropped:
-        ``required_role``, ``op_class``. The drop is deliberate — clients
-        don't need server-side RBAC details and shouldn't see them.
+        ``required_role``, ``op_class``, ``required_capability``. The
+        drop is deliberate — clients don't need server-side RBAC /
+        capability details and shouldn't see them.
 
         ``inputSchema`` is additionally passed through
         :func:`_wire_safe_input_schema`, which strips top-level
@@ -222,13 +270,36 @@ class ResourceTemplateDefinition(BaseModel):
     """MCP resource-template definition + MEHO-internal RBAC metadata.
 
     The wire shape exposed via ``resources/templates/list`` is derived
-    through :meth:`to_wire`; ``required_role`` is dropped for the same
-    reason it is on :class:`ToolDefinition`.
+    through :meth:`to_wire`; ``required_role`` and ``required_capability``
+    are dropped for the same reason they are on :class:`ToolDefinition`.
 
     ``uriTemplate`` follows the RFC 6570 syntax for ``{var}`` substitution.
     v0.2 supports only simple variable substitution (no expression
     operators like ``+`` / ``#`` / ``?``); :func:`_match_uri_template`
     documents what it actually parses.
+
+    ``required_capability`` (G4.5-T1) gates the template the same way it
+    gates a tool: a capability-gated template is absent from
+    ``resources/templates/list`` and 403s on ``resources/read`` for an
+    operator lacking the key. ``None`` (the default) means no capability
+    gate. T4's companion ``meho://docs/{...}`` resource is the first
+    consumer.
+
+    ``audit_redact_uri`` (G0.5-T9) opts the template out of persisting
+    its concrete URI in the audit trail. Most resources encode opaque
+    identifiers (slugs, chunk ids, tenant UUIDs) whose presence in
+    ``audit_log.path`` / ``payload.uri`` is harmless or useful. The
+    ``meho://retrieve/{query}`` resource is different: its variable is a
+    free-form retrieval query that leaks operator intent, so the row must
+    not carry it. When ``True``,
+    :func:`~meho_backplane.mcp.handlers.handle_resources_read` substitutes
+    a query-stripped sentinel (the template prefix up to the first
+    variable, plus ``<redacted>``) for both the audit ``path`` and
+    ``payload.uri``; the resource handler is expected to bind a
+    privacy-preserving identity (e.g. ``audit_query_hash``) via the
+    ``audit_*`` contextvar convention so the row stays correlatable.
+    ``False`` (the default) preserves the per-URI forensic path every
+    other resource relies on.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -239,6 +310,8 @@ class ResourceTemplateDefinition(BaseModel):
     mimeType: str = "application/json"  # noqa: N815
     title: str | None = None
     required_role: TenantRole = TenantRole.OPERATOR
+    required_capability: str | None = None
+    audit_redact_uri: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields."""
@@ -280,6 +353,48 @@ def register_mcp_tool(definition: ToolDefinition, handler: ToolHandler) -> None:
         raise RuntimeError(f"MCP tool already registered: {definition.name!r}")
     _TOOLS[definition.name] = (definition, handler)
     _log.info("mcp_tool_registered", name=definition.name)
+
+
+def register_deprecated_mcp_tool_alias(
+    *,
+    alias: str,
+    canonical: str,
+    removal_version: str,
+) -> None:
+    """Register *alias* as a deprecated second name for the *canonical* tool.
+
+    The alias shares the canonical tool's handler **object** (callers can
+    assert identity), ``inputSchema``, role gate, op class, and capability
+    gate — only ``name`` and ``description`` differ, plus the
+    MEHO-internal :attr:`ToolDefinition.deprecated_alias_for` marker the
+    dispatcher keys its ``mcp_tool_name_deprecated`` warning on. The
+    description is generated here so every alias on the surface carries
+    the same DEPRECATED phrasing (the one-cycle alias convention from the
+    ``content``→``body`` / ``id``→``approval_request_id`` field shims,
+    lifted to whole tool names for #1612).
+
+    The canonical tool must already be registered — alias registration is
+    a strict follow-on so the pair is always created together at module
+    import and the alias can never outlive (or predate) its target.
+    """
+    entry = _TOOLS.get(canonical)
+    if entry is None:
+        raise RuntimeError(
+            f"cannot register alias {alias!r}: canonical MCP tool {canonical!r} is not registered",
+        )
+    definition, handler = entry
+    alias_definition = definition.model_copy(
+        update={
+            "name": alias,
+            "description": (
+                f"DEPRECATED alias for `{canonical}`; removed in "
+                f"v{removal_version}. Identical arguments and behaviour — "
+                f"new callers MUST use `{canonical}`."
+            ),
+            "deprecated_alias_for": canonical,
+        }
+    )
+    register_mcp_tool(alias_definition, handler)
 
 
 def register_mcp_resource(
@@ -360,22 +475,35 @@ def get_resource_for_uri(
 
 
 def all_tools_for(operator: Operator) -> list[ToolDefinition]:
-    """Return tools the operator's :class:`TenantRole` admits, in registration order."""
+    """Return tools the operator may see, in registration order.
+
+    Two orthogonal gates, both AND-ed: the operator's
+    :class:`TenantRole` must meet ``required_role`` *and* — when the tool
+    declares a ``required_capability`` — that key must be in the
+    operator's provisioned :attr:`Operator.capabilities`. A
+    capability-gated tool the tenant hasn't provisioned is *absent* from
+    the listing (true absence, G4.5-T1), not just un-callable.
+    """
     return [
         defn
         for defn, _ in _TOOLS.values()
         if role_at_least(operator.tenant_role, defn.required_role)
+        and capability_satisfied(operator, defn.required_capability)
     ]
 
 
 def all_resource_templates_for(
     operator: Operator,
 ) -> list[ResourceTemplateDefinition]:
-    """Return resource templates the operator's role admits, in registration order."""
+    """Return resource templates the operator may see, in registration order.
+
+    Same two-gate (role AND capability) filter as :func:`all_tools_for`.
+    """
     return [
         defn
         for defn, _ in _RESOURCES.values()
         if role_at_least(operator.tenant_role, defn.required_role)
+        and capability_satisfied(operator, defn.required_capability)
     ]
 
 
@@ -411,6 +539,26 @@ def _canonical_template_shape(template: str) -> str:
     at boot) rather than silent (the second handler never fires).
     """
     return _TEMPLATE_VAR_RE.sub("{}", template)
+
+
+def redacted_audit_uri(template: str) -> str:
+    """Return a query-stripped sentinel for an ``audit_redact_uri`` template.
+
+    Takes the literal prefix of *template* up to its first ``{var}``
+    placeholder and appends ``<redacted>``, so ``meho://retrieve/{query}``
+    collapses to ``meho://retrieve/<redacted>``. Used by
+    :func:`~meho_backplane.mcp.handlers.handle_resources_read` to keep the
+    free-form variable portion (a retrieval query that leaks operator
+    intent) out of ``audit_log.path`` / ``payload.uri`` while preserving a
+    stable, greppable prefix that identifies *which* resource was read.
+
+    Templates with no placeholder (none exist in v0.2 — every registered
+    resource is templated) fall back to the template verbatim plus the
+    sentinel suffix, which is the harmless degenerate case.
+    """
+    first = _TEMPLATE_VAR_RE.search(template)
+    prefix = template[: first.start()] if first is not None else template
+    return f"{prefix}<redacted>"
 
 
 def _match_uri_template(uri: str, template: str) -> dict[str, str] | None:

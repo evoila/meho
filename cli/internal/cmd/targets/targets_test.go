@@ -117,7 +117,9 @@ func TestStrDerefNilEmpty(t *testing.T) {
 
 // TestPathEscapeRoundTrip — the helper must escape the FastAPI-
 // unsafe characters but leave the operator-typical characters
-// (hyphens, dots, alphanumerics) alone.
+// (hyphens, dots, alphanumerics) alone. The import-side YAML loader
+// is the lone caller now that the verb files delegate path-segment
+// encoding to the generated typed client.
 func TestPathEscapeRoundTrip(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -223,9 +225,11 @@ func TestFormatNoConnectorAppendsG3Pointer(t *testing.T) {
 	}
 }
 
-// TestRenderHTTPErrorRoutesByStatus — each HTTP status the targets
+// TestRenderHTTPStatusRoutesByStatus — each HTTP status the targets
 // surface produces lands in the right StructuredError category.
-func TestRenderHTTPErrorRoutesByStatus(t *testing.T) {
+// Pins the (statusCode, body) renderer the typed-client verbs feed
+// directly off the generated response envelope.
+func TestRenderHTTPStatusRoutesByStatus(t *testing.T) {
 	cases := []struct {
 		name     string
 		status   int
@@ -281,8 +285,7 @@ func TestRenderHTTPErrorRoutesByStatus(t *testing.T) {
 			cmd := &cobra.Command{}
 			var stderr strings.Builder
 			cmd.SetErr(&stderr)
-			he := &httpError{StatusCode: c.status, Body: c.body}
-			err := renderHTTPError(cmd, "https://meho.test", he, false)
+			err := renderHTTPStatus(cmd, "https://meho.test", c.status, []byte(c.body), false)
 			if err == nil {
 				t.Fatalf("expected non-nil error")
 			}
@@ -306,7 +309,10 @@ func TestRenderHTTPErrorRoutesByStatus(t *testing.T) {
 }
 
 // TestHTTPErrorErrorString — the *httpError formatter must not lose
-// the underlying status / body so wrapping errors stays useful.
+// the underlying status / body so wrapping errors stays useful. The
+// type now lives in import.go (the lone remaining caller); the test
+// stays in package_test so it runs against the same in-tree
+// definition.
 func TestHTTPErrorErrorString(t *testing.T) {
 	he := &httpError{StatusCode: 418, Body: "i am a teapot"}
 	got := he.Error()

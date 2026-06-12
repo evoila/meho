@@ -55,9 +55,13 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.meta_tools import (
+    ConnectorNotIngestedError,
+    UnknownConnectorError,
     call_operation,
     list_operation_groups,
+    preview_operation,
     search_operations,
 )
 
@@ -69,20 +73,68 @@ __all__: list[str] = []
 # ---------------------------------------------------------------------------
 
 
+def _connector_error_to_invalid_params(
+    exc: UnknownConnectorError | ConnectorNotIngestedError,
+) -> McpInvalidParamsError:
+    """Map a connector-resolution domain error to a typed ``-32602``.
+
+    The discovery meta-tools raise a :class:`ValueError` subclass when a
+    ``connector_id`` does not resolve. Left to propagate, the dispatcher's
+    generic ``except Exception`` would mistranslate it into an opaque
+    ``-32603 "internal error: …"`` — exactly the trap #1482 removes.
+    Catching it here and re-raising :class:`McpInvalidParamsError` flips
+    the wire code to ``-32602 INVALID_PARAMS`` (the spec's "bad argument"
+    code) and threads a machine-readable ``error.data`` discriminator so
+    an agent can tell the two cases apart:
+
+    * :class:`ConnectorNotIngestedError` →
+      ``{"reason": "connector_not_ingested", "connector_id", "next_step"}``
+      — the connector exists but awaits ingest; ``next_step.verb`` is the
+      ``meho connector ingest …`` command to run.
+    * :class:`UnknownConnectorError` →
+      ``{"reason": "unknown_connector", "connector_id"}`` — no such
+      connector on this deploy.
+    """
+    if isinstance(exc, ConnectorNotIngestedError):
+        return McpInvalidParamsError(str(exc), data=exc.as_error_data())
+    return McpInvalidParamsError(
+        str(exc),
+        data={"reason": "unknown_connector", "connector_id": exc.connector_id},
+    )
+
+
 async def _list_operation_groups_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`list_operation_groups`."""
-    return await list_operation_groups(operator, arguments)
+    """Thin shim over :func:`list_operation_groups`.
+
+    Translates the connector-resolution domain errors to a typed
+    ``-32602`` (see :func:`_connector_error_to_invalid_params`) so a
+    registered-but-not-ingested connector surfaces an actionable
+    ``connector_not_ingested`` hint instead of an opaque ``-32603``
+    (#1482).
+    """
+    try:
+        return await list_operation_groups(operator, arguments)
+    except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
+        raise _connector_error_to_invalid_params(exc) from exc
 
 
 async def _search_operations_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`search_operations`."""
-    return await search_operations(operator, arguments)
+    """Thin shim over :func:`search_operations`.
+
+    Shares :func:`_list_operation_groups_handler`'s connector-error
+    mapping so both discovery meta-tools surface the same typed
+    ``-32602`` taxonomy (#1482).
+    """
+    try:
+        return await search_operations(operator, arguments)
+    except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
+        raise _connector_error_to_invalid_params(exc) from exc
 
 
 async def _call_operation_handler(
@@ -91,6 +143,14 @@ async def _call_operation_handler(
 ) -> dict[str, Any]:
     """Thin shim over :func:`call_operation`."""
     return await call_operation(operator, arguments)
+
+
+async def _preview_operation_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Thin shim over :func:`preview_operation` (#1683)."""
+    return await preview_operation(operator, arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +170,23 @@ register_mcp_tool(
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
             '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
-            "product name. Returns groups in name order. An UNKNOWN "
-            "connector_id is an error (no such connector); a KNOWN "
-            "connector with no enabled groups returns an empty list "
-            "(operationally meaningful: it exists, nothing enabled yet)."
+            "product name. Returns groups in `group_key` order. An "
+            "UNKNOWN connector_id is an error (no such connector, "
+            "`-32602` with `data.reason=unknown_connector`); a "
+            "REGISTERED-BUT-NOT-INGESTED connector is also an error but "
+            "recoverable (`-32602` with `data.reason=connector_not_ingested` "
+            "and `data.next_step.verb` = the `meho connector ingest …` "
+            "command to run, then retry); a KNOWN connector with no "
+            "enabled groups returns an empty list (operationally "
+            "meaningful: it exists, nothing enabled yet). A group whose "
+            "own review is still staged but that holds ≥1 per-op-enabled "
+            "operation IS listed, flagged `partial=true` with a non-zero "
+            "`enabled_op_count` — only those ops are live and "
+            "dispatchable; `search_operations` will find them. Pagination "
+            "(G0.18-T5 #1358): keyset on `group_key`; "
+            "default `limit=100`, max 500; pass the response's "
+            "`next_cursor` back as the next call's `cursor` to fetch "
+            "the next page. A `null` `next_cursor` is the end."
         ),
         inputSchema={
             "type": "object",
@@ -127,6 +200,29 @@ register_mcp_tool(
                         "value naming no registered connector is an error."
                     ),
                     "minLength": 1,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": (
+                        "Page size. Default 100; max 500. Matches "
+                        "`list_targets` paging — sibling list tools share "
+                        "one upper bound (G0.18-T5 #1358)."
+                    ),
+                },
+                "cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Keyset-pagination cursor: pass the last "
+                        "`group_key` from the previous page to fetch the "
+                        "next. Results are ordered by `group_key` "
+                        "ascending. Matches `cursor` on `query_audit` / "
+                        "`query_topology` / `list_targets` / "
+                        "`meho.broadcast.recent` (G0.18-T5 #1358)."
+                    ),
+                    "maxLength": 256,
                 },
             },
             "required": ["connector_id"],
@@ -145,17 +241,51 @@ register_mcp_tool(
                             "name": {"type": "string"},
                             "when_to_use": {"type": "string"},
                             "operation_count": {"type": "integer", "minimum": 0},
+                            "enabled_op_count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "Count of this group's enabled (live, "
+                                    "dispatchable) operations. Equal to "
+                                    "`operation_count`; named explicitly so a "
+                                    "`partial` group's live-op count reads "
+                                    "unambiguously."
+                                ),
+                            },
+                            "partial": {
+                                "type": "boolean",
+                                "description": (
+                                    "True when the group itself is NOT "
+                                    "`review_status=enabled` but holds ≥1 "
+                                    "per-op-enabled operation (so it is "
+                                    "surfaced here solely on per-op "
+                                    "enablement). False for a fully-enabled "
+                                    "group. When true, `enabled_op_count` is "
+                                    "≥1 and only those ops are live; the "
+                                    "rest of the group is still staged."
+                                ),
+                            },
                         },
                         "required": [
                             "group_key",
                             "name",
                             "when_to_use",
                             "operation_count",
+                            "enabled_op_count",
+                            "partial",
                         ],
                     },
                 },
+                "next_cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Keyset cursor for the next page (last "
+                        "`group_key` on this page) or `null` when this "
+                        "page is the end of the listing."
+                    ),
+                },
             },
-            "required": ["connector_id", "groups"],
+            "required": ["connector_id", "groups", "next_cursor"],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",
@@ -179,9 +309,13 @@ register_mcp_tool(
             "`query` (required, free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
             "`connector_id` is `<impl_id>-<version>` (NOT the bare "
-            "product name); an unknown connector_id is an error. An "
-            "unknown group, by contrast, narrows the result set to "
-            "zero hits and is not an error."
+            "product name); an unknown connector_id is an error "
+            "(`-32602`, `data.reason=unknown_connector`), and a "
+            "registered-but-not-ingested connector is a recoverable error "
+            "(`-32602`, `data.reason=connector_not_ingested` + "
+            "`data.next_step.verb` to run, then retry). An unknown group, "
+            "by contrast, narrows the result set to zero hits and is not "
+            "an error."
         ),
         inputSchema={
             "type": "object",
@@ -271,9 +405,11 @@ register_mcp_tool(
             "an `invalid_params` error verbatim -- inspect "
             "`extras.validation_errors` and fix the params shape first. "
             "Arguments: `connector_id` (required), `op_id` (required), "
-            '`target` (optional partial descriptor like `{"name": '
-            '"rdc-vcenter"}`; required for ops that act on a target), '
-            "`params` (operation-specific). Returns the full "
+            "`target` (optional, accepts EITHER a bare string "
+            '`"rdc-vcenter"` -- preferred forward shape, matches '
+            "`query_topology` / `query_audit` -- OR a dict "
+            '`{"name": "rdc-vcenter"}`; required for ops that act on a '
+            "target), `params` (operation-specific). Returns the full "
             "OperationResult shape."
         ),
         inputSchema={
@@ -290,29 +426,34 @@ register_mcp_tool(
                     ),
                 },
                 "target": {
-                    "type": ["object", "null"],
+                    "type": ["string", "object", "null"],
                     "description": (
-                        "Partial target descriptor. The dispatcher "
-                        "resolves the `name` field against the targets "
-                        "registry; aliases are accepted. Pass null "
-                        "for operations that do not act on a target. "
-                        "NOTE: this tool's `target` is a dict "
-                        '({"name": "<target-name>"}) because the '
-                        "dispatcher reserves room for additional "
-                        "future fields (e.g. an alias-precedence pin); "
-                        "the topology / audit read tools (`query_topology`, "
-                        "`query_audit`) take a bare-string `target` "
-                        "since they only need the name. See "
-                        "`docs/architecture/mcp.md` ('Target-reference "
-                        "shape convention') for the canonical forward "
-                        "convention any new tool should follow. The "
-                        "optional `fqdn` field is a per-call override "
-                        "for the resolved target's vhost name; honoured "
-                        "by connectors that route by `Host:` header "
-                        "(notably `vcfa-rest-9.0` where reaching the "
-                        "appliance by IP without an `fqdn` returns 404 "
-                        "with empty body)."
+                        "Target reference. Two shapes are accepted; "
+                        "either reduces to the same dispatch:\n"
+                        '  * Bare string -- e.g. `"rdc-vcenter"`. '
+                        "The forward-preferred shape; matches "
+                        "`query_topology` / `query_audit` so a target "
+                        "name carried across read and write surfaces "
+                        "needs no reshape.\n"
+                        '  * Dict -- e.g. `{"name": "rdc-vcenter"}`. '
+                        "The original shape; supports the optional "
+                        "`fqdn` field below for per-call vhost "
+                        "override. Use this form when you need the "
+                        "override.\n"
+                        "Pass null for operations that do not act on "
+                        "a target. The dispatcher resolves `name` "
+                        "against the targets registry; aliases are "
+                        "accepted. See `docs/architecture/mcp.md` "
+                        "('Target-reference shape convention') for "
+                        "the cross-tool convention. The optional "
+                        "`fqdn` field (dict-shape only) is a per-call "
+                        "override for the resolved target's vhost "
+                        "name; honoured by connectors that route by "
+                        "`Host:` header (notably `vcfa-rest-9.0` "
+                        "where reaching the appliance by IP without "
+                        "an `fqdn` returns 404 with empty body)."
                     ),
+                    "minLength": 1,
                     "properties": {
                         "name": {"type": "string", "minLength": 1},
                         "fqdn": {
@@ -322,7 +463,9 @@ register_mcp_tool(
                                 "Per-call override for the resolved "
                                 "target's `fqdn` column. Threaded into "
                                 "the connector for vhost routing; the "
-                                "DB row is not modified."
+                                "DB row is not modified. Dict-shape "
+                                "only -- bare-string callers must "
+                                "switch to the dict to opt in."
                             ),
                         },
                     },
@@ -358,7 +501,145 @@ register_mcp_tool(
             "required": ["status", "op_id", "duration_ms"],
         },
         required_role=TenantRole.OPERATOR,
-        op_class="write",
+        # G0.15-T3 #1212 — finding 1: ``call_operation`` is a tool-call
+        # envelope, not a domain operation. The actual mutation /
+        # read-class of the inner op lives on the DISPATCH row the
+        # dispatcher writes from inside the handler; the outer MCP
+        # wrapper row's class must NOT shadow that with a fixed value
+        # (the pre-#1212 ``"write"`` mis-classified every ``k8s.node.list``
+        # / ``k8s.about`` invocation as a write at the audit-query layer).
+        # ``"tool_call"`` is the agreed Option-A value from the issue
+        # (the inner DISPATCH carries the truth; this is a filterable
+        # envelope marker). ``classify_op`` in
+        # :mod:`meho_backplane.broadcast.events` treats unknown classes
+        # as ``other`` for redaction, which keeps the broadcast event's
+        # full-detail shape for the envelope row — operators can still
+        # see the request params on the SSE feed.
+        op_class="tool_call",
     ),
     handler=_call_operation_handler,
+)
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="preview_operation",
+        description=(
+            "Preview an operation WITHOUT running it. Resolves the same "
+            "op + target + params `call_operation` would and returns the "
+            "literal would-be HTTP request -- `method`, `resolved_path` "
+            "(path placeholders substituted + connector mount prefix "
+            "applied), `query`, and a REDACTED `redacted_body` -- instead "
+            "of dispatching. Use this to diagnose a write failure: when a "
+            "`call_operation` write returned a 4xx (e.g. a gh-rest 422 / "
+            "403), re-issue the SAME arguments here to read back exactly "
+            "what would be put on the wire (the operation audit persists "
+            "only a hashed params_hash, so the request shape is otherwise "
+            "unrecoverable). Inspection only -- it never sends the request "
+            "and never re-dispatches a past one. Covers ingested HTTP ops "
+            "(`source_kind='ingested'`); for a typed/composite op it "
+            'returns `status="unavailable"` (no single literal HTTP '
+            "request to preview). Arguments mirror `call_operation`: "
+            "`connector_id` (required), `op_id` (required), `target` "
+            '(optional; bare string `"rdc-vcenter"` or dict '
+            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string", "minLength": 1},
+                "op_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Operation id as returned by `search_operations`. "
+                        'Examples: "POST:/repos/{owner}/{repo}/issues", '
+                        '"GET:/api/vcenter/cluster".'
+                    ),
+                },
+                "target": {
+                    "type": ["string", "object", "null"],
+                    "description": (
+                        "Target reference. Same two shapes as "
+                        '`call_operation`: a bare string `"rdc-vcenter"` '
+                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "optional `fqdn` override). Pass null for ops that "
+                        "do not act on a target. Resolving the target lets "
+                        "the preview reflect the same connector + mount "
+                        "prefix the real dispatch would hit."
+                    ),
+                    "minLength": 1,
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1},
+                        "fqdn": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Per-call override for the resolved "
+                                "target's `fqdn` column; threaded into the "
+                                "connector for vhost routing. Dict-shape "
+                                "only."
+                            ),
+                        },
+                    },
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Operation-specific parameters. Validated against "
+                        "the operation's parameter_schema before the "
+                        "request is resolved; an invalid shape returns "
+                        '`status="error"` + `extras.validation_errors` '
+                        "(the same shape `call_operation` rejects with)."
+                    ),
+                },
+            },
+            "required": ["connector_id", "op_id"],
+            "additionalProperties": False,
+        },
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["ok", "error", "unavailable"],
+                },
+                "op_id": {"type": "string"},
+                "connector_id": {"type": "string"},
+                "source_kind": {"type": "string"},
+                "method": {
+                    "type": "string",
+                    "description": "Resolved HTTP verb (present on status=ok).",
+                },
+                "resolved_path": {
+                    "type": "string",
+                    "description": (
+                        "Fully resolved request path -- placeholders "
+                        "substituted, mount prefix applied (status=ok)."
+                    ),
+                },
+                "query": {
+                    "type": ["object", "null"],
+                    "description": "Query-string params, or null (status=ok).",
+                },
+                "redacted_body": {
+                    "description": (
+                        "The would-be JSON request body after the "
+                        "connector-boundary redaction pipeline; null when "
+                        "the op declares no body (status=ok)."
+                    ),
+                },
+                "error": {"type": ["string", "null"]},
+                "extras": {"type": "object"},
+            },
+            "required": ["status", "op_id", "connector_id"],
+        },
+        required_role=TenantRole.OPERATOR,
+        # A read-only request-shape inspection. No dispatch, no audit row,
+        # no mutation -- ``"read"`` matches the actual op-class (unlike
+        # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
+        # dispatch whose true class lives on the inner DISPATCH row).
+        op_class="read",
+    ),
+    handler=_preview_operation_handler,
 )

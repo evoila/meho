@@ -544,9 +544,10 @@ BIND9_ZONE_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
         "two rows, not one row with a list rdata). For large zones the "
         "full row list lands inline; the dispatcher's default "
         "JsonFluxReducer wraps a zone with thousands of records in a "
-        "``ResultHandle`` and the agent drills in via "
-        "``result_query`` / ``result_aggregate`` rather than receiving "
-        "the full row list in the inline result."
+        "``ResultHandle`` carrying a bounded inline sample plus a "
+        "``fetch_more`` envelope rather than the full row list. To act on "
+        "more than the sample, re-call with a narrower filter (no handle "
+        "read-back tool exists in this version)."
     ),
     "parameter_hints": {
         "zone": (
@@ -613,10 +614,11 @@ ZONE_OPS: tuple[Bind9Op, ...] = (
             "questions 'what's the current value of <fqdn>?' and "
             "'list everything in zone X'. The handler emits the full "
             "row list inline; the dispatcher's default JsonFluxReducer "
-            "wraps large zones in a result handle that the "
-            "agent drills into via ``result_query`` / "
-            "``result_aggregate`` rather than receiving the full row "
-            "list. Read-only; safe against any zone bind9 has loaded."
+            "wraps large zones in a result handle carrying a bounded "
+            "inline sample plus a ``fetch_more`` envelope rather than the "
+            "full row list -- re-call with a narrower filter to act on "
+            "more than the sample. Read-only; safe against any zone bind9 "
+            "has loaded."
         ),
         parameter_schema=BIND9_ZONE_READ_PARAMETER_SCHEMA,
         response_schema=_BIND9_ZONE_READ_RESPONSE_SCHEMA,

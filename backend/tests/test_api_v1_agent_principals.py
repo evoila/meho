@@ -36,6 +36,7 @@ from sqlalchemy import select
 import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
+    KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
     KeycloakAdminError,
     KeycloakAdminNotConfiguredError,
     KeycloakClientNotFoundError,
@@ -136,14 +137,32 @@ async def _fetch_principals(tenant_id: uuid.UUID) -> list[AgentPrincipal]:
 
 
 def _mock_kc_ok(internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
-    """Return a mock KeycloakAdminClient that succeeds on create and disable."""
+    """Return a mock KeycloakAdminClient that succeeds on create/secret/disable."""
     mock_client = AsyncMock()
     mock_client.create_client = AsyncMock(return_value=internal_id)
+    mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
     mock_client.disable_client = AsyncMock(return_value=None)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     factory = MagicMock(return_value=mock_client)
     return factory
+
+
+@pytest.fixture(autouse=True)
+def _stub_vault_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the scheduler Vault write the register path now performs (#1478).
+
+    Registration persists the captured Keycloak secret to Vault under the
+    scheduler service token; these route tests have no live Vault, so the
+    write is stubbed to a no-op. The Vault-persistence behaviour itself is
+    covered by ``test_auth_agent_principals.py`` (unit) and the
+    integration suite (live Vault + Keycloak).
+    """
+
+    async def _noop_write(identity_ref: str, client_secret: str) -> str:
+        return f"secret/data/agents/{identity_ref}/credentials"
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _noop_write)
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +445,15 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
 async def test_keycloak_not_configured_returns_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``KeycloakAdminNotConfiguredError`` on register → 503."""
+    """``KeycloakAdminNotConfiguredError`` on register → 503.
+
+    The 503 detail is the gold-standard three-clause message
+    (G0.14-T7 #1148): domain code + named env vars + doc reference.
+    Symmetric with ``/ui/auth/login``'s
+    :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
+    and compliant with the convention codified in
+    ``docs/codebase/error-message-shape.md`` (G0.14-T11 #1141).
+    """
     await _seed_tenants()
     key = make_rsa_keypair("kid-503")
 
@@ -447,7 +474,19 @@ async def test_keycloak_not_configured_returns_503(
             headers={"Authorization": f"Bearer {_token(key)}"},
         )
     assert resp.status_code == 503, resp.text
-    assert resp.json()["detail"] == "keycloak_admin_not_configured"
+    detail = resp.json()["detail"]
+    assert detail == KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL
+    # Sanity: the three load-bearing parts of the convention are
+    # present. The constant assertion above is the wire-stable
+    # contract; the substring assertions below pin the convention's
+    # three-clause shape (code prefix + env vars + doc reference)
+    # so a future refactor that rewords the detail must keep all
+    # three.
+    assert detail.startswith("keycloak_admin_not_configured")
+    assert "KEYCLOAK_ADMIN_URL" in detail
+    assert "KEYCLOAK_ADMIN_CLIENT_ID" in detail
+    assert "KEYCLOAK_ADMIN_CLIENT_SECRET" in detail
+    assert "docs/cross-repo/keycloak-agent-client.md" in detail
 
 
 @pytest.mark.asyncio
@@ -631,3 +670,147 @@ async def test_register_rolls_back_orphan_client_on_db_failure(client: TestClien
     assert resp.status_code == 409, resp.text
     # The just-created (now orphaned) Keycloak client must be deleted.
     mock_client.delete_client.assert_awaited_once_with(new_internal_id)
+
+
+# ---------------------------------------------------------------------------
+# Vault secret persistence at registration (G0.19-T2 #1478)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_persists_captured_secret_to_vault(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Register captures the Keycloak secret and persists it to Vault.
+
+    The scheduler reads the secret Vault-first, so registration must write
+    it there for an API-registered agent to be schedulable without a pod
+    env-var wire-up.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-vault")
+    factory = _mock_kc_ok()
+
+    captured: dict[str, str] = {}
+
+    async def _capture_write(identity_ref: str, client_secret: str) -> str:
+        captured["identity_ref"] = identity_ref
+        captured["secret"] = client_secret
+        return f"secret/data/agents/{identity_ref}/credentials"
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _capture_write)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "vault-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 201, resp.text
+    # The captured secret is the one Keycloak's get_client_secret returned.
+    assert captured == {
+        "identity_ref": "agent:vault-bot",
+        "secret": "generated-secret",
+    }
+
+
+@pytest.mark.asyncio
+async def test_register_rolls_back_client_on_vault_write_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Vault-write failure rolls back the just-created Keycloak client.
+
+    Registering an agent whose secret never reached Vault would leave it
+    unschedulable (the scheduler reads Vault-first), so register fails
+    closed and deletes the orphaned client.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-vault-fail")
+    new_internal_id = "dd000000-0000-0000-0000-00000000aaaa"
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=new_internal_id)
+    mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+
+    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+        raise SchedulerVaultBrokerError("vault unreachable")
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _failing_write)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "vault-fail-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    # The route maps the broker error to 502; the key assertions are the
+    # rollback + no DB row.
+    assert resp.status_code == 502, resp.text
+    mock_client.delete_client.assert_awaited_once_with(new_internal_id)
+    assert await _fetch_principals(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_register_skips_vault_when_token_unset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``VAULT_SCHEDULER_TOKEN`` -> register skips the Vault write (no 5xx).
+
+    Backward compatibility: an env-var-only deployment that has not wired a
+    scheduler Vault token still registers agents successfully; the agent
+    relies on the env-var fallback. Uses the *real* ``write_agent_secret``
+    (the autouse stub is overridden) to exercise the not-configured branch.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-no-token")
+    factory = _mock_kc_ok()
+
+    # Override the autouse no-op stub with the real broker write, and
+    # ensure no scheduler Vault token is configured.
+    import meho_backplane.scheduler.vault_credentials as vc_module
+
+    monkeypatch.setattr(
+        "meho_backplane.auth.agent_principals.write_agent_secret",
+        vc_module.write_agent_secret,
+    )
+    monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
+    get_settings.cache_clear()
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "no-token-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 201, resp.text
+    rows = await _fetch_principals(_TENANT_A)
+    assert [row.name for row in rows] == ["no-token-bot"]

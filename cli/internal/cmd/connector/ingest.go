@@ -451,7 +451,21 @@ func runIngestAsync(
 			detail = *st.Error
 		}
 		if opts.JSONOut {
-			return output.PrintJSON(cmd.OutOrStdout(), st)
+			// Emit the full job document (counts + error_class) to stdout
+			// for diagnosis, then still exit non-zero: a degraded job is a
+			// terminal failure (#1647), and a --json consumer that read this
+			// as exit 0 is the exact false-success this task closes, moved
+			// to the CLI tier. jsonOut=false on RenderError keeps stdout the
+			// clean JSON document (the human one-liner goes to stderr) while
+			// the returned silentError carries ExitUnexpected.
+			if err := output.PrintJSON(cmd.OutOrStdout(), st); err != nil {
+				return err
+			}
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"ingest job %s degraded: %s: %s", st.JobId, errClass, detail)),
+				false,
+			)
 		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(

@@ -137,8 +137,9 @@ connector-related release-notes line.
   Hetzner Robot, and vmware-rest (session token + endpoint paths). Two
   same-named targets in different tenants no longer collapse onto one cache
   entry, closing the same cross-tenant credential/session bleed in these
-  connectors. The shared `HttpConnector._clients` connection pool stays keyed
-  on `target.name` (a pooling concern, tracked separately) (#1672).
+  connectors. (The shared `HttpConnector._clients` connection pool was the
+  one remaining `target.name`-keyed cache; it is re-keyed in the following
+  bullet, #1682.) (#1672).
 - Re-keyed the shared connection pools — `HttpConnector._clients`
   (every HTTP connector) and `SshConnector._connections` (bind9, pfSense,
   Holodeck) — on the tenant-unique `(tenant_id, target.id)` tuple

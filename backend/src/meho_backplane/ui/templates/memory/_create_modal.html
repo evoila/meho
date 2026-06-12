@@ -13,11 +13,19 @@
   ``HX-Redirect: /ui/memory`` -- HTMX then reloads the full list
   page so the new row appears.
 
-  CSRF posture: the page-level ``hx-headers`` directive on
-  ``index.html`` echoes the CSRF token; HTMX inherits the header
-  through the inserted form, so the modal form does not need its own
-  ``hx-headers`` override. The route also sets the cookie on every
-  modal render so a freshly-issued token lines up with the cookie.
+  CSRF posture: the form declares its own ``hx-headers`` echo of the
+  token THIS render minted -- the route sets the matching
+  ``meho_csrf`` cookie on the same response, so the double-submit
+  pair always lines up (#1693). Relying on the page-level
+  ``hx-headers`` on ``index.html`` is not enough: htmx 2 *does*
+  inherit the attribute (child declarations override parent ones,
+  https://htmx.org/attributes/hx-headers/), but the modal render
+  rotates the cookie, so the inherited header still carried the
+  stale list-render token while the cookie carried the fresh one and
+  the chassis middleware 403'd every create POST (the same
+  cookie/header desync class the runbooks list fragment fixed). The
+  form-level declaration also covers the body textarea's debounced
+  preview ``hx-post``, which inherits it from the form.
 
   RBAC posture: the scope selector is server-filtered via
   :func:`writable_scopes_for` so the operator only sees scopes they
@@ -56,6 +64,7 @@
       <form
         id="memory-create-form"
         hx-post="/ui/memory/create"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
         hx-target="this"
         hx-swap="none"
         hx-disabled-elt="find button[type=submit]"

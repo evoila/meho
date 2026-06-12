@@ -101,6 +101,20 @@ connector-related release-notes line.
 - Operator-console modals now dismiss via the close button, the Escape key, and a backdrop click. The HTMX-injected `<dialog>` fragments relied on DaisyUI's static `modal-open` class, which the native `dialog.close()` cannot clear, so every modal (approvals, memory create/promote, connector create/edit/delete) stayed stuck open until a page reload. A shared app-shell controller now opens injected dialogs via `showModal()` on swap and strips any lingering `modal-open` on the native `close` event (#1803).
 - Connector **auth/session failures** now surface as a structured `connector_auth_failed` dispatch result instead of the opaque `connector_error`. An upstream `401` (and vRLI's `440`) reaching the dispatcher names the host, the status, the likely cause (a session/credential expiry or a misconfigured `auth_model` — the session connectors already retry once on a 401 internally, so re-login *also* failed by then), and the verify-the-Vault-credential/`auth_model` remediation; the structured cause rides in `extras` (`error_code`, `http_status`, `host`, `upstream_message`). Mirrors the `connector_tls_verify_failed` (#1782) and `connector_http_403` (#1649) pattern. This closes the diagnosability gap that made the vRLI dispatch the operator saw as `connector_error (440)` (#1798) look like a stub-auth problem. Non-auth statuses (`404`, `5xx`, `429`) still flatten to `connector_error` unchanged (#1804).
 - Fix a vRLI dispatch dead end where a `product="vrli"` target — the natural token `meho connector list` emits — resolved an auto-registered `GenericRestConnector` shim (`connector_unsupported` / `auth_headers` `NotImplementedError`) instead of the shipped `VcfLogsConnector`, because the connector registered under a divergent `product="vcf-logs"` namespace while the dispatcher derives `"vrli"` from the `vrli-rest` connector-id. `VcfLogsConnector` is now aligned to the dispatch-canonical `product="vrli"` (round-trips `parse_connector_id`), spec-ingest defers to a hand-coded connector instead of scaffolding a shadowing shim under a divergent product token, and `register_connector_v2` logs a structured WARN (not a boot failure) when a registration's `product` ≠ its connector-id-derived product. A migration reconciles existing `product="vcf-logs"` targets to `"vrli"` (no new `PRODUCT_ALIASES` entry). The five remaining sanctioned `_PRODUCT_SPLITS` connectors WARN, pointing at the family-realignment Initiative #1810 (#1798).
+- Deflaked `test_corpus_client.py::test_forwarded_jwt_never_logged`, which
+  asserted on structlog events from a module-level production logger via
+  `structlog.testing.capture_logs()`. Under `pytest -n 6 --dist loadscope` a
+  logger warmed-and-orphaned by an earlier test on the same xdist worker —
+  `cache_logger_on_first_use=True` pins a `BoundLogger` to a processor-list
+  instance that a later `structlog.configure(...)` then replaces — caused
+  `capture_logs` to miss the event (empty list), reddening the whole
+  `Python (ruff + mypy + pytest)` job and letting the JWT-absence check pass
+  vacuously against an empty capture. The test now binds a private
+  `structlog.testing.LogCapture` and monkeypatches the subject module's
+  `_log`, the established #1254 pattern (the sibling
+  `test_operations_register_ingested.py` orphan-class assertions were
+  converted the same way by #1712); the convention is documented in
+  `docs/codebase/backend.md`. No production logging config change. (#1622)
 
 ### Documentation
 

@@ -19,11 +19,15 @@ renders three components per the Initiative work-item #6:
   is the auth boundary that gates ``/ui/``). Trimming the rendered
   tray to the last N events is G10.1 (#338) client-side surface work;
   the underlying feed endpoint streams the live tail unbounded.
-* A version + readiness card sourced from
-  :data:`meho_backplane.__version__` (always rendered) and the chassis
-  readiness probe registry (``meho_backplane.health.run_probes_async``)
-  -- the same data ``/ready`` returns, surfaced as a single
-  ready/starting pill.
+* A version + readiness card sourced from the deployed-build label the
+  chassis Jinja env binds as the ``app_version`` global -- the same
+  ``CHART_VERSION`` / ``GIT_SHA`` env metadata ``GET /version`` reads
+  (#1698; the handler must NOT pass its own ``app_version`` context
+  key: render context shadows env globals, which is exactly how the
+  static package ``__version__`` used to leak into this page) -- and
+  the chassis readiness probe registry
+  (``meho_backplane.health.run_probes_async``) -- the same data
+  ``/ready`` returns, surfaced as a single ready/starting pill.
 
 The handler also sets the ``meho_csrf`` cookie on the response. Per
 the OWASP signed double-submit cookie pattern, the cookie is
@@ -59,7 +63,6 @@ from typing import Final
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
-from meho_backplane import __version__
 from meho_backplane.health import run_probes_async
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -150,7 +153,6 @@ async def _render_dashboard(
     csrf_token = mint_csrf_token(str(session.session_id))
     context = {
         "page_title": "Dashboard",
-        "app_version": __version__,
         "ready": readiness["ready"],
         "readiness_checks": readiness["checks"],
         "surface_tiles": _SURFACE_TILES,

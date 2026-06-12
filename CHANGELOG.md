@@ -164,6 +164,13 @@ connector-related release-notes line.
   inheritance); the datalist now pins `hx-target="this"` so the
   `<option>` fragment lands in the datalist and the cards stay intact
   (#1695)
+- Operator console: the sidebar footer (and the dashboard Deploy card)
+  showed `v0.1.0-dev` on every deployed instance because the
+  `app_version` Jinja global bound the static package `__version__`;
+  it now binds the deployed-build label read from the same
+  `CHART_VERSION` / `GIT_SHA` env metadata `GET /version` reports —
+  `v0.14.0`-style on chart deploys, a 12-char commit id on bare-image
+  runs, `unknown` on local runs without build metadata (#1698)
 
 ## [0.14.0] - 2026-06-12
 

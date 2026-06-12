@@ -13,8 +13,11 @@ shape:
 * Sidebar links to every one of the five G10.x surfaces.
 * Alpine.js ``x-data`` wiring for the sidebar collapse + user menu.
 * A ``{% block content %}`` slot the surface templates can override.
-* A footer rendering the backplane version (``app_version`` global)
-  and the readiness pill.
+* A footer rendering the deployed-build label (``app_version`` global,
+  bound from the same ``CHART_VERSION`` / ``GIT_SHA`` env metadata
+  ``GET /version`` reads — #1698) and the readiness pill. The static
+  package ``__version__`` (``0.1.0-dev`` by design) must never leak
+  into the rendered HTML.
 * :class:`jinja2.StrictUndefined` propagates so a typo in a template
   variable fails the render rather than producing an empty string.
 """
@@ -29,7 +32,7 @@ from jinja2 import Environment, UndefinedError
 
 from meho_backplane import __version__
 from meho_backplane.ui.paths import static_src_dir, templates_dir
-from meho_backplane.ui.templating import get_jinja_env
+from meho_backplane.ui.templating import get_jinja_env, reset_templating_for_testing
 
 # The five surface routes the chassis sidebar links to. Sourced from
 # Initiative #337 work-item 5 + Goal #336 done-when (broadcast / kb /
@@ -101,16 +104,56 @@ def test_static_src_carries_vendored_assets() -> None:
     assert (vendor / "VENDOR.md").is_file()
 
 
-def test_base_template_renders_with_app_version_global(ui_env: Environment) -> None:
-    """``base.html`` resolves the ``app_version`` global from the env.
+@pytest.fixture(name="fresh_templating_singleton")
+def fixture_fresh_templating_singleton() -> Iterator[None]:
+    """Rebuild the templating singleton around a test that patches env vars.
 
-    The environment factory binds ``__version__`` as a Jinja global so
-    every surface template can show the backplane version in the
-    footer without each route having to pass it explicitly.
+    The ``app_version`` global is read from ``CHART_VERSION`` /
+    ``GIT_SHA`` once, at environment construction (the values are
+    process-immutable in deployment, so once-per-process is the correct
+    cadence). Tests that monkeypatch those vars must drop the cached
+    env before *and* after, so they see their own values and don't
+    leak a patched label into later modules on the same xdist worker.
     """
-    template = ui_env.get_template("base.html")
-    html = template.render(ready=True)
-    assert __version__ in html
+    reset_templating_for_testing()
+    yield
+    reset_templating_for_testing()
+
+
+def test_base_template_renders_chart_version_label(
+    fresh_templating_singleton: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``base.html`` shows the deployed release, not the package version.
+
+    #1698 — the footer used to render ``meho_backplane.__version__``
+    (``0.1.0-dev`` by design, never tracking the deployed image). The
+    ``app_version`` global now binds the deployed-build label from the
+    same ``CHART_VERSION`` / ``GIT_SHA`` env vars ``GET /version``
+    reads. On a chart deploy the label is the ``v``-prefixed release,
+    so the template no longer hardcodes a ``v`` of its own.
+    """
+    monkeypatch.setenv("CHART_VERSION", "0.14.0")
+    monkeypatch.setenv("GIT_SHA", "2bbea9ad00112233445566778899aabbccddeeff")
+    html = get_jinja_env().get_template("base.html").render(ready=True)
+    assert "v0.14.0" in html
+    assert "vv0.14.0" not in html
+    assert __version__ not in html
+
+
+def test_base_template_version_label_degrades_to_unknown(
+    fresh_templating_singleton: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No build metadata (local dev) → ``unknown``, still never ``0.1.0-dev``.
+
+    The global resolves without any route passing ``app_version``
+    explicitly, so a bare-env render (this test) and every surface
+    route get the same label for free.
+    """
+    monkeypatch.delenv("CHART_VERSION", raising=False)
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    html = get_jinja_env().get_template("base.html").render(ready=True)
+    assert "unknown" in html
+    assert __version__ not in html
 
 
 def test_base_template_renders_navbar_and_drawer(ui_env: Environment) -> None:

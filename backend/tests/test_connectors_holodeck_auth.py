@@ -88,6 +88,16 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: dict[str, Any]
+    # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
+    # id)``); a double missing either field hits ``AttributeError`` at the
+    # pool (evoila/meho#1682). ``id`` defaults off ``name`` so distinct
+    # targets in one tenant land on distinct pool keys.
+    id: str = ""
+    tenant_id: str = "00000000-0000-0000-0000-000000000000"
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = f"id-{self.name}"
 
 
 # Canary credentials the secret-leak assertions key on. The fake
@@ -274,15 +284,17 @@ async def test_per_target_connection_isolation() -> None:
     conn_a.is_closed.return_value = False
     conn_b = MagicMock(name="conn-B")
     conn_b.is_closed.return_value = False
+    target_a = _password_target("holorouter-a")
+    target_b = _password_target("holorouter-b")
     with patch("asyncssh.connect", new=AsyncMock(side_effect=[conn_a, conn_b])):
-        a = await connector._connect(_password_target("holorouter-a"), raw_jwt="")
-        b = await connector._connect(_password_target("holorouter-b"), raw_jwt="")
+        a = await connector._connect(target_a, raw_jwt="")
+        b = await connector._connect(target_b, raw_jwt="")
     assert a is conn_a
     assert b is conn_b
     assert a is not b
-    # Pool keyed by target.name; both entries present.
-    assert "holorouter-a" in connector._connections
-    assert "holorouter-b" in connector._connections
+    # Pool keyed by the tenant-unique ``(tenant_id, id)`` tuple; both present.
+    assert (target_a.tenant_id, target_a.id) in connector._connections
+    assert (target_b.tenant_id, target_b.id) in connector._connections
 
 
 # ---------------------------------------------------------------------------

@@ -259,11 +259,6 @@ class VmwareRestConnector(HttpConnector):
         # for the rationale and source citations. Keyed on the same
         # tenant-unique tuple as ``_session_tokens``.
         self._session_paths: dict[tuple[str, str], str] = {}
-        # Maps each tenant-unique cache key back to its ``target.name`` so
-        # :meth:`aclose` can locate the per-target client in the shared
-        # ``HttpConnector._clients`` pool (which is keyed on ``target.name``
-        # and is explicitly out of scope for the #1672 re-keying).
-        self._session_names: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -396,9 +391,11 @@ class VmwareRestConnector(HttpConnector):
         Called by :meth:`_session_token` under ``self._session_lock`` on a
         cold cache. Resolves credentials via the loader, POSTs to the modern
         session endpoint (falling back to the legacy path on a 404 only),
-        and records the token, the endpoint that minted it, and the target's
-        ``name`` (so :meth:`aclose` can find the per-target client in the
-        ``target.name``-keyed pool) against the tenant-unique *cache_key*.
+        and records the token and the endpoint that minted it against the
+        tenant-unique *cache_key* — the same key the shared
+        ``HttpConnector._clients`` pool now uses (evoila/meho#1682), so
+        :meth:`aclose` can locate the per-target client directly by
+        *cache_key* without a name reverse-map.
         """
         creds = await self._session_loader(target, operator)
         client = await self._http_client(target)
@@ -442,7 +439,6 @@ class VmwareRestConnector(HttpConnector):
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token
         self._session_paths[cache_key] = established_path
-        self._session_names[cache_key] = target.name
         _log.info(
             "vsphere_session_established",
             target=target.name,
@@ -620,18 +616,15 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             tokens = dict(self._session_tokens)
             paths = dict(self._session_paths)
-            names = dict(self._session_names)
             self._session_tokens.clear()
             self._session_paths.clear()
-            self._session_names.clear()
         for cache_key, token in tokens.items():
-            # ``_session_tokens`` is keyed on the tenant-unique
-            # ``(tenant_id, target.id)`` tuple (#1672), but the shared
-            # ``HttpConnector._clients`` pool is keyed on ``target.name``
-            # (explicitly out of scope). ``_session_names`` maps each
-            # cache key back to its name so we can locate the client.
-            target_name = names.get(cache_key)
-            client = self._clients.get(target_name) if target_name is not None else None
+            # ``_session_tokens`` and the shared ``HttpConnector._clients``
+            # pool are now keyed on the same tenant-unique
+            # ``(tenant_id, target.id)`` tuple (evoila/meho#1682), so the
+            # cached token's key indexes its host-bound client directly —
+            # no name reverse-map needed.
+            client = self._clients.get(cache_key)
             if client is None:
                 # Theoretically unreachable — every cached token was
                 # established against a per-target client that was
@@ -654,14 +647,14 @@ class VmwareRestConnector(HttpConnector):
                 if resp.status_code >= 400:
                     _log.warning(
                         "vsphere_session_revoke_non_2xx",
-                        target=target_name,
+                        target=cache_key,
                         status_code=resp.status_code,
                         session_path=revoke_path,
                     )
             except (httpx.HTTPError, OSError) as exc:
                 _log.warning(
                     "vsphere_session_revoke_failed",
-                    target=target_name,
+                    target=cache_key,
                     error=f"{type(exc).__name__}: {exc}",
                     session_path=revoke_path,
                 )

@@ -121,11 +121,20 @@ def _password_target(
     host: str = "127.0.0.1",
     port: int = 22,
     username: str = "test",
+    target_id: str | None = None,
+    tenant_id: str = "00000000-0000-0000-0000-000000000000",
 ) -> Any:
+    # Carries ``id`` and ``tenant_id`` because the connection pool keys on
+    # ``target_cache_key`` (``(tenant_id, id)``); a double missing either
+    # field hits ``AttributeError`` at the pool (evoila/meho#1682). Derive
+    # a distinct ``id`` from ``name`` so distinct-name targets in the same
+    # tenant land on distinct pool keys by default.
     return types.SimpleNamespace(
         name=name,
         host=host,
         port=port,
+        id=target_id if target_id is not None else f"id-{name}",
+        tenant_id=tenant_id,
         secret_ref={"username": username, "password": _PASSWORD},
     )
 
@@ -136,12 +145,16 @@ def _key_target(
     host: str = "127.0.0.1",
     port: int = 22,
     username: str = "test",
+    target_id: str | None = None,
+    tenant_id: str = "00000000-0000-0000-0000-000000000000",
 ) -> Any:
     private_key_pem = _CLIENT_KEY.export_private_key("pkcs8-pem").decode()
     return types.SimpleNamespace(
         name=name,
         host=host,
         port=port,
+        id=target_id if target_id is not None else f"id-{name}",
+        tenant_id=tenant_id,
         secret_ref={"username": username, "ssh_private_key": private_key_pem},
     )
 
@@ -257,7 +270,7 @@ async def test_same_target_reuses_connection(ssh_server: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_different_targets_get_different_connections(ssh_server: Any) -> None:
-    """Each distinct target.name gets its own SSHClientConnection."""
+    """Each distinct target gets its own SSHClientConnection."""
     conn = _ConcreteSshConnector()
     target_a = _password_target(name="srv-a", host=ssh_server.host, port=ssh_server.port)
     target_b = _password_target(name="srv-b", host=ssh_server.host, port=ssh_server.port)
@@ -266,8 +279,38 @@ async def test_different_targets_get_different_connections(ssh_server: Any) -> N
     ssh_b = await conn._connect(target_b, "jwt")
 
     assert ssh_a is not ssh_b
-    assert "srv-a" in conn._connections
-    assert "srv-b" in conn._connections
+    # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
+    assert (target_a.tenant_id, target_a.id) in conn._connections
+    assert (target_b.tenant_id, target_b.id) in conn._connections
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_different_tenant_get_distinct_connections(ssh_server: Any) -> None:
+    """Cross-tenant misrouting regression for the SSH pool (evoila/meho#1682).
+
+    Two targets both named ``edge-router`` owned by different tenants
+    must get *distinct* pooled SSH connections — a name-keyed pool would
+    hand tenant B the live connection tenant A opened, routing B's
+    commands onto A's session.
+    """
+    conn = _ConcreteSshConnector()
+    target_a = _password_target(
+        name="edge-router", host=ssh_server.host, port=ssh_server.port, tenant_id="tenant-a"
+    )
+    target_b = _password_target(
+        name="edge-router", host=ssh_server.host, port=ssh_server.port, tenant_id="tenant-b"
+    )
+
+    ssh_a = await conn._connect(target_a, "jwt")
+    ssh_b = await conn._connect(target_b, "jwt")
+
+    assert ssh_a is not ssh_b
+    assert len(conn._connections) == 2
+    assert (target_a.tenant_id, target_a.id) in conn._connections
+    assert (target_b.tenant_id, target_b.id) in conn._connections
+    # Re-fetching B's connection returns B's, not A's (no first-writer bleed).
+    assert await conn._connect(target_b, "jwt") is ssh_b
     await conn.aclose()
 
 
@@ -302,6 +345,8 @@ async def test_connect_failure_raises_at_connect_time() -> None:
         name="bad-host",
         host="unreachable.internal",
         port=22,
+        id="id-bad-host",
+        tenant_id="00000000-0000-0000-0000-000000000000",
         secret_ref={"username": "u", "password": "p"},  # NOSONAR
     )
 
@@ -340,9 +385,11 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         name="timeout-target",
         host="127.0.0.1",
         port=22,
+        id="id-timeout-target",
+        tenant_id="00000000-0000-0000-0000-000000000000",
         secret_ref={"username": "u", "password": "p"},  # NOSONAR
     )
-    conn._connections["timeout-target"] = (mock_conn, time.monotonic())
+    conn._connections[(target.tenant_id, target.id)] = (mock_conn, time.monotonic())
 
     with pytest.raises(asyncio.TimeoutError):
         await conn._run_command(target, "sleep 60", raw_jwt="jwt", timeout=0.05)
@@ -481,7 +528,10 @@ async def test_idle_ttl_evicts_stale_connection(ssh_server: Any) -> None:
     ssh_first = await conn._connect(target, "jwt")
 
     # Backdate last_used to simulate idle expiry.
-    conn._connections["ttl-test"] = (ssh_first, time.monotonic() - _POOL_TTL_S - 1.0)
+    conn._connections[(target.tenant_id, target.id)] = (
+        ssh_first,
+        time.monotonic() - _POOL_TTL_S - 1.0,
+    )
 
     ssh_second = await conn._connect(target, "jwt")
 

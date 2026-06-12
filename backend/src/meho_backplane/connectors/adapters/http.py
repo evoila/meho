@@ -14,8 +14,15 @@ carries the retry decorator; non-idempotent callers must bypass it.
 4xx responses represent caller/auth errors that retrying would not fix.
 
 **Client pooling:** Each :class:`HttpConnector` instance owns a dict of
-``httpx.AsyncClient`` keyed by ``target.name``. The client is created lazily
-on first use and reused across all operations against the same target.
+``httpx.AsyncClient`` keyed by the tenant-unique
+:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
+(``(tenant_id, id)``). The client is created lazily on first use and reused
+across all operations against the same target. Keying on ``target.name``
+alone would collide two same-named targets in different tenants — target
+names are unique only per ``(tenant_id, name)`` — and since each pooled
+client is host-bound via ``base_url``, the collision would route one
+tenant's request to the other tenant's host and leak credentials across
+the tenant boundary (evoila/meho#1682).
 
 **Cert-bundle support:** httpx honours ``SSL_CERT_FILE`` natively; no extra
 cert logic is needed here beyond not overriding the default ``verify`` flag.
@@ -30,6 +37,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
@@ -56,14 +64,21 @@ class HttpConnector(Connector):
     """
 
     def __init__(self) -> None:
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
+        # (``target_cache_key``), not ``target.name``: each pooled client
+        # is host-bound via ``base_url``, and two tenants may legitimately
+        # own same-named targets pointing at different hosts. Name-keying
+        # would route the second tenant's request to the first tenant's
+        # host and leak credentials across the boundary (evoila/meho#1682).
+        self._clients: dict[tuple[str, str], httpx.AsyncClient] = {}
         self._lock = asyncio.Lock()
 
     async def _http_client(self, target: Target) -> httpx.AsyncClient:
         """Return the per-target pooled client, creating it on first use."""
+        cache_key = target_cache_key(target)
         async with self._lock:
-            if target.name not in self._clients:
-                self._clients[target.name] = httpx.AsyncClient(
+            if cache_key not in self._clients:
+                self._clients[cache_key] = httpx.AsyncClient(
                     base_url=self._base_url(target),
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
                     # Follow 301/302/307/308. Vendor REST surfaces
@@ -78,7 +93,7 @@ class HttpConnector(Connector):
                     # don't 301 mid-write.
                     follow_redirects=True,
                 )
-            return self._clients[target.name]
+            return self._clients[cache_key]
 
     async def mount_op_path(self, target: Target, path: str, operator: Operator) -> str:
         """Map an ingested-descriptor *path* onto the wire path for *target*.

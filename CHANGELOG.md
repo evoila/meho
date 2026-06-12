@@ -139,6 +139,20 @@ connector-related release-notes line.
   entry, closing the same cross-tenant credential/session bleed in these
   connectors. The shared `HttpConnector._clients` connection pool stays keyed
   on `target.name` (a pooling concern, tracked separately) (#1672).
+- Re-keyed the shared connection pools — `HttpConnector._clients`
+  (every HTTP connector) and `SshConnector._connections` (bind9, pfSense,
+  Holodeck) — on the tenant-unique `(tenant_id, target.id)` tuple
+  (`target_cache_key`) instead of `target.name`, closing the pooling
+  concern deferred in #1642/#1672. Each pooled `httpx.AsyncClient` is
+  host-bound via `base_url` (and each SSH connection is bound to a live
+  host session), so when two tenants legitimately owned same-named targets
+  pointing at different hosts, the name-keyed pool served tenant B's
+  request through tenant A's host-bound client — a cross-tenant request
+  **misroute** and credential leak below the authz layer. The vmware-rest
+  `aclose()` session-revoke path and the NSX cookie-jar invalidation, which
+  reached the pool directly by name, now resolve clients by the same
+  tenant-unique key (the vmware-rest `_session_names` name reverse-map is
+  removed as redundant). Same-tenant pooling behaviour is unchanged (#1682).
 
 ### Breaking changes
 

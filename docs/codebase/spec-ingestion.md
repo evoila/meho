@@ -730,27 +730,36 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
   sources the spec URI.
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
-  `<p>` is the **parser-derived** (dispatch) product, not the registry
-  product. Rationale calls out the missing catalog entry so the operator
-  knows they need to source the OpenAPI spec themselves. Manual
-  mode is the same path G0.7-T5 already supports for one-off /
-  not-yet-curated specs (see `ingest.go`'s mode dispatch). Emitting the
-  registry product here was the claude-rdc-hetzner-dc#1136 false-success
-  (see "Product-slug reconciliation" below): the verb said
-  `--product vcf-logs` while the row it decorated advertised
-  `product="vrli"`, so the verb did not round-trip to a dispatchable
-  ingest.
+  `<p>` is the **registry** product (the spelling the connector class
+  registers under, e.g. `vcf-logs`), not the parser-derived short one.
+  Rationale calls out the missing catalog entry so the operator knows
+  they need to source the OpenAPI spec themselves. Manual mode is the
+  same path G0.7-T5 already supports for one-off / not-yet-curated specs
+  (see `ingest.go`'s mode dispatch). The registry product is the right
+  spelling because the ingest write path keys two safety steps on the
+  supplied `--product` — `check_version_covered_by_registered_class`
+  (the version-coverage pre-flight) and `ensure_connector_class_registered`
+  — so the registry product is what lets them find the real
+  `VcfLogsConnector`; the short `vrli` would miss it, synthesise a
+  redundant `AutoShim_vrli_*`, and make the coverage pre-flight vacuous.
+  Register-time row reconciliation then persists the rows under the
+  dispatch product regardless (see "Product-slug reconciliation" below),
+  so the verb still round-trips to a dispatchable ingest. (Emitting the
+  registry product while the row advertised `product="vrli"` *was* the
+  claude-rdc-hetzner-dc#1136 false-success **before** that reconciliation
+  existed — the reconciliation is what closes it, not switching the verb
+  to the short product.)
 
 The **catalog lookup** uses the **registry's** `(product, version)`,
 not the parser-derived shortening. The SDDC case is canonical: the
 catalog stores `product="sddc-manager"`, the listing emits
 `product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
 because that is what `meho connector ingest --catalog ...` resolves
-against. Looking up the parsed product would always miss for SDDC. The
-catalog-hit branches keep the catalog-native `--product` (an operator
-running `--catalog` or copying the catalog's triple matches the
-registered class); the catalog-miss branch emits the parser-derived
-product so the manual-mode verb round-trips dispatchably.
+against. Looking up the parsed product would always miss for SDDC. Both
+the catalog-hit and catalog-miss branches emit a registry-side
+`--product` (the catalog-native triple, or the registry product) so the
+operator's ingest matches the registered class; register-time row
+reconciliation is what keeps the resulting connector dispatchable.
 
 #### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
 
@@ -791,14 +800,22 @@ coverage:
 
 A background pipeline coroutine that returns without raising is **not**
 sufficient evidence the ingest succeeded: it can persist rows under a
-mis-keyed product (above) or skip every op against a prior run, leaving
-nothing dispatchable. `run_ingest_job` (`ingest/jobs.py`) therefore
-applies a postcondition before flipping the job to `succeeded`:
-`inserted_count > 0` **and** a `dispatchability_check` closure (the
-route's `connector_exists` probe under the parser-derived natural key,
-scoped to the originating tenant) returns `True`. When it fails the job
-ends `degraded` carrying `error_class="ingested_not_dispatchable"` and
-the counts that landed — never a bare `succeeded`. Regression coverage:
+mis-keyed product (above), leaving nothing dispatchable. `run_ingest_job`
+(`ingest/jobs.py`) therefore consults a `dispatchability_check` closure
+(the route's `connector_exists` probe under the parser-derived natural
+key, scoped to the originating tenant) before flipping the job to
+`succeeded`. The job ends `degraded` carrying
+`error_class="ingested_not_dispatchable"` and the counts that landed
+when the run is genuinely non-dispatchable — either `inserted_count == 0`
+on a connector the probe cannot resolve (an empty/first-run spec), or
+`inserted_count > 0` yet the probe returns `False` (the mis-keyed-product
+case). Crucially, the zero-insert branch is **not** unconditional: a
+benign idempotent re-run skips every op (`_upsert.upsert_one_operation`
+returns `"skipped"`, so `inserted_count == 0`) on an already-dispatchable
+connector, and the probe keeps that `succeeded` rather than flipping a
+no-op re-run into a non-zero CLI failure. A probe that *raises* fails
+open to `succeeded` (a transient DB blip must not strand or degrade a
+completed pipeline). Regression coverage:
 `tests/test_operations_ingest_jobs.py`.
 
 If `load_catalog()` raises `CatalogError` at listing time (only

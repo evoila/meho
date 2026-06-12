@@ -837,18 +837,22 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
 async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
     """The ``vcf-logs`` registered-row ``next_step.verb`` ingests dispatchably.
 
-    The claude-rdc-hetzner-dc#1136 false-success had two halves: the
-    catalog's own ``next_step.verb`` printed ``--product vcf-logs`` while
-    the row it decorated carried ``product="vrli"``, so an operator
-    copying the verb ingested under a product the dispatcher never
-    queried. This test pins the fix end-to-end:
+    The claude-rdc-hetzner-dc#1136 false-success was: an operator copying
+    the verb ingested under a product the dispatcher never queried, so the
+    catalog kept reporting ``registered, 0 ops``. The fix is the
+    register-time row reconciliation (rows land under the parser-derived
+    dispatch product regardless of the supplied ``--product``), which lets
+    the verb keep the **registry** product so the operator's ingest also
+    finds the real connector class and runs a real version-coverage
+    pre-flight. This test pins the fix end-to-end:
 
-    1. The verb for the ``vcf-logs`` registered row emits the
-       parser-derived ``--product`` (``vrli``) — the same product the
-       row advertises.
+    1. The verb for the ``vcf-logs`` registered row emits the **registry**
+       ``--product`` (``vcf-logs``) — the spelling ``VcfLogsConnector``
+       registers under.
     2. Ingesting under exactly that ``--product`` yields a connector the
-       dispatch/query surface resolves (``connector_exists`` True): the
-       verb round-trips to a *dispatchable* ingest.
+       dispatch/query surface resolves under the parser-derived key
+       (``connector_exists`` True): reconciliation makes the verb
+       round-trip to a *dispatchable* ingest.
     """
     import re
     from unittest.mock import AsyncMock
@@ -877,19 +881,23 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     )
     assert item is not None
     assert item.state == "registered"
-    # The row advertises the parser-derived product, and the verb agrees.
+    # The listing row still advertises the parser-derived product (the
+    # dispatch surface keys on it); the manual-mode verb, however, names
+    # the registry product so the operator's ingest finds the real class.
     assert item.product == "vrli"
     assert item.next_step is not None
     verb = item.next_step.verb
     match = re.search(r"--product (\S+)", verb)
     assert match is not None, f"verb has no --product flag: {verb!r}"
     verb_product = match.group(1)
-    assert verb_product == "vrli", (
+    assert verb_product == "vcf-logs", (
         f"next_step.verb emits --product {verb_product!r}; expected the "
-        f"dispatch product 'vrli' so the verb round-trips. Full verb: {verb!r}"
+        f"registry product 'vcf-logs' so the operator's ingest finds the "
+        f"real VcfLogsConnector class. Full verb: {verb!r}"
     )
 
-    # Round-trip: ingest under the verb's --product and assert dispatchable.
+    # Round-trip: ingest under the verb's --product (the registry product)
+    # and assert the reconciled rows are dispatchable under the short key.
     stub = AsyncMock()
     stub.encode_one.return_value = [0.25] * 384
     stub.encode.return_value = [[0.25] * 384]

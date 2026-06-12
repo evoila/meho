@@ -1097,14 +1097,18 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     "custom"``) — the same long↔short split shape the VCF family carries.
     The hint must:
 
-    * point at ``meho connector ingest --product custom --version
+    * point at ``meho connector ingest --product custom-vendor --version
       1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
-      manual-mode invocation), emitting the **parser-derived**
-      ``--product`` (the same one the listing row advertises) so the
-      verb round-trips to a *dispatchable* ingest. Emitting the registry
-      product (``custom-vendor``) was the claude-rdc-hetzner-dc#1136
-      false-success: rows ingested under it land where the dispatcher
-      never queries, leaving the catalog ``registered, 0 ops``;
+      manual-mode invocation), emitting the **registry** ``--product``
+      (the spelling the connector class registers under) so the operator's
+      ingest finds the real class and runs a real version-coverage
+      pre-flight. Register-time row reconciliation persists the rows under
+      the parser-derived dispatch product (``custom``), so it still
+      round-trips to a *dispatchable* ingest — that reconciliation, not
+      switching the verb to the short product, is what closes the
+      claude-rdc-hetzner-dc#1136 false-success (the dispatchable round-trip
+      is pinned end-to-end in
+      ``test_operations_ingest_catalog.test_registered_next_step_verb_round_trips_to_dispatchable_ingest``);
     * carry a rationale that says the catalog has no entry so the
       operator knows they need to source the OpenAPI spec themselves;
     * name the hand-authored on-ramp (#1533 / ci-07) so a spec-less
@@ -1127,10 +1131,11 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     assert custom["next_step"] is not None
     verb = custom["next_step"]["verb"]
     assert "--catalog" not in verb
-    # The verb emits the parser-derived product (round-trips dispatchably),
-    # NOT the registry product custom-vendor (claude-rdc-hetzner-dc#1136).
-    assert "--product custom " in verb
-    assert "--product custom-vendor" not in verb
+    # The verb emits the registry product (so the operator's ingest finds
+    # the real class + runs a real version-coverage pre-flight); register-
+    # time reconciliation lands the rows dispatchably under the short
+    # product, so it still round-trips (claude-rdc-hetzner-dc#1136).
+    assert "--product custom-vendor " in verb
     assert "--version 1.0" in verb
     assert "--impl custom-rest" in verb
     assert "--spec" in verb

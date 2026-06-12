@@ -216,16 +216,22 @@ connector-related release-notes line.
   `hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
   `vcf-fleet/fleet`, `vcf-logs/vrli`, `vcf-operations/vrops`; a no-op for
   aligned connectors), and a registered-but-unpopulated row's `next_step`
-  verb emits the parser-derived `--product` so it round-trips to a
-  dispatchable ingest. (2) The async job flipped to `succeeded` purely
-  because the pipeline coroutine returned; it now applies a
-  dispatchability postcondition (`inserted_count > 0` and the connector
-  resolves under its dispatch key) and ends `degraded` with
-  `error_class="ingested_not_dispatchable"` when it fails — never a bare
-  `succeeded` over a connector that persisted nothing callable. New
-  `degraded` job status surfaces on the REST/MCP poll response and the
-  CLI renders it as a non-zero failure. Diagnoses the v0.13.0 vcf-logs
-  log-sentry false-success; see claude-rdc-hetzner-dc#1136. (#1647)
+  verb emits the **registry** `--product` (e.g. `vcf-logs`) so the
+  operator's ingest finds the real connector class and runs a real
+  version-coverage pre-flight — the same register-time reconciliation
+  then lands the rows dispatchably under the short product, so the verb
+  still round-trips. (2) The async job flipped to `succeeded` purely
+  because the pipeline coroutine returned; it now consults a
+  dispatchability probe (the connector resolves under its dispatch key)
+  and ends `degraded` with `error_class="ingested_not_dispatchable"` when
+  the run is genuinely non-dispatchable — never a bare `succeeded` over a
+  connector that persisted nothing callable. A benign idempotent re-run
+  (every op skipped, so `inserted_count == 0`, but the connector is
+  already dispatchable) stays `succeeded`, so a no-op re-ingest no longer
+  reads as a failure. New `degraded` job status surfaces on the REST/MCP
+  poll response and the CLI renders it as a non-zero failure (including
+  under `--json`). Diagnoses the v0.13.0 vcf-logs log-sentry
+  false-success; see claude-rdc-hetzner-dc#1136. (#1647)
 - An ingested **L2** write op no longer mangles its HTTP request body: the
   dispatcher now serializes the single `x-meho-param-loc: "body"` container
   param's *value* as the JSON body (unwrapped) on every body-carrying arm,

@@ -3118,6 +3118,39 @@ type PreambleInclusion struct {
 	WouldDropSlugs []string `json:"would_drop_slugs"`
 }
 
+// PreviewOperationBody Request body for the “POST /api/v1/operations/preview“ route.
+//
+// Same field shape as :class:`CallOperationBody` (#1683) -- a preview
+// resolves the *same* op + target + params a real “call_operation“
+// would, then returns the literal would-be HTTP request instead of
+// sending it. Keeping the body identical means an operator who hit a
+// write 4xx can re-issue the exact arguments against “/preview“ to see
+// what was put on the wire (the audit row persists only a hashed
+// “params_hash“, so the request shape is otherwise unrecoverable).
+//
+// “target“ accepts the same three shapes as “call_operation“ (bare
+// string, dict “{"name": ...}“, or “None“); see
+// :class:`CallOperationBody` for the convention. “extra="forbid"“ keeps
+// a typo in “connector_id“ failing loud rather than silently previewing
+// nothing.
+type PreviewOperationBody struct {
+	ConnectorId string                       `json:"connector_id"`
+	OpId        string                       `json:"op_id"`
+	Params      *map[string]interface{}      `json:"params,omitempty"`
+	Target      *PreviewOperationBody_Target `json:"target"`
+}
+
+// PreviewOperationBodyTarget0 defines model for .
+type PreviewOperationBodyTarget0 = string
+
+// PreviewOperationBodyTarget1 defines model for .
+type PreviewOperationBodyTarget1 map[string]interface{}
+
+// PreviewOperationBody_Target defines model for PreviewOperationBody.Target.
+type PreviewOperationBody_Target struct {
+	union json.RawMessage
+}
+
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
 // G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
@@ -5435,6 +5468,11 @@ type GetGroupsApiV1OperationsGroupsGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// PostPreviewApiV1OperationsPreviewPostParams defines parameters for PostPreviewApiV1OperationsPreviewPost.
+type PostPreviewApiV1OperationsPreviewPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
@@ -5914,6 +5952,9 @@ type PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody = PromoteBody
 
 // PostCallApiV1OperationsCallPostJSONRequestBody defines body for PostCallApiV1OperationsCallPost for application/json ContentType.
 type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
+
+// PostPreviewApiV1OperationsPreviewPostJSONRequestBody defines body for PostPreviewApiV1OperationsPreviewPost for application/json ContentType.
+type PostPreviewApiV1OperationsPreviewPostJSONRequestBody = PreviewOperationBody
 
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
@@ -6512,6 +6553,68 @@ func (t *OperationCallStep_Verify) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsPreviewOperationBodyTarget0 returns the union data inside the PreviewOperationBody_Target as a PreviewOperationBodyTarget0
+func (t PreviewOperationBody_Target) AsPreviewOperationBodyTarget0() (PreviewOperationBodyTarget0, error) {
+	var body PreviewOperationBodyTarget0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPreviewOperationBodyTarget0 overwrites any union data inside the PreviewOperationBody_Target as the provided PreviewOperationBodyTarget0
+func (t *PreviewOperationBody_Target) FromPreviewOperationBodyTarget0(v PreviewOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePreviewOperationBodyTarget0 performs a merge with any union data inside the PreviewOperationBody_Target, using the provided PreviewOperationBodyTarget0
+func (t *PreviewOperationBody_Target) MergePreviewOperationBodyTarget0(v PreviewOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPreviewOperationBodyTarget1 returns the union data inside the PreviewOperationBody_Target as a PreviewOperationBodyTarget1
+func (t PreviewOperationBody_Target) AsPreviewOperationBodyTarget1() (PreviewOperationBodyTarget1, error) {
+	var body PreviewOperationBodyTarget1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPreviewOperationBodyTarget1 overwrites any union data inside the PreviewOperationBody_Target as the provided PreviewOperationBodyTarget1
+func (t *PreviewOperationBody_Target) FromPreviewOperationBodyTarget1(v PreviewOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePreviewOperationBodyTarget1 performs a merge with any union data inside the PreviewOperationBody_Target, using the provided PreviewOperationBodyTarget1
+func (t *PreviewOperationBody_Target) MergePreviewOperationBodyTarget1(v PreviewOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t PreviewOperationBody_Target) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *PreviewOperationBody_Target) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsOperationCallStep returns the union data inside the RunbookTemplateBody_Steps_Item as a OperationCallStep
 func (t RunbookTemplateBody_Steps_Item) AsOperationCallStep() (OperationCallStep, error) {
 	var body OperationCallStep
@@ -7066,6 +7169,11 @@ type ClientInterface interface {
 
 	// GetGroupsApiV1OperationsGroupsGet request
 	GetGroupsApiV1OperationsGroupsGet(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostPreviewApiV1OperationsPreviewPostWithBody request with any body
+	PostPreviewApiV1OperationsPreviewPostWithBody(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostPreviewApiV1OperationsPreviewPost(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetSearchApiV1OperationsSearchGet request
 	GetSearchApiV1OperationsSearchGet(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -8496,6 +8604,30 @@ func (c *Client) PostCallApiV1OperationsCallPost(ctx context.Context, params *Po
 
 func (c *Client) GetGroupsApiV1OperationsGroupsGet(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetGroupsApiV1OperationsGroupsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostPreviewApiV1OperationsPreviewPostWithBody(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostPreviewApiV1OperationsPreviewPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostPreviewApiV1OperationsPreviewPost(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostPreviewApiV1OperationsPreviewPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -14239,6 +14371,61 @@ func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroup
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostPreviewApiV1OperationsPreviewPostRequest calls the generic PostPreviewApiV1OperationsPreviewPost builder with application/json body
+func NewPostPreviewApiV1OperationsPreviewPostRequest(server string, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostPreviewApiV1OperationsPreviewPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostPreviewApiV1OperationsPreviewPostRequestWithBody generates requests for PostPreviewApiV1OperationsPreviewPost with any type of body
+func NewPostPreviewApiV1OperationsPreviewPostRequestWithBody(server string, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -20646,6 +20833,11 @@ type ClientWithResponsesInterface interface {
 	// GetGroupsApiV1OperationsGroupsGetWithResponse request
 	GetGroupsApiV1OperationsGroupsGetWithResponse(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*GetGroupsApiV1OperationsGroupsGetResponse, error)
 
+	// PostPreviewApiV1OperationsPreviewPostWithBodyWithResponse request with any body
+	PostPreviewApiV1OperationsPreviewPostWithBodyWithResponse(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostPreviewApiV1OperationsPreviewPostResponse, error)
+
+	PostPreviewApiV1OperationsPreviewPostWithResponse(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostPreviewApiV1OperationsPreviewPostResponse, error)
+
 	// GetSearchApiV1OperationsSearchGetWithResponse request
 	GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error)
 
@@ -22532,6 +22724,29 @@ func (r GetGroupsApiV1OperationsGroupsGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetGroupsApiV1OperationsGroupsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostPreviewApiV1OperationsPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostPreviewApiV1OperationsPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostPreviewApiV1OperationsPreviewPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25571,6 +25786,23 @@ func (c *ClientWithResponses) GetGroupsApiV1OperationsGroupsGetWithResponse(ctx 
 		return nil, err
 	}
 	return ParseGetGroupsApiV1OperationsGroupsGetResponse(rsp)
+}
+
+// PostPreviewApiV1OperationsPreviewPostWithBodyWithResponse request with arbitrary body returning *PostPreviewApiV1OperationsPreviewPostResponse
+func (c *ClientWithResponses) PostPreviewApiV1OperationsPreviewPostWithBodyWithResponse(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	rsp, err := c.PostPreviewApiV1OperationsPreviewPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostPreviewApiV1OperationsPreviewPostWithResponse(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	rsp, err := c.PostPreviewApiV1OperationsPreviewPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp)
 }
 
 // GetSearchApiV1OperationsSearchGetWithResponse request returning *GetSearchApiV1OperationsSearchGetResponse
@@ -28872,6 +29104,39 @@ func ParseGetGroupsApiV1OperationsGroupsGetResponse(rsp *http.Response) (*GetGro
 	}
 
 	response := &GetGroupsApiV1OperationsGroupsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostPreviewApiV1OperationsPreviewPostResponse parses an HTTP response from a PostPreviewApiV1OperationsPreviewPostWithResponse call
+func ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp *http.Response) (*PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostPreviewApiV1OperationsPreviewPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

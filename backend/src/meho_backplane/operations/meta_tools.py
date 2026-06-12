@@ -93,6 +93,7 @@ from meho_backplane.operations._lookup import (
     connector_exists,
     parse_connector_id,
 )
+from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
@@ -105,11 +106,13 @@ __all__ = [
     "OperationDescriptor",
     "OperationGroupSummary",
     "OperationSearchHit",
+    "PreviewOperationBody",
     "UnknownConnectorError",
     "call_operation",
     "call_operation_with_approval",
     "describe_descriptor",
     "list_operation_groups",
+    "preview_operation",
     "search_operations",
 ]
 
@@ -356,6 +359,32 @@ class CallOperationBody(BaseModel):
     free-form ``dict`` because per-op parameter shape is enforced by
     the descriptor's ``parameter_schema`` further down the dispatch
     path; only the meta-tool body's own fields are constrained here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector_id: str = Field(min_length=1)
+    op_id: str = Field(min_length=1)
+    target: str | dict[str, Any] | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewOperationBody(BaseModel):
+    """Request body for the ``POST /api/v1/operations/preview`` route.
+
+    Same field shape as :class:`CallOperationBody` (#1683) -- a preview
+    resolves the *same* op + target + params a real ``call_operation``
+    would, then returns the literal would-be HTTP request instead of
+    sending it. Keeping the body identical means an operator who hit a
+    write 4xx can re-issue the exact arguments against ``/preview`` to see
+    what was put on the wire (the audit row persists only a hashed
+    ``params_hash``, so the request shape is otherwise unrecoverable).
+
+    ``target`` accepts the same three shapes as ``call_operation`` (bare
+    string, dict ``{"name": ...}``, or ``None``); see
+    :class:`CallOperationBody` for the convention. ``extra="forbid"`` keeps
+    a typo in ``connector_id`` failing loud rather than silently previewing
+    nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -922,6 +951,77 @@ async def call_operation_with_approval(
     split documented in #1117).
     """
     return await _call_operation_impl(operator, arguments, approved=True)
+
+
+async def preview_operation(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve an op + params to the literal would-be HTTP request, without sending.
+
+    The read-only diagnosis sibling of :func:`call_operation` (#1683). Takes
+    the same ``arguments`` shape -- ``{"connector_id": str, "op_id": str,
+    "target": str | dict | None, "params": dict}`` -- resolves the target the
+    same way, then delegates to
+    :func:`~meho_backplane.operations._request_preview.preview_dispatch`,
+    which returns ``{method, resolved_path, query, redacted_body}`` for an
+    ``source_kind='ingested'`` op **instead of dispatching it**. The body is
+    redacted through the same connector-boundary pipeline the response path
+    uses, so the preview is not a new raw-secret surface; nothing is written
+    to the audit row (the ``params_hash`` privacy design is untouched).
+
+    Use this to diagnose a write 4xx (the gh-rest 422 of #1656, a 403 of
+    #1649) from the inside -- re-issue the exact arguments here to read back
+    what meho would put on the wire, rather than bisecting payload shapes
+    from outside. Inspection only: it never sends the request and never
+    re-dispatches a past one (replay is a separate concern, Goal #1651).
+
+    Returns the structured envelope verbatim (``status`` of ``"ok"`` /
+    ``"error"`` / ``"unavailable"``); operator-input faults (unknown op,
+    invalid params, unresolvable connector) come back inside the envelope
+    rather than as exceptions, mirroring ``call_operation``. The one
+    exception the handler may raise is the missing-``target.name``
+    ``ValueError`` from :func:`_normalize_target_arg`, which the route maps
+    to a ``400``.
+    """
+    connector_id = arguments["connector_id"]
+    op_id = arguments["op_id"]
+    target_arg = _normalize_target_arg(arguments.get("target"))
+    params: dict[str, Any] = arguments.get("params") or {}
+
+    resolved_target: Any = None
+    if target_arg is not None:
+        # ``name`` is guaranteed present + non-empty by
+        # ``_normalize_target_arg``. Resolve the target so the preview
+        # reflects the same connector + ``mount_op_path`` the real dispatch
+        # would hit -- but do NOT bind the ``audit_target_id`` contextvar:
+        # a preview writes no audit row, so there is nothing to enrich.
+        name = target_arg["name"]
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            resolved_target = await resolve_target(session, operator.tenant_id, name)
+        # Per-call ``fqdn`` override -- applied in memory only, same as
+        # ``call_operation``; the resolved path the connector's
+        # ``mount_op_path`` produces can depend on it (vhost routing).
+        fqdn_override = target_arg.get("fqdn")
+        if isinstance(fqdn_override, str) and fqdn_override:
+            resolved_target.fqdn = fqdn_override
+
+    envelope = await preview_dispatch(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        target=resolved_target,
+        params=params,
+    )
+    _log.info(
+        "preview_operation",
+        connector_id=connector_id,
+        op_id=op_id,
+        status=envelope.get("status"),
+        tenant_id=str(operator.tenant_id),
+    )
+    return envelope
 
 
 async def describe_descriptor(

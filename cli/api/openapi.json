@@ -2731,6 +2731,62 @@
         }
       }
     },
+    "/api/v1/operations/preview": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Post Preview",
+        "description": "Resolve an op + params to the literal would-be HTTP request, without sending.\n\nDelegates to :func:`preview_operation` (#1683). The read-only diagnosis\nsibling of ``POST /api/v1/operations/call``: it resolves the same op +\ntarget + params and returns the literal request\n(``{method, resolved_path, query, redacted_body}``) for an\n``source_kind='ingested'`` op **instead of dispatching it**. Use it to\ndiagnose a write 4xx from the inside -- the audit row persists only a\nhashed ``params_hash``, so the wire shape is otherwise unrecoverable.\n\nReturns ``200`` with the structured envelope; operator-input faults\n(unknown op, invalid params, unresolvable connector) land inside the\nenvelope (``status=\"error\"`` / ``status=\"unavailable\"`` +\n``extras.error_code``) rather than as HTTP 4xx, the same contract as\n``/call``. The one HTTP-side gate is target resolution: a missing-target\nname (``{\"target\": {}}`` without ``\"name\"``) surfaces as a ``400``. The\nbody is redacted through the same connector-boundary pipeline the\nresponse path uses; nothing is written to the audit row.",
+        "operationId": "post_preview_api_v1_operations_preview_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewOperationBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Post Preview Api V1 Operations Preview Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/operations/{descriptor_id}": {
       "get": {
         "tags": [
@@ -14146,6 +14202,46 @@
         ],
         "title": "PreambleInclusion",
         "description": "Whether a just-written convention reaches the session preamble.\n\nG0.14-T8 (#1149, signal 18) -- the post-write feedback shape\n``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``\nattach to the response when the convention is ``kind='operational'``.\nWithout it, the operator gets a ``201`` (or ``200`` on PATCH), assumes\nthe rule is in effect, and the agent silently never sees it because\nthe preamble packer dropped it on budget overflow.\n\nFields:\n\n* ``included`` -- ``True`` when the slug landed in the assembled\n  preamble (after the priority-ranked pack against\n  :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer\n  dropped it whole on overflow.\n* ``position`` -- 1-based index of the convention in the assembled\n  preamble's packed order (the packer iterates ``priority DESC,\n  created_at ASC``; ``position=1`` means highest-priority slot in\n  the operator's tenant). ``None`` when ``included=False``.\n* ``token_count`` -- the convention body's own estimated token\n  cost via :func:`estimate_tokens`. Useful for the operator to\n  see why a near-budget body got dropped (it weighed more than\n  the remaining headroom).\n* ``would_drop_slugs`` -- the full ``dropped_slugs`` list the\n  packer produced on this assembly. When ``included=True`` this\n  names *other* slugs that fell out of the preamble (the just-\n  written convention may have pushed a lower-priority neighbour\n  out); when ``included=False`` the list contains *this* slug\n  plus any others dropped under the same pack. The shape lets\n  a single ``meho conventions create ...`` round-trip surface\n  both the personal outcome (did mine land?) and the collateral\n  damage (did mine push someone else out?).\n\nWhy a separate model instead of inlining fields on\n:class:`Convention`: the response shape ``Convention`` is used\nby ``GET /{slug}`` too, where ``preamble_status`` would be\nredundant (operators inspecting a row already have the\n``GET /api/v1/conventions``'s ``budget_status`` envelope for\naggregate budget signal). Keeping the inclusion shape on a\nsub-model means GET-single can drop the field cleanly while\nPOST/PATCH attach it."
+      },
+      "PreviewOperationBody": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Op Id"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "title": "PreviewOperationBody",
+        "description": "Request body for the ``POST /api/v1/operations/preview`` route.\n\nSame field shape as :class:`CallOperationBody` (#1683) -- a preview\nresolves the *same* op + target + params a real ``call_operation``\nwould, then returns the literal would-be HTTP request instead of\nsending it. Keeping the body identical means an operator who hit a\nwrite 4xx can re-issue the exact arguments against ``/preview`` to see\nwhat was put on the wire (the audit row persists only a hashed\n``params_hash``, so the request shape is otherwise unrecoverable).\n\n``target`` accepts the same three shapes as ``call_operation`` (bare\nstring, dict ``{\"name\": ...}``, or ``None``); see\n:class:`CallOperationBody` for the convention. ``extra=\"forbid\"`` keeps\na typo in ``connector_id`` failing loud rather than silently previewing\nnothing."
       },
       "PromoteBody": {
         "properties": {

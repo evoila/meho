@@ -179,6 +179,29 @@ connector-related release-notes line.
 
 ### Added
 
+- A read-only **dispatch request preview** — `POST
+  /api/v1/operations/preview`, the MCP `preview_operation` tool, and the
+  regenerated CLI client — resolves an ingested op + params to the literal
+  would-be HTTP request (`method` + substituted `path` + `query` +
+  **redacted** `body`) and **returns** it instead of dispatching. It makes
+  a write failure self-diagnosable from the inside: an operator who hit a
+  gh-rest write `422` / `403` re-issues the same arguments against
+  `/preview` to read back exactly what would be put on the wire, rather
+  than bisecting payload shapes from the outside — the operation audit
+  persists only a hashed `params_hash`, so the request shape is otherwise
+  unrecoverable. The body is redacted through the **same**
+  connector-boundary pipeline the response path uses (a bearer token in a
+  body value is masked just as in a response), so it is request-time
+  observability, **not** a new persisted-secret surface: nothing is
+  written to the audit row and the `params_hash` privacy choice is
+  untouched. The literal request is resolved through the **same** code
+  path `dispatch_ingested` sends through (path substitution, `mount_op_path`
+  prefix, requestBody unwrap), so the preview can never drift from the real
+  request. `typed` / `composite` ops return `status="unavailable"` (no
+  single literal HTTP request to preview); inspection only — it never sends
+  the request and never re-dispatches a past one (replay is out of scope).
+  The observability counterpart to #1656 (requestBody unwrap) and #1649
+  (structured `403`/`422` shape) (`claude-rdc-hetzner-dc#1138`) (#1683).
 - `Operator` now carries a `platform_admin: bool` flag, parsed from a
   configurable JWT claim (`JWT_PLATFORM_ADMIN_CLAIM_NAME`, default
   `platform_admin`) and defaulting to `False` when the claim is absent or

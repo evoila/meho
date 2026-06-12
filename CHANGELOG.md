@@ -109,10 +109,11 @@ connector-related release-notes line.
   v0.14.0 shipped with all 11 aliases still registered and callable and
   its release notes carried no removal or deferral line, so the
   deadline is moved explicitly rather than slipping silently: the
-  per-call deprecation warnings (`mcp_tool_name_deprecated`,
-  `runbook_template_slug_field_deprecated`) and the DEPRECATED wire
-  descriptions now name v0.15.0, a `### Deprecated` erratum was added
-  to the v0.14.0 section below, and the removal itself stays tracked in
+  `runbook_template_slug_field_deprecated` warning and the DEPRECATED
+  wire descriptions now name v0.15.0 (the per-call
+  `mcp_tool_name_deprecated` breadcrumb stays unversioned — it logs
+  tool + replacement only), a `### Deprecated` erratum was added to
+  the v0.14.0 section below, and the removal itself stays tracked in
   #1625 (re-scheduled to the v0.15.0 cycle). Nothing else changes:
   consumers already on `meho.runbook.<verb>` + `template_slug` are
   unaffected, and the migration recipe is unchanged — replace

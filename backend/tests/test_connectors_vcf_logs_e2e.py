@@ -68,6 +68,7 @@ from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
@@ -234,6 +235,7 @@ def _resolve_connector() -> VcfLogsConnector:
 class _VrliE2EBundle:
     target_name: str
     connector_instance: VcfLogsConnector
+    db_target: Any
 
 
 @pytest.fixture
@@ -242,7 +244,7 @@ async def vrli_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VrliE2EB
     del captured_events  # the fixture's side-effect is the patched publisher
 
     await _insert_vrli_descriptors()
-    await _seed_target()
+    seeded_target = await _seed_target()
     instance = _resolve_connector()
 
     async with respx.mock(
@@ -255,6 +257,7 @@ async def vrli_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VrliE2EB
             yield _VrliE2EBundle(
                 target_name=_E2E_TARGET_NAME,
                 connector_instance=instance,
+                db_target=seeded_target,
             )
         finally:
             await instance.aclose()
@@ -430,8 +433,11 @@ async def test_vrli_e2e_session_establishes_on_first_dispatch(
     """
     instance = vrli_e2e_canary.connector_instance
     target_name = vrli_e2e_canary.target_name
+    # The session-token cache is keyed on the tenant-unique (tenant_id, id)
+    # tuple (#1642), not the bare name.
+    cache_key = target_cache_key(vrli_e2e_canary.db_target)
 
-    assert target_name not in instance._session_tokens, (
+    assert cache_key not in instance._session_tokens, (
         "Expected empty token cache before first dispatch; "
         f"got _session_tokens={instance._session_tokens!r}"
     )
@@ -446,7 +452,7 @@ async def test_vrli_e2e_session_establishes_on_first_dispatch(
         },
     )
     assert result["status"] == "ok"
-    assert instance._session_tokens.get(target_name) == VRLI_CANARY_SESSION_ID, (
+    assert instance._session_tokens.get(cache_key) == VRLI_CANARY_SESSION_ID, (
         f"Expected vRLI session token cached after first dispatch; "
         f"got _session_tokens={instance._session_tokens!r}"
     )
@@ -500,7 +506,7 @@ async def test_vrli_e2e_401_recovery_via_connector_method(
         f"Expected GET /api/v2/version called twice (401 + retry); "
         f"got call_count={bundle.version_route.call_count}"
     )
-    cached = bundle.connector_instance._session_tokens.get(_E2E_TARGET_NAME)
+    cached = bundle.connector_instance._session_tokens.get(target_cache_key(bundle.db_target))
     assert cached == VRLI_CANARY_SESSION_REFRESH_ID, (
         f"Expected post-retry token to be the refreshed id {VRLI_CANARY_SESSION_REFRESH_ID!r}; "
         f"got cached token {cached!r}"

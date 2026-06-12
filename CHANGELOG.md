@@ -123,6 +123,12 @@ connector-related release-notes line.
   naming one's own tenant (by slug or UUID) or omitting the argument is
   unchanged, and an unauthorized cross-tenant request surfaces as the
   MCP `-32602` (INVALID_PARAMS) error (#1641).
+- Re-keyed the VCF (vROps / vRLI / Fleet), Harbor, NSX, and SDDC-Manager
+  connectors' per-target credential and session-token caches on the
+  tenant-unique `(tenant_id, target.id)` tuple instead of `target.name`.
+  Two same-named targets in different tenants previously collapsed onto one
+  cache entry, so one tenant could be served another tenant's cached
+  service-account credential or session token (#1642).
 
 ### Breaking changes
 
@@ -170,6 +176,19 @@ connector-related release-notes line.
   ingested, only a fraction enabled). The `meho.connector.list` MCP
   tool returns the same rows. Additive — existing `operation_count`
   consumers are unaffected. (#1636)
+- The backplane now emits a single structured startup advisory
+  (`vault_tenant_scope_unenforced`) when the opt-in Vault `vault.kv.*`
+  tenant-scope guard (#1643) is left default-off
+  (`VAULT_KV_TENANT_SCOPE_PREFIX` unset), so an operator running a
+  tenant-partitioned Vault has a signal that cross-tenant `vault.kv.*`
+  isolation is unenforced at the app layer instead of the guard silently
+  no-op'ing. The advisory names the enabling env var and the doc; it is
+  observability-only — dispatch behaviour and the empty default are
+  unchanged (flipping the guard on is an explicit infra decision). A new
+  "Choosing a layout" section in
+  `docs/codebase/connectors-vault-tenant-scope.md` documents the
+  per-`sub` vs tenant-partitioned choice and what enabling the prefix
+  requires (#1673).
 
 ### Fixed
 
@@ -228,6 +247,17 @@ connector-related release-notes line.
   pattern to the transport-error sibling; reaches both the REST dispatch
   response and the MCP `call_operation` tool
   (`claude-rdc-hetzner-dc#1138`) (#1649).
+- `meho connector list --json` no longer silently drops the `state`,
+  `next_step` and `enabled_operation_count` fields the backend ships on
+  every `GET /api/v1/connectors` row — the machine surface was
+  advertising an incomplete row shape, so scripts and LLM consumers
+  could not tell a dispatchable (`ingested`) connector from a
+  registered-but-empty one, see the self-describing remediation verb
+  for half-registered connectors, or read the enabled-vs-total
+  operation split. The CLI's decode shape now mirrors all 13
+  `ConnectorListItem` fields and the canonical wire-shape test rejects
+  unknown fixture keys so the mirror cannot silently regress. The
+  human table is unchanged. (#1645)
 
 ## [0.13.0] - 2026-06-11
 

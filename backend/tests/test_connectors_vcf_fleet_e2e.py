@@ -50,6 +50,7 @@ from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_fleet import (
     FLEET_CONNECTOR_ID,
@@ -210,6 +211,7 @@ def _resolve_connector() -> VcfFleetConnector:
 class _FleetE2EBundle:
     target_name: str
     connector_instance: VcfFleetConnector
+    db_target: Any
 
 
 @pytest.fixture
@@ -228,7 +230,7 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
        register the 8 read-op routes.
     """
     await _insert_fleet_descriptors()
-    await _seed_target()
+    seeded_target = await _seed_target()
     instance = _resolve_connector()
 
     async with respx.mock(
@@ -241,6 +243,7 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
             yield _FleetE2EBundle(
                 target_name=FLEET_TARGET_NAME,
                 connector_instance=instance,
+                db_target=seeded_target,
             )
         finally:
             await instance.aclose()
@@ -298,13 +301,13 @@ async def test_fleet_e2e_credentials_cached_after_first_dispatch(
     """
     instance = fleet_e2e_canary.connector_instance
     target_name = fleet_e2e_canary.target_name
-
     # The CredentialsCache exposes the underlying dict via ``_cache``; the
     # SDDC Manager precedent uses ``_creds_cache`` because its connector
-    # caches the dict directly. The cache key is the target name (set by
-    # ``CredentialsCache.get(target)``).
+    # caches the dict directly. The cache key is the tenant-unique
+    # (tenant_id, id) tuple (#1642), set by ``CredentialsCache.get(target)``.
+    cache_key = target_cache_key(fleet_e2e_canary.db_target)
     initial_keys = list(instance._creds._cache.keys())  # type: ignore[attr-defined]
-    assert target_name not in initial_keys, (
+    assert cache_key not in initial_keys, (
         f"Expected empty credential cache before first dispatch; got keys={initial_keys!r}"
     )
 
@@ -319,7 +322,7 @@ async def test_fleet_e2e_credentials_cached_after_first_dispatch(
     )
     assert result["status"] == "ok"
     after_first_keys = list(instance._creds._cache.keys())  # type: ignore[attr-defined]
-    assert target_name in after_first_keys, (
+    assert cache_key in after_first_keys, (
         f"Expected credentials cached after first dispatch; got keys={after_first_keys!r}"
     )
 

@@ -109,11 +109,24 @@ Detail payloads land in ``extras``. Codes:
   ``extras["detail"]``; ``extras["cause"]`` distinguishes
   ``unsupported_feature`` (fix the target config) from
   ``unreplaced_auto_shim`` (register the per-product subclass).
+* ``connector_http_403`` -- the connector raised
+  :exc:`httpx.HTTPStatusError` with a ``403`` status: the credential
+  reached the upstream and was authenticated but rejected on
+  authorization (e.g. a GitHub App with ``issues: read`` but not
+  ``issues: write``). G0.24-T4 (#1649), extending #1627's pattern to
+  the transport-error sibling. The ``error`` names the likely
+  insufficient-permission cause (connector-agnostically -- any upstream
+  403); ``extras`` carries ``http_status=403``, the upstream
+  ``upstream_message``, and any standard GitHub permission headers
+  (``permission_headers``) that were present. Only 403 is siphoned
+  here; every other ``HTTPStatusError`` status falls through to
+  ``connector_error``.
 * ``connector_error`` -- the connector / handler raised any other
-  exception (and the reducer / redaction middleware raised *any*
-  exception -- the ``connector_unsupported`` classification applies
-  only to the source-kind branch where connector code runs). The raised
-  exception's class name lands in ``extras["exception_class"]``;
+  exception (any non-403 :exc:`httpx.HTTPStatusError` included, and the
+  reducer / redaction middleware raised *any* exception -- the
+  ``connector_unsupported`` / ``connector_http_403`` classifications
+  apply only to the source-kind branch where connector code runs). The
+  raised exception's class name lands in ``extras["exception_class"]``;
   the (length-capped) message in ``extras["exception_message"]``.
 
 Why "always return, never raise"
@@ -156,6 +169,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+import httpx
+
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
     OperationResult,
@@ -180,6 +195,8 @@ from meho_backplane.operations._errors import (
     result_composite_l2_disabled,
     result_composite_l2_missing,
     result_connector_error,
+    result_connector_http_403,
+    result_connector_http_422,
     result_connector_unsupported,
     result_denied,
     result_handler_unreachable,
@@ -665,6 +682,16 @@ async def _run_branch_with_error_handling(
     ``target.auth_model``; unreplaced ingest auto-shim) whose
     already-descriptive message used to flatten into the same opaque
     ``connector_error`` envelope.
+
+    G0.24-T4 (#1649) adds ``connector_http_403`` / ``connector_http_422``
+    catches for an upstream ``403`` / ``422`` :exc:`httpx.HTTPStatusError`
+    -- an insufficient-permission rejection (the credential authenticated
+    but lacks the op's required scope) and an invalid-payload rejection
+    (the upstream parsed the request but rejected its content), whose
+    useful upstream body + GitHub permission headers / ``errors[]``
+    validation array used to flatten into the same opaque
+    ``connector_error``. Scoped to ``403`` + ``422``; every other status
+    falls through to ``connector_error``.
     """
     try:
         return await _run_source_kind_branch(
@@ -783,6 +810,50 @@ async def _run_branch_with_error_handling(
             ),
             duration_ms=duration_ms,
         )
+    except httpx.HTTPStatusError as http_exc:
+        # G0.24-T4 (#1649): an upstream 403 or 422 carries actionable
+        # detail the generic ``connector_error`` arm would bury in
+        # ``extras.exception_message`` (consumer
+        # ``claude-rdc-hetzner-dc#1138``), because the shared
+        # ``HttpConnector`` adapter does no error mapping. Two distinct,
+        # connector-agnostic causes:
+        #
+        # * 403 -> insufficient permission: the credential reached the
+        #   upstream and was authenticated, but lacks the scope the op
+        #   requires (a GitHub App with ``issues: read`` but not
+        #   ``issues: write`` on ``POST /repos/.../issues``). GitHub
+        #   returns a body message + ``X-Accepted-GitHub-Permissions`` /
+        #   ``x-oauth-scopes`` headers.
+        # * 422 -> invalid payload: the upstream parsed the request and
+        #   rejected its *content* (a malformed/mis-nested body, a missing
+        #   field -- the requestBody-mangling bug T5 #1656). GitHub
+        #   returns a body message + an ``errors[]`` array naming the
+        #   offending fields.
+        #
+        # Scoped strictly to 403 + 422: every other status (401, 429, 5xx)
+        # flattens to the unchanged generic ``connector_error`` shape
+        # (401/429 are deliberate follow-ups, not this surface). The
+        # branch is taken *inside* this arm rather than re-``raise``-ing
+        # to the ``except Exception`` below -- a re-raise from one except
+        # clause is not caught by a sibling clause of the same ``try``, so
+        # it would escape the dispatcher's never-raises contract.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        status_code = http_exc.response.status_code
+        if status_code == 403:
+            return result_connector_http_403(op_id, http_exc, duration_ms)
+        if status_code == 422:
+            return result_connector_http_422(op_id, http_exc, duration_ms)
+        return result_connector_error(op_id, http_exc, duration_ms)
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(

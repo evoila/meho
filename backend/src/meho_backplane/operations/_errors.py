@@ -13,7 +13,8 @@ Each builder owns one ``error_code`` from the contract documented in
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
-``connector_error``. The ``status`` field maps
+``connector_http_403`` / ``connector_http_422`` / ``connector_error``.
+The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
 (``error.startswith("unknown_op:")``) and parse the code for structured
@@ -25,6 +26,8 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
+import httpx
+
 from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
@@ -33,6 +36,8 @@ __all__ = [
     "result_composite_l2_disabled",
     "result_composite_l2_missing",
     "result_connector_error",
+    "result_connector_http_403",
+    "result_connector_http_422",
     "result_connector_unsupported",
     "result_denied",
     "result_handler_unreachable",
@@ -534,6 +539,216 @@ def result_connector_unsupported(
             "connector_class": connector_class,
             "detail": detail,
         },
+    )
+
+
+#: GitHub returns the accepted/required fine-grained permissions on an App
+#: or fine-grained-PAT 403 via this header, and the granted classic-OAuth
+#: scopes via ``x-oauth-scopes``. They are echoed verbatim (when present)
+#: so an operator/agent can read the missing grant off the structured
+#: error instead of re-issuing the call to inspect raw headers. Matched
+#: case-insensitively through :class:`httpx.Headers`.
+_HTTP_403_ECHOED_HEADERS: tuple[str, ...] = (
+    "X-Accepted-GitHub-Permissions",
+    "x-oauth-scopes",
+)
+
+
+def _cap_message(message: str) -> str:
+    """Apply the :data:`_EXC_MESSAGE_CAP` discipline to one upstream line."""
+    if len(message) > _EXC_MESSAGE_CAP:
+        return message[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    return message
+
+
+def _http_upstream_message(response: httpx.Response) -> str | None:
+    """Best-effort extraction of the upstream's human error message.
+
+    GitHub (and most REST APIs that bother) returns a JSON body with a
+    top-level ``message`` (``"Resource not accessible by integration"``
+    on a 403, ``"Validation Failed"`` on a 422); that is the single most
+    useful line for diagnosis, so it is preferred when the body parses as
+    a JSON object carrying a string ``message``. Bodies that are not
+    JSON, or JSON without a usable ``message``, fall back to the capped
+    raw text. ``None`` only when the body is empty. The same
+    :data:`_EXC_MESSAGE_CAP` discipline as the other builders bounds any
+    credential-bearing upstream text. Shared by the 403 and 422 builders
+    (the body shape is identical across GitHub's 4xx responses).
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        body = None
+    if isinstance(body, dict):
+        message = body.get("message")
+        if isinstance(message, str) and message.strip():
+            return _cap_message(message)
+    text = (response.text or "").strip()
+    if not text:
+        return None
+    return _cap_message(text)
+
+
+def _http_validation_errors(response: httpx.Response) -> list[Any]:
+    """Extract the GitHub-style ``errors[]`` validation array from a 422 body.
+
+    GitHub's 422 ``Validation Failed`` body carries an ``errors`` array
+    naming each offending field (``[{"resource", "field", "code", ...}]``);
+    that array is the actionable detail an operator/agent needs to fix the
+    payload (the requestBody-mangling bug T5 #1656 is exactly the class of
+    failure it pinpoints). It is echoed **verbatim** when the body parses
+    as a JSON object whose ``errors`` is a list -- never required, so a
+    non-GitHub 422 (or a 422 whose body carried no ``errors``) yields an
+    empty list rather than a fabricated shape. A non-JSON body yields an
+    empty list too; its human text is still surfaced via
+    :func:`_http_upstream_message`.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if isinstance(body, dict):
+        errors = body.get("errors")
+        if isinstance(errors, list):
+            return errors
+    return []
+
+
+def result_connector_http_403(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector raised an upstream **403 Forbidden** on dispatch.
+
+    G0.24-T4 (#1649), extending the G0.23-T1 (#1627) dispatch
+    structured-cause pattern to the transport-error sibling. A write
+    dispatch whose backing credential is authenticated but lacks the
+    *permission* the operation needs (e.g. a GitHub App with
+    ``issues: read`` but not ``issues: write`` hitting
+    ``POST /repos/{owner}/{repo}/issues``) surfaces as
+    :exc:`httpx.HTTPStatusError`. The shared :class:`HttpConnector`
+    adapter does no error mapping, so routing it through
+    :func:`result_connector_error` flattened a genuinely useful 403
+    -- GitHub returns a body message *and* headers enumerating the
+    accepted/required permissions -- into an opaque
+    ``connector_error: HTTPStatusError`` with only the httpx status
+    line, the actionable detail buried in
+    ``extras["exception_message"]`` (consumer
+    ``claude-rdc-hetzner-dc#1138``).
+
+    The cause is kept **connector-agnostic**: any upstream 403 means the
+    credential reached the upstream and was rejected on authorization,
+    not transport -- so the operator-facing ``error`` names the likely
+    insufficient-permission cause regardless of which connector raised.
+    ``extras`` carries the machine-usable fields an agent can branch on
+    without re-parsing a transport error: ``http_status`` (always
+    ``403`` -- the dispatcher scopes this builder to that code; 401/429
+    are deliberate follow-ups, not this surface), the upstream
+    ``upstream_message`` when the body carried one, and any of the
+    standard GitHub permission headers
+    (:data:`_HTTP_403_ECHOED_HEADERS`) that were present -- echoed,
+    never required, so a non-GitHub 403 still yields the structured
+    cause with an empty ``permission_headers``.
+    """
+    response = exc.response
+    upstream_message = _http_upstream_message(response)
+    permission_headers = {
+        header: value
+        for header in _HTTP_403_ECHOED_HEADERS
+        if (value := response.headers.get(header)) is not None
+    }
+    summary = (
+        "connector_http_403: the upstream returned HTTP 403 Forbidden. The "
+        "target credential reached the upstream and was authenticated, but "
+        "may lack the permission this operation requires -- a credential "
+        "scope matter on the target, not a meho transport fault. Grant the "
+        "missing permission on the backing credential (for a GitHub App / "
+        "fine-grained PAT, the accepted permission is echoed in "
+        "extras.permission_headers when the upstream sent it) and retry. See "
+        "docs/codebase/error-message-shape.md for the dispatch error "
+        "convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary} Upstream said: {upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_http_403",
+        "http_status": 403,
+        "upstream_message": upstream_message,
+        "permission_headers": permission_headers,
+    }
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_http_422(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector raised an upstream **422 Unprocessable Entity** on dispatch.
+
+    G0.24-T4 (#1649), the validation sibling of
+    :func:`result_connector_http_403`. A write dispatch whose request
+    *payload* the upstream rejected as invalid (a malformed body, a
+    missing required field) surfaces as :exc:`httpx.HTTPStatusError` with
+    a 422 status. GitHub returns a genuinely useful 422 -- a body
+    ``message`` (``"Validation Failed"``) and an ``errors`` array naming
+    each offending field -- but the shared :class:`HttpConnector` adapter
+    does no error mapping, so routing it through
+    :func:`result_connector_error` flattened all of it into an opaque
+    ``connector_error: HTTPStatusError`` with only the httpx status line,
+    the actionable detail buried in ``extras["exception_message"]``. That
+    bare shape is exactly what slowed the diagnosis of the
+    requestBody-mangling bug T5 #1656 (consumer
+    ``claude-rdc-hetzner-dc#1138``).
+
+    The cause is kept **connector-agnostic**: any upstream 422 means the
+    upstream parsed the request and rejected its *content*, not transport
+    or authorization -- so the operator-facing ``error`` names the
+    payload-rejected cause regardless of which connector raised.
+    ``extras`` carries the machine-usable fields an agent can branch on
+    without re-parsing a transport error: ``http_status`` (always
+    ``422`` -- the dispatcher scopes this builder to that code), the
+    upstream ``upstream_message`` when the body carried one, and the
+    GitHub-style ``validation_errors`` array (the body's ``errors[]``)
+    echoed verbatim when present -- never required, so a non-GitHub 422
+    (or one with no ``errors``) still yields the structured cause with an
+    empty ``validation_errors``.
+    """
+    response = exc.response
+    upstream_message = _http_upstream_message(response)
+    validation_errors = _http_validation_errors(response)
+    summary = (
+        "connector_http_422: the upstream rejected the request payload as "
+        "invalid (HTTP 422 Unprocessable Entity). The credential reached the "
+        "upstream and the request was understood, but its content failed the "
+        "upstream's validation -- a request-shape matter, not a meho transport "
+        "or permission fault. Inspect extras.validation_errors (the upstream's "
+        "field-level errors[] when it sent them) to see which fields were "
+        "rejected, correct the payload, and retry. See "
+        "docs/codebase/error-message-shape.md for the dispatch error "
+        "convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary} Upstream said: {upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_http_422",
+        "http_status": 422,
+        "upstream_message": upstream_message,
+        "validation_errors": validation_errors,
+    }
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
     )
 
 

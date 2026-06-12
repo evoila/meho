@@ -134,6 +134,17 @@ connector-related release-notes line.
   `X-CSRF-Token`; the create form now declares its own `hx-headers`
   echo of the token minted with the modal, so the double-submit pair
   always matches and the create round-trips to 204 + redirect (#1693)
+- Alembic data backfill (`0038`) reconciles pre-v0.14.0 ingested rows
+  persisted under the long VCF-family / SDDC / Hetzner-Robot product
+  spellings (`vcf-logs`, `vcf-automation`, `vcf-fleet`,
+  `vcf-operations`, `sddc-manager`, `hetzner-robot`) to the
+  dispatch-canonical short spellings (`vrli`, `vcfa`, `fleet`,
+  `vrops`, `sddc`, `hetzner`) that v0.14.0's register-time
+  reconciliation (#1647) writes for new ingests — the connectors'
+  pre-existing operations become dispatchable again after upgrade
+  instead of reporting `registered, 0 ops`. Built-in rows only
+  (`tenant_id IS NULL`); idempotent; rows whose short-spelling twin
+  already exists (post-upgrade re-ingest) are left untouched (#1701)
 
 ## [0.14.0] - 2026-06-12
 

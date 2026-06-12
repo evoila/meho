@@ -80,6 +80,7 @@ class AuditQueryRequest(BaseModel):
     audit_id: uuid.UUID | None = None
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
+    work_ref: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = Field(default=None, max_length=512)
 

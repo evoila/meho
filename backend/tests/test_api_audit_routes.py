@@ -209,6 +209,7 @@ def _make_entry(
         result_status="ok",
         parent_audit_id=None,
         agent_session_id=None,
+        work_ref=None,
         broadcast_event_id=None,
     )
 
@@ -415,6 +416,37 @@ def test_who_touched_builds_target_filter(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/v1/audit/by-work-ref/{ref}
+# ---------------------------------------------------------------------------
+
+
+def test_by_work_ref_builds_exact_work_ref_filter(client: TestClient) -> None:
+    """work_ref I1-T3 #1658: the path param becomes the substrate ``work_ref`` filter.
+
+    Unlike ``who-touched``, the route binds **no** default ``since`` window — a
+    change-ticket lookup wants the whole governed history of the ref, not just
+    the last 24h — so ``since`` stays None unless the caller passes one.
+    """
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            "/api/v1/audit/by-work-ref/gh:evoila/meho%231",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    filters = mock_query.await_args.args[0]
+    assert filters.work_ref == "gh:evoila/meho#1"
+    assert filters.since is None  # no default window for a change-ticket lookup
+    assert filters.limit == 100
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/audit/my-recent
 # ---------------------------------------------------------------------------
 
@@ -592,6 +624,7 @@ def test_openapi_schema_lists_all_routes(client: TestClient) -> None:
     paths = schema["paths"]
     assert "/api/v1/audit/query" in paths
     assert "/api/v1/audit/who-touched/{target}" in paths
+    assert "/api/v1/audit/by-work-ref/{ref}" in paths
     assert "/api/v1/audit/my-recent" in paths
     assert "/api/v1/audit/show/{audit_id}" in paths
     assert "/api/v1/audit/sessions/{session_id}/replay" in paths
@@ -600,6 +633,7 @@ def test_openapi_schema_lists_all_routes(client: TestClient) -> None:
     assert "post" in paths["/api/v1/audit/query"]
     assert "audit" in paths["/api/v1/audit/query"]["post"]["tags"]
     assert "audit" in paths["/api/v1/audit/who-touched/{target}"]["get"]["tags"]
+    assert "audit" in paths["/api/v1/audit/by-work-ref/{ref}"]["get"]["tags"]
     assert "audit" in paths["/api/v1/audit/my-recent"]["get"]["tags"]
     assert "audit" in paths["/api/v1/audit/show/{audit_id}"]["get"]["tags"]
     assert "audit" in paths["/api/v1/audit/sessions/{session_id}/replay"]["get"]["tags"]

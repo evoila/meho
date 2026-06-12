@@ -22,6 +22,9 @@ Coverage matrix (G8.1-T1 acceptance criteria):
   (the flat filter stays gated; ``agent_session_id`` is un-gated by G8.2-T3).
 * G8.2-T3 — ``agent_session_id`` filter narrows rows; ``parent_audit_id`` /
   ``agent_session_id`` populate on the returned ``AuditEntry``.
+* work_ref I1-T3 #1658 — ``work_ref`` exact-match filter narrows to rows whose
+  ``work_ref`` matches (excluding different / NULL); ``work_ref`` populates on
+  every returned ``AuditEntry``.
 * :class:`InvalidCursorError` propagates when a tampered cursor is passed.
 * ``target_name`` denormalization via LEFT JOIN works (and is None when the
   audit row has no ``target_id``).
@@ -87,6 +90,7 @@ async def _seed_audit_row(
     payload: dict[str, object] | None = None,
     agent_session_id: uuid.UUID | None = None,
     parent_audit_id: uuid.UUID | None = None,
+    work_ref: str | None = None,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -104,6 +108,7 @@ async def _seed_audit_row(
             target_id=target_id,
             agent_session_id=agent_session_id,
             parent_audit_id=parent_audit_id,
+            work_ref=work_ref,
         ),
     )
     return row_id
@@ -530,6 +535,95 @@ async def test_agent_session_id_filter_narrows_rows(
 
     assert len(result.rows) == 1
     assert result.rows[0].agent_session_id == session_a
+
+
+# ---------------------------------------------------------------------------
+# work_ref filter + surfacing (work_ref I1-T3 #1658)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_work_ref_filter_exact_match_excludes_others_and_null(
+    session: AsyncSession,
+) -> None:
+    """``work_ref`` is an exact-match filter (work_ref I1-T3 #1658).
+
+    The column landed with work_ref I1-T1 (#1655, migration ``0039``); this
+    task adds the ``WHERE work_ref = :work_ref`` clause. The match is exact —
+    a change-ticket reference is an opaque identifier, not a search term — so a
+    row carrying a *different* work_ref, and a row whose ``work_ref`` is NULL
+    (the system-internal / not-yet-bound case), are both excluded. The
+    headline "show every write authorised by ticket X" use case.
+    """
+    tenant_id = uuid.uuid4()
+    ref = "gh:evoila/meho#1"
+    other_ref = "gh:evoila/meho#2"
+    matching_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        work_ref=ref,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        work_ref=other_ref,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        work_ref=None,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(work_ref=ref),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [entry.id for entry in result.rows] == [matching_id]
+    assert result.rows[0].work_ref == ref
+
+
+@pytest.mark.asyncio
+async def test_work_ref_surfaced_on_every_returned_entry(
+    session: AsyncSession,
+) -> None:
+    """Every returned ``AuditEntry`` carries its row's ``work_ref`` value.
+
+    Guards the half-wired failure mode the task exists to prevent: a column
+    that is filterable but never surfaced on the row (the ``actor_sub`` /
+    ``run_id`` / ``step_id`` trap). A no-filter query over rows with mixed
+    work_ref values must echo each row's ``work_ref`` verbatim — the bound
+    string on bound rows, ``None`` on unbound rows.
+    """
+    tenant_id = uuid.uuid4()
+    bound_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        work_ref="jira:OPS-42",
+    )
+    unbound_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        work_ref=None,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    by_id = {entry.id: entry.work_ref for entry in result.rows}
+    assert by_id[bound_id] == "jira:OPS-42"
+    assert by_id[unbound_id] is None
 
 
 # ---------------------------------------------------------------------------

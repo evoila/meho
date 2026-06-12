@@ -47,6 +47,7 @@ def test_filters_empty_construction_uses_defaults() -> None:
     assert f.audit_id is None
     assert f.parent_audit_id is None
     assert f.agent_session_id is None
+    assert f.work_ref is None
 
 
 def test_filters_limit_lower_bound_rejected() -> None:
@@ -86,8 +87,10 @@ def _make_entry(**overrides: object) -> AuditEntry:
     so the helper spells out all of them — including ``broadcast_event_id``
     (still unconditionally None in v0.2; FK direction is reversed),
     ``principal_name`` (conditionally populated since G0.15-T3 #1212 — None
-    here unless overridden), and the two lineage columns the handler now
-    populates from the row (``parent_audit_id`` / ``agent_session_id``).
+    here unless overridden), the two lineage columns the handler now
+    populates from the row (``parent_audit_id`` / ``agent_session_id``), and
+    ``work_ref`` (external change-ticket reference; work_ref I1-T1 #1655 —
+    None here unless overridden).
     """
     defaults: dict[str, object] = {
         "id": uuid.uuid4(),
@@ -108,6 +111,7 @@ def _make_entry(**overrides: object) -> AuditEntry:
         "result_status": "ok",
         "parent_audit_id": None,
         "agent_session_id": None,
+        "work_ref": None,
         "broadcast_event_id": None,
     }
     defaults.update(overrides)

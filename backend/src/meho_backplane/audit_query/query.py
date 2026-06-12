@@ -44,6 +44,13 @@ Filter coverage
   the column is also surfaced on every returned ``AuditEntry`` and drives the
   per-session replay query
   (:func:`~meho_backplane.audit_query.replay.replay_session`).
+* ``work_ref`` is a real column (work_ref I1-T1 #1655, migration ``0039``).
+  The filter narrows to ``audit_log.work_ref = :work_ref`` — exact match (an
+  opaque change-ticket reference such as ``"gh:evoila/meho#1"`` is an
+  identifier, not a search term, so the predicate is deterministic equality
+  per #1177, not ``ILIKE``); the column is also surfaced on every returned
+  ``AuditEntry``. NULL on rows with no bound work_ref, so a ``work_ref``
+  filter excludes them.
 * ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``)
   and is surfaced on every returned ``AuditEntry``, but the *flat filter* on
   it still raises :class:`UnsupportedFilterError` — un-gating that filter is
@@ -194,6 +201,9 @@ def _apply_filters(
     if filters.agent_session_id is not None:
         stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)
 
+    if filters.work_ref is not None:
+        stmt = stmt.where(AuditLog.work_ref == filters.work_ref)
+
     if filters.principal is not None:
         escaped = _escape_like_literal(filters.principal)
         stmt = stmt.where(
@@ -330,6 +340,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         result_status=_derive_result_status(row.status_code),
         parent_audit_id=row.parent_audit_id,
         agent_session_id=row.agent_session_id,
+        work_ref=row.work_ref,
         broadcast_event_id=None,
     )
 

@@ -35,6 +35,7 @@ import (
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # v0.2 substrate rejects (400)
 //	  [--session-id ID]            # narrow to one agent session (UUID)
+//	  [--work-ref REF]             # exact change-ticket ref: gh:evoila/meho#1
 //	  [--json]                     # raw AuditQueryResult JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
@@ -59,6 +60,7 @@ func newQueryCmd() *cobra.Command {
 		auditID           string
 		parentAuditID     string
 		sessionID         string
+		workRef           string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -90,6 +92,7 @@ func newQueryCmd() *cobra.Command {
 				AuditID:           auditID,
 				ParentAuditID:     parentAuditID,
 				SessionID:         sessionID,
+				WorkRef:           workRef,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -120,6 +123,9 @@ func newQueryCmd() *cobra.Command {
 			"(v0.2 substrate rejects with 400; column lands with G0.6-T7 #398)")
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"narrow to one external change-ticket reference (exact match; "+
+			"e.g. gh:evoila/meho#1) — \"show every write authorised by ticket X\"")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw AuditQueryResult JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -140,6 +146,7 @@ type queryOptions struct {
 	AuditID           string
 	ParentAuditID     string
 	SessionID         string
+	WorkRef           string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -264,6 +271,10 @@ func buildAuditQueryRequest(opts queryOptions) (api.AuditQueryRequest, error) {
 		}
 		uu := openapi_types.UUID(u)
 		body.AgentSessionId = &uu
+	}
+	if opts.WorkRef != "" {
+		v := opts.WorkRef
+		body.WorkRef = &v
 	}
 	if opts.Limit > 0 {
 		l := opts.Limit

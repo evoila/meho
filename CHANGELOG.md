@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-12
+
 ### Security
 
 - Closed a cross-tenant IDOR on the scheduler

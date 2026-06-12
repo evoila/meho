@@ -170,6 +170,7 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": "2.11.0"})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a2")
         self.name = "harbor-credread"
         self.host = _HARBOR_HOST
         self.port = 443

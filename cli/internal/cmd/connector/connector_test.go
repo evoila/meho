@@ -790,12 +790,17 @@ func TestDeriveRollupLabelTable(t *testing.T) {
 }
 
 // TestListEntryDecodesCanonical pins the wire shape: the canonical
-// ConnectorListItem (PR #488 api_schemas.py) ships per-status group
-// counts and no top-level review_status. The list endpoint
-// deliberately returns `dict[str, list[dict[str, object]]]` (no
-// `response_model`), so we keep a package-private listEntry struct
-// for the decode; drift here surfaces as a Major-class wire-contract
-// failure on the next list round-trip.
+// ConnectorListItem (operations/ingest/api_schemas.py) ships the
+// per-status group counts, the enabled-vs-total op split (#1636),
+// the dispatchability state (#773), the next_step hint (#1133) and
+// no top-level review_status. The list endpoint deliberately returns
+// `dict[str, list[dict[str, object]]]` (no `response_model`), so we
+// keep a package-private listEntry struct for the decode. The strict
+// decoder makes the fixture⇄struct direction fail loudly: a canonical
+// key without a matching listEntry field is exactly the drift class
+// that silently dropped three backend fields from `--json` (#1645) —
+// plain json.Unmarshal ignores unknown keys, so three backend
+// additions sailed past the previous shape of this test.
 func TestListEntryDecodesCanonical(t *testing.T) {
 	raw := []byte(`{
 		"connector_id": "vmware-rest-9.0",
@@ -807,10 +812,15 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 		"staged_group_count": 5,
 		"enabled_group_count": 3,
 		"disabled_group_count": 1,
-		"operation_count": 961
+		"operation_count": 961,
+		"enabled_operation_count": 14,
+		"state": "ingested",
+		"next_step": null
 	}`)
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
 	var got listEntry
-	if err := json.Unmarshal(raw, &got); err != nil {
+	if err := dec.Decode(&got); err != nil {
 		t.Fatalf("decode listEntry: %v", err)
 	}
 	if got.ConnectorID != "vmware-rest-9.0" {
@@ -822,6 +832,111 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 	if got.StagedGroupCount != 5 || got.EnabledGroupCount != 3 || got.DisabledGroupCount != 1 {
 		t.Errorf("per-status counts: got %+v", got)
 	}
+	if got.OperationCount != 961 || got.EnabledOperationCount != 14 {
+		t.Errorf("op rollup: want 961 total / 14 enabled; got %+v", got)
+	}
+	if got.State != "ingested" {
+		t.Errorf("state: got %q", got.State)
+	}
+	if got.NextStep != nil {
+		t.Errorf("next_step must decode JSON null to nil on an ingested row; got %+v", got.NextStep)
+	}
+}
+
+// TestListEntryJSONRoundTrip pins the machine surface end to end:
+// decode a canonical row, re-marshal through output.PrintJSON — the
+// exact `--json` emit path (`runList` marshals the decoded envelope,
+// not the raw response body) — and assert the fields #773 / #1133 /
+// #1636 added survive the round trip. This is the regression class
+// #1645 closes: any ConnectorListItem field the struct doesn't
+// mirror silently vanishes from machine-readable output.
+func TestListEntryJSONRoundTrip(t *testing.T) {
+	t.Run("registered row carries next_step", func(t *testing.T) {
+		raw := []byte(`{
+			"connector_id": "nsx-rest-4.2",
+			"product": "nsx",
+			"version": "4.2",
+			"impl_id": "nsx-rest",
+			"tenant_id": null,
+			"group_count": 0,
+			"staged_group_count": 0,
+			"enabled_group_count": 0,
+			"disabled_group_count": 0,
+			"operation_count": 0,
+			"enabled_operation_count": 0,
+			"state": "registered",
+			"next_step": {
+				"verb": "meho connector ingest --catalog nsx/4.2",
+				"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"
+			}
+		}`)
+		var got listEntry
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode listEntry: %v", err)
+		}
+		if got.State != "registered" {
+			t.Errorf("state: got %q", got.State)
+		}
+		if got.NextStep == nil {
+			t.Fatal("next_step must decode to a non-nil pointer on a registered row")
+		}
+		if got.NextStep.Verb != "meho connector ingest --catalog nsx/4.2" {
+			t.Errorf("next_step.verb: got %q", got.NextStep.Verb)
+		}
+		if got.NextStep.Rationale == "" {
+			t.Error("next_step.rationale must survive decode")
+		}
+		var buf bytes.Buffer
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+			t.Fatalf("PrintJSON: %v", err)
+		}
+		out := buf.String()
+		for _, want := range []string{
+			`"state": "registered"`,
+			`"verb": "meho connector ingest --catalog nsx/4.2"`,
+			`"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"`,
+			`"enabled_operation_count": 0`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("--json re-marshal missing %s in:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("ingested row re-marshals next_step as null", func(t *testing.T) {
+		raw := []byte(`{
+			"connector_id": "vault-1.x",
+			"product": "vault",
+			"version": "1.x",
+			"impl_id": "vault",
+			"tenant_id": null,
+			"group_count": 2,
+			"staged_group_count": 0,
+			"enabled_group_count": 2,
+			"disabled_group_count": 0,
+			"operation_count": 7,
+			"enabled_operation_count": 7,
+			"state": "ingested",
+			"next_step": null
+		}`)
+		var got listEntry
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode listEntry: %v", err)
+		}
+		if got.NextStep != nil {
+			t.Fatalf("next_step must be nil on an ingested row; got %+v", got.NextStep)
+		}
+		var buf bytes.Buffer
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+			t.Fatalf("PrintJSON: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `"next_step": null`) {
+			t.Errorf("nil next_step must re-marshal as JSON null, not be dropped or rendered as {}; got:\n%s", out)
+		}
+		if !strings.Contains(out, `"state": "ingested"`) {
+			t.Errorf("state must survive the --json round trip; got:\n%s", out)
+		}
+	})
 }
 
 // TestPrintReviewTableHappyPath — review render shows groups + ops

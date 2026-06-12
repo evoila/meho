@@ -88,6 +88,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -176,7 +177,7 @@ class HarborConnector(HttpConnector):
         credentials_loader: HarborCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._creds_cache: dict[str, dict[str, str]] = {}
+        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: HarborCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -256,8 +257,9 @@ class HarborConnector(HttpConnector):
         resolve itself (#1008). Real-operator behaviour is unchanged —
         cold load → cache → reuse.
         """
+        cache_key = target_cache_key(target)
         async with self._creds_lock:
-            cached = self._creds_cache.get(target.name)
+            cached = self._creds_cache.get(cache_key)
             if cached is not None and not is_system_operator(operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
@@ -270,7 +272,7 @@ class HarborConnector(HttpConnector):
                     f"a dict missing required key {exc.args[0]!r}; need "
                     "{'username': str, 'password': str}"
                 ) from exc
-            self._creds_cache[target.name] = raw
+            self._creds_cache[cache_key] = raw
             _log.info(
                 "harbor_credentials_loaded",
                 target=target.name,

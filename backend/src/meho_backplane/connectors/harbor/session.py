@@ -96,8 +96,15 @@ class HarborTargetLike(Protocol):
 
     No ``sso_realm`` field — Harbor sends ``username:password`` as-is;
     no realm suffix is appended.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the credential + HTTP-client caches use, so two same-named targets in
+    different tenants never share a cached credential (#1642).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

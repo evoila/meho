@@ -194,6 +194,7 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a1")
         self.name = "vrops-credread"
         self.host = _VROPS_HOST
         self.port = 443

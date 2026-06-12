@@ -88,6 +88,68 @@ guard is enabled: its only callers run the unauthenticated
 `vault.sys.health` op and forward no token to Vault, so there is no tenant
 identity to bind against.
 
+## Startup advisory (unenforced state is visible)
+
+Because the guard is default-off, a deploy whose Vault layout *is*
+tenant-partitioned could leave the prefix empty and never know the guard
+is silently a no-op. To make that state visible,
+[`main._advise_vault_tenant_scope_unenforced`](../../backend/src/meho_backplane/main.py)
+runs in the FastAPI lifespan and emits **exactly one** structured advisory
+at startup when `vault_kv_tenant_scope_prefix` is empty:
+
+```
+vault_tenant_scope_unenforced  enable_via=VAULT_KV_TENANT_SCOPE_PREFIX  doc=docs/codebase/connectors-vault-tenant-scope.md
+```
+
+It is **observability-only** — loud-but-non-fatal, like the embedding
+preload advisory: no dispatch change, no raise, the default is not flipped.
+A deploy that relies solely on the per-`sub` Vault policy can ignore the
+line; a tenant-partitioned deploy treats it as the cue to set the prefix
+(see "Choosing a layout"). Once the prefix is set the advisory is silent.
+The behaviour is covered by
+[`backend/tests/test_vault_tenant_scope_advisory.py`](../../backend/tests/test_vault_tenant_scope_advisory.py)
+(fires unset, silent when set, never blocks boot).
+
+## Choosing a layout
+
+Which Vault KV layout you run determines whether this guard does anything.
+It is a deploy/infra decision, **not** a backplane default — the backplane
+ships the prefix empty (#1673 only surfaces and documents the choice; it
+does not make it):
+
+- **Per-`sub` layout (the shipped default).** Secrets live under
+  `secret/data/targets/<sub>/*` and isolation is enforced entirely by the
+  templated `meho-mcp` Vault policy (`connector-vault-policy.md` §2). There
+  is no `tenant-<id>/` partition to bind against, so the prefix stays
+  **empty** and the app-layer guard is intentionally a no-op. The startup
+  advisory fires; for this layout it is expected and can be ignored. Keep
+  the policy template correct — it is the primary (and only) gate here.
+
+- **Tenant-partitioned layout (opt-in).** Secrets are physically
+  partitioned by tenant — e.g. mount `secret/tenant-<tenant_id>/...` or a
+  path prefix `tenant-<tenant_id>/...`. Here the app-layer guard becomes a
+  real backstop for a mis-provisioned policy, so you **enable** it.
+
+**Enabling the prefix requires all of:**
+
+1. A Vault KV layout actually partitioned by `tenant_id` (mount or path) —
+   the prefix only denies; it never relocates secrets.
+2. Setting `VAULT_KV_TENANT_SCOPE_PREFIX` to the matching `str.format`
+   template with a single `{tenant_id}` placeholder, e.g.
+   `tenant-{tenant_id}/` (path prefix) or `secret/tenant-{tenant_id}/`
+   (mount-pinned). The rendered `tenant_id` is the canonical dashed
+   lowercase UUID (see "The namespace convention").
+3. Confirming every legitimate `vault.kv.*` caller's secrets already live
+   **under** that prefix — once set, any in-namespace mismatch is denied
+   with `exception_class=VaultTenantScopeError` *before* the hvac call.
+   The system/shim operator (Nil-UUID tenant, `vault.sys.health` only) is
+   exempt, so enabling the prefix does not break the health probe.
+
+Because step 3 denies every per-`sub` call that is *not* under a
+`tenant-<id>/` prefix, flipping this on against the shipped per-`sub`
+layout would break dispatch — which is exactly why the default is empty
+and the switch is left to the operator.
+
 ## Scope notes
 
 - This is **defense-in-depth, not the primary gate.** The guard never

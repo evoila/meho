@@ -158,6 +158,7 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a3")
         self.name = "fleet-credread"
         self.host = _FLEET_HOST
         self.port = 443

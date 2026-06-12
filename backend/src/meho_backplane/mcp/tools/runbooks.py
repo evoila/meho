@@ -17,9 +17,9 @@ The canonical tool names are dotted — ``meho.runbook.draft_template``,
 ``meho.runbook.show_template``, … — matching the ``meho.<noun>.<verb>``
 grammar every other multi-verb family on the surface uses. The original
 flat ``runbook_*`` names remain registered as deprecated aliases (same
-handler object, same schema) for one release and are removed in
-v0.14.0; calling one emits the dispatcher's ``mcp_tool_name_deprecated``
-warning.
+handler object, same schema) and are removed in v0.15.0 — deferred from
+the original one-release v0.14.0 window by #1702; calling one emits the
+dispatcher's ``mcp_tool_name_deprecated`` warning.
 
 The template identifier is canonically ``template_slug`` on every wire
 input (matching ``meho.runbook.start`` / ``meho.runbook.list_runs`` on
@@ -124,10 +124,16 @@ _OP_CLASS_READ: Final[str] = "read"
 _OP_CLASS_WRITE: Final[str] = "write"
 
 #: Release that drops the deprecated flat ``runbook_*`` tool-name
-#: aliases and the ``slug`` input-field alias (#1612). One release after
-#: the canonicalisation ships (announced in the CHANGELOG ``Deprecated``
-#: section), mirroring the v0.6.x ``content``→``body`` one-cycle shim.
-_ALIAS_REMOVAL_VERSION: Final[str] = "0.14.0"
+#: aliases and the ``slug`` input-field alias (#1612). Originally one
+#: release after the canonicalisation shipped (v0.14.0, mirroring the
+#: v0.6.x ``content``→``body`` one-cycle shim), but v0.14.0 was tagged
+#: with the aliases still registered and no release-notes line, so
+#: #1702 re-pinned the deadline to v0.15.0 with a public deferral
+#: erratum on the v0.14.0 CHANGELOG section. The value is description/
+#: warning text only — removal is executed by the scheduled task
+#: (#1625, re-scheduled to the v0.15.0 cycle), not by a runtime
+#: version gate (``__version__`` is build-metadata-dependent; #1698).
+_ALIAS_REMOVAL_VERSION: Final[str] = "0.15.0"
 
 #: The caller-actionable service exceptions that map to JSON-RPC
 #: ``-32602``. Bad input or a missing / wrong-state entity is the
@@ -169,8 +175,8 @@ def _resolve_template_slug(tool: str, arguments: dict[str, Any]) -> str:
     on ``add_to_memory``: exactly one of the two names must be supplied
     (both → ``-32602``), and the deprecated name emits a structured
     ``runbook_template_slug_field_deprecated`` warning so operators can
-    watch consumers migrate before the alias is dropped in
-    v0.14.0 (:data:`_ALIAS_REMOVAL_VERSION`).
+    watch consumers migrate before the alias is dropped in v0.15.0
+    (:data:`_ALIAS_REMOVAL_VERSION`; deferred from v0.14.0 by #1702).
 
     The dispatcher's JSON-Schema gate (:data:`_TEMPLATE_SLUG_ANYOF`)
     guarantees at least one name is present; the neither-supplied branch
@@ -206,8 +212,8 @@ def _mirror_template_slug(payload: dict[str, Any]) -> dict[str, Any]:
     REST surface is out of #1612's scope), so the MCP handlers mirror it
     at the wire boundary: every template-verb response carries
     ``template_slug`` (canonical, what ``meho.runbook.start`` accepts
-    verbatim) *and* ``slug`` (kept for the same one-release window as
-    the input alias, dropped with it in v0.14.0). Top-level only — the
+    verbatim) *and* ``slug`` (kept for the same alias window as the
+    input alias, dropped with it in v0.15.0 per #1702). Top-level only — the
     nested ``forked_from.slug`` names the fork *source* and is not a
     round-trip input.
     """
@@ -836,8 +842,9 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# Deprecated flat-name aliases (#1612) — one release, removed in
-# v0.14.0 (`_ALIAS_REMOVAL_VERSION`). Registered strictly after their
+# Deprecated flat-name aliases (#1612) — removed in v0.15.0
+# (`_ALIAS_REMOVAL_VERSION`; deferred from the original one-release
+# v0.14.0 window by #1702). Registered strictly after their
 # canonical targets; each shares the canonical handler object and
 # schema, differing only in name + DEPRECATED pointer description.
 # ---------------------------------------------------------------------------

@@ -102,6 +102,23 @@ connector-related release-notes line.
   the registered-row `next_step` rationale now name the right surface
   per scope (#1699).
 
+### Deprecated
+
+- Deferred the removal of the 11 flat `runbook_*` MCP tool-name aliases
+  and the `slug` template-id input alias from v0.14.0 to **v0.15.0**.
+  v0.14.0 shipped with all 11 aliases still registered and callable and
+  its release notes carried no removal or deferral line, so the
+  deadline is moved explicitly rather than slipping silently: the
+  per-call deprecation warnings (`mcp_tool_name_deprecated`,
+  `runbook_template_slug_field_deprecated`) and the DEPRECATED wire
+  descriptions now name v0.15.0, a `### Deprecated` erratum was added
+  to the v0.14.0 section below, and the removal itself stays tracked in
+  #1625 (re-scheduled to the v0.15.0 cycle). Nothing else changes:
+  consumers already on `meho.runbook.<verb>` + `template_slug` are
+  unaffected, and the migration recipe is unchanged — replace
+  `runbook_<verb>` with `meho.runbook.<verb>` and rename `slug` →
+  `template_slug` in template-verb arguments (#1612, #1702).
+
 ### Fixed
 
 - Operator console: broadcast feed/wall and the connectors recent-ops
@@ -272,6 +289,19 @@ connector-related release-notes line.
   spec/label cross-check; omitting the band keeps the strict check, and
   a non-pattern token (a bare `v2`) is rejected at request validation.
   (#1646; consumer signal claude-rdc-hetzner-dc#1136)
+
+### Deprecated
+
+- *Erratum — added 2026-06-12, after the v0.14.0 tag (#1702).* Deferral
+  of flat `runbook_*` alias removal to v0.15.0 (originally scheduled
+  per the #1612 migration recipe announced in v0.13.0; execution
+  deferred to the next release). v0.14.0 ships with the 11 flat
+  `runbook_*` MCP tool names and the `slug` template-id input alias
+  still callable as deprecated aliases; they are removed in v0.15.0,
+  tracked in #1625 (re-scheduled to the v0.15.0 cycle). Consumers who
+  already migrated to `meho.runbook.<verb>` + `template_slug` are
+  unaffected; consumers still on the flat names keep working through
+  v0.14.x and must migrate before v0.15.0.
 
 ### Fixed
 

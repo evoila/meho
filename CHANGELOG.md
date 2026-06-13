@@ -189,6 +189,16 @@ connector-related release-notes line.
   `/ui/auth/login?return_to=<page>` with the dead cookie cleared
   instead of a JSON error page. Session and CSRF cookies are never
   rotated by a refresh, so already-open pages keep working (#1694)
+- Operator console: the dashboard's "Recent activity" tray streamed
+  nothing (permanent "Connecting to live feed…" placeholder) because it
+  subscribed to the Bearer-only `/api/v1/feed`, which the browser's
+  `EventSource` can never authenticate against (no `Authorization`
+  header support — each attempt 401'd and reconnect-looped); the tray
+  now subscribes to the session-gated `/ui/broadcast/stream` bridge the
+  broadcast surface already uses (same cookie boundary as the page
+  itself) and renders the live `BroadcastEvent` frames as
+  time/principal/op/status rows through the XSS-safe Alpine sink
+  pattern, capped at 50 in-DOM rows (#1696)
 
 ## [0.14.0] - 2026-06-12
 

@@ -22,11 +22,12 @@ browser pointing ``sse-connect`` at ``/api/v1/feed`` would be answered
 with a 401 and the SSE state machine would tighten into a reconnect
 loop.
 
-The chassis dashboard's recent-activity snippet (#866) wired
-``sse-connect="/api/v1/feed"`` directly; that wiring is inert for the
-same reason (and the snippet only renders a "Connecting..." placeholder
-today). G10.1's live feed is the first surface that must *actually*
-stream, so it routes through this UI-owned bridge instead.
+The chassis dashboard's recent-activity snippet (#866) originally
+wired ``sse-connect="/api/v1/feed"`` directly; that wiring was inert
+for the same reason and the snippet never left its "Connecting..."
+placeholder. G10.1's live feed was the first surface to route through
+this UI-owned bridge instead; G0.25 (#1696) re-pointed the dashboard
+tray here too, so every browser-side subscriber now rides this route.
 
 This route lives under ``/ui/`` so the existing
 :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` gates it
@@ -235,10 +236,10 @@ def build_stream_router() -> APIRouter:
     """Construct the broadcast SSE-bridge :class:`APIRouter`.
 
     Registers ``GET /ui/broadcast/stream`` -- the session-gated SSE
-    source the live feed subscribes to. The route name
-    (``ui_broadcast_stream``) is referenced by the feed template's
-    ``sse-connect`` URL; a rename here must update the template in
-    lockstep.
+    source the live feed, the connectors recent-ops card, and the
+    dashboard recent-activity tray (#1696) subscribe to. The path is
+    referenced by those templates' ``sse-connect`` URLs; a rename here
+    must update them in lockstep.
     """
     router = APIRouter(tags=["ui-broadcast"])
 

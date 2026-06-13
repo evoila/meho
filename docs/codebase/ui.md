@@ -51,7 +51,7 @@ Locked decisions:
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. `require_ui_admin` (the write-route RBAC gate) loads + verifies the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). |
-| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). This is the session seam the dashboard-feed proxy (#1696) builds on. |
+| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies (`require_ui_admin` today); the dashboard-feed fix (#1696) needed no new caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads Valkey directly under `require_ui_session` and never presents the access token. |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts exactly `401 session_expired` on `/ui/*`: HTML requests (`Accept: text/html`) get `302 /ui/auth/login?return_to=<path>` + `meho_session` cookie clear; non-HTML callers keep the JSON body (cookie cleared too). Every other HTTPException delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes are untouched. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
@@ -424,16 +424,21 @@ Initiative #337 work-item #6:
 * A 3x2 grid of DaisyUI `card` tiles linking to the five surface
   routes. The sixth tile shows the backplane version + readiness
   badge sourced from `meho_backplane.health.run_probes_async`.
-* A live "recent activity" snippet wired to `/api/v1/feed` via the
-  HTMX 2 SSE extension (`hx-ext="sse"` + `sse-connect="..."` +
-  `sse-swap="broadcast"`). The feed endpoint itself runs the chassis
-  JWT dependency, but the browser carries the session cookie and the
-  same operator's JWT will be issued by Keycloak; G10.1 (`#338`)
-  wires the live-token round-trip and the client-side
-  trim-to-last-N rendering (the feed endpoint streams the live tail
-  unbounded -- it does not accept a `limit` query parameter, so a
-  hardcoded `?limit=N` would be a silent no-op given FastAPI's
-  unknown-query-param drop semantics).
+* A live "recent activity" snippet wired to the session-gated SSE
+  bridge `/ui/broadcast/stream` (G0.25 `#1696`; the chassis
+  originally pointed at the Bearer-only `/api/v1/feed`, which a
+  browser `EventSource` can never authenticate against — no
+  `Authorization` header support — so that wiring 401-looped behind
+  its "Connecting…" placeholder). Frames are consumed through the
+  same hidden-sink + Alpine pattern as the broadcast and connectors
+  surfaces: `hx-ext="sse"` + `sse-connect` + `sse-swap="broadcast"`
+  sit on a hidden sink, and the `dashboardFeedTray` controller
+  (`static/src/app/dashboard-feed.js`, registered on `alpine:init`
+  from the head-level `component_scripts` block per #1692) cancels
+  the raw swap on `htmx:sse-before-message`, parses the
+  `BroadcastEvent` JSON, and renders time / principal / op_id /
+  result_status rows via `x-text` bindings (markup-bearing event
+  fields stay inert), trimmed to a 50-row in-DOM cap.
 * A "readiness checks" panel listing every registered probe with a
   green/orange pill matching `/ready`'s shape.
 
@@ -634,9 +639,10 @@ constructor exposes only `withCredentials`); it sends cookies, not a
 Bearer token. So pointing `sse-connect` at `/api/v1/feed` from a
 logged-in operator's browser would be answered with a 401 and the SSE
 state machine would tighten into a reconnect loop. (The chassis
-dashboard's recent-activity snippet wired `sse-connect="/api/v1/feed"`
-directly for the same reason it only shows a "Connecting…" placeholder —
-that snippet is inert today; fixing it is tracked separately.)
+dashboard's recent-activity snippet originally wired
+`sse-connect="/api/v1/feed"` directly and was inert for exactly this
+reason — it never left its "Connecting…" placeholder until G0.25
+`#1696` re-pointed it at this bridge.)
 
 The broadcast view instead subscribes to `/ui/broadcast/stream`, a
 UI-owned route under `/ui/` so the existing `UISessionMiddleware` gates

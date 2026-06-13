@@ -10,15 +10,21 @@ renders three components per the Initiative work-item #6:
   routes G10.1-G10.5 fill in. The sixth tile is a static
   "deploy details" card so the grid layout is balanced without a
   trailing empty slot.
-* A live recent-activity snippet wired to ``/api/v1/feed`` via the
-  HTMX 2 SSE extension (``hx-ext="sse"`` + ``sse-connect="..."`` +
-  ``sse-swap="broadcast"``). The feed endpoint validates the JWT via
-  the Bearer header on ``/api/v1/feed``; the dashboard surface only
-  renders the HTMX wiring -- the actual subscription happens
-  browser-side once the page loads (and the operator's session cookie
-  is the auth boundary that gates ``/ui/``). Trimming the rendered
-  tray to the last N events is G10.1 (#338) client-side surface work;
-  the underlying feed endpoint streams the live tail unbounded.
+* A live recent-activity snippet wired to the session-gated SSE
+  bridge ``/ui/broadcast/stream`` (G0.25 #1696). The chassis
+  originally pointed ``sse-connect`` at the Bearer-authenticated
+  ``/api/v1/feed``, but the browser's ``EventSource`` cannot send an
+  ``Authorization`` header (the WHATWG constructor exposes only
+  ``withCredentials``), so that wiring 401-looped and the tray never
+  left its "Connecting..." placeholder. The bridge lives under
+  ``/ui/`` where the operator's session cookie -- the same boundary
+  that gated this page render -- authenticates the stream. Frames are
+  consumed through the hidden-sink + Alpine pattern the broadcast and
+  connectors surfaces established (``dashboardFeedTray`` in
+  ``static/src/app/dashboard-feed.js``): the controller cancels the
+  extension's raw swap and renders each ``BroadcastEvent`` JSON frame
+  through ``x-text`` bindings, which keeps markup-bearing event
+  fields inert instead of letting the swap parse them into live DOM.
 * A version + readiness card sourced from the deployed-build label the
   chassis Jinja env binds as the ``app_version`` global -- the same
   ``CHART_VERSION`` / ``GIT_SHA`` env metadata ``GET /version`` reads
@@ -52,7 +58,10 @@ References
   https://htmx.org/extensions/sse/
 * Chassis ``base.html`` reference (sidebar links, version footer):
   ``backend/src/meho_backplane/ui/templates/base.html``
-* Per-tenant SSE feed endpoint (G6.1-T4, #310):
+* Session-gated SSE bridge (G10.1-T1, #867) the tray subscribes to:
+  ``backend/src/meho_backplane/ui/routes/broadcast/stream.py``
+* Canonical per-tenant SSE feed the bridge stays byte-compatible
+  with (G6.1-T4, #310):
   ``backend/src/meho_backplane/api/v1/feed.py``
 """
 
@@ -118,6 +127,28 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
 )
 
 
+#: The session-gated SSE bridge the recent-activity tray subscribes to
+#: (G0.25 #1696). NOT ``/api/v1/feed`` -- the browser ``EventSource``
+#: cannot send the Bearer header that endpoint requires, so the
+#: original wiring 401-looped forever; see the rationale in
+#: :mod:`meho_backplane.ui.routes.broadcast.stream` and the matching
+#: ``_STREAM_ENDPOINT`` constant in
+#: :mod:`meho_backplane.ui.routes.broadcast.feed`. The dashboard
+#: subscribes to the unfiltered live tail (no query parameters) --
+#: filtering is the broadcast surface's affordance.
+_FEED_STREAM_ENDPOINT: Final[str] = "/ui/broadcast/stream"
+
+#: Hard cap on the number of event rows the tray keeps in the DOM at
+#: once, passed to the ``dashboardFeedTray`` Alpine controller. The
+#: tray is a glance surface (~12 visible rows under its ``max-h-72``
+#: scroll box), so the connectors recent-ops default (50) is the right
+#: order of magnitude -- enough scroll-back to be useful, bounded so an
+#: all-day dashboard tab can't grow the DOM unboundedly. The richer
+#: bounded-tray UX (row counters, trim affordances) is G10.1 (#338)
+#: surface work per #1696's out-of-scope.
+_FEED_TRAY_DOM_CAP: Final[int] = 50
+
+
 async def _readiness_snapshot() -> dict[str, object]:
     """Project the chassis readiness-probe results into the dashboard shape.
 
@@ -159,16 +190,15 @@ async def _render_dashboard(
         "operator_sub": session.operator_sub,
         "tenant_id": str(session.tenant_id),
         "csrf_token": csrf_token,
-        # Endpoint the HTMX SSE snippet subscribes to. Lifted out so a
+        # Endpoint the HTMX SSE sink subscribes to. Lifted out so a
         # future deploy can swap to a CDN-hosted edge proxy without
-        # editing the template. ``/api/v1/feed`` is the canonical
-        # tenant-scoped SSE stream from G6.1-T4 (#310); the route does
-        # not accept a ``limit`` query parameter (FastAPI silently
-        # ignores unknown query params, so a hardcoded ``?limit=5``
-        # would be a no-op surface promise), so the dashboard subscribes
-        # to the full live stream. Trimming the tray to the last N
-        # events client-side is G10.1 (#338) surface work.
-        "feed_endpoint": "/api/v1/feed",
+        # editing the template. The session-gated bridge streams the
+        # tenant's live tail scoped by the validated session -- no
+        # tenant or limit query parameters exist on the route, so the
+        # tray subscribes bare and bounds itself client-side via
+        # ``feed_tray_cap``.
+        "feed_endpoint": _FEED_STREAM_ENDPOINT,
+        "feed_tray_cap": _FEED_TRAY_DOM_CAP,
     }
     response = get_templates().TemplateResponse(request, "dashboard.html", context)
     # Mirror the SameSite + Secure posture of the session cookie. The

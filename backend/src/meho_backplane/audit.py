@@ -130,6 +130,20 @@ _AUDIT_FAILURE_BODY: Final[bytes] = json.dumps({"detail": "audit_write_failed"})
 _RESPONSE_START: Final[str] = "http.response.start"
 _RESPONSE_BODY: Final[str] = "http.response.body"
 
+#: Lower-cased request-header name carrying the external change-ticket
+#: reference for a REST/dispatch call (work_ref I1-T2 #1657). Read off
+#: the raw ASGI scope (the audit middleware is pure-ASGI and runs before
+#: FastAPI route resolution, so there is no ``Request`` object to declare
+#: a ``Header(...)`` param on -- same posture as ``X-Request-Id`` in
+#: :func:`meho_backplane.middleware._extract_request_id`). Bound onto
+#: :data:`~meho_backplane.operations._audit.work_ref_var` for the audit
+#: write so the chassis ``audit_log.work_ref`` column carries it. Because
+#: it is never declared as a FastAPI param, it does NOT appear in the
+#: OpenAPI schema -- the documented surface (and thus the CLI snapshot)
+#: is untouched by this header; only the ``CallOperationBody.work_ref``
+#: field (a real body field) moves the documented schema.
+_WORK_REF_HEADER: Final[bytes] = b"meho-work-ref"
+
 #: Content-type the middleware treats as a live stream that must NOT be
 #: buffered. Matched as a prefix against the lowercased ``content-type``
 #: header value on ``http.response.start`` so the ``; charset=utf-8``
@@ -620,6 +634,28 @@ def _resolve_request_metadata(
     return method, path, request_id
 
 
+def _extract_work_ref(scope: Scope) -> str | None:
+    """Return the inbound ``Meho-Work-Ref`` header value, or ``None``.
+
+    The audit middleware reads the header straight off the raw ASGI
+    ``scope`` (work_ref I1-T2 #1657) -- it is pure-ASGI and runs before
+    route resolution, so there is no ``Request`` to hang a
+    ``Header(...)`` param on, mirroring how
+    :func:`meho_backplane.middleware._extract_request_id` reads
+    ``X-Request-Id``. Header names are case-insensitive per RFC 9110
+    §5.1, so the comparison lower-cases the wire name; the value is
+    decoded ``latin-1`` (the byte range ASGI guarantees for header
+    values) and stripped. An absent header, or a present-but-empty
+    value, both return ``None`` so the audit row's ``work_ref`` lands
+    NULL -- the correct quiet path for a call carrying no ticket.
+    """
+    for name, value in scope.get("headers", ()):
+        if name.lower() == _WORK_REF_HEADER:
+            decoded = value.decode("latin-1").strip()
+            return decoded or None
+    return None
+
+
 def _resolve_tenant_id(
     *,
     operator_sub: str,
@@ -941,6 +977,26 @@ class AuditMiddleware:
             # for forensic queries, not for subscribers.
             payload["broadcast_detail_effective"] = broadcast_decision[1]
 
+        # work_ref I1-T2 (#1657): bind the inbound ``Meho-Work-Ref``
+        # header onto :data:`work_ref_var` so the chassis writer
+        # (:func:`_write_audit_row`) stamps ``audit_log.work_ref`` for
+        # this request. Token + ``try/finally`` / ``reset(token)`` is
+        # the same set/reset discipline the sibling boundary binds use
+        # (``run_id_var`` / ``step_id_var`` in
+        # ``runbooks.run_service``); the ``finally`` is load-bearing
+        # because the ``except`` arm below has early ``return`` / ``raise``
+        # exits, and the middleware is a single instance serving
+        # concurrent requests on the same event loop, so a leaked
+        # binding would mis-stamp the NEXT request's audit row. ``None``
+        # header → no bind → the column lands NULL, unchanged from
+        # pre-#1657. The reset restores the prior value (almost always
+        # ``None`` at the chassis boundary -- the per-op
+        # ``call_operation`` override binds further down the dispatch,
+        # on the inner DISPATCH row, not here).
+        work_ref_token = None
+        work_ref_header = _extract_work_ref(scope)
+        if work_ref_header is not None:
+            work_ref_token = work_ref_var.set(work_ref_header)
         try:
             await _write_audit_row(
                 audit_id=audit_id,
@@ -992,6 +1048,9 @@ class AuditMiddleware:
                 raise handler_exc from None
             await _send_audit_failure_response(send)
             return
+        finally:
+            if work_ref_token is not None:
+                work_ref_var.reset(work_ref_token)
 
         # Audit row was committed. The G6.1-T3 (#309) publish-on-write
         # hook fires here — exactly ONCE per audit commit, AFTER the

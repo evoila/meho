@@ -1524,11 +1524,25 @@ type BudgetStatus struct {
 // free-form “dict“ because per-op parameter shape is enforced by
 // the descriptor's “parameter_schema“ further down the dispatch
 // path; only the meta-tool body's own fields are constrained here.
+//
+// “work_ref“ (work_ref I1-T2 #1657) is the optional external
+// change-ticket reference -- an opaque typed-URI string
+// (“"gh:evoila/meho#7"“) correlating this dispatch to the
+// out-of-band change record that authorised it. When supplied, it is
+// the per-op override the Goal #1651 design calls for:
+// :func:`_call_operation_impl` binds it onto
+// :data:`~meho_backplane.operations._audit.work_ref_var` for the
+// duration of the dispatch, so the DISPATCH “audit_log“ row carries
+// it ahead of any ambient “Meho-Work-Ref“ header bound at the
+// chassis boundary. “None“ leaves the ambient binding (or NULL)
+// untouched. The field stores an opaque string -- no validation, no
+// tracker API call (Goal #1651 ships the field only).
 type CallOperationBody struct {
 	ConnectorId string                    `json:"connector_id"`
 	OpId        string                    `json:"op_id"`
 	Params      *map[string]interface{}   `json:"params,omitempty"`
 	Target      *CallOperationBody_Target `json:"target"`
+	WorkRef     *string                   `json:"work_ref"`
 }
 
 // CallOperationBodyTarget0 defines model for .

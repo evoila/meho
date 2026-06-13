@@ -479,6 +479,24 @@ register_mcp_tool(
                         "rejected at the schema layer."
                     ),
                 },
+                "work_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional external change-ticket reference for "
+                        "this operation -- an opaque typed-URI string "
+                        '(e.g. `"gh:evoila/meho#7"`, a Jira key, a CR '
+                        "id) correlating the governed write to the "
+                        "change record that authorised it. Stamped onto "
+                        "the operation's `audit_log.work_ref` so "
+                        "`meho audit query --work-ref ...` can later find "
+                        "every row bound to that ticket. Scoped to this "
+                        "single call (no leakage to the next); a per-op "
+                        "value here overrides any ambient `Meho-Work-Ref` "
+                        "request header. Opaque -- not validated and "
+                        "never sent to the tracker."
+                    ),
+                },
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,

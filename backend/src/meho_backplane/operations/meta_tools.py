@@ -88,6 +88,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -359,6 +360,19 @@ class CallOperationBody(BaseModel):
     free-form ``dict`` because per-op parameter shape is enforced by
     the descriptor's ``parameter_schema`` further down the dispatch
     path; only the meta-tool body's own fields are constrained here.
+
+    ``work_ref`` (work_ref I1-T2 #1657) is the optional external
+    change-ticket reference -- an opaque typed-URI string
+    (``"gh:evoila/meho#7"``) correlating this dispatch to the
+    out-of-band change record that authorised it. When supplied, it is
+    the per-op override the Goal #1651 design calls for:
+    :func:`_call_operation_impl` binds it onto
+    :data:`~meho_backplane.operations._audit.work_ref_var` for the
+    duration of the dispatch, so the DISPATCH ``audit_log`` row carries
+    it ahead of any ambient ``Meho-Work-Ref`` header bound at the
+    chassis boundary. ``None`` leaves the ambient binding (or NULL)
+    untouched. The field stores an opaque string -- no validation, no
+    tracker API call (Goal #1651 ships the field only).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -367,6 +381,7 @@ class CallOperationBody(BaseModel):
     op_id: str = Field(min_length=1)
     target: str | dict[str, Any] | None = None
     params: dict[str, Any] = Field(default_factory=dict)
+    work_ref: str | None = Field(default=None, min_length=1)
 
 
 class PreviewOperationBody(BaseModel):
@@ -880,14 +895,36 @@ async def _call_operation_impl(
         fqdn_override = target_arg.get("fqdn")
         if isinstance(fqdn_override, str) and fqdn_override:
             resolved_target.fqdn = fqdn_override
-    result = await dispatch(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        target=resolved_target,
-        params=params,
-        _approved=approved,
-    )
+
+    # work_ref I1-T2 (#1657): bind an explicit per-op ``work_ref`` (the
+    # MCP ``call_operation`` tool arg / the REST ``CallOperationBody``
+    # field) onto :data:`work_ref_var` for the dispatch, so the DISPATCH
+    # ``audit_log`` row the dispatcher writes carries it. Same token +
+    # ``try/finally`` / ``reset(token)`` discipline as the runbook
+    # engine's ``run_id_var`` / ``step_id_var`` bind-around-dispatch
+    # (``run_service._operation_call``) -- the binding never leaks past
+    # this call. It is the per-op OVERRIDE the Goal #1651 design calls
+    # for: gated on a non-empty arg, so a bare ``call_operation`` does
+    # NOT clobber an ambient ``Meho-Work-Ref`` header bound at the
+    # chassis -- ``reset`` restores exactly the prior value, never a
+    # hardcoded default.
+    work_ref_arg = arguments.get("work_ref")
+    work_ref_token = None
+    if isinstance(work_ref_arg, str) and work_ref_arg:
+        work_ref_token = work_ref_var.set(work_ref_arg)
+    try:
+        result = await dispatch(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=resolved_target,
+            params=params,
+            _approved=approved,
+        )
+    finally:
+        if work_ref_token is not None:
+            work_ref_var.reset(work_ref_token)
+
     _log.info(
         "call_operation",
         connector_id=connector_id,

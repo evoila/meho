@@ -22,6 +22,11 @@
       ``hx-swap="outerHTML"``, ``hx-push-url="true"`` so the browser
       URL stays in sync with the active scope (copy/paste reproduces).
     * Tag filter: same target, debounced 300ms.
+    * Tag datalist: ``hx-target="this"`` pins the load-time options
+      fetch to the datalist itself. htmx resolves ``hx-target`` by
+      walking ancestors (closest wins), so without the local override
+      the datalist inherits the filter form's ``#memory-cards`` target
+      and the ``<option>`` fragment replaces the card grid (#1695).
     * The page-level ``hx-headers`` directive echoes the CSRF token
       for any state-changing request triggered from this page
       (delete-from-detail, for example).
@@ -122,6 +127,7 @@
           id="memory-tag-options"
           hx-get="/ui/memory/tags"
           hx-trigger="load"
+          hx-target="this"
           hx-swap="innerHTML"
         ></datalist>
       </label>

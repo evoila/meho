@@ -329,6 +329,7 @@ def test_tools_call_handler_returns_result_model_dump(
         result_status="ok",
         parent_audit_id=None,
         agent_session_id=None,
+        work_ref=None,
         broadcast_event_id=None,
     )
     mock_query = AsyncMock(

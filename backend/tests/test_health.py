@@ -15,6 +15,11 @@ Coverage matrix (per Task #19 acceptance criteria):
   200 once a passing probe is registered, and 503 again with one
   failing probe registered alongside a passing one (so the failure
   detail is visible in the payload).
+* :func:`~meho_backplane.version.deployed_version_label` (#1698 — the
+  UI footer's source string) prefers ``CHART_VERSION`` (``v``-prefixed)
+  over a 12-char ``GIT_SHA`` truncation over the literal ``"unknown"``,
+  reading the same env vars as ``/version`` so the two surfaces cannot
+  disagree.
 """
 
 from collections.abc import Iterator
@@ -30,6 +35,7 @@ from meho_backplane.health import (
 )
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
+from meho_backplane.version import deployed_version_label
 
 
 @pytest.fixture(autouse=True)
@@ -182,6 +188,67 @@ def test_version_chart_version_unset_is_null(
 
     assert response.status_code == 200
     assert response.json()["chart_version"] is None
+
+
+# ---------------------------------------------------------------------------
+# deployed_version_label (#1698 — the UI footer's build-identity string)
+# ---------------------------------------------------------------------------
+
+
+def test_label_prefers_chart_version_with_v_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chart deploy shows the release identity, ``v``-prefixed.
+
+    ``chart.yml`` stamps plain semver on tag pushes (Helm rejects a
+    leading ``v`` in ``Chart.yaml``), so the label adds the prefix for
+    the operator-facing rendering: ``CHART_VERSION=0.14.0`` →
+    ``v0.14.0``. ``GIT_SHA`` being set too must not matter.
+    """
+    monkeypatch.setenv("CHART_VERSION", "0.14.0")
+    monkeypatch.setenv("GIT_SHA", "deadbeefcafe0123456789aa")
+
+    assert deployed_version_label() == "v0.14.0"
+
+
+def test_label_does_not_double_v_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``CHART_VERSION`` already carrying ``v`` is passed through."""
+    monkeypatch.setenv("CHART_VERSION", "v0.15.0-rc1")
+
+    assert deployed_version_label() == "v0.15.0-rc1"
+
+
+def test_label_falls_back_to_short_git_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bare-image runs (no chart) show the first 12 hash chars, unprefixed."""
+    monkeypatch.delenv("CHART_VERSION", raising=False)
+    monkeypatch.setenv("GIT_SHA", "2bbea9ad00112233445566778899aabbccddeeff")
+
+    assert deployed_version_label() == "2bbea9ad0011"
+
+
+def test_label_unknown_when_no_build_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local ``uvicorn`` runs degrade to ``unknown`` — never ``0.1.0-dev``."""
+    monkeypatch.delenv("CHART_VERSION", raising=False)
+    monkeypatch.delenv("GIT_SHA", raising=False)
+
+    assert deployed_version_label() == "unknown"
+
+
+def test_label_treats_dockerfile_default_sha_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ARG GIT_SHA=unknown`` (Dockerfile default) is not a real hash.
+
+    A locally-built image without ``--build-arg GIT_SHA=...`` carries
+    the literal ``unknown`` in the env; the label must not render it as
+    if it were a 7-char commit id. Empty strings degrade the same way
+    (mirrors ``/version``'s ``or "unknown"`` coercion).
+    """
+    monkeypatch.delenv("CHART_VERSION", raising=False)
+    monkeypatch.setenv("GIT_SHA", "unknown")
+    assert deployed_version_label() == "unknown"
+
+    monkeypatch.setenv("GIT_SHA", "")
+    monkeypatch.setenv("CHART_VERSION", "")
+    assert deployed_version_label() == "unknown"
 
 
 # ---------------------------------------------------------------------------

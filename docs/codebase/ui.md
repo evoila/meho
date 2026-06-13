@@ -43,7 +43,7 @@ Locked decisions:
 | Module | Purpose |
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
-| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
+| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
 | `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
@@ -273,7 +273,7 @@ backplane Python base image already follows).
       <div class="drawer-content">
         <header class="navbar">…tenant select…user menu…</header>
         <main>{% block content %}{% endblock %}</main>
-        <footer>v{{ app_version }} · ready/starting pill</footer>
+        <footer>{{ app_version }} · ready/starting pill</footer>  <!-- deployed-build label, self-prefixed (#1698) -->
       </div>
       <aside class="drawer-side">
         <nav>…sidebar with 5 surface links…</nav>
@@ -1402,6 +1402,12 @@ silent no-op that audits worse).
 ### HTMX conventions
 
 * `hx-get` for scope tabs + tag filter (idempotent reads).
+* The tag datalist (`#memory-tag-options`) pins `hx-target="this"`
+  on its `hx-trigger="load"` options fetch. htmx resolves
+  `hx-target` closest-wins up the ancestor chain, so without the
+  local override the datalist inherits the filter form's
+  `hx-target="#memory-cards"` and the `<option>` fragment replaces
+  the card grid on page load (#1695).
 * `hx-patch` for the edit-in-place save; the form's
   `id="memory-body"` is the swap target so Save replaces the form
   with the rendered body view in place.

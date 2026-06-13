@@ -110,6 +110,7 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		AuditID:       "00000000-0000-0000-0000-000000000001",
 		ParentAuditID: "00000000-0000-0000-0000-000000000002",
 		SessionID:     "00000000-0000-0000-0000-000000000003",
+		WorkRef:       "gh:evoila/meho#1",
 		Limit:         50,
 		Cursor:        "opaque-cursor-bytes",
 	}
@@ -133,6 +134,7 @@ func TestBuildAuditQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		`"audit_id":"00000000-0000-0000-0000-000000000001"`,
 		`"parent_audit_id":"00000000-0000-0000-0000-000000000002"`,
 		`"agent_session_id":"00000000-0000-0000-0000-000000000003"`,
+		`"work_ref":"gh:evoila/meho#1"`,
 		`"limit":50`,
 		`"cursor":"opaque-cursor-bytes"`,
 	} {

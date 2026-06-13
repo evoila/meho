@@ -28,6 +28,7 @@ this package never inserts, updates, or deletes.
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** — the flat filter stays gated (un-gating is out of scope for #377). The column itself (#398) *is* read onto the returned row and is walked by the replay CTE. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
+| `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -55,6 +56,7 @@ Field-to-source mapping:
 | `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
+| `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). NULL until a bind source lands (I1-T2); system-internal writers leave it NULL by design. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -83,6 +85,7 @@ query_audit(filters, tenant_id, session)
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
   │       [+ agent_session_id = :agent_session_id]
+  │       [+ work_ref = :work_ref]                              ← exact match
   │       [+ operator_sub ILIKE :principal]
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
@@ -109,6 +112,7 @@ query_audit(filters, tenant_id, session)
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
   │                 parent_audit_id=row.parent_audit_id,
   │                 agent_session_id=row.agent_session_id,
+  │                 work_ref=row.work_ref,
   │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
@@ -163,9 +167,9 @@ node and a `query_audit` row for the same audit id agree field-for-field.
 
 ## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
 
-The five routes under `backend/src/meho_backplane/api/v1/audit.py` are the
-operator-facing entry into the substrate. The first four dispatch through
-`query_audit`; the fifth (replay) dispatches through `replay_session`. All
+The six routes under `backend/src/meho_backplane/api/v1/audit.py` are the
+operator-facing entry into the substrate. The first five dispatch through
+`query_audit`; the sixth (replay) dispatches through `replay_session`. All
 pass `tenant_id=operator.tenant_id` (from the JWT) — the substrate's
 tenant-scoping invariant is enforced one layer up.
 
@@ -173,6 +177,7 @@ tenant-scoping invariant is enforced one layer up.
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
+| `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. | Per-session replay (G8.2-T4). |

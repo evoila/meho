@@ -158,6 +158,19 @@ connector-related release-notes line.
   instead of reporting `registered, 0 ops`. Built-in rows only
   (`tenant_id IS NULL`); idempotent; rows whose short-spelling twin
   already exists (post-upgrade re-ingest) are left untouched (#1701)
+- Operator console: the memory list's tag-autocomplete fetch wiped the
+  card grid on page load because the `<datalist>` inherited the filter
+  form's `hx-target="#memory-cards"` (htmx closest-wins attribute
+  inheritance); the datalist now pins `hx-target="this"` so the
+  `<option>` fragment lands in the datalist and the cards stay intact
+  (#1695)
+- Operator console: the sidebar footer (and the dashboard Deploy card)
+  showed `v0.1.0-dev` on every deployed instance because the
+  `app_version` Jinja global bound the static package `__version__`;
+  it now binds the deployed-build label read from the same
+  `CHART_VERSION` / `GIT_SHA` env metadata `GET /version` reports —
+  `v0.14.0`-style on chart deploys, a 12-char commit id on bare-image
+  runs, `unknown` on local runs without build metadata (#1698)
 
 ## [0.14.0] - 2026-06-12
 

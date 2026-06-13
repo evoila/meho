@@ -1092,14 +1092,20 @@ class Settings(BaseModel):
     #: (``docs/codebase/connectors-vault-tenant-scope.md``). When a caller
     #: requests a ``path`` outside their rendered prefix the handler raises
     #: :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
-    #: *before* the hvac call. **Empty (the default) disables the guard** —
-    #: the shipped deploy convention scopes per operator ``sub``
-    #: (``secret/data/targets/<sub>/*``, ``connector-vault-policy.md`` §2),
-    #: not per tenant, so enforcing a hard tenant prefix unconditionally
-    #: would break every existing call; a deploy whose KV layout *is*
-    #: tenant-partitioned opts in by setting e.g. ``"tenant-{tenant_id}/"``.
+    #: *before* the hvac call. **Default-on** as of this release: the
+    #: canonical KV layout is now per-tenant
+    #: (``secret/data/tenants/<tenant_id>/<target>``, #1723), so the guard
+    #: ships enforcing the mount-pinned ``"secret/tenants/{tenant_id}/"``
+    #: prefix. The mount segment is required because the guard matches a
+    #: normalised ``<mount>/<path>`` candidate and the KV-v2 handlers default
+    #: ``mount="secret"`` (``connectors/vault/ops.py`` ``_DEFAULT_KV_MOUNT``);
+    #: a path-only ``"tenants/{tenant_id}/"`` would never match that
+    #: candidate and would deny every legitimate per-tenant call. A deploy
+    #: still mid-migration (secrets under the retired per-``sub`` layout)
+    #: opts **out** by setting ``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its
+    #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
-    vault_kv_tenant_scope_prefix: str = ""
+    vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -1452,5 +1458,7 @@ def get_settings() -> Settings:
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
         ),
-        vault_kv_tenant_scope_prefix=os.environ.get("VAULT_KV_TENANT_SCOPE_PREFIX", "").strip(),
+        vault_kv_tenant_scope_prefix=os.environ.get(
+            "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
+        ).strip(),
     )

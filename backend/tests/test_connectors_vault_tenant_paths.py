@@ -44,6 +44,13 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
     monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    # The relocation helper reads the *retired* per-`sub` path
+    # (``targets/<sub>/...``) to move it to the per-tenant home. That source
+    # path is outside the now-default-on tenant-scope guard
+    # (``secret/tenants/{tenant_id}/``, #1725), so the migration runs with
+    # the guard explicitly disabled — exactly as the operator runbook
+    # (``vault-per-tenant-migration.md``) prescribes for the migration window.
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -74,8 +81,11 @@ def test_tenant_secret_ref_uses_canonical_dashed_uuid() -> None:
     """The tenant segment matches the guard's rendered prefix exactly."""
     op = _operator()
     ref = tenant_secret_ref(op.tenant_id, "x")
+    # The mount-less ``secret_ref`` carries only the path portion; the
+    # default-on guard pins the mount too (``secret/tenants/{tenant_id}/``),
+    # so the path-relative prefix here is the path tail of that template.
     prefix = rendered_tenant_prefix(op, template="tenants/{tenant_id}/")
-    # The derived ref sits inside the prefix the #1643 guard would render.
+    # The derived ref sits inside the path tail of the prefix the guard renders.
     assert ref.startswith(prefix)
 
 

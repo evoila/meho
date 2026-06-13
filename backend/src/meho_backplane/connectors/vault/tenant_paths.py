@@ -21,8 +21,11 @@ so a target's credential lives once per tenant and every operator in that
 tenant reads the same path. ``<tenant_id>`` is the canonical dashed
 lowercase UUID (``str(UUID)``) — the exact rendering
 :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`
-produces, so a deploy can enable the guard with the matching
-``tenants/{tenant_id}/`` prefix once its secrets are relocated.
+produces. The #1643 guard enforces this layout by default (#1725) with the
+mount-pinned ``secret/tenants/{tenant_id}/`` prefix (the guard matches a
+``<mount>/<path>`` candidate and these secrets sit on the default ``secret``
+mount); a deploy mid-migration disables it with
+``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its secrets are relocated.
 
 Two public helpers:
 
@@ -67,8 +70,11 @@ __all__ = ["TENANT_SECRET_PREFIX", "relocate_target_secret", "tenant_secret_ref"
 #: and the target identity this yields ``tenants/<tenant_id>/<target>``;
 #: hvac inserts the mount and the ``/data/`` API segment itself, so the
 #: full KV-v2 wire path becomes ``secret/data/tenants/<tenant_id>/<target>``.
-#: A deploy enables the #1643 guard against this layout by setting
-#: ``VAULT_KV_TENANT_SCOPE_PREFIX="tenants/{tenant_id}/"``.
+#: The #1643 guard enforces this layout **by default** (#1725) via the
+#: mount-pinned ``VAULT_KV_TENANT_SCOPE_PREFIX="secret/tenants/{tenant_id}/"``
+#: — the mount segment is required because the guard matches a
+#: ``<mount>/<path>`` candidate and these secrets sit on the default
+#: ``secret`` mount.
 TENANT_SECRET_PREFIX = "tenants"
 
 
@@ -85,9 +91,9 @@ def tenant_secret_ref(tenant_id: UUID, target: str) -> str:
     (``str(UUID)``), matching how tenant UUIDs appear everywhere else —
     audit rows, JWT claims, and
     :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`'s
-    output — so a deploy that enables the guard with
-    ``tenants/{tenant_id}/`` finds the derived ref already inside the
-    rendered prefix.
+    output — so the default-on guard
+    (``secret/tenants/{tenant_id}/``) finds the derived ref already inside
+    the rendered prefix.
 
     Parameters
     ----------

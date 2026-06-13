@@ -31,8 +31,9 @@ Two consequences:
   tenant-partitioned layout to enforce against, so it shipped opt-in.
 
 The per-tenant layout fixes both: one secret per `(tenant, target)`,
-readable by every operator in that tenant, under a path the guard can
-enforce with `VAULT_KV_TENANT_SCOPE_PREFIX="tenants/{tenant_id}/"`.
+readable by every operator in that tenant, under a path the guard now
+enforces **by default** (#1725) with the mount-pinned
+`VAULT_KV_TENANT_SCOPE_PREFIX="secret/tenants/{tenant_id}/"`.
 
 ## The new convention
 
@@ -158,14 +159,28 @@ Or pass `delete_old=True` to `relocate_target_secret` in step 1 to do the
 read → write → soft-delete in one call **after** you have verified the new
 path resolves.
 
-## Enabling the guard (after migration)
+## The guard is default-on (disable while mid-migration)
 
-Once all of a tenant's secrets live under `tenants/<tenant_id>/`, the
-deploy can flip the #1643 guard default-on by setting:
+As of #1725 the #1643 guard is **enforced by default** with the
+mount-pinned prefix:
 
 ```text
-VAULT_KV_TENANT_SCOPE_PREFIX=tenants/{tenant_id}/
+VAULT_KV_TENANT_SCOPE_PREFIX=secret/tenants/{tenant_id}/
 ```
+
+The mount segment is required: the guard matches a normalised
+`<mount>/<path>` candidate and these secrets sit on the default `secret`
+mount, so a path-only `tenants/{tenant_id}/` would deny every legitimate
+per-tenant call. While a deploy still holds secrets under the retired
+per-`sub` layout, **disable** the guard until the migration completes:
+
+```text
+VAULT_KV_TENANT_SCOPE_PREFIX=
+```
+
+Once every legitimate `vault.kv.*` caller's secrets are under
+`tenants/<tenant_id>/`, drop the override and let the default-on guard
+enforce.
 
 See
 [`connectors-vault-tenant-scope.md`](../codebase/connectors-vault-tenant-scope.md)

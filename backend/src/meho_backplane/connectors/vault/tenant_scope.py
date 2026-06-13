@@ -19,25 +19,40 @@ It is deliberately *additive*: the Vault policy stays the primary gate
 earlier). See ``docs/codebase/connectors-vault-tenant-scope.md`` for the
 namespace convention, the rationale, and the failure mode.
 
-Opt-in by design
-----------------
-The shipped deploy convention scopes secrets per operator ``sub``
-(``secret/data/targets/<sub>/*``), **not** per tenant, so there is no
-universal ``tenant-<id>/`` layout to enforce against out of the box.
-Enforcing a hard tenant prefix unconditionally would deny every existing
-call. The guard is therefore controlled by
+Default-on as of #1725
+----------------------
+The canonical KV layout is now per-tenant
+(``secret/data/tenants/<tenant_id>/<target>``, #1723), so the guard ships
+**enforcing** by default. The guard is controlled by
 :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`:
 
-* **empty (default)** → :func:`enforce_tenant_scope` is a no-op; behaviour
-  is byte-for-byte what it was before #1643.
-* **a ``str.format`` template** with a single ``{tenant_id}`` placeholder
-  (e.g. ``"tenant-{tenant_id}/"``) → the requested logical path must begin
-  with the rendered prefix, or :class:`VaultTenantScopeError` is raised
-  before any Vault round-trip.
+* **the mount-pinned default** ``"secret/tenants/{tenant_id}/"`` → the
+  requested logical path must begin with the rendered prefix, or
+  :class:`VaultTenantScopeError` is raised before any Vault round-trip. The
+  mount segment is part of the default because the match candidate is the
+  normalised ``<mount>/<path>`` (see :func:`_normalised_logical_path`) and
+  the KV-v2 handlers default ``mount="secret"`` — a *path-only*
+  ``"tenants/{tenant_id}/"`` would render to ``tenants/<id>/`` and never
+  match the ``secret/tenants/<id>/...`` candidate, denying every legitimate
+  per-tenant call.
+* **empty** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``) → :func:`enforce_tenant_scope`
+  is a no-op; behaviour is byte-for-byte what it was before #1643. A deploy
+  still mid-migration (secrets under the retired per-``sub`` layout) opts out
+  this way until its secrets are relocated.
 
 The system/shim operator (Nil-UUID tenant, empty ``raw_jwt``) is exempt:
 its only callers exercise the unauthenticated ``vault.sys.health`` op and
 forward no token to Vault, so there is no tenant identity to bind against.
+
+A small set of **platform paths** is also exempt regardless of operator —
+fixed, shared, non-tenant secrets the platform itself reads under any
+authenticated operator's identity. The only such path today is the
+federation-proof health-check secret (``secret/meho/test/federation``,
+read by ``GET /api/v1/health`` to prove the JWT→OIDC→Vault chain). It is
+provisioned shared per the Goal #11 cross-repo contract and carries no
+tenant data, so the per-tenant guard must not deny it once enforced by
+default (#1725). The exemption is deliberately a closed allow-list, not a
+pattern, so it cannot be widened by a caller-supplied path.
 """
 
 from __future__ import annotations
@@ -47,7 +62,12 @@ from uuid import UUID
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import get_settings
 
-__all__ = ["VaultTenantScopeError", "enforce_tenant_scope", "rendered_tenant_prefix"]
+__all__ = [
+    "PLATFORM_EXEMPT_PATHS",
+    "VaultTenantScopeError",
+    "enforce_tenant_scope",
+    "rendered_tenant_prefix",
+]
 
 #: The Nil UUID the vault-connector shim synthesises as the system
 #: operator's ``tenant_id`` (mirrors
@@ -56,6 +76,17 @@ __all__ = ["VaultTenantScopeError", "enforce_tenant_scope", "rendered_tenant_pre
 #: is skipped for it. Duplicated here rather than imported to avoid a
 #: connector ↔ ops import cycle; a regression test pins the two equal.
 _SYSTEM_TENANT_ID: UUID = UUID(int=0)
+
+#: Closed allow-list of normalised ``<mount>/<path>`` candidates the guard
+#: never denies, regardless of operator tenant. These are fixed, shared,
+#: non-tenant platform secrets the backplane reads on its own behalf under
+#: the request operator's identity (the audit trail keeps the real
+#: operator). Currently only the federation-proof health secret
+#: ``GET /api/v1/health`` reads. Kept as an explicit set — never a prefix or
+#: glob — so a caller cannot smuggle a tenant escape through it. A
+#: regression test pins this equal to the health route's
+#: ``_FEDERATION_PROOF_PATH`` rendered onto the default ``secret`` mount.
+PLATFORM_EXEMPT_PATHS: frozenset[str] = frozenset({"secret/meho/test/federation"})
 
 
 class VaultTenantScopeError(Exception):
@@ -107,12 +138,15 @@ def _normalised_logical_path(mount: str, path: str) -> str:
 def enforce_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
     """Deny a ``vault.kv.*`` call whose path escapes the operator's tenant namespace.
 
-    No-op when
-    :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
-    is empty (the default) or when *operator* is the Nil-tenant system
-    shim. Otherwise renders the operator's tenant prefix from the template
-    and raises :class:`VaultTenantScopeError` unless the normalised
-    ``<mount>/<path>`` begins with it.
+    Enforced by default
+    (``vault_kv_tenant_scope_prefix="secret/tenants/{tenant_id}/"``). No-op
+    only when the prefix is explicitly emptied
+    (``VAULT_KV_TENANT_SCOPE_PREFIX=""``), when *operator* is the Nil-tenant
+    system shim, or when the normalised ``<mount>/<path>`` is one of the
+    fixed :data:`PLATFORM_EXEMPT_PATHS` (shared non-tenant platform secrets,
+    e.g. the federation-proof health read). Otherwise renders the operator's
+    tenant prefix from the template and raises :class:`VaultTenantScopeError`
+    unless the normalised ``<mount>/<path>`` begins with it.
 
     Parameters
     ----------
@@ -139,9 +173,15 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
         # callers run the unauthenticated sys.health op.
         return
 
+    candidate = _normalised_logical_path(mount, path)
+    if candidate in PLATFORM_EXEMPT_PATHS:
+        # A fixed, shared, non-tenant platform secret (e.g. the
+        # federation-proof health read) — exempt by closed allow-list so
+        # default-on enforcement does not deny the platform's own probes.
+        return
+
     prefix = rendered_tenant_prefix(operator, template=template)
     normalised_prefix = prefix.strip().strip("/")
-    candidate = _normalised_logical_path(mount, path)
 
     # Match on a path-segment boundary so a "tenant-1" prefix cannot be
     # satisfied by a "tenant-12/..." path. The candidate is normalised to

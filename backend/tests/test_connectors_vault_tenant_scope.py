@@ -30,6 +30,7 @@ from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.connector import _SYSTEM_TENANT_ID
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.connectors.vault.tenant_scope import (
+    PLATFORM_EXEMPT_PATHS,
     VaultTenantScopeError,
     enforce_tenant_scope,
     rendered_tenant_prefix,
@@ -180,6 +181,84 @@ def test_empty_template_disables_the_guard(monkeypatch: pytest.MonkeyPatch) -> N
     op = _operator(_TENANT_A)
     # Any path, including a cross-tenant one, is allowed when disabled.
     enforce_tenant_scope(op, mount="secret", path=f"tenant-{_TENANT_B}/db")
+
+
+def test_default_prefix_is_mount_pinned_per_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env override → the guard ships enforced with ``secret/tenants/{tenant_id}/`` (#1725).
+
+    The default-on value must be **mount-pinned**: the guard matches a
+    normalised ``<mount>/<path>`` candidate and the KV-v2 handlers default
+    ``mount="secret"``, so a path-only ``tenants/{tenant_id}/`` would never
+    match the ``secret/tenants/<id>/...`` candidate and would deny every
+    legitimate per-tenant call.
+    """
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    assert get_settings().vault_kv_tenant_scope_prefix == "secret/tenants/{tenant_id}/"
+
+
+def test_default_config_allows_canonical_per_tenant_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the default prefix, the canonical #1723 layout call is ALLOWED.
+
+    mount=``secret`` (the handler default) + path=``tenants/<id>/<target>``
+    → candidate ``secret/tenants/<id>/<target>`` is inside the rendered
+    default prefix, so no raise.
+    """
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    op = _operator(_TENANT_A)
+    enforce_tenant_scope(op, mount="secret", path=f"tenants/{_TENANT_A}/rdc-vcenter")
+
+
+def test_default_config_denies_cross_tenant_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the default prefix, a cross-tenant path is DENIED."""
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    op = _operator(_TENANT_A)
+    with pytest.raises(VaultTenantScopeError):
+        enforce_tenant_scope(op, mount="secret", path=f"tenants/{_TENANT_B}/rdc-vcenter")
+
+
+def test_default_config_exempts_system_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the default prefix, the Nil-UUID system operator stays exempt."""
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    op = _operator(_SYSTEM_TENANT_ID)
+    enforce_tenant_scope(op, mount="secret", path="anything/at/all")
+
+
+def test_platform_exempt_path_is_allowed_for_real_tenant() -> None:
+    """A shared platform secret (federation-proof health) bypasses the guard.
+
+    The path is read by ``GET /api/v1/health`` under the *real* request
+    operator's identity (not the system shim), so the per-tenant guard would
+    otherwise deny it once enforced by default. The closed allow-list exempts
+    it.
+    """
+    op = _operator(_TENANT_A)
+    # mount "secret" (the handler default) + path "meho/test/federation".
+    enforce_tenant_scope(op, mount="secret", path="meho/test/federation")
+
+
+def test_platform_exemption_does_not_widen_to_sibling_paths() -> None:
+    """The exemption is an exact-match allow-list, not a prefix."""
+    op = _operator(_TENANT_A)
+    with pytest.raises(VaultTenantScopeError):
+        enforce_tenant_scope(op, mount="secret", path="meho/test/federation/escape")
+
+
+def test_platform_exempt_paths_match_health_route() -> None:
+    """The exempt set stays equal to the health route's federation-proof path.
+
+    Mirrors the ``_SYSTEM_TENANT_ID`` duplication pattern: the value is
+    pinned by a test rather than imported, so a drift in the health route's
+    ``_FEDERATION_PROOF_PATH`` (or its mount) trips here.
+    """
+    from meho_backplane.api.v1.health import _FEDERATION_PROOF_PATH
+
+    assert frozenset({f"secret/{_FEDERATION_PROOF_PATH}"}) == PLATFORM_EXEMPT_PATHS
 
 
 def test_system_tenant_is_exempt() -> None:

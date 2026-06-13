@@ -3,17 +3,19 @@
 
 """Startup advisory for an unenforced Vault tenant-scope guard (#1673).
 
-The application-layer ``vault.kv.*`` tenant-scope guard (#1643) is opt-in
-and default-off (``VAULT_KV_TENANT_SCOPE_PREFIX=""``). On a deploy whose
-Vault layout *is* tenant-partitioned, leaving the prefix empty silently
-turns the guard into a no-op, so cross-tenant ``vault.kv.*`` isolation is
-unenforced at the app layer with no signal.
+The application-layer ``vault.kv.*`` tenant-scope guard (#1643) is default-on
+as of #1725 (``VAULT_KV_TENANT_SCOPE_PREFIX="secret/tenants/{tenant_id}/"``).
+The advisory therefore stays silent on the common deploy; it fires only when
+an operator has *explicitly disabled* the guard (set the prefix back to
+``""``) — e.g. while still mid-migration — so that running unenforced is
+never silent.
 
 :func:`meho_backplane.main._advise_vault_tenant_scope_unenforced` runs in
 the FastAPI lifespan and emits exactly one structured
-``vault_tenant_scope_unenforced`` advisory when the prefix is unset. These
-tests assert it fires when unset, stays silent when set, and does not
-change boot behaviour either way (it is observability-only — no raise).
+``vault_tenant_scope_unenforced`` advisory when the prefix is empty. These
+tests assert it stays silent on the default config and when a prefix is set,
+fires when the prefix is explicitly emptied, and does not change boot
+behaviour either way (it is observability-only — no raise).
 """
 
 from __future__ import annotations
@@ -50,8 +52,24 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def test_advisory_fires_once_when_prefix_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty prefix → exactly one structured advisory naming the env var."""
+def test_advisory_silent_on_default_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env override → guard is default-on (#1725), so no advisory fires."""
+    monkeypatch.delenv("VAULT_KV_TENANT_SCOPE_PREFIX", raising=False)
+    get_settings.cache_clear()
+    try:
+        with capture_logs() as captured:
+            _advise_vault_tenant_scope_unenforced()
+    finally:
+        get_settings.cache_clear()
+
+    advisories = [e for e in captured if e.get("event") == _ADVISORY_EVENT]
+    assert advisories == []
+
+
+def test_advisory_fires_once_when_prefix_explicitly_emptied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicitly emptied prefix → exactly one structured advisory naming the env var."""
     monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     get_settings.cache_clear()
     try:

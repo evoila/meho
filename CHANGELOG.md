@@ -197,6 +197,21 @@ connector-related release-notes line.
   (`total_searches == 2` and `payload["row_count"] == 2`) are unchanged,
   and the fix is tests-only (no production engine/session behaviour
   change) (#1722)
+- Test suite: hardened
+  `test_retrieval_usage.py::test_rest_only_dogfood_zero_is_not_context_free`
+  (the deferred sibling of #1722, same root cause). The test seeds
+  `/api/v1/retrieve` `audit_log` rows and asserts `total_searches == 0`
+  to prove REST is excluded from the counted search surfaces (#632), but
+  its two seeds were pinned to the fixed `_NOW = 2026-05-14` while the
+  route resolves its default `since` window against the real wall clock
+  (`now - 30d`). Once the calendar advanced past `_NOW + 30d` the rows
+  fell out of the window, so the zero passed by window expiry rather than
+  by surface exclusion — the guard had gone vacuous (a regression that
+  wrongly counted REST rows would no longer fail it). The seeds now
+  anchor to `datetime.now(UTC)` so the rows stay in-window and the zero
+  genuinely exercises the exclusion path; all four assertions
+  (`total_searches`, `buckets`, `counted_surfaces`, `rest_excluded`) are
+  unchanged, tests-only (#1734)
 - Operator console: broadcast feed/wall and the connectors recent-ops
   card rendered dead (empty state despite a healthy stream, console
   errors on every SSE frame) because their Alpine component scripts

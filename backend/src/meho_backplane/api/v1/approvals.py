@@ -16,8 +16,8 @@ Route inventory
   ``operator``.
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
-  Body: :class:`ApproveRequestBody` (``params`` dict). Role:
-  ``operator``.
+  Body: :class:`ApproveRequestBody` (``params`` dict + optional
+  ``reason`` string). Role: ``operator``.
 * ``POST /api/v1/approvals/{request_id}/reject`` — reject a pending
   request; the original dispatch is not executed. Body:
   :class:`RejectRequestBody` (optional ``reason`` string). Role:
@@ -128,6 +128,10 @@ class ApproveRequestBody(BaseModel):
             "the stored params_hash on the approval request."
         ),
     )
+    reason: str = Field(
+        default="",
+        description="Optional human-readable approval reason (recorded in the audit row).",
+    )
 
 
 class RejectRequestBody(BaseModel):
@@ -232,7 +236,9 @@ async def _capture_operator_decision(
     try:
         async with sessionmaker() as session:
             if decision == "approved":
-                request = await approve_request(session, request_id, operator=operator, params=None)
+                request = await approve_request(
+                    session, request_id, operator=operator, params=None, reason=reason
+                )
             else:
                 request = await reject_request(
                     session, request_id, operator=operator, reason=reason
@@ -386,6 +392,7 @@ async def approve_approval_request(
                 request_id,
                 operator=operator,
                 params=body.params,
+                reason=body.reason,
             )
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot

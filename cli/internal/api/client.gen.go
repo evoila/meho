@@ -841,6 +841,9 @@ type ApprovalRequestView struct {
 type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
+
+	// Reason Optional human-readable approval reason (recorded in the audit row).
+	Reason *string `json:"reason,omitempty"`
 }
 
 // ApproveResponseBody Response for a successful approve + re-dispatch.

@@ -10894,6 +10894,12 @@
             "type": "object",
             "title": "Params",
             "description": "The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Optional human-readable approval reason (recorded in the audit row).",
+            "default": ""
           }
         },
         "additionalProperties": false,

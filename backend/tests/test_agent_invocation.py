@@ -74,6 +74,7 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
 
@@ -852,6 +853,59 @@ async def test_finalize_child_run_swallows_illegal_transition() -> None:
         # The cancel's terminal state stands; the finalizer did not overwrite it.
         assert row.status == AgentRunStatus.CANCELLED.value
         assert row.output is None
+
+
+# ---------------------------------------------------------------------------
+# work_ref I3-T2 (#1662): an agent-invoked child run inherits the parent's
+# external change-ticket reference off the shared ``work_ref_var`` ContextVar —
+# children are recorded inside the parent's invoker.run call while the var is
+# still bound, so the child must land the same work_ref, not NULL.
+# ---------------------------------------------------------------------------
+
+
+async def test_record_child_run_inherits_bound_work_ref() -> None:
+    """A child run recorded while ``work_ref_var`` is bound persists that
+    work_ref — mirroring the top-level ``_create_run_row`` path. The defect this
+    guards: child runs landing NULL even when the parent's ticket is bound."""
+    await _seed_definition(name="child", toolset={"meta_tools": []})
+    op = _make_operator()
+    child_def = await _resolve_child_definition(op, "child")
+    assert child_def is not None
+
+    token = work_ref_var.set("gh:evoila/meho#1662")
+    try:
+        child_run_id, _lease_owner = await _record_child_run(
+            operator=op, definition=child_def, parent_run_id=None
+        )
+    finally:
+        work_ref_var.reset(token)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        assert row.work_ref == "gh:evoila/meho#1662"
+
+
+async def test_record_child_run_leaves_work_ref_null_when_unbound() -> None:
+    """With no ticket bound on ``work_ref_var``, a child run records work_ref as
+    NULL — inheritance is opt-in via the ContextVar, never fabricated."""
+    await _seed_definition(name="child", toolset={"meta_tools": []})
+    op = _make_operator()
+    child_def = await _resolve_child_definition(op, "child")
+    assert child_def is not None
+
+    # work_ref_var defaults to None; assert that to make the precondition explicit.
+    assert work_ref_var.get() is None
+    child_run_id, _lease_owner = await _record_child_run(
+        operator=op, definition=child_def, parent_run_id=None
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        assert row.work_ref is None
 
 
 # ---------------------------------------------------------------------------

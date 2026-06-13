@@ -1343,6 +1343,15 @@ async def _record_child_run(
     the ``invoke_agent`` tool can heartbeat the child for its loop's lifetime
     and the reaper can reclaim a child whose worker died mid-flight.
 
+    work_ref I3-T2 (#1662): the child run inherits the parent's external
+    change-ticket reference off the shared
+    :data:`~meho_backplane.operations._audit.work_ref_var` ContextVar -- the
+    same boundary the top-level path reads in
+    :meth:`AgentInvoker._create_run_row`. Children are recorded inside the
+    parent's ``invoker.run`` call, so the var is still bound at child-creation
+    time and the child lands the same ``work_ref`` as its parent instead of
+    ``None``.
+
     The row's *terminal* state is closed by the companion
     :func:`_finalize_child_run` (G11.1-T8 #1087) after the child loop returns,
     so the child reaches ``succeeded`` / ``failed``. A definition deleted
@@ -1367,6 +1376,7 @@ async def _record_child_run(
             model_tier=entry.model_tier,
             agent_definition_id=entry.id,
             parent_run_id=parent_run_id,
+            work_ref=work_ref_var.get(),
         )
         await run_lifecycle.start_run(session, row, provider=provider, model=model)
         await run_lifecycle.claim_lease(

@@ -111,6 +111,19 @@ type SearchResponse struct {
 // each command keeps cobra from double-printing the error string.
 var ErrOpError = errors.New("operation status not ok")
 
+// StatusAwaitingApproval is the change-class park status the dispatcher
+// returns for an approval-gated op that has not yet been approved
+// (G11.7-T1 #1401). The backplane has durably written an ApprovalRequest
+// row and parked the call; it is a first-class non-error outcome that
+// Render surfaces as a parked dispatch and maps to exit 0.
+const StatusAwaitingApproval = "awaiting_approval"
+
+// ParkedHint is the operator-facing one-liner Render prints under the
+// status header when a dispatch parks. Exported so the parallel
+// operation/call.go render path (a separate package that can't share
+// Render) emits the byte-identical hint.
+const ParkedHint = "parked for human approval — approve via the approval queue, then re-dispatch"
+
 // APIResponseError wraps a non-2xx response from the backplane so
 // per-vendor renderRequestError can pick the right output category
 // (401 → AuthExpired, 403 → InsufficientRole, other non-2xx →
@@ -369,6 +382,15 @@ func isSpace(b byte) bool {
 // the status enum, render the envelope (JSON or human), then map
 // "error" / "denied" to ErrOpError. When prettyPrinter is nil the
 // generic envelope is used.
+//
+// awaiting_approval (parked) is intercepted here — ahead of the
+// per-verb prettyPrinter — so the park is a first-class non-error
+// outcome on every dispatch render path (the generic verb, every
+// argocd/keycloak approval-gated write verb, secret move, and any
+// future requires_approval verb) without each verb re-implementing
+// it. A parked dispatch renders the status header plus the ParkedHint
+// (or the full envelope under --json, incl. extras.approval_request_id)
+// and returns nil → exit 0.
 func (c Connector) Render(
 	cmd *cobra.Command,
 	opID string,
@@ -376,6 +398,15 @@ func (c Connector) Render(
 	jsonOut bool,
 	prettyPrinter func(w io.Writer, r *CallResult),
 ) error {
+	if r.Status == StatusAwaitingApproval {
+		if jsonOut {
+			return output.PrintJSON(cmd.OutOrStdout(), r)
+		}
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
+		fmt.Fprintf(w, "  %s\n", ParkedHint)
+		return nil // parked, not failed — exit 0.
+	}
 	switch r.Status {
 	case "ok", "error", "denied":
 		// fall through.
@@ -383,7 +414,7 @@ func (c Connector) Render(
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied)",
+				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied / awaiting_approval)",
 				r.Status,
 			)),
 			jsonOut,

@@ -272,7 +272,7 @@ func TestSecretMoveAwaitingApproval(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 200, dispatch.CallResult{
-				Status: statusAwaitingApproval, OpID: opMove, DurationMs: 3,
+				Status: dispatch.StatusAwaitingApproval, OpID: opMove, DurationMs: 3,
 			})
 		},
 	})
@@ -292,7 +292,7 @@ func TestSecretMoveAwaitingApproval(t *testing.T) {
 		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, statusAwaitingApproval) {
+	if !strings.Contains(got, dispatch.StatusAwaitingApproval) {
 		t.Errorf("output should surface awaiting_approval verbatim\n%s", got)
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
@@ -306,7 +306,7 @@ func TestSecretMoveAwaitingApprovalJSON(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(t, w, 200, dispatch.CallResult{
-				Status: statusAwaitingApproval, OpID: opMove,
+				Status: dispatch.StatusAwaitingApproval, OpID: opMove,
 			})
 		},
 	})
@@ -328,7 +328,7 @@ func TestSecretMoveAwaitingApprovalJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
 	}
-	if decoded["status"] != statusAwaitingApproval {
-		t.Errorf("json envelope status: got %v want %s", decoded["status"], statusAwaitingApproval)
+	if decoded["status"] != dispatch.StatusAwaitingApproval {
+		t.Errorf("json envelope status: got %v want %s", decoded["status"], dispatch.StatusAwaitingApproval)
 	}
 }

@@ -59,16 +59,14 @@ var writeResultKeyOrder = []string{
 }
 
 // printWriteResult is the shared pretty-printer for the write confirmations.
-// It renders the op header, the awaiting_approval hint when parked, then the
-// flat result object's scalar fields (proposed_effect / before-after blocks
-// are nested and only shown under --json).
+// It renders the op header then the flat result object's scalar fields
+// (proposed_effect / before-after blocks are nested and only shown under
+// --json). The awaiting_approval (parked) status never reaches this
+// printer: the shared dispatch.Render intercepts it ahead of the
+// pretty-printer and renders the parked hint itself (exit 0).
 func printWriteResult(opID string) func(w io.Writer, r *CallResult) {
 	return func(w io.Writer, r *CallResult) {
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
-		if r.Status == "awaiting_approval" {
-			fmt.Fprintln(w, "  parked for human approval — approve via the approval queue, then re-dispatch")
-			return
-		}
 		if r.Status != "ok" {
 			printErrorTrailer(w, r)
 			return

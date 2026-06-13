@@ -15,6 +15,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -139,6 +140,24 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	// awaiting_approval (parked) is a first-class non-error outcome:
+	// the dispatcher has durably written an ApprovalRequest row and
+	// parked the call (G11.7-T1 #1401). Intercept it ahead of the
+	// status switch — mirroring the shared dispatch.Render path the
+	// vendor verbs go through — so the generic `operation call` verb
+	// renders the parked hint (or the full envelope, incl.
+	// extras.approval_request_id, under --json) and exits 0 instead of
+	// rejecting it as an invalid status (exit 4).
+	if result.Status == dispatch.StatusAwaitingApproval {
+		if opts.JSONOut {
+			return output.PrintJSON(cmd.OutOrStdout(), result)
+		}
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n",
+			opts.ConnectorID, opts.OpID, result.Status, result.DurationMs)
+		fmt.Fprintf(w, "  %s\n", dispatch.ParkedHint)
+		return nil // parked, not failed — exit 0.
+	}
 	// Classify status BEFORE rendering. The backend
 	// `Connector.execute` contract (see
 	// `backend/src/meho_backplane/connectors/schemas.py`) defines three
@@ -156,7 +175,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied)",
+				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied / awaiting_approval)",
 				result.Status,
 			)),
 			opts.JSONOut,

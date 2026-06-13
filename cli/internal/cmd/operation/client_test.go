@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -487,5 +488,84 @@ func TestPostCallNon2xxAfterRefreshClassifiesAsApiResponseError(t *testing.T) {
 	var apiErr *apiResponseError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != 500 {
 		t.Fatalf("expected *apiResponseError{StatusCode:500}; got %+v", err)
+	}
+}
+
+// withFakeClient swaps newAuthedClient for a factory returning f and
+// restores the original on cleanup, so a full runCall path can be
+// exercised without a live backplane or token store.
+func withFakeClient(t *testing.T, f operationsAPI) {
+	t.Helper()
+	orig := newAuthedClient
+	newAuthedClient = func(_ context.Context, _ string) (operationsAPI, error) { return f, nil }
+	t.Cleanup(func() { newAuthedClient = orig })
+}
+
+// TestRunCallAwaitingApprovalRealPath — the generic `operation call`
+// verb treats status=awaiting_approval as a parked, non-error,
+// exit-0 outcome on the REAL runCall path (not just printCallResult):
+// stdout carries the parked hint and stderr never carries the
+// invalid-status diagnostic.
+func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{
+		Status: "awaiting_approval", OpID: "argocd.app.sync", DurationMs: 7,
+		Extras: json.RawMessage(`{"approval_request_id":"ar-op-1"}`),
+	})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--backplane", "http://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
+	}
+	if !strings.Contains(out.String(), "parked for human approval") {
+		t.Errorf("expected parked hint on stdout; got %q", out.String())
+	}
+	if strings.Contains(errBuf.String(), "invalid OperationResult") {
+		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
+	}
+}
+
+// TestRunCallAwaitingApprovalJSON — with --json the parked envelope
+// round-trips as the full OperationResult JSON (incl.
+// extras.approval_request_id) and the command exits 0.
+func TestRunCallAwaitingApprovalJSON(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{
+		Status: "awaiting_approval", OpID: "argocd.app.sync",
+		Extras: json.RawMessage(`{"approval_request_id":"ar-op-1"}`),
+	})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--json", "--backplane", "http://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if decoded["status"] != "awaiting_approval" {
+		t.Errorf("json status: got %v want awaiting_approval", decoded["status"])
+	}
+	extras, ok := decoded["extras"].(map[string]any)
+	if !ok || extras["approval_request_id"] != "ar-op-1" {
+		t.Errorf("json envelope must carry extras.approval_request_id; got %v", decoded["extras"])
 	}
 }

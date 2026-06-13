@@ -1042,8 +1042,21 @@ async def test_route_audit_row_count_matches_total_searches(
     Seed a known search-count, hit the route, read back the audit row,
     assert the row's ``payload['row_count']`` equals the response body's
     ``total_searches``.
+
+    The seed timestamps are anchored to ``datetime.now(UTC)`` rather than
+    the module-level fixed ``_NOW`` constant. This route test (unlike the
+    service-level :func:`compute_usage` tests above, which pass an explicit
+    ``since``/``until`` window pinned to ``_NOW``) drives the HTTP endpoint
+    with its **default** ``since`` of ``30d``, which the route resolves
+    relative to the real wall clock (``datetime.now(UTC)``). Seeding at a
+    fixed past date made the rows fall out of that rolling window once the
+    calendar advanced ~30 days past ``_NOW``, turning the assertion into a
+    time-bomb (the rows were committed and visible at the raw-SQL level but
+    excluded by the window filter, so ``total_searches`` dropped to 0).
+    Anchoring the seed to the same clock the route reads keeps both rows
+    inside the default window on every run.
     """
-    base = _NOW - timedelta(hours=2)
+    base = datetime.now(UTC) - timedelta(hours=2)
     await _seed_audit_row(
         operator_sub="op-1",
         tenant_id=_FIXED_TENANT,

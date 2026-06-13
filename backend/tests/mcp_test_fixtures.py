@@ -215,6 +215,9 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.tools import (
         doc_collections as doc_collections_tools,
     )
+    from meho_backplane.mcp.tools import (
+        doc_collections_create as doc_collections_create_tool,
+    )
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
 
@@ -257,6 +260,14 @@ def isolated_registry() -> Iterator[None]:
     # otherwise leave it unregistered in any test file that imports this
     # fixture after the first one runs in the process.
     importlib.reload(doc_collections_tools)
+    # #1739: the ``create_doc_collections`` registry-create tool lives in a
+    # separate module (mirroring topology_create_node) so the read-class
+    # ``doc_collections`` catalogue module stays focused; it joins the
+    # reload list for the same reason every other tool module does -- the
+    # autouse ``clear_registries()`` above would otherwise leave it
+    # unregistered in any test file that imports this fixture after the
+    # first one runs in the process.
+    importlib.reload(doc_collections_create_tool)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
     # G12.2-T4 (#1298): the runbook template MCP tools

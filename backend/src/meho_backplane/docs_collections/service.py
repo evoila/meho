@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Probe write-back + operator lifecycle service for doc collections (T6 #1555).
+"""Create + probe write-back + operator lifecycle service for doc collections.
 
-Two write paths against a :class:`~meho_backplane.db.models.DocCollection`
-row, both modelled on the ``probe_target`` / connector-enable precedents:
+Three write paths against a :class:`~meho_backplane.db.models.DocCollection`
+row. :func:`create_doc_collection` (#1739) registers a new row, modelled on
+``create_target``: ``tenant_id`` from the operator (never the body), the
+``backend.type`` validated against the search-backend registry with a
+structured 422 (the ``create_target`` unknown-product shape), an
+``IntegrityError`` on a cross-scope ``collection_key`` collision mapped to
+409, and the ``meho.docs.collections.create`` audit op bound so the write
+joins the ``op_id="meho.docs.*"`` who-touched trail. The other two are
+modelled on the ``probe_target`` / connector-enable precedents:
 
 * :func:`probe_collection` — resolve the row's backend, read its typed
   :class:`~meho_backplane.docs_search.backends.base.BackendReadiness`, and
@@ -28,9 +35,11 @@ meho probes + reflects).
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -42,14 +51,166 @@ from meho_backplane.docs_collections.lifecycle import (
     apply_probe_transition,
     status_for_readiness,
 )
+from meho_backplane.docs_collections.schemas import DocCollectionCreate
 from meho_backplane.docs_search.backends import BackendReadiness, resolve_backend
+from meho_backplane.docs_search.backends.registry import all_backends
 
 __all__ = [
+    "DocCollectionBackendTypeError",
+    "DocCollectionConflictError",
+    "create_doc_collection",
     "probe_collection",
     "set_collection_enabled",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Canonical audit op_id for the create — the SAME ``meho.docs.*`` family
+#: the list route / lifecycle verbs bind, so a ``query_audit`` filter on
+#: ``op_id="meho.docs.*"`` catches the registration transport-independently
+#: (G4.5-T8 #1549). ``op_class="write"`` — create mutates the registry.
+_CREATE_OP_ID = "meho.docs.collections.create"
+
+
+class DocCollectionBackendTypeError(Exception):
+    """The ``backend.type`` is not a registered search backend.
+
+    Carries the structured 422 ``detail`` the create fronts surface so an
+    operator who typed an unroutable backend type sees the registered set
+    at create time instead of an opaque 503 at probe/search time. The
+    detail shape mirrors ``create_target``'s ``unknown_product`` 422 (a
+    stable ``kind`` code + the offending value + the valid set + a human
+    ``message``).
+    """
+
+    def __init__(self, backend_type: str, valid_types: list[str]) -> None:
+        self.backend_type = backend_type
+        self.valid_types = valid_types
+        self.detail: dict[str, object] = {
+            "kind": "unknown_backend_type",
+            "backend_type": backend_type,
+            "valid_backend_types": valid_types,
+            "message": (
+                f"backend.type={backend_type!r} is not a registered search "
+                f"backend; pick one of {valid_types!r}. An unroutable "
+                f"collection would commit but fail every probe / search with "
+                f"a 503."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+class DocCollectionConflictError(Exception):
+    """A collection with this ``collection_key`` already exists in the scope.
+
+    Raised when the create's flush hits one of the two partial-unique
+    indexes (global ``collection_key`` / per-tenant
+    ``(tenant_id, collection_key)``). The fronts map it to 409 (REST) /
+    ``-32602`` (MCP) so a cross-scope collision is a typed conflict, not
+    an opaque 500 / IntegrityError.
+    """
+
+    def __init__(self, collection_key: str, *, tenant_scoped: bool) -> None:
+        self.collection_key = collection_key
+        self.tenant_scoped = tenant_scoped
+        scope = "tenant" if tenant_scoped else "global"
+        super().__init__(f"doc collection {collection_key!r} already exists in the {scope} scope")
+
+
+async def create_doc_collection(
+    session: AsyncSession,
+    operator: Operator,
+    body: DocCollectionCreate,
+) -> DocCollectionORM:
+    """Register a new doc collection in the operator's tenant.
+
+    Mirrors :func:`~meho_backplane.api.v1.targets.create_target`:
+    ``tenant_id`` is always the operator's (the body cannot override it);
+    ``id`` / timestamps are generated server-side; ``status`` defaults to
+    ``provisioning`` (a follow-up probe promotes it to ``ready``).
+    ``backend.type`` is validated against
+    :func:`~meho_backplane.docs_search.backends.registry.all_backends`
+    before the insert so an unroutable type is a structured 422
+    (:class:`DocCollectionBackendTypeError`), not a deferred probe-time
+    503. A cross-scope ``collection_key`` collision surfaces as a typed
+    :class:`DocCollectionConflictError` (409), not an opaque IntegrityError.
+
+    The caller owns the transaction boundary (the route's
+    ``async with session.begin()``); this function flushes but never
+    commits, so a downstream failure rolls the insert back.
+
+    Args:
+        session: Active async session inside the front's open transaction.
+        operator: The verified operator; ``operator.tenant_id`` is the
+            row's tenant — the body's ``tenant_id`` (if any) is ignored
+            (the schema forbids it).
+        body: The validated create request.
+
+    Returns:
+        The flushed :class:`DocCollectionORM` row (``id`` / timestamps
+        populated).
+
+    Raises:
+        DocCollectionBackendTypeError: ``backend.type`` is not registered;
+            the front maps it to 422.
+        DocCollectionConflictError: a collection with this ``collection_key``
+            already exists in the operator's scope; the front maps it to 409.
+    """
+    # Bind the canonical op_id up-front so a persisted audit row is
+    # filterable by ``op_id="meho.docs.*"`` even if the insert raises
+    # below (G4.5-T8 #1549). ``op_class="write"`` — create mutates the
+    # registry.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_CREATE_OP_ID,
+        audit_op_class="write",
+    )
+
+    # Validate ``backend.type`` against the registry BEFORE the insert so
+    # the operator sees the registered set at create time. ``all_backends``
+    # is populated at import time (the adapters self-register), so the set
+    # is non-empty in every real deploy; an empty registry would be a
+    # boot-order bug, and validating against an empty set would reject
+    # every create, so — matching ``create_target``'s empty-registry skip —
+    # we only enforce when the registry is populated.
+    valid_types = sorted(all_backends())
+    if valid_types and body.backend.type not in valid_types:
+        raise DocCollectionBackendTypeError(body.backend.type, valid_types)
+
+    now = datetime.now(UTC)
+    row = DocCollectionORM(
+        id=uuid.uuid4(),
+        tenant_id=operator.tenant_id,
+        collection_key=body.collection_key,
+        vendor=body.vendor,
+        products=list(body.products),
+        description=body.description,
+        when_to_use=body.when_to_use,
+        backend={"type": body.backend.type, "ref": dict(body.backend.ref)},
+        status=STATUS_PROVISIONING,
+        last_ingested_at=None,
+        doc_count=None,
+        readiness=None,
+        extras=dict(body.extras),
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise DocCollectionConflictError(
+            body.collection_key,
+            tenant_scoped=operator.tenant_id is not None,
+        ) from exc
+
+    _log.info(
+        "doc_collection_created",
+        collection_key=row.collection_key,
+        tenant_scope="tenant" if row.tenant_id is not None else "global",
+        backend_type=body.backend.type,
+        status=row.status,
+    )
+    return row
 
 
 async def probe_collection(

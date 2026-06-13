@@ -19,10 +19,16 @@ Two read models cover the registry's wire contract:
   never appears in a catalogue response (#1548 backend-agnostic
   contract). Frozen.
 
-There is no ``DocCollectionCreate`` / ``DocCollectionUpdate`` here: v1
-collections are operator-managed seed (no create/import API until a
-collection needs one — out of scope per #1550). When that API lands it
-adds the write schemas alongside these read models.
+:class:`DocCollectionCreate` is the write half (#1739): the request body
+for ``POST /api/v1/doc_collections`` + the ``create_doc_collections`` MCP
+tool + ``meho docs collections create``. It carries only the operator-set
+identity + routing fields (``collection_key`` / ``vendor`` / ``products`` /
+``backend`` + the optional ``description`` / ``when_to_use`` / ``extras``);
+``id`` / ``tenant_id`` / timestamps / ``status`` / the probe-written
+liveness are server-derived and deliberately absent — ``tenant_id`` in
+particular comes from the JWT, never the body (the ``create_target``
+precedent). There is still no ``DocCollectionUpdate`` here — PATCH /
+DELETE are a separate follow-up (out of scope per #1739).
 
 :func:`project_doc_collection_to_summary` is the **single** ORM→wire
 projection, mirroring :func:`targets.schemas.project_target_to_summary`.
@@ -38,16 +44,71 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import DocCollection as DocCollectionORM
 
 __all__ = [
     "DocCollection",
+    "DocCollectionCreate",
     "DocCollectionSummary",
+    "project_doc_collection",
     "project_doc_collection_to_summary",
 ]
+
+
+class DocCollectionBackend(BaseModel):
+    """The ``{type, ref}`` backend routing record a create supplies.
+
+    ``type`` is the search-backend type the row routes to (validated at
+    the service layer against
+    :func:`~meho_backplane.docs_search.backends.registry.all_backends` so
+    an unroutable row is rejected at create time, not at probe time).
+    ``ref`` is the per-collection backend config the resolved adapter
+    reads (e.g. ``{"endpoint": "https://corpus/v1/search"}`` for
+    ``corpus-http``); it is opaque to the create surface — the adapter
+    owns its shape — so it is a free ``Mapping``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(min_length=1)
+    ref: Mapping[str, Any]
+
+
+class DocCollectionCreate(BaseModel):
+    """Request body for creating a doc collection (#1739).
+
+    Carries only the operator-set identity + routing fields. The
+    server derives ``id`` / ``tenant_id`` / ``created_at`` /
+    ``updated_at`` / ``status`` and leaves the probe-written liveness
+    (``last_ingested_at`` / ``doc_count`` / ``readiness``) NULL until the
+    first probe — so none of those appear here. ``tenant_id`` is taken
+    from the JWT in every front, never the body; a body carrying one is
+    not modelled (``extra="forbid"`` rejects it) so a writer cannot even
+    attempt a cross-tenant create. Mirrors
+    :class:`~meho_backplane.targets.schemas.TargetCreate`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    collection_key: str = Field(min_length=1, max_length=128)
+    vendor: str = Field(min_length=1, max_length=256)
+    products: tuple[str, ...] = ()
+    description: str | None = None
+    when_to_use: str | None = None
+    backend: DocCollectionBackend
+    extras: Mapping[str, Any] = Field(default_factory=dict)
+
+    @field_validator("products")
+    @classmethod
+    def _strip_empty_products(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank product tokens — a ``""`` entry is a typo, not a product."""
+        if any(not p.strip() for p in value):
+            msg = "products entries must be non-empty"
+            raise ValueError(msg)
+        return value
 
 
 class DocCollection(BaseModel):
@@ -113,6 +174,35 @@ class DocCollectionSummary(BaseModel):
     readiness: Mapping[str, Any] | None
     created_at: datetime
     updated_at: datetime
+
+
+def project_doc_collection(c: DocCollectionORM) -> DocCollection:
+    """Project a :class:`DocCollectionORM` row to the full wire shape.
+
+    The detail counterpart to :func:`project_doc_collection_to_summary` —
+    the single ORM→:class:`DocCollection` projection the create route
+    returns (#1739). Coerces the ORM's mutable ``list[str]`` ``products``
+    column to the frozen schema's ``tuple[str, ...]`` so the returned
+    instance is genuinely immutable; the JSON columns (``backend`` /
+    ``readiness`` / ``extras``) ride through as ``Mapping``.
+    """
+    return DocCollection(
+        id=c.id,
+        tenant_id=c.tenant_id,
+        collection_key=c.collection_key,
+        vendor=c.vendor,
+        products=tuple(c.products),
+        description=c.description,
+        when_to_use=c.when_to_use,
+        backend=c.backend,
+        status=c.status,
+        last_ingested_at=c.last_ingested_at,
+        doc_count=c.doc_count,
+        readiness=c.readiness,
+        extras=c.extras,
+        created_at=c.created_at,
+        updated_at=c.updated_at,
+    )
 
 
 def project_doc_collection_to_summary(c: DocCollectionORM) -> DocCollectionSummary:

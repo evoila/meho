@@ -191,16 +191,29 @@ access on its own — the backplane re-validates the JWT and the backend
 federation enforces the real boundary, so a forged claim can change only
 what a client *shows*, never what the server *allows*.
 
-### 2. Seed the collection + bind its backend (deploy side)
+### 2. Register the collection + bind its backend (deploy side)
 
-Collections are **operator-managed seed** for v1 — there is no
-create/import API yet; a deployment seeds `doc_collections` rows directly.
-A minimal seed row binds identity + a backend:
+A tenant_admin registers a collection through the create surface
+(#1739) — pick whichever front fits the deploy tooling:
+
+- **REST** — `POST /api/v1/doc_collections` with the create body below.
+- **CLI** — `meho docs collections create <collection_key> --vendor … --product … --backend-type corpus-http --backend-ref '{"endpoint":"…"}'` (or `--from-file <path>` with the JSON body).
+- **MCP** — the `create_doc_collections` tool (tenant_admin, `meho-docs`).
+
+The create validates `backend.type` against the search-backend registry
+(an unregistered type is a `422`, not a row that fails later at probe /
+search), derives `tenant_id` from the JWT (the body cannot set it),
+defaults `status` to `provisioning`, and writes an audit row under
+`op_id="meho.docs.collections.create"` — so a registration is never
+unroutable, never cross-tenant, and never invisible the way a raw
+`INSERT INTO doc_collections` could be. A follow-up `probe` promotes the
+collection from `provisioning` to `ready` once its index confirms. A
+minimal create binds identity + a backend:
 
 | Field | Example | Notes |
 |---|---|---|
-| `collection_key` | `vmware` | The agent-facing id; must match the `meho-docs:vmware` capability key above. |
-| `tenant_id` | `NULL` *or* `<tenant uuid>` | `NULL` = shared across tenants; set = curated for one tenant (shadows a global key). |
+| `collection_key` | `vmware` | The agent-facing id; must match the `meho-docs:vmware` capability key above. Unique within the scope (global or per-tenant); a collision is a `409`. |
+| `tenant_id` | *(derived from the JWT)* | Never supplied in the body — the create always scopes the row to the caller's tenant. A shared/global row is seeded out-of-band (operator DB seed) since cross-tenant sharing is out of the create scope. |
 | `vendor` | `VMware by Broadcom` | |
 | `products` | `["vsphere", "nsx"]` | |
 | `when_to_use` | `Vendor docs for VMware Cloud Foundation…` | The blurb the agent reads to pick the collection. |

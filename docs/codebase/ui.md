@@ -1473,7 +1473,7 @@ before calling the service.
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
 | `GET` | `/ui/memory/create` | HTMX-loaded create modal fragment. Scope selector filtered to scopes the operator can write to via `MemoryRbacResolver.can_write`. |
-| `POST` | `/ui/memory/create` | Submit handler. Form-encoded body shape mirrors `/api/v1/memory`'s `RememberBody`. Returns 204 + `HX-Redirect: /ui/memory`. |
+| `POST` | `/ui/memory/create` | Submit handler. Form-encoded body shape mirrors `/api/v1/memory`'s `RememberBody`. Blank `expires_at` runs through the shared #624 default-TTL resolver (see "Default TTL on create" below). Returns 204 + `HX-Redirect: /ui/memory`. |
 | `POST` | `/ui/memory/preview` | Debounced server-side Markdown preview. Returns the `_body_preview.html` fragment; same `<article>` shape `_body_view.html` uses on the detail page so styling matches. |
 | `GET` | `/ui/memory/<scope>/<slug>/promote` | HTMX-loaded promote modal. Legal targets derived from `PROMOTE_TARGETS_BY_SOURCE`; terminal scopes (`tenant` / `target`) return 400. |
 | `POST` | `/ui/memory/<scope>/<slug>/promote` | Submit handler. Calls G5.2's `MemoryService.promote`. Returns 204 + `HX-Redirect: /ui/memory/<target-scope>/<slug>`. |
@@ -1560,6 +1560,29 @@ before calling the service.
   attribute on the form so the enum is not re-hardcoded on the
   client.
 
+### Default TTL on create (#1697)
+
+The create submit handler routes the parsed `expires_at` form value
+through the shared G5.2-T2 (#624) resolver
+(`memory/ttl.py:resolve_default_expires_at`) before calling
+`create_entry` — the same seam the REST `remember` route and the MCP
+`add_to_memory` tool consume, so the form's "Leave blank to use the
+scope's default TTL" hint is backed by the one canonical policy: a
+blank picker on a `user`-scope create injects `now(UTC) +
+Settings.memory_user_default_ttl_days` (default 7 days), non-`user`
+scopes persist `expires_at = null`, and an explicit timestamp is
+honoured verbatim.
+
+The surface-native "field was set" discriminant is `expires_at is
+not None` on the parsed form value: a blank
+`<input type="datetime-local">` submits `expires_at=` (empty string),
+and FastAPI coerces that to `None` exactly like an absent field
+(verified against FastAPI 0.136.3). A browser form cannot express
+the REST surface's explicit-`null` opt-out (the CLI `--persist`
+shape), so set-vs-unset collapses to datetime-vs-`None` here. See
+`docs/codebase/memory.md` ("Write path — default-TTL contract") for
+the cross-surface discriminant table.
+
 ### Idempotency + audit trail
 
 `MemoryService.promote` is idempotent (G5.2 contract): a re-promotion
@@ -1594,6 +1617,11 @@ The full suite lives in
   body 422s, target-scoped without `target_name` 422s, missing CSRF
   cookie 403s, and the real modal cookie/header pair round-trips to
   204 — the #1693 desync regression),
+* the create-submit default-TTL injection (#1697: blank `expires_at`
+  on a USER-scope create persists `metadata.expires_at ≈ now + 7d`,
+  blank on TENANT scope persists `null`, an explicit
+  `datetime-local` timestamp persists verbatim — asserted off the
+  persisted row's `doc_metadata`),
 * the Markdown preview (renders Markdown to HTML, empty body returns
   the placeholder, raw `<script>` escapes),
 * the promote-modal render (USER source lists USER_TENANT +

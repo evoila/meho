@@ -94,8 +94,9 @@ dispatcher.
 
 The default-TTL policy (G5.2-T2 #624: omitted `expires_at` on a
 `user`-scope write injects `now + memory_user_default_ttl_days`) lives
-in **one** place — `memory/ttl.py:resolve_default_expires_at`. Both
-surface layers consume it.
+in **one** place — `memory/ttl.py:resolve_default_expires_at`. All
+three write surfaces consume it (REST + MCP since #775; the UI create
+form since #1697).
 
 ```
 REST POST /api/v1/memory
@@ -118,6 +119,17 @@ MCP tools/call add_to_memory
     └─> resolve_default_expires_at(scope, ...)
             │
             └─> MemoryService.remember(expires_at=...)
+
+UI POST /ui/memory/create (#1697)
+    form field: expires_at (datetime-local; FastAPI parses to
+    datetime | None — blank submits "" which coerces to None)
+    │
+    │   expires_at_was_set = expires_at is not None
+    │   explicit_expires_at = expires_at
+    │
+    └─> resolve_default_expires_at(scope, ...)
+            │
+            └─> create_entry(expires_at=...) ─> MemoryService.remember(...)
 ```
 
 The discrimination on each side picks a surface-native "field absent
@@ -131,6 +143,12 @@ from the payload" signal:
   dispatcher only populates `arguments` with keys the inbound payload
   carried, and `additionalProperties: false` on the tool's
   `inputSchema` already rejected unknown keys upstream.
+* The UI create form uses **`expires_at is not None`** on the parsed
+  form value — FastAPI (verified on 0.136.3) coerces both an absent
+  field and the empty string a blank `<input type="datetime-local">`
+  submits to `None`, and a browser form cannot express an explicit
+  `null`, so the table's "field present, value `null`" row is
+  unreachable from this surface; blank ≡ field-omitted.
 
 The three semantic branches are:
 
@@ -147,7 +165,12 @@ Why this matters: before G0.9.1-T3 (#775) the MCP path always passed
 unset" split was defeated and user-scope memories written via MCP
 never expired (silent data-retention regression in v0.3.1). The fix
 lifts the resolver into a shared helper both layers call with their
-own set-vs-unset signal.
+own set-vs-unset signal. The UI create form repeated the same
+divergence class until #1697 (v0.14.0 cycle-10 dogfood finding FE-6):
+the submit handler passed the parsed form value — always `None` on a
+blank picker — straight through, so user-scope rows created in the
+operator console persisted `expires_at = null` and the expiry sweeper
+(#623, null rows skipped) never reaped them.
 
 ### Write path — `remember`
 

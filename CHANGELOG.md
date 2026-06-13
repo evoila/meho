@@ -250,6 +250,15 @@ connector-related release-notes line.
   itself) and renders the live `BroadcastEvent` frames as
   time/principal/op/status rows through the XSS-safe Alpine sink
   pattern, capped at 50 in-DOM rows (#1696)
+- `POST /api/v1/connectors/ingest` now returns the structured
+  uncovered-version-label envelope (`product`, `version`, `impl_id`,
+  `registered_classes[]` with each class's `supported_version_range`,
+  `message`) on its 422 instead of a bare `detail` string, wiring the
+  REST route to the same `build_uncovered_version_label_detail` builder
+  the MCP `meho.connector.ingest` tool has shipped since #777 — so REST
+  and MCP callers branch on the same stable fields and can't drift. This
+  closes the last bare-string arm in the ingest route's typed-exception
+  table, completing the #1610 400-family parity (#1624)
 
 ## [0.14.0] - 2026-06-12
 

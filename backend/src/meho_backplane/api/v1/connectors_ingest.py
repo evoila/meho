@@ -71,7 +71,14 @@ The service-layer exceptions map to HTTP status codes uniformly:
   the ``version`` label is outside every registered class's
   ``supported_version_range``) → 422 Unprocessable Entity. Caught
   before the generic ValueError-family below so the more-specific
-  status code wins.
+  status code wins. The ``detail`` body is the structured envelope
+  from :func:`build_uncovered_version_label_detail` (``product`` /
+  ``version`` / ``impl_id`` / ``registered_classes[]`` of each
+  class's ``supported_version_range`` + the rendered ``message``) —
+  the same dict the MCP ingest tool ships on the JSON-RPC
+  ``error.data`` member, so the two transports can't drift (#1624
+  wired the REST half of the parity to the shared #777 builder; the
+  MCP half has shipped it since #777/#1534).
 * :class:`InvalidSpecError` / :class:`UnsupportedSpecError` /
   :class:`InvalidSchemaError` / :class:`OpIdCollision` /
   :class:`LlmOutputInvalid` → 400 Bad Request. The ``detail`` body
@@ -129,7 +136,7 @@ from __future__ import annotations
 
 import asyncio
 from json import JSONDecodeError
-from typing import Annotated
+from typing import Annotated, NoReturn
 from uuid import UUID
 
 import httpx
@@ -184,6 +191,7 @@ from meho_backplane.operations.ingest import (
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
     build_version_mismatch_detail,
@@ -922,14 +930,37 @@ async def _run_ingest_with_http_mapping(
             dry_run=body.dry_run,
             spec_info_versions_compatible=spec_info_versions_compatible,
         )
-    except LlmClientUnavailable as exc:
+    except Exception as exc:
+        _raise_ingest_http_error(exc, catalog_entry=catalog_entry)
+
+
+def _raise_ingest_http_error(
+    exc: Exception,
+    *,
+    catalog_entry: str | None,
+) -> NoReturn:
+    """Map an ``IngestionPipelineService.ingest`` failure onto an HTTP error.
+
+    The single grep-friendly home for the ingest route's domain-error →
+    status-code table (the full contract is documented at the top of the
+    module). Each arm re-raises an :class:`HTTPException`; an exception that
+    matches no arm is re-raised unchanged so it surfaces as a 500 rather
+    than being silently swallowed.
+
+    ``catalog_entry`` carries the operator's original ``"<product>/<version>"``
+    reference when the request started as the catalog-driven shape; ``None``
+    for explicit-quadruple requests. Used only on the
+    :exc:`UpstreamNotSpecError` path so the 422 envelope can include the
+    catalog reference (G0.15-T2 / #1211).
+    """
+    if isinstance(exc, LlmClientUnavailable):
         raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-    except PermissionError as exc:
+    if isinstance(exc, PermissionError):
         # Defence-in-depth — the route's _require_admin already gates this,
         # but the service-level guard might catch a cross-tenant write that
         # slipped through.
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, str(exc)) from exc
-    except VersionMismatchError as exc:
+    if isinstance(exc, VersionMismatchError):
         # G0.9-T8 (#740). 422 (not 400) because the request was syntactically
         # valid but semantically refuses the spec-vs-label cross-check.
         # Detail builder is shared with the MCP path
@@ -939,25 +970,31 @@ async def _run_ingest_with_http_mapping(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             build_version_mismatch_detail(exc),
         ) from exc
-    except UncoveredVersionLabel as exc:
-        # G0.9-T9 (#741). Structurally valid (Pydantic accepted), semantically
-        # rejected (label outside every registered class's
-        # ``supported_version_range``). Listed BEFORE the generic ValueError-
-        # family catch below so the more-specific exception wins.
-        raise HTTPException(http_status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    except UpstreamNotSpecError as exc:
+    if isinstance(exc, UncoveredVersionLabel):
+        # G0.9-T9 (#741). Checked BEFORE the generic ValueError-family arm
+        # below so the more-specific exception wins. Shared builder (same
+        # parity rationale as the VersionMismatchError sibling above; #1624
+        # closed this last bare arm).
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_uncovered_version_label_detail(exc),
+        ) from exc
+    if isinstance(exc, UpstreamNotSpecError):
         raise _upstream_not_spec_http_exception(exc, catalog_entry=catalog_entry) from exc
-    except (
-        InvalidSpecError,
-        UnsupportedSpecError,
-        InvalidSchemaError,
-        OpIdCollision,
-        LlmOutputInvalid,
-    ) as exc:
+    if isinstance(
+        exc,
+        (
+            InvalidSpecError,
+            UnsupportedSpecError,
+            InvalidSchemaError,
+            OpIdCollision,
+            LlmOutputInvalid,
+        ),
+    ):
         # #1610 — structured envelope (shared builders), not bare str(exc);
         # see _spec_error_http_exception for the parity rationale.
         raise _spec_error_http_exception(exc) from exc
-    except (yaml.YAMLError, JSONDecodeError) as exc:
+    if isinstance(exc, (yaml.YAMLError, JSONDecodeError)):
         # The parser passes malformed YAML / JSON bubble-up by design (per
         # parse_openapi's docstring) so the loader's structured error message
         # survives to the operator. Route maps to 400.
@@ -965,7 +1002,7 @@ async def _run_ingest_with_http_mapping(
             http_status.HTTP_400_BAD_REQUEST,
             f"could not decode spec: {exc}",
         ) from exc
-    except httpx.HTTPError as exc:
+    if isinstance(exc, httpx.HTTPError):
         # HTTP(S) fetch failures for URL specs surface as ``httpx.HTTPError``
         # per :func:`parse_openapi`'s contract. 502 Bad Gateway is the closest
         # semantic fit: the operator's request is fine but an upstream the
@@ -974,6 +1011,9 @@ async def _run_ingest_with_http_mapping(
             http_status.HTTP_502_BAD_GATEWAY,
             f"upstream spec fetch failed: {exc}",
         ) from exc
+    # No arm matched — re-raise unchanged so an unexpected failure surfaces
+    # as a 500 rather than being swallowed by the broad ``except`` above.
+    raise exc
 
 
 @router.get("")

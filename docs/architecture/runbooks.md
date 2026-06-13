@@ -29,7 +29,7 @@ meho.runbook.reassign(run_id, new_assignee) -> {run_id, assigned_to, reassigned_
 
 The six template-lifecycle tools (`meho.runbook.draft_template` / `.edit_template` / `.publish_template` / `.deprecate_template` / `.list_templates` / `.show_template`) live on the same MCP surface from G12.2 and are documented in the authoring counterpart.
 
-The dotted names are canonical as of #1612; the original flat `runbook_*` names remain callable as deprecated aliases (removed in v0.15.0, deferred from the original one-release v0.14.0 window by #1702), and the template id is `template_slug` on every tool (`slug` accepted as a deprecated alias on the template verbs for the same window). See [`docs/codebase/mcp.md`](../codebase/mcp.md) §Tool naming grammar.
+The dotted names are canonical as of #1612; the original flat `runbook_*` names were kept as deprecated aliases for one release and removed in v0.15.0 (#1625; the deadline was deferred once from the original v0.14.0 window by #1702). The template id is `template_slug` on every tool — the deprecated `slug` input alias on the template verbs was removed alongside the flat names. See [`docs/codebase/mcp.md`](../codebase/mcp.md) §Tool naming grammar.
 
 ## The three entities
 

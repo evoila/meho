@@ -290,7 +290,7 @@ class RunbookTemplateBody(BaseModel):
 
 
 class ForkInfo(BaseModel):
-    """Surfaced by ``runbook_edit_template`` when editing a published template forks.
+    """Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.
 
     Editing a *published* template cannot mutate it in place (published
     templates are immutable); the edit forks a new draft instead. This
@@ -307,7 +307,7 @@ class ForkInfo(BaseModel):
 
 
 class DraftTemplateRequest(BaseModel):
-    """Request body for ``runbook_draft_template`` -- create a new draft.
+    """Request body for ``meho.runbook.draft_template`` -- create a new draft.
 
     :attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug
     contract, reused verbatim).
@@ -320,7 +320,7 @@ class DraftTemplateRequest(BaseModel):
 
 
 class DraftTemplateResponse(BaseModel):
-    """Response for ``runbook_draft_template`` -- the created draft's coordinates."""
+    """Response for ``meho.runbook.draft_template`` -- the created draft's coordinates."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -330,7 +330,7 @@ class DraftTemplateResponse(BaseModel):
 
 
 class EditTemplateRequest(BaseModel):
-    """Request body for ``runbook_edit_template`` -- edit a draft or fork a publish."""
+    """Request body for ``meho.runbook.edit_template`` -- edit a draft or fork a publish."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -339,7 +339,7 @@ class EditTemplateRequest(BaseModel):
 
 
 class EditTemplateResponse(BaseModel):
-    """Response for ``runbook_edit_template``.
+    """Response for ``meho.runbook.edit_template``.
 
     :attr:`version` equals the input version when editing a draft in
     place; it is a new version when forking from a published template, in
@@ -357,7 +357,7 @@ class EditTemplateResponse(BaseModel):
 
 
 class PublishTemplateRequest(BaseModel):
-    """Request body for ``runbook_publish_template`` -- promote a draft to published."""
+    """Request body for ``meho.runbook.publish_template`` -- promote a draft to published."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -366,7 +366,7 @@ class PublishTemplateRequest(BaseModel):
 
 
 class PublishTemplateResponse(BaseModel):
-    """Response for ``runbook_publish_template`` -- the now-published coordinates."""
+    """Response for ``meho.runbook.publish_template`` -- the now-published coordinates."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -376,7 +376,7 @@ class PublishTemplateResponse(BaseModel):
 
 
 class DeprecateTemplateRequest(BaseModel):
-    """Request body for ``runbook_deprecate_template`` -- retire a published version."""
+    """Request body for ``meho.runbook.deprecate_template`` -- retire a published version."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -385,7 +385,7 @@ class DeprecateTemplateRequest(BaseModel):
 
 
 class DeprecateTemplateResponse(BaseModel):
-    """Response for ``runbook_deprecate_template`` -- the now-deprecated coordinates."""
+    """Response for ``meho.runbook.deprecate_template`` -- the now-deprecated coordinates."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -395,7 +395,7 @@ class DeprecateTemplateResponse(BaseModel):
 
 
 class ListTemplatesFilter(BaseModel):
-    """Optional filters for ``runbook_list_templates``.
+    """Optional filters for ``meho.runbook.list_templates``.
 
     Both fields default to ``None`` (no filter). A bare
     :class:`ListTemplatesFilter` lists every template the caller can see.
@@ -408,7 +408,7 @@ class ListTemplatesFilter(BaseModel):
 
 
 class TemplateSummary(BaseModel):
-    """Operator-readable summary row surfaced by ``runbook_list_templates``.
+    """Operator-readable summary row surfaced by ``meho.runbook.list_templates``.
 
     The list-view projection -- enough to identify a template and its
     lifecycle state without loading the full step list (which
@@ -426,7 +426,7 @@ class TemplateSummary(BaseModel):
 
 
 class ShowTemplateResponse(BaseModel):
-    """Full template surface returned by ``runbook_show_template``.
+    """Full template surface returned by ``meho.runbook.show_template``.
 
     The complete template including the ordered :attr:`steps` and the
     authorship / timestamp provenance. Mirrors the

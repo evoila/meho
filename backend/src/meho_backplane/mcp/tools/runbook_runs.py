@@ -86,7 +86,6 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import (
     ToolDefinition,
-    register_deprecated_mcp_tool_alias,
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -153,14 +152,6 @@ _INVALID_PARAMS_ERRORS = (
 #: default (100).
 _DEFAULT_LIST_LIMIT: Final[int] = 100
 _MAX_LIST_LIMIT: Final[int] = 500
-
-#: Release that drops the deprecated flat ``runbook_*`` tool-name
-#: aliases (#1612); deferred from the original v0.14.0 window by #1702
-#: after v0.14.0 was tagged with the aliases still registered. Must
-#: stay in lockstep with the template-side constant in
-#: :mod:`meho_backplane.mcp.tools.runbooks` — the 11 aliases are
-#: announced and removed as one set.
-_ALIAS_REMOVAL_VERSION: Final[str] = "0.15.0"
 
 
 def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
@@ -691,26 +682,3 @@ register_mcp_tool(
     ),
     handler=_list_runs_handler,
 )
-
-
-# ---------------------------------------------------------------------------
-# Deprecated flat-name aliases (#1612) — removed in v0.15.0
-# (`_ALIAS_REMOVAL_VERSION`; deferred from the original one-release
-# v0.14.0 window by #1702). Registered strictly after their
-# canonical targets; each shares the canonical handler object and
-# schema, differing only in name + DEPRECATED pointer description.
-# ---------------------------------------------------------------------------
-
-
-for _flat_alias, _canonical in (
-    ("runbook_start", "meho.runbook.start"),
-    ("runbook_next", "meho.runbook.next"),
-    ("runbook_abort", "meho.runbook.abort"),
-    ("runbook_reassign", "meho.runbook.reassign"),
-    ("runbook_list_runs", "meho.runbook.list_runs"),
-):
-    register_deprecated_mcp_tool_alias(
-        alias=_flat_alias,
-        canonical=_canonical,
-        removal_version=_ALIAS_REMOVAL_VERSION,
-    )

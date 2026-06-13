@@ -115,7 +115,7 @@ def test_step_body_round_trip() -> None:
 def test_step_body_omits_future_step_fields() -> None:
     """Locks the Initiative #1198 opacity floor at the schema layer.
 
-    ``CurrentStepResponse`` is the wire surface that ``runbook_next``
+    ``CurrentStepResponse`` is the wire surface that ``meho.runbook.next``
     returns on the non-completion path. The acceptance bar of the
     parent Initiative is that an agent / operator who parses this
     response cannot deduce the contents of any step other than the

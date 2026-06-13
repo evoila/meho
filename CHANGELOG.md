@@ -133,6 +133,26 @@ connector-related release-notes line.
   `runbook_<verb>` with `meho.runbook.<verb>` and rename `slug` →
   `template_slug` in template-verb arguments (#1612, #1702).
 
+### Removed
+
+- Removed the 11 deprecated flat `runbook_*` MCP tool-name aliases and
+  the `slug` template-id input alias, completing the one-release
+  deprecation contract opened in #1612 (v0.13.0) and deferred once from
+  v0.14.0 to v0.15.0 by #1702. The runbook MCP family now serves exactly
+  the 11 dotted `meho.runbook.<verb>` tools; a removed flat name returns
+  the registry's standard unknown-tool error, and the template verbs
+  accept `template_slug` only (`slug` is now rejected). The unused
+  alias machinery (`register_deprecated_mcp_tool_alias`, the
+  `deprecated_alias_for` marker, and the `mcp_tool_name_deprecated` /
+  `runbook_template_slug_field_deprecated` warnings) was deleted with
+  it. Migration (unchanged from #1612): replace `runbook_<verb>` with
+  `meho.runbook.<verb>` and rename `slug` → `template_slug` in
+  template-verb arguments. Template-verb responses still carry
+  `template_slug`, so ids round-trip into `meho.runbook.start`
+  unchanged. The database tables `runbook_templates` / `runbook_runs` /
+  `runbook_run_step_states` are not tool names and are unaffected
+  (#1612, #1702, #1625).
+
 ### Fixed
 
 - Operator console: broadcast feed/wall and the connectors recent-ops

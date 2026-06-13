@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+#
+# code-quality-allow: file-size — the JSON-RPC envelope dispatcher for the
+# whole MCP surface (tools/call, resources/read, audit, event publish). It
+# was already well over the 600-line limit on main (two oversized handlers
+# inside carry their own per-function allows); #1625 only removed the
+# now-dead deprecated-alias breadcrumb. Splitting the dispatcher is a
+# behaviour-preserving refactor out of scope for an alias-removal task.
 
 """JSON-RPC method handlers for the registry-backed MCP surface (G0.5-T3).
 
@@ -273,19 +280,6 @@ async def handle_tools_call(
             raise McpInvalidParamsError(f"unknown tool: {name!r}")
         defn, handler = entry
         audit_payload["op_class"] = defn.op_class
-
-        # Deprecated-alias breadcrumb (#1612). A call arriving under a
-        # deprecated tool name still dispatches normally (the alias
-        # shares the canonical handler), but the structured warning
-        # gives operators a migration signal to watch before the alias
-        # is removed — same posture as the field-level
-        # ``add_to_memory_field_deprecated`` shim log.
-        if defn.deprecated_alias_for is not None:
-            _log.warning(
-                "mcp_tool_name_deprecated",
-                tool=name,
-                replacement=defn.deprecated_alias_for,
-            )
 
         # RBAC: the tool's required_role gates *invocation*, not just listing.
         # The list filter already hides tools the operator can't call, but

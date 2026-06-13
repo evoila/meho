@@ -12,11 +12,12 @@ on the MCP transport:
   wire shape.
 * RBAC: five tools are ``TENANT_ADMIN``-only; ``meho.runbook.list_templates``
   is ``OPERATOR``-readable.
-* #1612 naming + field canonicalisation: the dotted names are canonical;
-  the flat ``runbook_*`` names resolve as deprecated aliases routed to
-  the same handler objects; ``template_slug`` is the canonical input
-  field with ``slug`` as a deprecated XOR-guarded alias; responses
-  mirror ``slug`` as ``template_slug``.
+* #1612 naming + field canonicalisation, #1625 removal: the dotted names
+  are the only registered names; the flat ``runbook_*`` aliases and the
+  ``slug`` input alias were removed after their one-release window, so a
+  flat-name call falls through to unknown-tool and ``slug`` is rejected.
+  ``template_slug`` is the sole input field; responses still mirror
+  ``slug`` as ``template_slug``.
 * The edit tool's draft-in-place vs fork-from-published paths round-trip
   through the dispatcher (``forked_from`` present iff a published version
   exists).
@@ -47,7 +48,6 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunbookRun
-from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.runbooks.schemas import DraftTemplateRequest, PublishTemplateRequest
 from meho_backplane.runbooks.service import RunbookTemplateService
@@ -72,16 +72,17 @@ _ADMIN_TOOLS = {
 # ``-32602`` and the ``opacity_floor`` reason.
 _OPERATOR_TOOLS = {"meho.runbook.list_templates", "meho.runbook.show_template"}
 
-#: Deprecated flat aliases (#1612) — kept resolvable for one release;
-#: each maps to its canonical dotted name.
-_FLAT_ALIASES = {
-    "runbook_draft_template": "meho.runbook.draft_template",
-    "runbook_edit_template": "meho.runbook.edit_template",
-    "runbook_publish_template": "meho.runbook.publish_template",
-    "runbook_deprecate_template": "meho.runbook.deprecate_template",
-    "runbook_list_templates": "meho.runbook.list_templates",
-    "runbook_show_template": "meho.runbook.show_template",
-}
+#: Flat template-verb aliases removed by #1625 (kept as deprecated
+#: aliases for one release by #1612). Each must now fall through to the
+#: dispatcher's unknown-tool error.
+_REMOVED_FLAT_ALIASES = (
+    "runbook_draft_template",
+    "runbook_edit_template",
+    "runbook_publish_template",
+    "runbook_deprecate_template",
+    "runbook_list_templates",
+    "runbook_show_template",
+)
 
 
 def _body(title: str = "Rotate cert", *, step_body: str = "Rotate the cert.") -> dict[str, Any]:
@@ -593,86 +594,67 @@ def test_show_template_missing_error(
 
 
 # ---------------------------------------------------------------------------
-# #1612 — deprecated flat-name aliases + slug/template_slug field shim
+# #1625 — removal of the deprecated flat-name aliases + slug input alias
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_flat_aliases_listed_deprecated_and_route_to_same_handler(
+def test_removed_flat_template_aliases_return_unknown_tool(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC #1612: every flat alias resolves, is DEPRECATED-marked, shares the handler.
+    """AC #1625: the flat ``runbook_*_template`` names no longer resolve.
 
-    Three properties per template-side pair: (1) both names appear in
-    ``tools/list`` for an admin; (2) the alias's wire description is the
-    standard DEPRECATED pointer at its canonical name; (3) the registry
-    routes both names to the *same handler object* — the alias is a
-    second name, never a fork.
+    #1612 kept the flat names as deprecated aliases for one release;
+    #1625 removed them. A consumer that never migrated and calls a flat
+    name gets the dispatcher's standard unknown-tool error (``-32602``,
+    ``unknown tool: …``) — the same fall-through any unregistered name
+    hits — and the flat names are absent from ``tools/list``.
     """
     client, _op = client_with_operator
-    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
-
-    for alias, canonical in _FLAT_ALIASES.items():
-        assert canonical in tools_by_name, canonical
-        assert alias in tools_by_name, alias
-        alias_desc = tools_by_name[alias]["description"]
-        assert alias_desc.startswith(f"DEPRECATED alias for `{canonical}`"), alias_desc
-        # Identical schema on the wire — the alias accepts exactly what
-        # the canonical accepts.
-        assert tools_by_name[alias]["inputSchema"] == tools_by_name[canonical]["inputSchema"]
-
-        canonical_entry = get_tool(canonical)
-        alias_entry = get_tool(alias)
-        assert canonical_entry is not None and alias_entry is not None
-        assert alias_entry[1] is canonical_entry[1], alias
-        assert alias_entry[0].deprecated_alias_for == canonical
-
-
-@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_flat_alias_call_with_legacy_slug_field_still_works(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """AC #1612: the full pre-#1612 wire shape (flat name + ``slug``) still works.
-
-    A v0.12 caller pinned to ``runbook_draft_template`` + ``slug`` must
-    keep working unchanged for the deprecation window, and the response
-    now additionally mirrors ``template_slug``.
-    """
-    client, _op = client_with_operator
-    payload = _result_payload(
-        _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
-    )
-    assert payload == {
-        "slug": "cert-rotate",
-        "template_slug": "cert-rotate",
-        "version": 1,
-        "status": "draft",
+    listed = {
+        t["name"]
+        for t in post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()[
+            "result"
+        ]["tools"]
     }
+    assert not [name for name in listed if name.startswith("runbook_")]
 
-    shown = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
-    assert shown["template_slug"] == "cert-rotate"
-    assert shown["slug"] == "cert-rotate"
+    for flat in _REMOVED_FLAT_ALIASES:
+        body = _call(client, flat, {"template_slug": "cert-rotate", "body": _body()})
+        assert body["error"]["code"] == INVALID_PARAMS, flat
+        assert "unknown tool" in body["error"]["message"], flat
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_template_slug_and_slug_are_mutually_exclusive(
+def test_slug_input_field_rejected_template_slug_required(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC #1612: supplying both names → -32602; supplying neither → -32602."""
-    client, _op = client_with_operator
-    both = _call(
-        client,
-        "meho.runbook.draft_template",
-        {"template_slug": "cert-rotate", "slug": "cert-rotate", "body": _body()},
-    )
-    assert both["error"]["code"] == INVALID_PARAMS
-    assert "not both" in both["error"]["message"]
+    """AC #1625: template verbs accept ``template_slug`` only; ``slug`` is rejected.
 
-    # Neither name supplied — rejected by the server-side anyOf gate
-    # before the handler runs.
-    neither = _call(client, "meho.runbook.draft_template", {"body": _body()})
-    assert neither["error"]["code"] == INVALID_PARAMS
+    The deprecated ``slug`` input alias and its XOR guard are gone. The
+    canonical ``template_slug`` works; supplying the removed ``slug``
+    field is an unknown property under the schema's
+    ``additionalProperties: false`` gate and surfaces as a clean
+    ``-32602`` validation error before the handler runs.
+    """
+    client, _op = client_with_operator
+
+    ok = _result_payload(
+        _call(
+            client,
+            "meho.runbook.draft_template",
+            {"template_slug": "cert-rotate", "body": _body()},
+        )
+    )
+    assert ok["template_slug"] == "cert-rotate"
+
+    rejected = _call(
+        client, "meho.runbook.draft_template", {"slug": "cert-rotate", "body": _body()}
+    )
+    assert rejected["error"]["code"] == INVALID_PARAMS
+    # The handler never runs — the schema gate rejects the now-unknown
+    # ``slug`` property (and the absent required ``template_slug``).
+    assert "inputSchema" in rejected["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

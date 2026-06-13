@@ -64,6 +64,16 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    # The default-on tenant-scope guard (#1725) pins KV calls under
+    # ``secret/tenants/{tenant_id}/``. This test dispatches a
+    # ``vault.kv.write`` against a sentinel mount under a real operator
+    # tenant to exercise the credential-classifier redaction path, not
+    # tenant isolation (covered by ``test_connectors_vault_tenant_scope.py``).
+    # The sentinel path is not under ``secret/tenants/<id>/``, so the guard
+    # would deny it with VaultTenantScopeError once Redis is present.
+    # Disable the guard explicitly — matching the empty-prefix pin the
+    # #1725 PR used for its e2e fixtures.
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

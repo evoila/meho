@@ -72,7 +72,8 @@ import pytest
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
 from meho_backplane.connectors.vault.ops_sys import (
     register_vault_sys_typed_operations,
@@ -154,6 +155,16 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    # The default-on tenant-scope guard (#1725) pins KV calls under
+    # ``secret/tenants/{tenant_id}/``. These tests dispatch against the
+    # ``_SENTINEL_MOUNT`` sentinel mount under a real operator tenant to
+    # exercise the credential-classifier path, not tenant isolation
+    # (covered by ``test_connectors_vault_tenant_scope.py``). The sentinel
+    # path is not under ``secret/tenants/<id>/``, so the guard would deny
+    # it with VaultTenantScopeError once Redis is present. Disable the
+    # guard explicitly — matching the empty-prefix pin the #1725 PR used
+    # for its e2e fixtures.
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -161,9 +172,20 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state() -> Iterator[None]:
-    """Reset dispatcher caches + connector registry around every test."""
+    """Reset dispatcher caches + connector registry around every test.
+
+    Registers the v2 ``vault`` connector entry after the setup clear so
+    the dispatcher's natural-key resolution finds an implementation for
+    ``connector_id="vault-1.x"`` — the per-test
+    ``register_vault_typed_operations`` call only upserts the typed-op
+    *descriptor* rows, not the connector *class*, and connector
+    resolution is a hard gate before the handler runs (``no_connector``
+    otherwise). Mirrors the ``_registered_vault_substrate`` fixture in
+    ``test_api_v1_health.py``.
+    """
     reset_dispatcher_caches()
     clear_registry()
+    register_connector_v2(product="vault", version="1.x", impl_id="vault", cls=VaultConnector)
     yield
     reset_dispatcher_caches()
     clear_registry()

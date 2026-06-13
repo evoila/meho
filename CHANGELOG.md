@@ -92,6 +92,17 @@ connector-related release-notes line.
 
 ### Added
 
+- Per-tenant templated Vault ACL policies (≤3, by role) keyed on
+  `{{identity.entity.metadata.tenant_id}}`: a deploy runbook
+  (`docs/cross-repo/connector-vault-tenant-policy.md`) with the three
+  policy bodies (`meho-tenant-read-only` / `-operator` / `-admin`), the
+  entity-metadata + identity-group wiring that makes the template
+  resolve, and verification commands; plus a
+  `connectors/vault/tenant_identity.py` helper that maps an `Operator`
+  onto the entity `tenant_id` metadata and the authoritative
+  role→policy binding. Supersedes the per-operator alias recipe in
+  `connector-vault-policy.md` §2 for shared-target access. OSS-only
+  (no Enterprise namespaces) (#1724)
 - Connector DELETE surface for the zero-op registry stubs aborted
   ingests leave behind: `DELETE /api/v1/connectors/{connector_id}`
   (204, tenant_admin, always operator-tenant-scoped) and the

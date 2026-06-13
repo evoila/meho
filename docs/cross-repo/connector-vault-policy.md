@@ -103,6 +103,21 @@ secret"). KV-v2 stores the value under `/data/` and its metadata under
 
 ## 2. Templated ACL policy — per-operator scoping through one role
 
+> **Superseded for shared-target access (v0.14.0+, #1724).** The
+> per-operator recipe below scopes secrets per **person**
+> (`secret/data/targets/<sub>/*`), which duplicates a target credential
+> across operators and prevents two operators in one tenant from sharing
+> it. For the **per-tenant shared** layout
+> (`secret/data/tenants/<tenant_id>/*`) — where a tenant's operators read
+> one shared target credential, scoped by role — use the
+> **per-tenant templated** policies in
+> [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md).
+> Those policies key on `{{identity.entity.metadata.tenant_id}}` instead
+> of the alias name and bind capabilities by `TenantRole`. The
+> per-operator recipe here remains valid for the `per_user` model (each
+> operator has their own vendor credential; see the scope note below) and
+> as background for how templating works.
+
 A single Vault role (`meho-mcp`) enforces **per-operator** path scoping
 via **ACL policy templating**: Vault renders the operator's identity
 attributes into the policy path at evaluation time, so each operator can

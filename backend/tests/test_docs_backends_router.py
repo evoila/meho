@@ -320,7 +320,8 @@ async def test_adapter_forwards_jwt_and_uses_backend_ref_endpoint(
 
     body = json.loads(sent.content.decode())
     assert body["query"] == "supervisor cluster"
-    assert body["limit"] == 5
+    # The corpus reads ``top_k``, not ``limit`` (#1732).
+    assert body["top_k"] == 5
     assert body["metadata_filters"] == {"product": "vmware", "version": "9.0"}
     assert body["audience"] == "meho-corpus"
 

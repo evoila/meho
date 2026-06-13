@@ -114,19 +114,25 @@ async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPat
     """The client POSTs to corpus_url with Authorization: Bearer <raw_jwt>."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
     captured: list[httpx.Request] = []
+    # MEHO.Knowledge's actual /search wire shape (#1732): a ``results``
+    # envelope of chunks whose text/source-link fields are ``text`` /
+    # ``source_uri``. The adapter must read real hits from this body.
     response = httpx.Response(
         200,
         json={
-            "chunks": [
+            "query": "supervisor cluster",
+            "results": [
                 {
                     "chunk_id": "c1",
                     "document_id": "d1",
-                    "content": "vSphere 9.0 supervisor cluster setup.",
-                    "source_url": "https://docs.example/vsphere",
+                    "text": "vSphere 9.0 supervisor cluster setup.",
+                    "source_uri": "https://docs.example/vsphere",
                     "score": 0.91,
                     "metadata": {"product": "vmware", "version": "9.0"},
                 }
-            ]
+            ],
+            "took_ms": 12,
+            "score_kind": "cosine",
         },
     )
     transport = _transport_capturing(captured, response)
@@ -137,6 +143,10 @@ async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPat
     assert isinstance(result, CorpusSearchResponse)
     assert len(result.chunks) == 1
     assert result.chunks[0].chunk_id == "c1"
+    # The corpus's ``text`` / ``source_uri`` map onto the consumed
+    # ``content`` / ``source_url`` names downstream callers read.
+    assert result.chunks[0].content == "vSphere 9.0 supervisor cluster setup."
+    assert result.chunks[0].source_url == "https://docs.example/vsphere"
     assert result.chunks[0].metadata == {"product": "vmware", "version": "9.0"}
 
     sent = captured[0]
@@ -147,7 +157,9 @@ async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPat
 
     body = json.loads(sent.content.decode())
     assert body["query"] == "supervisor cluster"
-    assert body["limit"] == 5
+    # The corpus reads ``top_k``, not ``limit`` (#1732).
+    assert body["top_k"] == 5
+    assert "limit" not in body
 
 
 @pytest.mark.asyncio
@@ -269,6 +281,70 @@ async def test_schema_drift_fails_closed(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_results_envelope_with_text_fields_returns_real_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated {results:[…]} 200 returns real hits, not zero (#1732).
+
+    The regression for the original SEV-2: a healthy corpus returning five
+    hits under the ``results`` envelope (with ``text`` / ``source_uri``
+    fields) was parsed to an empty hit list, so the consumer saw "no docs
+    hits" for a populated corpus. The hits must come through with their
+    text and source link mapped onto the consumed names.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "query": "NSX edge node sizing",
+            "results": [
+                {
+                    "chunk_id": f"c{i}",
+                    "document_id": f"d{i}",
+                    "text": f"hit {i} body",
+                    "source_uri": f"https://docs.example/{i}",
+                    "score": 1.0 - i / 10,
+                }
+                for i in range(5)
+            ],
+            "took_ms": 9,
+            "score_kind": "cosine",
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "NSX edge node sizing", limit=3)
+
+    assert len(result.chunks) == 5
+    assert result.chunks[0].content == "hit 0 body"
+    assert result.chunks[0].source_url == "https://docs.example/0"
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_envelope_fails_loud_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2xx whose body names neither ``chunks`` nor ``results`` fails loud (#1732).
+
+    The dangerous silent-zero the old ``chunks: [] = default`` shape
+    produced: a successful response carrying an unrecognised envelope must
+    raise :class:`CorpusUnavailable` (→ 503), never parse to an empty hit
+    list that reads as "no docs hits" from a healthy corpus.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    transport = _transport_capturing(
+        [],
+        # A 200 with hits under an unrecognised key — the exact silent-zero
+        # shape #1732 is about.
+        httpx.Response(200, json={"query": "q", "hits": [{"chunk_id": "c"}], "took_ms": 3}),
+    )
+    _patch_async_client(monkeypatch, transport, [])
+
+    with pytest.raises(CorpusUnavailable):
+        await search_corpus(_make_operator(), "q")
+
+
+@pytest.mark.asyncio
 async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     """The forwarded operator JWT must not appear in any structlog event."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
@@ -292,14 +368,16 @@ async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.mark.parametrize(
     ("search_url", "expected"),
     [
-        ("https://corpus.test/v1/search", "https://corpus.test/v1/status"),
-        ("https://corpus.test/v1/search/", "https://corpus.test/v1/status"),
-        ("https://corpus.test/corpus", "https://corpus.test/corpus/status"),
-        ("https://corpus.test/search?x=1", "https://corpus.test/status"),
+        # The readiness URL is the search URL's host root + /readyz (#1732):
+        # MEHO.Knowledge exposes /readyz, not a /status sibling.
+        ("https://corpus.test/v1/search", "https://corpus.test/readyz"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/readyz"),
+        ("https://corpus.test/corpus", "https://corpus.test/readyz"),
+        ("https://corpus.test/search?x=1", "https://corpus.test/readyz"),
     ],
 )
 def test_derive_status_url(search_url: str, expected: str) -> None:
-    """The readiness URL is the search URL with its tail swapped to status."""
+    """The readiness URL is the search URL's host root plus /readyz."""
     assert derive_status_url(search_url) == expected
 
 
@@ -307,7 +385,7 @@ def test_derive_status_url(search_url: str, expected: str) -> None:
 async def test_corpus_status_gets_status_url_with_bearer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """corpus_status GETs the derived status URL forwarding the operator JWT."""
+    """corpus_status GETs the derived /readyz URL forwarding the operator JWT."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
     captured: list[httpx.Request] = []
     response = httpx.Response(
@@ -330,6 +408,40 @@ async def test_corpus_status_gets_status_url_with_bearer(
     assert captured[0].method == "GET"
     assert str(captured[0].url) == derive_status_url(_CORPUS_URL)
     assert captured[0].headers["Authorization"] == f"Bearer {_JWT}"
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_readyz_200_without_flag_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare /readyz 200 (no readiness flag) reads as index_built=True (#1732).
+
+    MEHO.Knowledge's /readyz returns a HealthResponse whose 200 *is* the
+    ready signal; it need not carry an ``index_built`` field. The adapter
+    must treat such a body as answerable rather than failing parse.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    transport = _transport_capturing([], httpx.Response(200, json={"status": "ok"}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    result = await corpus_status(_make_operator())
+
+    assert result.index_built is True
+    assert result.doc_count is None
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_readyz_ready_alias_false_is_not_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A /readyz body advertising ``ready: false`` maps to index_built=False."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    transport = _transport_capturing([], httpx.Response(200, json={"ready": False}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    result = await corpus_status(_make_operator())
+
+    assert result.index_built is False
 
 
 @pytest.mark.asyncio
@@ -356,9 +468,11 @@ async def test_corpus_status_non_2xx_fails_closed(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_corpus_status_malformed_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A 2xx body missing the required index_built fails parse → unavailable."""
+    """A 2xx body with a wrong-typed consumed field fails parse → unavailable."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
-    transport = _transport_capturing([], httpx.Response(200, json={"doc_count": 5}))
+    # ``doc_count`` is an optional int; a non-numeric string violates the
+    # contract and must fail closed rather than silently degrade.
+    transport = _transport_capturing([], httpx.Response(200, json={"doc_count": "lots"}))
     _patch_async_client(monkeypatch, transport, [])
 
     with pytest.raises(CorpusUnavailable):

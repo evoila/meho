@@ -179,6 +179,14 @@ def _classify_refresh_failure(exc: Exception) -> tuple[str, dict[str, str]]:
     ``extra_log_fields`` never carries token material -- only the
     exception class and, for IdP rejections, the RFC 6749 § 5.2
     ``error`` code authlib parsed off the response.
+
+    The residual branch also absorbs ``ValueError`` --
+    ``json.JSONDecodeError`` is a subclass -- because authlib 1.7.2's
+    ``parse_response_token`` runs ``resp.json()`` on every response
+    below 500 (200 included), so a non-JSON body from a misbehaving
+    proxy or captive portal surfaces as a decode error, not as an
+    HTTP or OAuth exception. That is "the IdP answered with something
+    that is not a token": ``malformed_response``.
     """
     fields = {"error_class": type(exc).__name__}
     if isinstance(exc, httpx.TimeoutException):
@@ -196,8 +204,9 @@ def _classify_refresh_failure(exc: Exception) -> tuple[str, dict[str, str]]:
         return "invalid_grant", fields
     if isinstance(exc, OAuthFlowConfigurationError):
         return "oauth_not_configured", fields
-    # Residual: OAuthFlowError -- the response parsed but is missing
-    # ``access_token`` (or is not an object at all).
+    # Residual: OAuthFlowError (the response parsed but is missing
+    # ``access_token``, or is not an object at all) or ValueError /
+    # json.JSONDecodeError (the body was not JSON to begin with).
     return "malformed_response", fields
 
 
@@ -301,10 +310,18 @@ async def _refresh_via_idp(
     ``ui_auth_token_refresh_failed`` event (structured ``reason`` per
     :func:`_classify_refresh_failure`) and the fail-closed
     ``session_expired`` 401. No retry.
+
+    ``ValueError`` is in the tuple for ``json.JSONDecodeError`` (its
+    subclass): authlib's ``parse_response_token`` only
+    ``raise_for_status()``-es at >= 500 and otherwise calls
+    ``resp.json()`` directly, so a non-JSON token-endpoint body with
+    any status below 500 -- a 200 from an interfering proxy included
+    -- raises the decode error here. Without the catch it would
+    escape as an unhandled 500: no failure event, no login redirect.
     """
     try:
         return await refresh_access_token(refresh_token=locked.refresh_token)
-    except (httpx.HTTPError, OAuthError, OAuthFlowError) as exc:
+    except (httpx.HTTPError, OAuthError, OAuthFlowError, ValueError) as exc:
         reason, extra = _classify_refresh_failure(exc)
         log.warning(
             "ui_auth_token_refresh_failed",

@@ -434,18 +434,46 @@ def test_refresh_failure_keeps_json_shape_for_non_html_callers() -> None:
             "malformed_response",
             id="malformed-response",
         ),
+        pytest.param(
+            httpx.Response(
+                200,
+                text="<html>captive portal</html>",
+                headers={"content-type": "text/html"},
+            ),
+            "malformed_response",
+            id="non-json-200",
+        ),
+        pytest.param(
+            httpx.Response(
+                400,
+                text="<html>err</html>",
+                headers={"content-type": "text/html"},
+            ),
+            "malformed_response",
+            id="non-json-400",
+        ),
     ],
 )
 def test_refresh_failure_reasons_map_per_contract(
     token_mock: Any,
     expected_reason: str,
 ) -> None:
-    """AC: each failure class logs its structured reason and fails closed."""
+    """AC: each failure class logs its structured reason and fails closed.
+
+    The two ``non-json-*`` cases pin the #1711 B1 regression: authlib
+    parses every sub-500 token-endpoint response with ``resp.json()``,
+    so a non-JSON body (200 included) raises ``json.JSONDecodeError``
+    -- which must land in the ``malformed_response`` mapping and the
+    clean login redirect, never escape as an unhandled 500.
+    """
     response, captured, token_route = _run_failed_refresh(
         token_mock=token_mock,
         accept="text/html",
     )
     assert response.status_code == 302
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+    # Terminal failure drops the dead cookie alongside the redirect.
+    assert "Max-Age=0" in response.headers["set-cookie"]
     assert token_route.call_count == 1
     assert _failed_reasons(captured) == [expected_reason]
 

@@ -119,7 +119,7 @@ from meho_backplane.db.models import (
     RunbookRunStepState,
     RunbookTemplate,
 )
-from meho_backplane.operations._audit import run_id_var, step_id_var
+from meho_backplane.operations._audit import run_id_var, step_id_var, work_ref_var
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.runbooks.engine import (
     advance,
@@ -323,6 +323,7 @@ class RunbookRunService:
                 target=request.target,
                 params=dict(request.params),
                 state="in_progress",
+                work_ref=request.work_ref,
                 started_by=operator_sub,
                 started_at=now,
             )
@@ -656,6 +657,7 @@ class RunbookRunService:
                 operator_sub=operator_sub,
                 run_id=run_id,
                 step_id_at_abort=current_step_id,
+                work_ref=run.work_ref,
                 reason=request.reason,
                 duration_ms=(time.monotonic() - abort_started) * 1000,
             )
@@ -762,6 +764,8 @@ class RunbookRunService:
                 stmt = stmt.where(RunbookRun.state == filter_.status)
             if filter_.template_slug is not None:
                 stmt = stmt.where(RunbookRun.template_slug == filter_.template_slug)
+            if filter_.work_ref is not None:
+                stmt = stmt.where(RunbookRun.work_ref == filter_.work_ref)
             rows = (await session.execute(stmt)).scalars().all()
 
             # Per-row current step + position need the pinned template body
@@ -799,6 +803,7 @@ class RunbookRunService:
                         abandoned_at=row.abandoned_at,
                         current_step_id=current_step_id,
                         position=position,
+                        work_ref=row.work_ref,
                     )
                 )
             return summaries
@@ -998,11 +1003,20 @@ class RunbookRunService:
             "params": dict(substituted_params_obj),
         }
 
+        # Bind run / step / work_ref onto the shared ContextVars around the
+        # dispatch so the dispatcher's audit writer stamps them on the
+        # operation_call step's audit row. ``work_ref`` is the run's
+        # durable change-ticket reference (work_ref I3-T1 #1661): binding
+        # it here -- once per step, from the run row -- is the "bind once,
+        # inherit" boundary that gives every dispatching step's audit row
+        # the same ``work_ref`` without each step having to carry it.
         run_token = run_id_var.set(run.run_id)
         step_token = step_id_var.set(current_step.id)
+        work_ref_token = work_ref_var.set(run.work_ref)
         try:
             call_result = await call_operation(operator, call_arguments)
         finally:
+            work_ref_var.reset(work_ref_token)
             step_id_var.reset(step_token)
             run_id_var.reset(run_token)
 
@@ -1115,6 +1129,7 @@ class RunbookRunService:
         operator_sub: str,
         run_id: uuid.UUID,
         step_id_at_abort: str | None,
+        work_ref: str | None,
         reason: str,
         duration_ms: float,
     ) -> AuditLog:
@@ -1126,11 +1141,14 @@ class RunbookRunService:
         runbook meta-actions share). ``path='runbook.abort'`` follows
         the ``<surface>.<action>`` shape used by approval queue rows.
 
-        The run-correlation columns are populated on the row directly —
-        not via the contextvar binding the dispatcher uses — because
-        the abort is not an operation dispatch; the columns are
-        documented to carry the run/step the row pertains to regardless
-        of how the row landed (#1294).
+        The run-correlation columns (``run_id`` / ``step_id`` /
+        ``work_ref``) are populated on the row directly — not via the
+        contextvar binding the dispatcher uses — because the abort is
+        not an operation dispatch; the columns are documented to carry
+        the run/step the row pertains to regardless of how the row
+        landed (#1294). ``work_ref`` is the run's change-ticket
+        reference, so the abort event is correlated to the same ticket
+        as the run's dispatching steps (work_ref I3-T1 #1661).
         """
         payload = {
             "op_id": _ABORT_AUDIT_PATH,
@@ -1161,6 +1179,11 @@ class RunbookRunService:
             kwargs["run_id"] = run_id
         if hasattr(AuditLog, "step_id"):
             kwargs["step_id"] = step_id_at_abort
+        # work_ref I3-T1 #1661: same forward-compat guard -- the column is
+        # added by migration 0039 and is None unless the run was started
+        # with a change ticket.
+        if hasattr(AuditLog, "work_ref"):
+            kwargs["work_ref"] = work_ref
         return AuditLog(**kwargs)
 
 

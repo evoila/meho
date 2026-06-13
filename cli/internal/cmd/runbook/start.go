@@ -55,6 +55,7 @@ func newStartRunCmd() *cobra.Command {
 	var (
 		target            string
 		params            []string
+		workRef           string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -89,6 +90,7 @@ func newStartRunCmd() *cobra.Command {
 				Slug:              args[0],
 				Target:            target,
 				Params:            params,
+				WorkRef:           workRef,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -98,6 +100,9 @@ func newStartRunCmd() *cobra.Command {
 		"required: run subject (host, cluster, cert thumbprint) -- substituted as ${run.target}")
 	cmd.Flags().StringArrayVar(&params, "param", nil,
 		"k=v substitution context entry for ${run.params.k}; repeat for multiple params")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"optional external change-ticket reference the run executes under (e.g. gh:evoila/meho#9); "+
+			"inherited by every operation_call step's audit row")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw CurrentStepResponse JSON instead of the human block")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -109,6 +114,7 @@ type startRunOptions struct {
 	Slug              string
 	Target            string
 	Params            []string
+	WorkRef           string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -143,6 +149,10 @@ func runStartRun(cmd *cobra.Command, opts startRunOptions) error {
 	if params != nil {
 		p := params
 		body.Params = &p
+	}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		body.WorkRef = &wr
 	}
 	respBody, status, rerr := postStartRun(cmd.Context(), backplaneURL, body)
 	if rerr != nil {

@@ -519,6 +519,7 @@ async def list_runs(
     assignee: str | None = Query(default=None),
     status: Literal["in_progress", "completed", "abandoned"] | None = Query(default=None),
     template_slug: str | None = Query(default=None),
+    work_ref: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     operator: Operator = _require_operator,
     service: RunbookRunService = _RUNBOOK_RUN_SERVICE,
@@ -578,7 +579,12 @@ async def list_runs(
         audit_op_class="read",
     )
     caller_is_admin = operator.tenant_role == TenantRole.TENANT_ADMIN
-    filter_ = ListRunsFilter(assignee=assignee, status=status, template_slug=template_slug)
+    filter_ = ListRunsFilter(
+        assignee=assignee,
+        status=status,
+        template_slug=template_slug,
+        work_ref=work_ref,
+    )
     summaries = await service.list_runs(
         tenant_id=operator.tenant_id,
         caller_sub=operator.sub,

@@ -4210,6 +4210,16 @@
             }
           },
           {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Work Ref"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -15175,6 +15185,11 @@
           "position": {
             "$ref": "#/components/schemas/StepPosition",
             "nullable": true
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
           }
         },
         "type": "object",
@@ -15188,7 +15203,7 @@
           "started_at"
         ],
         "title": "RunSummary",
-        "description": "List-view projection returned by ``runbook_list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``runbook_next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``."
+        "description": "List-view projection returned by ``runbook_list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``runbook_next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``.\n\n:attr:`work_ref` surfaces the external change-ticket reference the\nrun was started under (work_ref I3-T1 #1661); ``None`` when the run\ncarries no ticket."
       },
       "RunbookListRunsResponse": {
         "properties": {
@@ -15703,6 +15718,11 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Params"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
           }
         },
         "type": "object",
@@ -15711,7 +15731,7 @@
           "target"
         ],
         "title": "StartRunRequest",
-        "description": "Request body for ``runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty."
+        "description": "Request body for ``runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
       },
       "StepBody": {
         "properties": {

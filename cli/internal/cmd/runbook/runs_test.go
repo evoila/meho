@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,38 @@ func TestRunListRunsAdminWithAssignee(t *testing.T) {
 	}
 	if !strings.Contains(lastQuery, "assignee=junior-bob") {
 		t.Errorf("expected assignee in query; got %q", lastQuery)
+	}
+}
+
+// TestRunListRunsForwardsWorkRef — issue #1661. The --work-ref filter
+// is forwarded verbatim as the work_ref query param.
+func TestRunListRunsForwardsWorkRef(t *testing.T) {
+	var lastQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/runbooks/runs", func(w http.ResponseWriter, r *http.Request) {
+		lastQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Runs: []api.RunSummary{
+			newRunSummary(t, "11111111-1111-4111-8111-111111111111",
+				"x", "operator-self", api.RunSummaryState("in_progress"), 1, 2),
+		}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	err := runListRuns(cmd, listRunsOptions{
+		WorkRef:           "gh:evoila/meho#9",
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runListRuns: %v", err)
+	}
+	if !strings.Contains(lastQuery, "work_ref=") ||
+		!strings.Contains(lastQuery, url.QueryEscape("gh:evoila/meho#9")) {
+		t.Errorf("expected work_ref filter in query; got %q", lastQuery)
 	}
 }
 

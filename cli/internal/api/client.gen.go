@@ -3526,6 +3526,10 @@ type RunCompletedResponse struct {
 // exclusive (and both “None“ for “in_progress“ runs); the
 // transition that fired sets the corresponding column on
 // “runbook_runs“.
+//
+// :attr:`work_ref` surfaces the external change-ticket reference the
+// run was started under (work_ref I3-T1 #1661); “None“ when the run
+// carries no ticket.
 type RunSummary struct {
 	AbandonedAt   *time.Time `json:"abandoned_at"`
 	AssignedTo    string     `json:"assigned_to"`
@@ -3556,6 +3560,7 @@ type RunSummary struct {
 	Target          string             `json:"target"`
 	TemplateSlug    string             `json:"template_slug"`
 	TemplateVersion int                `json:"template_version"`
+	WorkRef         *string            `json:"work_ref"`
 }
 
 // RunSummaryState defines model for RunSummary.State.
@@ -4020,10 +4025,19 @@ type SpecSource struct {
 // :attr:`target` is the run's subject (the host, the cluster, the
 // cert thumbprint); :attr:`params` is the substitution context for
 // “${run.params.X}“ and may be empty.
+//
+// :attr:`work_ref` is the optional opaque external change-ticket
+// reference (a GitHub issue “"gh:evoila/meho#9"“, a Jira key, a CR
+// id) the run executes under. It is pinned on the run row at start and
+// bound onto the shared “work_ref_var“ ContextVar around each step's
+// dispatch so every “operation_call“ step's audit row inherits it
+// (work_ref I3-T1 #1661). “None“ when the run is started without a
+// change ticket.
 type StartRunRequest struct {
 	Params       *map[string]interface{} `json:"params,omitempty"`
 	Target       string                  `json:"target"`
 	TemplateSlug string                  `json:"template_slug"`
+	WorkRef      *string                 `json:"work_ref"`
 }
 
 // StepBody The opaque-by-construction single-step shape returned by “runbook_next“.
@@ -5552,6 +5566,7 @@ type ListRunsApiV1RunbooksRunsGetParams struct {
 	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
 	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
 	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+	WorkRef      *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Limit        *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
 
 	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
@@ -15136,6 +15151,22 @@ func NewListRunsApiV1RunbooksRunsGetRequest(server string, params *ListRunsApiV1
 		if params.TemplateSlug != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "template_slug", runtime.ParamLocationQuery, *params.TemplateSlug); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

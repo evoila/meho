@@ -245,6 +245,14 @@ class StartRunRequest(BaseModel):
     :attr:`target` is the run's subject (the host, the cluster, the
     cert thumbprint); :attr:`params` is the substitution context for
     ``${run.params.X}`` and may be empty.
+
+    :attr:`work_ref` is the optional opaque external change-ticket
+    reference (a GitHub issue ``"gh:evoila/meho#9"``, a Jira key, a CR
+    id) the run executes under. It is pinned on the run row at start and
+    bound onto the shared ``work_ref_var`` ContextVar around each step's
+    dispatch so every ``operation_call`` step's audit row inherits it
+    (work_ref I3-T1 #1661). ``None`` when the run is started without a
+    change ticket.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -252,6 +260,7 @@ class StartRunRequest(BaseModel):
     template_slug: str
     target: str
     params: dict[str, object] = Field(default_factory=dict)
+    work_ref: str | None = None
 
 
 class CurrentStepResponse(BaseModel):
@@ -403,7 +412,10 @@ class ListRunsFilter(BaseModel):
     :attr:`status` to a single run state from the closed vocabulary
     (matching the storage-level ``CheckConstraint`` on
     ``runbook_runs.state``); :attr:`template_slug` to a single
-    template (across all versions).
+    template (across all versions); :attr:`work_ref` to a single
+    external change ticket (exact match, across all templates) -- "show
+    me every run started under ``gh:evoila/meho#9``" (work_ref I3-T1
+    #1661).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -411,6 +423,7 @@ class ListRunsFilter(BaseModel):
     assignee: str | None = None
     status: Literal["in_progress", "completed", "abandoned"] | None = None
     template_slug: str | None = None
+    work_ref: str | None = None
 
 
 class RunSummary(BaseModel):
@@ -431,6 +444,10 @@ class RunSummary(BaseModel):
     exclusive (and both ``None`` for ``in_progress`` runs); the
     transition that fired sets the corresponding column on
     ``runbook_runs``.
+
+    :attr:`work_ref` surfaces the external change-ticket reference the
+    run was started under (work_ref I3-T1 #1661); ``None`` when the run
+    carries no ticket.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -446,3 +463,4 @@ class RunSummary(BaseModel):
     abandoned_at: datetime | None = None
     current_step_id: str | None = None
     position: StepPosition | None = None
+    work_ref: str | None = None

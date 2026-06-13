@@ -636,19 +636,26 @@ class Settings(BaseModel):
         agent loop indefinitely on a forgotten request. Set via
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     approval_allow_self_approval:
-        Self-approval break-glass switch (G11.7-T1 #1401). Default
-        ``False`` (fail-closed): the operator who requested a parked
-        approval may not approve their own request — requester !=
+        Self-approval **emergency break-glass** switch (G11.7-T1 #1401).
+        Default ``False`` (fail-closed): the operator who requested a
+        parked approval may not approve their own request — requester !=
         approver is enforced in
         :func:`~meho_backplane.operations.approval_queue.approve_request`,
         so a compromised or careless single account cannot both ask for
         and grant a privileged connector write. Set
-        ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for an audited
-        single-operator break-glass deployment; the self-approval still
-        writes its decision audit row, so the use is forensically
-        visible. Reject is always allowed regardless of this flag — an
-        operator withdrawing their own pending request is never a
-        privilege escalation.
+        ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine,
+        audited break-glass; the self-approval still writes its decision
+        audit row, so the use is forensically visible. This is **not**
+        the single-operator answer — enabling it posture-wide re-opens,
+        for every op, the single-account request+grant hole #1401
+        closed. A single-operator tenant should instead park its
+        four-eyes writes under an **agent-requester** (a distinct
+        ``principal_kind=agent`` ``sub``, so requester != approver clears
+        with no flag); see the "Single-operator tenants: use an
+        agent-requester, not break-glass" section of
+        ``docs/codebase/approvals.md``. Reject is always allowed
+        regardless of this flag — an operator withdrawing their own
+        pending request is never a privilege escalation.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -861,14 +868,17 @@ class Settings(BaseModel):
     # elevation windows are typically hours, not days.
     grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     grant_expiry_enabled: bool = True
-    # G11.7-T1 #1401 -- self-approval break-glass. Default False is
-    # fail-closed: the operator who requested a parked approval may not
-    # also approve it (requester != approver, enforced in
+    # G11.7-T1 #1401 -- self-approval emergency break-glass. Default
+    # False is fail-closed: the operator who requested a parked approval
+    # may not also approve it (requester != approver, enforced in
     # ``approval_queue.approve_request``). Set
-    # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for an audited
-    # single-operator break-glass deployment; every self-approval still
-    # writes its decision audit row, so the break-glass use is forensically
-    # visible.
+    # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` only for a genuine, audited
+    # break-glass; every self-approval still writes its decision audit
+    # row, so the use is forensically visible. NOT the single-operator
+    # answer -- single-operator tenants park four-eyes writes under an
+    # agent-requester (distinct principal_kind=agent sub) instead; see
+    # docs/codebase/approvals.md "Single-operator tenants: use an
+    # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
     # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
     # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator

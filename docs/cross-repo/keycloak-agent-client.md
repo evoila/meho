@@ -283,6 +283,11 @@ manage their own sub-principals:
   protocol mapper recipe for `tenant_id` and `tenant_role`
 - [`mcp-client-setup.md`](mcp-client-setup.md) — MCP browser-flow client
   provisioning (for human-facing MCP sessions, not agent clients)
+- [`../codebase/approvals.md`](../codebase/approvals.md) §
+  "Single-operator tenants: use an agent-requester, not break-glass" —
+  why an `agent:<name>` principal (a distinct `sub`) is the four-eyes
+  answer for single-operator tenants, instead of the
+  `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
 - Issue [#815](https://github.com/evoila/meho/issues/815) — G11.2-T1
   implementation
 - Initiative [#803](https://github.com/evoila/meho/issues/803) — G11.2

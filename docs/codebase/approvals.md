@@ -93,8 +93,8 @@ model, or resume endpoint):
 2. **Self-approval guard (requester != approver).** `approve_request`
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST, invalid-params on MCP) when `operator.sub ==
-   request.principal_sub`, unless the audited break-glass switch
-   `APPROVAL_ALLOW_SELF_APPROVAL=true`
+   request.principal_sub`, unless the audited **emergency break-glass**
+   switch `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
    fail-closed) is set. Both wire strings keep the
    `self_approval_forbidden` token as a prefix and append the
@@ -106,6 +106,15 @@ model, or resume endpoint):
    privilege escalation. The guard runs after the role check and before
    the params-hash check, so a self-approver gets the precise refusal
    reason.
+
+   `APPROVAL_ALLOW_SELF_APPROVAL` is an **emergency** escape, not the
+   single-operator answer: enabling it posture-wide re-opens, for every
+   op, the single-account request+grant hole this guard closes.
+   Single-operator tenants should park their four-eyes writes under an
+   **agent-requester** (a distinct `principal_kind=agent` `sub`) instead
+   — see [Single-operator tenants: use an agent-requester, not
+   break-glass](#single-operator-tenants-use-an-agent-requester-not-break-glass-1738)
+   below.
 3. **Resume target re-hydration.** The REST `…/approve` route persists
    only `target_id` on the row, so it re-loads the live `Target` by id
    (`targets.resolver.resolve_target_by_id`, tenant-scoped, `deleted_at
@@ -132,6 +141,95 @@ is unchanged in mechanism but now matters for humans too: with humans
 routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
+
+## Single-operator tenants: use an agent-requester, not break-glass (#1738)
+
+The self-approval guard enforces requester != approver on the stable
+`sub` claim. On a tenant with **one** human operator this looks like a
+deadlock: that operator parks a `requires_approval` write as a human
+(`USER`) principal, then is the only identity available to approve it,
+so `approve_request` raises `self_approval_forbidden`. The break-glass
+switch `APPROVAL_ALLOW_SELF_APPROVAL` exists for that case — but it is an
+**emergency** escape, not the everyday answer. Flipping it posture-wide
+re-opens, for every op, the single-account *request + grant* hole #1401
+was created to close.
+
+The everyday answer is an **agent-requester**: park the write under an
+**agent principal** (`principal_kind=agent`) rather than under the human.
+An agent principal is a first-class identity — a Keycloak
+`client_credentials` client `agent:<name>` with its own stable `sub`,
+minted by `meho agent-principal register` (see
+[`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)).
+When the agent parks the request, `create_pending_request` sets
+`principal_sub=<agent-sub>` (it always reads `operator.sub` —
+`approval_queue.py:338`). The human operator who later approves carries a
+**distinct** `sub`, so `_check_self_approval`
+(`approval_queue.py:816-831`) takes its `operator.sub != request.principal_sub`
+early-return and the approval clears — **with no break-glass flag and no
+new tunable**, and with the full subject/actor lineage intact (the
+decision audit row records the human approver; the request row records
+the agent requester).
+
+### How the agent becomes the requester
+
+The agent must be the *subject* of the parked request, not merely an
+actor on a human's behalf. That distinction is the RFC 8693 token-
+exchange shape MEHO encodes (see [Subject + actor attribution on the
+request row](#subject--actor-attribution-on-the-request-row-1481) above),
+and it is the difference between the two agent-run entry points in
+`backend/src/meho_backplane/agent/invocation.py`:
+
+- **Autonomous / scheduled run** — `AgentInvoker.run_scheduled`
+  (`invocation.py:951`) authenticates the agent under its **own**
+  `client_credentials` grant and deliberately binds **no**
+  `actor_delegation` (`invocation.py:1117-1118`). The agent is the sole
+  subject: `operator.sub` resolves to the agent, so the parked row gets
+  `principal_sub=<agent-sub>` and `principal_act=NULL`. **This is the
+  agent-requester path.** A human operator with a different `sub`
+  approves the row and clears the gate.
+- **Human-initiated delegated run** — `AgentInvoker.run`
+  (`invocation.py:795`) is launched by a human, so it binds the acting
+  agent as the RFC 8693 **actor** via `with actor_delegation(...)`
+  (`invocation.py:841`). Per RFC 8693 §4.1 the human stays the *subject*
+  and the agent is only the *actor*: the parked row gets
+  `principal_sub=<human>` + `principal_act=<agent-sub>`. The requester is
+  still the human, so that same human **still cannot** approve it. Routing
+  a single-operator write through a human-triggered agent run does **not**
+  break the deadlock — only the autonomous/scheduled run does.
+
+### Which identity shape clears the gate
+
+| Identity shape | How it parks | `principal_sub` | `principal_act` | Approve by the human op |
+|---|---|---|---|---|
+| Direct human op | human dispatches a `requires_approval` write as `USER` | the human's `sub` | `NULL` | **Blocked** — `requester == approver` (needs break-glass) |
+| Human-initiated delegated agent run (`run`) | human launches an agent; agent binds as RFC 8693 *actor* | the human's `sub` | the agent's `sub` | **Blocked** — RFC 8693 subject is the human; `requester == approver` |
+| Autonomous / scheduled agent run (`run_scheduled`) | agent authenticates as itself; **no** delegation bound | the agent's `sub` | `NULL` | **Clears** — distinct `sub`, no break-glass, full audit lineage |
+
+### End-to-end recipe (single-operator four-eyes write)
+
+1. **Register the agent principal** —
+   [`keycloak-agent-client.md`](../cross-repo/keycloak-agent-client.md)
+   (`meho agent-principal register <name>` → a `agent:<name>`
+   `client_credentials` client carrying `principal_kind=agent`).
+2. **Author an agent definition whose `identity_ref` is that client** —
+   [`agent-definition.md`](agent-definition.md); `identity_ref` is
+   validated against `agent_principal.keycloak_client_id`, and
+   `run_scheduled` enforces `identity_ref == agent_client_id` so the run
+   provably parks under the named agent.
+3. **Wire the write as a scheduled trigger under that definition** —
+   [`scheduler.md`](scheduler.md); a cron or one-off
+   `scheduled_trigger` fires `run_scheduled`, so the
+   `requires_approval` op parks with `principal_sub=<agent-sub>`.
+4. **The human operator approves the parked row** — via any surface
+   (REST `/decide`, `meho approvals approve <id>`, MCP). Their `sub`
+   differs from the agent's, so the gate clears and the approved op
+   re-dispatches.
+
+### Troubleshooting — `self_approval_forbidden` on a single-operator tenant
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject). | Re-park the write under an **agent-requester**: wire it as a scheduled trigger under an agent definition (the four-step recipe above) so `run_scheduled` parks it with `principal_sub=<agent-sub>`. Then approve as yourself — your distinct `sub` clears the gate. Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide. |
 
 ## G0.20-T3 — execute a parked direct op on approve via every surface (#1503)
 

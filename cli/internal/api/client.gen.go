@@ -835,6 +835,7 @@ type ApprovalRequestView struct {
 	Status   ApprovalRequestStatus `json:"status"`
 	TargetId *openapi_types.UUID   `json:"target_id"`
 	TenantId openapi_types.UUID    `json:"tenant_id"`
+	WorkRef  *string               `json:"work_ref"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -5203,7 +5204,10 @@ type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
 // ListApprovalsApiV1ApprovalsGetParams defines parameters for ListApprovalsApiV1ApprovalsGet.
 type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.
-	Status        *string `form:"status,omitempty" json:"status,omitempty"`
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+
+	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
+	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11520,6 +11524,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

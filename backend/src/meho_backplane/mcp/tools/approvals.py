@@ -157,6 +157,7 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        "work_ref": row.work_ref,
     }
 
 
@@ -213,6 +214,12 @@ async def _list_handler(
             ) from exc
     limit = int(arguments.get("limit", 50))
     offset = int(arguments.get("offset", 0))
+    work_ref_raw = arguments.get("work_ref")
+    work_ref_filter: str | None = None
+    if work_ref_raw is not None:
+        if not isinstance(work_ref_raw, str) or not work_ref_raw:
+            raise McpInvalidParamsError("work_ref must be a non-empty string when supplied")
+        work_ref_filter = work_ref_raw
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -220,6 +227,7 @@ async def _list_handler(
             session,
             tenant_id=operator.tenant_id,
             status=status_filter,
+            work_ref=work_ref_filter,
             limit=limit,
             offset=offset,
         )
@@ -266,6 +274,15 @@ register_mcp_tool(
                     "minimum": 0,
                     "default": 0,
                     "description": "Rows to skip before the first returned row. Default 0.",
+                },
+                "work_ref": {
+                    "type": "string",
+                    "description": (
+                        "Filter by external change-ticket reference (exact "
+                        "match), e.g. 'gh:evoila/meho#1' — the requests "
+                        "authorised by change ticket X (work_ref I2-T1 "
+                        "#1659). Omit for no work_ref filter."
+                    ),
                 },
             },
             "additionalProperties": False,

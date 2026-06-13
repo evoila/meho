@@ -6611,7 +6611,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``. Returns newest-first (``created_at DESC``).",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -6625,6 +6625,18 @@
               "title": "Status"
             },
             "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.",
+              "title": "Work Ref"
+            },
+            "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter."
           },
           {
             "name": "authorization",
@@ -10864,6 +10876,11 @@
             "type": "string",
             "nullable": true,
             "title": "Expires At"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
           }
         },
         "type": "object",
@@ -10882,7 +10899,8 @@
           "reviewed_by",
           "decided_at",
           "created_at",
-          "expires_at"
+          "expires_at",
+          "work_ref"
         ],
         "title": "ApprovalRequestView",
         "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."

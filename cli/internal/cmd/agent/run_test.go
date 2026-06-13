@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -299,16 +300,28 @@ func TestRunListPassesWorkRefFilter(t *testing.T) {
 	err := runRunList(cmd, runListOptions{
 		WorkRef:           "gh:evoila/meho#11",
 		Status:            "succeeded",
+		Limit:             25,
+		Offset:            50,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(gotQuery, "work_ref=gh") {
-		t.Errorf("request must carry the work_ref filter; got query %q", gotQuery)
+	q, perr := url.ParseQuery(gotQuery)
+	if perr != nil {
+		t.Fatalf("parse query %q: %v", gotQuery, perr)
 	}
-	if !strings.Contains(gotQuery, "status=succeeded") {
-		t.Errorf("request must carry the status filter; got query %q", gotQuery)
+	if got := q.Get("work_ref"); got != "gh:evoila/meho#11" {
+		t.Errorf("work_ref filter: got %q, want %q", got, "gh:evoila/meho#11")
+	}
+	if got := q.Get("status"); got != "succeeded" {
+		t.Errorf("status filter: got %q, want %q", got, "succeeded")
+	}
+	if got := q.Get("limit"); got != "25" {
+		t.Errorf("limit filter: got %q, want %q", got, "25")
+	}
+	if got := q.Get("offset"); got != "50" {
+		t.Errorf("offset filter: got %q, want %q", got, "50")
 	}
 	if !strings.Contains(stdout.String(), "no agent runs") {
 		t.Errorf("empty list should print 'no agent runs'; got %q", stdout.String())
@@ -317,7 +330,7 @@ func TestRunListPassesWorkRefFilter(t *testing.T) {
 
 func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
 	params := listRunsParams(runListOptions{})
-	if params.WorkRef != nil || params.Status != nil || params.Limit != nil {
+	if params.WorkRef != nil || params.Status != nil || params.Limit != nil || params.Offset != nil {
 		t.Errorf("empty options must leave filters nil; got %+v", params)
 	}
 }

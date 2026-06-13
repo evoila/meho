@@ -18,7 +18,7 @@ import (
 
 // newRunListCmd returns the `meho agent run-list` command.
 //
-//	meho agent run-list [--work-ref REF] [--status S] [--limit N] [--json] [--backplane <url>]
+//	meho agent run-list [--work-ref REF] [--status S] [--limit N] [--offset N] [--json] [--backplane <url>]
 //
 // Role: operator. Lists the tenant's agent runs via GET /api/v1/agents/runs,
 // newest first. Filters: --work-ref (exact-match external change-ticket
@@ -29,6 +29,7 @@ func newRunListCmd() *cobra.Command {
 		workRef           string
 		statusFilter      string
 		limit             int
+		offset            int
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -40,7 +41,8 @@ func newRunListCmd() *cobra.Command {
 			"--work-ref (exact-match change-ticket reference, e.g. " +
 			"gh:evoila/meho#11), --status (pending / running / " +
 			"awaiting_approval / succeeded / failed / cancelled), " +
-			"--limit (1..500, server default 100). Runs are " +
+			"--limit (1..500, server default 100), --offset (rows to " +
+			"skip for paging, default 0). Runs are " +
 			"tenant-isolated server-side — only your tenant's runs " +
 			"appear. --json emits the raw list for scripting.",
 		Args:          cobra.NoArgs,
@@ -51,6 +53,7 @@ func newRunListCmd() *cobra.Command {
 				WorkRef:           workRef,
 				Status:            statusFilter,
 				Limit:             limit,
+				Offset:            offset,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -62,6 +65,8 @@ func newRunListCmd() *cobra.Command {
 		"filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max runs per page (1..500, server default 100 when omitted)")
+	cmd.Flags().IntVar(&offset, "offset", 0,
+		"rows to skip for paging into the result set (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the raw []AgentRunSummaryResponse JSON instead of the table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -73,6 +78,7 @@ type runListOptions struct {
 	WorkRef           string
 	Status            string
 	Limit             int
+	Offset            int
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -112,6 +118,10 @@ func listRunsParams(opts runListOptions) *api.ListRunsApiV1AgentsRunsGetParams {
 	if opts.Limit > 0 {
 		l := opts.Limit
 		params.Limit = &l
+	}
+	if opts.Offset > 0 {
+		o := opts.Offset
+		params.Offset = &o
 	}
 	return params
 }

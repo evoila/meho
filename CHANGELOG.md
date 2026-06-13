@@ -103,6 +103,15 @@ connector-related release-notes line.
   role→policy binding. Supersedes the per-operator alias recipe in
   `connector-vault-policy.md` §2 for shared-target access. OSS-only
   (no Enterprise namespaces) (#1724)
+- `meho connector ingest-status <job-id> [--wait] [--json]` — poll or
+  inspect an async ingest job after `meho connector ingest --no-wait`
+  (or a lost waiting session), the CLI twin of the
+  `meho.connector.ingest_status` MCP tool. Snapshots a `running` job
+  (identity + lifecycle echo) by default, `--wait` polls to terminal;
+  terminal rendering and the poll loop are shared with `meho connector
+  ingest` (no duplicated lifecycle switch). The `--no-wait` hint and
+  the poll-phase error guidance now name the verb. Closes the PR #1618
+  gap (#1621)
 - Connector DELETE surface for the zero-op registry stubs aborted
   ingests leave behind: `DELETE /api/v1/connectors/{connector_id}`
   (204, tenant_admin, always operator-tenant-scoped) and the
@@ -113,6 +122,16 @@ connector-related release-notes line.
   no rows remain anywhere (hand-coded classes never), warns —
   advisory, not error — when enabled operations are deleted, and
   re-ingest revives the connector from scratch (#1700)
+- `work_ref` on scheduled triggers, inherited end-to-end by every
+  dispatched run: `scheduled_trigger.work_ref` (migration 0043) is
+  set at create time on `meho.scheduler.create` / `POST
+  /api/v1/scheduler/triggers` and, when the trigger fires, the
+  scheduler binds it around the dispatched agent run so the run's
+  `agent_run.work_ref` and every audit row it produces carry the
+  trigger's change-ticket reference (the previously-severed
+  trigger → run seam). The scheduler-trigger list filters by
+  `--work-ref` and surfaces it (`meho scheduler list --work-ref`,
+  `meho scheduler create --work-ref`) (#1663)
 
 ### Changed
 
@@ -166,6 +185,18 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Test suite: deflaked
+  `test_retrieval_usage.py::test_route_audit_row_count_matches_total_searches`,
+  which intermittently red-flaked the unit lane with `total_searches == 0`.
+  Root cause was a time-bomb, not the hypothesised xdist engine-isolation
+  race: the route test seeded `audit_log` rows at a fixed past date
+  (`_NOW = 2026-05-14`) while the route resolves its default `since`
+  window relative to the real wall clock (`now - 30d`), so the rows fell
+  out of the window once the calendar advanced ~30 days past `_NOW`. The
+  seed timestamps now anchor to `datetime.now(UTC)`; both assertions
+  (`total_searches == 2` and `payload["row_count"] == 2`) are unchanged,
+  and the fix is tests-only (no production engine/session behaviour
+  change) (#1722)
 - Operator console: broadcast feed/wall and the connectors recent-ops
   card rendered dead (empty state despite a healthy stream, console
   errors on every SSE frame) because their Alpine component scripts
@@ -230,6 +261,15 @@ connector-related release-notes line.
   itself) and renders the live `BroadcastEvent` frames as
   time/principal/op/status rows through the XSS-safe Alpine sink
   pattern, capped at 50 in-DOM rows (#1696)
+- `POST /api/v1/connectors/ingest` now returns the structured
+  uncovered-version-label envelope (`product`, `version`, `impl_id`,
+  `registered_classes[]` with each class's `supported_version_range`,
+  `message`) on its 422 instead of a bare `detail` string, wiring the
+  REST route to the same `build_uncovered_version_label_detail` builder
+  the MCP `meho.connector.ingest` tool has shipped since #777 — so REST
+  and MCP callers branch on the same stable fields and can't drift. This
+  closes the last bare-string arm in the ingest route's typed-exception
+  table, completing the #1610 400-family parity (#1624)
 
 ## [0.14.0] - 2026-06-12
 

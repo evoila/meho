@@ -29,6 +29,7 @@ func newListCmd() *cobra.Command {
 	var (
 		kind              string
 		status            string
+		workRef           string
 		tenant            string
 		limit             int
 		offset            int
@@ -41,7 +42,9 @@ func newListCmd() *cobra.Command {
 		Long: "list calls GET /api/v1/scheduler/triggers and renders " +
 			"the triggers in the operator's tenant, newest-first. " +
 			"--kind narrows to cron|one_off|event; --status narrows to " +
-			"active|paused|cancelled|fired. --tenant is a tenant_admin-" +
+			"active|paused|cancelled|fired. --work-ref narrows to triggers " +
+			"carrying that exact change-ticket reference (e.g. " +
+			"gh:evoila/meho#13). --tenant is a tenant_admin-" +
 			"only filter that targets another tenant; operator role " +
 			"calling with --tenant lands as 403 insufficient_role. " +
 			"--limit caps the page size (1..500, server default 100). " +
@@ -54,6 +57,7 @@ func newListCmd() *cobra.Command {
 			return runList(cmd, listOptions{
 				Kind:              kind,
 				Status:            status,
+				WorkRef:           workRef,
 				Tenant:            tenant,
 				Limit:             limit,
 				Offset:            offset,
@@ -66,6 +70,8 @@ func newListCmd() *cobra.Command {
 		"filter by trigger kind: cron | one_off | event")
 	cmd.Flags().StringVar(&status, "status", "",
 		"filter by trigger status: active | paused | cancelled | fired")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#13)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (tenant_admin only; operator role is locked to its own tenant)")
 	cmd.Flags().IntVar(&limit, "limit", 0,
@@ -82,6 +88,7 @@ func newListCmd() *cobra.Command {
 type listOptions struct {
 	Kind              string
 	Status            string
+	WorkRef           string
 	Tenant            string
 	Limit             int
 	Offset            int
@@ -178,6 +185,10 @@ func listQueryParams(opts listOptions, tenantFilter *openapi_types.UUID) *api.Li
 		s := api.ListTriggersApiV1SchedulerTriggersGetParamsStatus(opts.Status)
 		params.Status = &s
 	}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		params.WorkRef = &wr
+	}
 	if tenantFilter != nil {
 		params.TenantFilter = tenantFilter
 	}
@@ -229,8 +240,8 @@ func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
 		fmt.Fprintln(w, "no scheduled triggers in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %s\n",
-		"ID", "KIND", "STATUS", "SCHEDULE", "NEXT_FIRE_AT")
+	fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %-24s %s\n",
+		"ID", "KIND", "STATUS", "SCHEDULE", "NEXT_FIRE_AT", "WORK_REF")
 	for _, t := range r.Triggers {
 		schedule := ""
 		switch string(t.Kind) {
@@ -252,7 +263,11 @@ func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
 		if t.NextFireAt != nil {
 			next = formatTime(t.NextFireAt)
 		}
-		fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %s\n",
-			t.Id.String(), string(t.Kind), string(t.Status), schedule, next)
+		workRef := "-"
+		if t.WorkRef != nil && *t.WorkRef != "" {
+			workRef = *t.WorkRef
+		}
+		fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %-24s %s\n",
+			t.Id.String(), string(t.Kind), string(t.Status), schedule, next, workRef)
 	}
 }

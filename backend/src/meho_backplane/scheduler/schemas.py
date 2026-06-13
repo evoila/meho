@@ -52,6 +52,13 @@ _TIMEZONE_MAX_LENGTH = 64
 #: customisation (longer values are almost certainly a misconfiguration).
 _IDENTITY_SUB_MAX_LENGTH = 256
 
+#: Max length of a ``work_ref`` change-ticket reference. An opaque
+#: cross-system string (``"gh:evoila/meho#13"`` / a Jira key / a CR id);
+#: bounded so an adversarial caller cannot smuggle a large blob past the
+#: validator. Mirrors the 256-char cap the audit ``work_ref`` sink
+#: applies (:class:`~meho_backplane.api.v1.audit_models`).
+_WORK_REF_MAX_LENGTH = 256
+
 
 class ScheduledTriggerCreate(BaseModel):
     """Request body for ``POST /api/v1/scheduler/triggers``.
@@ -94,6 +101,13 @@ class ScheduledTriggerCreate(BaseModel):
     callers leave it ``None`` and the boundary pins it to the JWT's
     tenant id. The boundary enforces the RBAC -- this schema only
     carries the field.
+
+    *work_ref* (optional, work_ref I3-T3 #1663) is the opaque external
+    change-ticket reference the trigger -- and every run it dispatches --
+    works under. Pinned on the trigger row at create time and inherited
+    by each dispatched run's ``agent_run.work_ref`` and audit rows via
+    the shared ``work_ref_var`` ContextVar. Set-at-create-only: triggers
+    have no UPDATE path. Omit when the trigger carries no change ticket.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -110,6 +124,7 @@ class ScheduledTriggerCreate(BaseModel):
         ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT
     )
     tenant_id: uuid.UUID | None = None
+    work_ref: Annotated[str | None, Field(max_length=_WORK_REF_MAX_LENGTH)] = None
 
     @model_validator(mode="after")
     def _validate_discriminated_union(self) -> ScheduledTriggerCreate:
@@ -180,6 +195,7 @@ class ScheduledTriggerRead(BaseModel):
     inputs: dict[str, object] | None
     identity_sub: str
     created_by_sub: str
+    work_ref: str | None
     created_at: datetime
     updated_at: datetime
 

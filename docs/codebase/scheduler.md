@@ -49,6 +49,12 @@ DBOS rebase swaps only the loop module.
     run's user-prompt input string — `"prompt"` key when present, else the
     dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). A `""`
     result is refused typed at fire time, see the no-input guard below.
+  - `work_ref` (nullable Text, migration `0043`, #1663) — the opaque
+    external change-ticket reference (`"gh:evoila/meho#13"`, a Jira key,
+    a CR id) the trigger works under. Set at create time (triggers have
+    no UPDATE path); inherited end-to-end by every dispatched run — see
+    "work_ref inheritance" under Dispatch. Indexed
+    `(tenant_id, work_ref)` for the list `--work-ref` exact-match filter.
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
@@ -202,6 +208,29 @@ at-most-once contract honest for invoke-time failures (where it was
 always the right behaviour) without dropping work for the
 precondition cases (where it was always recoverable by the
 operator).
+
+### work_ref inheritance (#1663)
+
+A scheduled trigger's `work_ref` is inherited by every run it
+dispatches, end-to-end:
+
+1. `_prepare_invocation` copies `row.work_ref` onto
+   `_PreparedInvocation.work_ref`.
+2. `_dispatch_invocation` forwards it as the `work_ref=` argument to
+   `AgentInvoker.run_scheduled`.
+3. `run_scheduled` binds the value onto the shared `work_ref_var`
+   ContextVar for the duration of the call. `_create_run_row` reads
+   that ContextVar at run-create time, so the dispatched
+   `agent_run.work_ref` lands the trigger's ref; the background loop
+   task snapshots the ContextVar at `asyncio.create_task` time (in
+   `_launch_run`), so every per-tool-call `audit_log` row the run
+   produces inherits it too.
+
+This is the trigger → dispatched-run seam the work_ref Initiative
+(#1654) widened: before #1663 the dispatch carried only name + inputs
+and `agent_run` had no trigger linkage, so a dispatched run could not
+inherit the trigger's ref. `work_ref` is set-at-create-only and binds
+nothing when the trigger carries no ticket (the run lands `NULL`).
 
 ### Cron fire path (`_fire_cron`)
 

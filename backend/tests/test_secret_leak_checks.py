@@ -725,6 +725,7 @@ def _raise_dispatch_through_scheduler_log(buf: io.StringIO, exc: Exception) -> N
         # The canary lives only inside the SecretStr from here on.
         agent_client_secret=SecretStr(_AGENT_SECRET_CANARY),
         inputs_str="ping",
+        work_ref=None,
     )
     row = SimpleNamespace(id="11111111-1111-1111-1111-111111111111", kind="cron")
     log = structlog.get_logger("meho_backplane.scheduler.loop")

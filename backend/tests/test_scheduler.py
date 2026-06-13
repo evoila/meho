@@ -42,11 +42,18 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 import structlog
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
@@ -59,17 +66,34 @@ from meho_backplane.agent.run import (
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector_v2,
+)
+from meho_backplane.connectors.schemas import (
+    FingerprintResult,
+    OperationResult,
+    ProbeResult,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPrincipal,
     AgentRun,
     AgentRunStatus,
     AgentRunTrigger,
+    AuditLog,
     ScheduledTrigger,
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
     Tenant,
 )
+from meho_backplane.operations import (
+    register_typed_operation,
+    reset_dispatcher_caches,
+)
+from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
@@ -143,6 +167,87 @@ def _stub_autonomous_auth(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
 
 
+@pytest.fixture
+def _reset_connector_state() -> Iterator[None]:
+    """Clear the connector registry + dispatcher caches around a test.
+
+    Only the work_ref audit-inheritance test seeds a typed operation, so
+    this fixture is opt-in (not autouse) to keep the rest of the module's
+    fires off the dispatcher's global registry entirely.
+    """
+    clear_registry()
+    reset_dispatcher_caches()
+    yield
+    clear_registry()
+    reset_dispatcher_caches()
+
+
+@pytest.fixture
+def _stub_embedding_service() -> AsyncMock:
+    """A stub embedding service returning a fixed-dimension vector.
+
+    ``register_typed_operation`` embeds the op's ``when_to_use`` text; the
+    stub keeps that off a real model so the op-seeding stays hermetic.
+    """
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * EMBEDDING_DIMENSION
+    service.encode.return_value = [[0.1] * EMBEDDING_DIMENSION]
+    service.dimension = EMBEDDING_DIMENSION
+    return service
+
+
+class _NoOpVaultConnector(Connector):
+    """Connector class registered so resolver/dispatch lookups succeed."""
+
+    product = "vault"
+    version = "1.x"
+    impl_id = "vault"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+async def _echo_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Typed handler echoing its params — proves the dispatch path runs."""
+    return {"echo": params, "operator_sub": operator.sub}
+
+
+async def _seed_echo_op(stub_embedding_service: AsyncMock) -> None:
+    """Register the ``vault.kv.read`` typed op the agent tool will dispatch.
+
+    The op emits a per-tool-call ``audit_log`` row when the agent calls
+    it, which is the row the work_ref-inheritance assertion checks.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_echo_handler,
+        summary="Read a secret.",
+        description="reads.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+
 def _final_text(text: str) -> FunctionModel:
     """A deterministic model that answers immediately with *text*."""
 
@@ -150,6 +255,46 @@ def _final_text(text: str) -> FunctionModel:
         return ModelResponse(parts=[TextPart(text)])
 
     return FunctionModel(fn)
+
+
+def _call_op_then_text(text: str) -> FunctionModel:
+    """A model that calls ``call_operation`` once, then answers with *text*.
+
+    The single tool call drives a per-tool-call ``audit_log`` row so the
+    dispatched run's audit trail is non-empty — the row whose ``work_ref``
+    the inheritance assertion checks.
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        has_return = any(
+            getattr(part, "part_kind", "") == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_return:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "call_operation",
+                        {
+                            "connector_id": "vault-1.x",
+                            "op_id": "vault.kv.read",
+                            "params": {"path": "secret/foo"},
+                        },
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart(text)])
+
+    return FunctionModel(fn)
+
+
+def _make_tool_calling_invoker() -> AgentInvoker:
+    """An invoker whose model makes one audited ``call_operation`` tool call."""
+    return AgentInvoker(
+        runtime=PydanticAgentRun(model_factory=lambda: _call_op_then_text("done")),
+    )
 
 
 def _make_invoker() -> AgentInvoker:
@@ -180,7 +325,11 @@ def _make_no_call_invoker() -> AgentInvoker:
     )
 
 
-async def _seed_tenant_and_agent(name: str = "reporter") -> uuid.UUID:
+async def _seed_tenant_and_agent(
+    name: str = "reporter",
+    *,
+    toolset: dict[str, Any] | None = None,
+) -> uuid.UUID:
     """Insert one Tenant + AgentPrincipal + enabled AgentDefinition; return def id.
 
     The ``AgentPrincipal`` seed exists to satisfy
@@ -231,7 +380,7 @@ async def _seed_tenant_and_agent(name: str = "reporter") -> uuid.UUID:
             identity_ref=f"agent:{name}",
             model_tier=AgentModelTier.STANDARD,
             system_prompt="You report status.",
-            toolset={},
+            toolset=toolset or {},
             turn_budget=2,
             enabled=True,
         ),
@@ -244,6 +393,7 @@ async def _create_cron(
     agent_definition_id: uuid.UUID,
     cron_expr: str = "*/5 * * * *",
     base: datetime,
+    work_ref: str | None = None,
 ) -> ScheduledTrigger:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -256,6 +406,7 @@ async def _create_cron(
             identity_sub="op-scheduler",
             created_by_sub="seed-admin",
             base=base,
+            work_ref=work_ref,
         )
         await session.commit()
         return row
@@ -265,6 +416,7 @@ async def _create_one_off(
     *,
     agent_definition_id: uuid.UUID,
     run_at: datetime,
+    work_ref: str | None = None,
 ) -> ScheduledTrigger:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -276,6 +428,7 @@ async def _create_one_off(
             inputs={"prompt": "one-shot"},
             identity_sub="op-scheduler",
             created_by_sub="seed-admin",
+            work_ref=work_ref,
         )
         await session.commit()
         return row
@@ -382,6 +535,35 @@ async def _wait_for_agent_runs(
     pytest.fail(f"expected {expected} agent_run rows, found {len(rows)}")
 
 
+async def _wait_for_run_audit_rows(
+    run_id: uuid.UUID,
+    *,
+    expected: int,
+    timeout: float = 3.0,
+) -> list[AuditLog]:
+    """Poll for *expected* ``audit_log`` rows correlated to *run_id*.
+
+    Audit rows are written from the background loop task (which finalises
+    after :func:`run_one_tick` returns), so the assertion polls rather
+    than reading once. Correlation is via ``agent_session_id`` -- the
+    lineage key every per-tool-call audit row the run produces shares
+    with the ``agent_run.id``.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    sessionmaker = get_sessionmaker()
+    while asyncio.get_event_loop().time() < deadline:
+        async with sessionmaker() as session:
+            rows = list(
+                (await session.execute(select(AuditLog).where(AuditLog.agent_session_id == run_id)))
+                .scalars()
+                .all()
+            )
+            if len(rows) >= expected:
+                return rows
+        await asyncio.sleep(0.05)
+    pytest.fail(f"expected {expected} audit_log rows for run {run_id}, found {len(rows)}")
+
+
 # ---------------------------------------------------------------------------
 # Cron arithmetic
 # ---------------------------------------------------------------------------
@@ -486,6 +668,148 @@ async def test_cron_trigger_fires_when_due_and_advances() -> None:
     assert next_fire is not None
     assert next_fire > datetime(2026, 1, 1, tzinfo=UTC)
     assert advanced.last_fired_at is not None
+
+
+# ---------------------------------------------------------------------------
+# work_ref I3-T3 (#1663): trigger.work_ref + dispatch-seam inheritance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_cron_trigger_persists_work_ref() -> None:
+    """A trigger created with ``work_ref`` writes a row whose work_ref matches.
+
+    Acceptance criterion 1: creating a trigger with
+    ``work_ref="gh:evoila/meho#13"`` persists that exact ref on the
+    ``scheduled_trigger`` row.
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(
+        agent_definition_id=agent_id,
+        base=base,
+        work_ref="gh:evoila/meho#13",
+    )
+    persisted = await _get_trigger(trigger.id)
+    assert persisted.work_ref == "gh:evoila/meho#13"
+
+
+@pytest.mark.asyncio
+async def test_create_trigger_without_work_ref_leaves_it_null() -> None:
+    """A trigger created without ``work_ref`` lands ``NULL`` (set-at-create-only)."""
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    persisted = await _get_trigger(trigger.id)
+    assert persisted.work_ref is None
+
+
+@pytest.mark.asyncio
+async def test_dispatched_run_inherits_trigger_work_ref() -> None:
+    """A fired trigger's dispatched run inherits the trigger's ``work_ref``.
+
+    Acceptance criterion 2 (the severed seam): a cron trigger carrying a
+    ``work_ref`` fires through the real :func:`run_one_tick` loop; the
+    dispatched ``agent_run`` row lands the trigger's ref, proving the
+    inheritance flows through the widened ``_PreparedInvocation`` ->
+    ``run_scheduled`` -> ``work_ref_var`` -> ``_create_run_row`` seam.
+    Before #1663 the dispatch carried only name + inputs and a dispatched
+    run could not inherit the trigger's ref.
+    """
+    work_ref = "gh:evoila/meho#13"
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(
+        agent_definition_id=agent_id,
+        base=base,
+        work_ref=work_ref,
+    )
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    fires = await run_one_tick(invoker=_make_invoker())
+    assert fires == 1
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    # The dispatched run carries the firing trigger's work_ref.
+    assert runs[0].work_ref == work_ref
+    # The binding does not leak past the dispatch (the loop reset the var).
+    assert work_ref_var.get() is None
+
+
+@pytest.mark.asyncio
+async def test_dispatched_run_ignores_ambient_work_ref_when_trigger_has_none() -> None:
+    """A no-work_ref trigger lands ``NULL`` even with an ambient ref bound.
+
+    Determinism contract for the dispatch seam: the dispatched run's
+    ``work_ref`` is exactly the firing trigger's value (or ``None``), never
+    whatever ``work_ref_var`` happened to be bound to in the surrounding
+    context. ``run_scheduled`` binds the ContextVar UNCONDITIONALLY -- here
+    to ``None`` -- so a pre-existing ambient ref cannot bleed into
+    ``_create_run_row`` / ``agent_run.work_ref``. Before the unconditional
+    bind (conditional ``set(...) if cleaned_work_ref``), a None trigger ref
+    left the ambient binding in place and the dispatched run would have
+    inherited it.
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    # Trigger has NO work_ref.
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    # Bind an ambient ref in the surrounding context that, absent the
+    # unconditional bind, would bleed into the dispatched run.
+    ambient_token = work_ref_var.set("gh:evoila/meho#9999")
+    try:
+        fires = await run_one_tick(invoker=_make_invoker())
+        assert fires == 1
+        # The dispatch reset() restored the ambient binding it found, rather
+        # than leaving its own None binding in place.
+        assert work_ref_var.get() == "gh:evoila/meho#9999"
+    finally:
+        work_ref_var.reset(ambient_token)
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    # The ambient ref did NOT bleed in -- the run lands NULL work_ref.
+    assert runs[0].work_ref is None
+
+
+@pytest.mark.asyncio
+async def test_dispatched_run_audit_rows_inherit_trigger_work_ref(
+    _reset_connector_state: None,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A fired trigger's dispatched-run audit rows carry the trigger's ``work_ref``.
+
+    Acceptance criterion 2, end-to-end through the audit trail: the
+    dispatched run makes one audited ``call_operation`` tool call; the
+    resulting ``audit_log`` row (correlated by the run's
+    ``agent_session_id``) carries the firing trigger's ``work_ref``,
+    inherited via the ``work_ref_var`` ContextVar the dispatch seam binds
+    (snapshotted into the background loop task at ``create_task`` time).
+    """
+    work_ref = "gh:evoila/meho#13"
+    await _seed_echo_op(_stub_embedding_service)
+    agent_id = await _seed_tenant_and_agent(toolset={"meta_tools": ["call_operation"]})
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(
+        agent_definition_id=agent_id,
+        base=base,
+        work_ref=work_ref,
+    )
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    fires = await run_one_tick(invoker=_make_tool_calling_invoker())
+    assert fires == 1
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    run_id = runs[0].id
+    # The dispatched run's tool-call audit rows inherit the trigger's ref.
+    audit_rows = await _wait_for_run_audit_rows(run_id, expected=1)
+    assert audit_rows, "expected at least one audit_log row for the dispatched run"
+    assert all(row.work_ref == work_ref for row in audit_rows)
 
 
 # ---------------------------------------------------------------------------

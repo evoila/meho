@@ -102,6 +102,16 @@ connector-related release-notes line.
   no rows remain anywhere (hand-coded classes never), warns —
   advisory, not error — when enabled operations are deleted, and
   re-ingest revives the connector from scratch (#1700)
+- `work_ref` on scheduled triggers, inherited end-to-end by every
+  dispatched run: `scheduled_trigger.work_ref` (migration 0043) is
+  set at create time on `meho.scheduler.create` / `POST
+  /api/v1/scheduler/triggers` and, when the trigger fires, the
+  scheduler binds it around the dispatched agent run so the run's
+  `agent_run.work_ref` and every audit row it produces carry the
+  trigger's change-ticket reference (the previously-severed
+  trigger → run seam). The scheduler-trigger list filters by
+  `--work-ref` and surfaces it (`meho scheduler list --work-ref`,
+  `meho scheduler create --work-ref`) (#1663)
 
 ### Changed
 

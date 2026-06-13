@@ -390,6 +390,58 @@ async def test_service_list_filters_kind_and_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_service_create_persists_work_ref() -> None:
+    """The create path threads ``work_ref`` from the payload onto the row."""
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="ref-bot")
+    service = SchedulerAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=def_id,
+            cron_expr="*/5 * * * *",
+            work_ref="gh:evoila/meho#13",
+        ),
+    )
+    assert entry.work_ref == "gh:evoila/meho#13"
+
+
+@pytest.mark.asyncio
+async def test_service_list_filters_work_ref() -> None:
+    """``list_(work_ref=...)`` narrows to triggers carrying that exact ref."""
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="ref-filter")
+    service = SchedulerAdminService()
+    tagged = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=def_id,
+            cron_expr="*/5 * * * *",
+            work_ref="gh:evoila/meho#13",
+        ),
+    )
+    untagged = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.ONE_OFF,
+            agent_definition_id=def_id,
+            fire_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+    )
+    matched = await service.list_(_TENANT_A, work_ref="gh:evoila/meho#13")
+    assert [t.id for t in matched] == [tagged.id]
+    # A non-matching ref filters everything out.
+    none_match = await service.list_(_TENANT_A, work_ref="gh:evoila/meho#99")
+    assert none_match == []
+    # No filter still returns both.
+    all_rows = await service.list_(_TENANT_A)
+    assert {t.id for t in all_rows} == {tagged.id, untagged.id}
+
+
+@pytest.mark.asyncio
 async def test_service_cancel_active_trigger() -> None:
     def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="cancellable")
     service = SchedulerAdminService()
@@ -984,6 +1036,7 @@ async def test_durability_trigger_survives_scheduler_restart(
         agent_client_id="dummy",
         agent_client_secret=SecretStr("dummy"),
         inputs_str="",
+        work_ref=None,
     )
 
     async def _stub_prepare(row: ScheduledTrigger) -> Any:

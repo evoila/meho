@@ -955,6 +955,7 @@ class AgentInvoker:
         *,
         agent_client_id: str,
         agent_client_secret: SecretStr,
+        work_ref: str | None = None,
     ) -> AgentRunOutcome:
         """Run an agent autonomously under its own ``client_credentials`` identity.
 
@@ -984,6 +985,21 @@ class AgentInvoker:
         owns-definition guard) is delegated to
         :meth:`_authenticate_scheduled_agent`.
 
+        work_ref I3-T3 (#1663): when the firing trigger carries a
+        *work_ref* (its change-ticket reference), it is bound onto the
+        shared
+        :data:`~meho_backplane.operations._audit.work_ref_var` ContextVar
+        for the duration of this call. :meth:`_create_run_row` reads that
+        ContextVar at run-create time, so the dispatched
+        ``agent_run.work_ref`` lands the trigger's ref; the background
+        loop task snapshots the ContextVar at
+        :func:`asyncio.create_task` time (in :meth:`_launch_run`), so
+        every per-tool-call audit row the run produces inherits it too.
+        ``None`` leaves the binding untouched (the run lands ``NULL``
+        work_ref, the pre-#1663 behaviour). This is the inheritance hop
+        the Initiative #1654 builds across the previously-severed
+        trigger -> dispatched-run seam.
+
         A trigger fired with no usable user prompt (empty / whitespace-only
         *inputs*, the common cause being a trigger created without
         ``inputs``) does **not** reach the model: the run row is finalised
@@ -1007,9 +1023,21 @@ class AgentInvoker:
             agent_client_secret=agent_client_secret,
             settings=settings,
         )
-        return await self._launch_scheduled_run(
-            name, inputs, operator=operator, entry=entry, settings=settings
-        )
+        # work_ref I3-T3 #1663: bind the firing trigger's change-ticket ref
+        # onto the shared ContextVar so the dispatched run inherits it.
+        # _create_run_row reads it at create time (-> agent_run.work_ref);
+        # the background loop task snapshots it at create_task time (->
+        # the run's audit rows). A blank/None ref binds nothing -- the run
+        # lands NULL work_ref (the pre-#1663 behaviour).
+        cleaned_work_ref = work_ref.strip() if work_ref else None
+        work_ref_token = work_ref_var.set(cleaned_work_ref) if cleaned_work_ref else None
+        try:
+            return await self._launch_scheduled_run(
+                name, inputs, operator=operator, entry=entry, settings=settings
+            )
+        finally:
+            if work_ref_token is not None:
+                work_ref_var.reset(work_ref_token)
 
     async def _refuse_scheduled_no_input(
         self,

@@ -71,6 +71,7 @@ async def create_cron_trigger(
     timezone: str = "UTC",
     base: datetime | None = None,
     in_flight_policy: str = ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
+    work_ref: str | None = None,
 ) -> ScheduledTrigger:
     """Insert a cron trigger with a computed first ``next_fire_at``.
 
@@ -106,6 +107,7 @@ async def create_cron_trigger(
         inputs=inputs,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
+        work_ref=work_ref,
     )
     session.add(row)
     await session.flush()
@@ -122,6 +124,7 @@ async def create_one_off_trigger(
     identity_sub: str,
     created_by_sub: str,
     in_flight_policy: str = ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
+    work_ref: str | None = None,
 ) -> ScheduledTrigger:
     """Insert a one-off trigger that fires once at *run_at*.
 
@@ -154,6 +157,7 @@ async def create_one_off_trigger(
         inputs=inputs,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
+        work_ref=work_ref,
     )
     session.add(row)
     await session.flush()
@@ -170,6 +174,7 @@ async def create_event_trigger(
     identity_sub: str,
     created_by_sub: str,
     in_flight_policy: str,
+    work_ref: str | None = None,
 ) -> ScheduledTrigger:
     """Insert an event-subscription trigger.
 
@@ -199,6 +204,7 @@ async def create_event_trigger(
         inputs=inputs,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
+        work_ref=work_ref,
     )
     session.add(row)
     await session.flush()

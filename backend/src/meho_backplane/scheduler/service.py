@@ -209,6 +209,7 @@ class SchedulerAdminService:
                         identity_sub=payload.identity_sub,
                         created_by_sub=created_by_sub,
                         in_flight_policy=payload.in_flight_policy.value,
+                        work_ref=payload.work_ref,
                     )
                 elif payload.kind == ScheduledTriggerKind.ONE_OFF:
                     assert payload.fire_at is not None
@@ -221,6 +222,7 @@ class SchedulerAdminService:
                         identity_sub=payload.identity_sub,
                         created_by_sub=created_by_sub,
                         in_flight_policy=payload.in_flight_policy.value,
+                        work_ref=payload.work_ref,
                     )
                 else:  # payload.kind == ScheduledTriggerKind.EVENT
                     assert payload.event_filter is not None
@@ -233,6 +235,7 @@ class SchedulerAdminService:
                         identity_sub=payload.identity_sub,
                         created_by_sub=created_by_sub,
                         in_flight_policy=payload.in_flight_policy.value,
+                        work_ref=payload.work_ref,
                     )
                 await session.commit()
             except IntegrityError as exc:
@@ -251,6 +254,7 @@ class SchedulerAdminService:
         *,
         kind: str | None = None,
         status: str | None = None,
+        work_ref: str | None = None,
         limit: int = DEFAULT_LIST_LIMIT,
         offset: int = 0,
     ) -> Sequence[ScheduledTriggerRead]:
@@ -262,6 +266,12 @@ class SchedulerAdminService:
         :data:`KindFilter` / :data:`StatusFilter` literals); this
         method accepts the raw string so a future widening doesn't
         require lock-step changes.
+
+        Optional *work_ref* narrows to triggers carrying that exact
+        change-ticket reference (work_ref I3-T3 #1663) -- the
+        tenant-scoped exact-match driven by
+        ``scheduled_trigger_tenant_work_ref_idx``. ``None`` (the
+        default) applies no work_ref filter.
 
         Ordering is ``created_at DESC`` so the operator sees the most
         recent trigger first -- matching the precedent
@@ -282,6 +292,8 @@ class SchedulerAdminService:
                 stmt = stmt.where(ScheduledTrigger.kind == kind)
             if status is not None:
                 stmt = stmt.where(ScheduledTrigger.status == status)
+            if work_ref is not None:
+                stmt = stmt.where(ScheduledTrigger.work_ref == work_ref)
             result = await session.execute(stmt)
             rows = list(result.scalars().all())
             return [_row_to_read(r) for r in rows]

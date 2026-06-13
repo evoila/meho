@@ -498,6 +498,9 @@ func printTriggerSummary(w io.Writer, t *api.ScheduledTriggerRead) {
 		fmt.Fprintf(w, "%-22s %s\n", "last_fired_at:", formatTime(t.LastFiredAt))
 	}
 	fmt.Fprintf(w, "%-22s %s\n", "identity_sub:", t.IdentitySub)
+	if t.WorkRef != nil && *t.WorkRef != "" {
+		fmt.Fprintf(w, "%-22s %s\n", "work_ref:", *t.WorkRef)
+	}
 	fmt.Fprintf(w, "%-22s %s\n", "created_by:", t.CreatedBySub)
 	fmt.Fprintf(w, "%-22s %s\n", "created_at:", formatTime(&t.CreatedAt))
 }

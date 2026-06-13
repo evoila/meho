@@ -350,6 +350,16 @@ class _PreparedInvocation:
     #: only at the token-mint call site via ``.get_secret_value()``.
     agent_client_secret: SecretStr
     inputs_str: str
+    #: The firing trigger's external change-ticket reference
+    #: (work_ref I3-T3 #1663), copied off ``row.work_ref`` at prepare
+    #: time. The dispatcher binds ``work_ref_var`` from this value around
+    #: :meth:`AgentInvoker.run_scheduled` so the dispatched run's
+    #: ``agent_run.work_ref`` and every audit row the run produces inherit
+    #: the trigger's ref end-to-end. ``None`` when the trigger carries no
+    #: change ticket. This is the seam the Initiative #1654 widens: today
+    #: the dispatch carried only name + inputs, so a dispatched run could
+    #: not inherit the trigger's ref.
+    work_ref: str | None
 
 
 async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | None:
@@ -430,6 +440,9 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
         # any fire that ``run_one_tick`` would log on).
         agent_client_secret=SecretStr(agent_client_secret),
         inputs_str=_coerce_inputs(row.inputs),
+        # work_ref I3-T3 #1663: snapshot the trigger's change-ticket ref so
+        # the dispatcher can bind it onto the run for inheritance.
+        work_ref=row.work_ref,
     )
 
 
@@ -524,6 +537,11 @@ async def _fire_one_off(
     return await _dispatch_invocation(row, prepared, invoker)
 
 
+# _dispatch_invocation is a dispatch handler with four exception branches + two
+# outcome branches, each carrying a load-bearing at-most-once-contract comment;
+# splitting fragments that single error-contract. It was already at the 100-line
+# limit before #1663 added the one-line ``work_ref=`` forward.
+# code-quality-allow: function-size — irreducible error-contract dispatcher (see above)
 async def _dispatch_invocation(
     row: ScheduledTrigger,
     prepared: _PreparedInvocation,
@@ -541,6 +559,11 @@ async def _dispatch_invocation(
     :meth:`run_scheduled` so a cron / one-off fire is distinguishable
     from a direct invocation in audit queries.
 
+    work_ref I3-T3 (#1663): *prepared*'s ``work_ref`` is forwarded into
+    :meth:`run_scheduled`, which binds ``work_ref_var`` so the dispatched
+    run + its audit rows inherit the trigger's ref -- the seam that
+    before #1663 carried only name + inputs.
+
     Errors are logged + swallowed (return ``False``); the at-most-once
     contract documented in the module docstring applies -- the
     advance/mark-fired commit has already happened, so a transient
@@ -553,6 +576,7 @@ async def _dispatch_invocation(
             prepared.inputs_str,
             agent_client_id=prepared.agent_client_id,
             agent_client_secret=prepared.agent_client_secret,
+            work_ref=prepared.work_ref,
         )
     except (
         AgentNotFoundError,

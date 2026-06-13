@@ -3056,6 +3056,9 @@ class AgentRun(Base):
       ``lease_expires_at`` (PG ``WHERE status='running'``). Drives
       the reaper's "what leases have expired" query without
       scanning the table. T4 #825.
+    * ``agent_run_tenant_work_ref_idx`` -- composite b-tree on
+      ``(tenant_id, work_ref)``. Drives the tenant-scoped exact-match
+      ``--work-ref`` filter on the agent-run list (work_ref I3-T2 #1662).
     """
 
     __tablename__ = "agent_run"
@@ -3153,12 +3156,37 @@ class AgentRun(Base):
         nullable=False,
         default=_AGENT_RUN_IN_FLIGHT_POLICY_DEFAULT,
     )
+    # External change-ticket reference (work_ref I3-T2 #1662). The opaque
+    # cross-system reference (a GitHub issue ``"gh:evoila/meho#11"``, a
+    # Jira key, a CR id) of the change record this run works under. Set at
+    # create time from the request-time ``work_ref_var`` binding (same
+    # ContextVar mechanism as run_id / audit_log.work_ref); set-at-create-
+    # only -- never re-mutated. Distinct from ``id`` / the
+    # ``agent_session_id`` lineage key: ``id`` is the run's own identity,
+    # ``work_ref`` is an external reference set from outside the run. NULL
+    # when no work_ref is bound (pre-#1662 rows, direct runs without a
+    # ticket). No FK -- opaque cross-system string. Added by migration
+    # ``0041``.
+    work_ref: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
             "agent_run_tenant_created_at_idx",
             "tenant_id",
             "created_at",
+            postgresql_using="btree",
+        ),
+        # work_ref I3-T2 #1662 -- composite (tenant_id, work_ref) drives
+        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # agent-run list surfaces. Mirrors runbook_runs_tenant_work_ref_idx.
+        Index(
+            "agent_run_tenant_work_ref_idx",
+            "tenant_id",
+            "work_ref",
             postgresql_using="btree",
         ),
         Index(

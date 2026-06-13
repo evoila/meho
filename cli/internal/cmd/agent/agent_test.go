@@ -75,6 +75,7 @@ func TestNewRootCmdRegistersAllVerbs(t *testing.T) {
 		"delete":     false,
 		"run":        false,
 		"run-status": false,
+		"run-list":   false,
 		"run-events": false,
 	}
 	for _, sub := range root.Commands() {

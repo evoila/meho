@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -247,5 +248,89 @@ func TestRunEvents403SingleErrorLine(t *testing.T) {
 	}
 	if strings.Contains(got, "unreachable") {
 		t.Errorf("403 must not surface as 'unreachable' (B1 regression); got %q", got)
+	}
+}
+
+// --- run-list ---
+
+func TestRunListHappyPathRendersTable(t *testing.T) {
+	workRef := "gh:evoila/meho#11"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{
+			{
+				RunId:     uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+				Status:    api.AgentRunStatusSucceeded,
+				Trigger:   "direct",
+				ModelTier: "standard",
+				Turns:     2,
+				WorkRef:   &workRef,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"succeeded", "direct", workRef} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunListPassesWorkRefFilter(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	err := runRunList(cmd, runListOptions{
+		WorkRef:           "gh:evoila/meho#11",
+		Status:            "succeeded",
+		Limit:             25,
+		Offset:            50,
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	q, perr := url.ParseQuery(gotQuery)
+	if perr != nil {
+		t.Fatalf("parse query %q: %v", gotQuery, perr)
+	}
+	if got := q.Get("work_ref"); got != "gh:evoila/meho#11" {
+		t.Errorf("work_ref filter: got %q, want %q", got, "gh:evoila/meho#11")
+	}
+	if got := q.Get("status"); got != "succeeded" {
+		t.Errorf("status filter: got %q, want %q", got, "succeeded")
+	}
+	if got := q.Get("limit"); got != "25" {
+		t.Errorf("limit filter: got %q, want %q", got, "25")
+	}
+	if got := q.Get("offset"); got != "50" {
+		t.Errorf("offset filter: got %q, want %q", got, "50")
+	}
+	if !strings.Contains(stdout.String(), "no agent runs") {
+		t.Errorf("empty list should print 'no agent runs'; got %q", stdout.String())
+	}
+}
+
+func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
+	params := listRunsParams(runListOptions{})
+	if params.WorkRef != nil || params.Status != nil || params.Limit != nil || params.Offset != nil {
+		t.Errorf("empty options must leave filters nil; got %+v", params)
 	}
 }

@@ -57,6 +57,7 @@ func newRunCmd() *cobra.Command {
 	var (
 		input             string
 		asyncRun          bool
+		workRef           string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -78,6 +79,7 @@ func newRunCmd() *cobra.Command {
 				Name:              args[0],
 				Input:             input,
 				Async:             asyncRun,
+				WorkRef:           workRef,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -87,6 +89,9 @@ func newRunCmd() *cobra.Command {
 		"the user prompt to run the agent on (required)")
 	cmd.Flags().BoolVar(&asyncRun, "async", false,
 		"return a run handle immediately instead of blocking for the result")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"external change-ticket reference to bind the run to (e.g. gh:evoila/meho#11); "+
+			"filterable via `meho agent run-list --work-ref`")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the raw run response JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -98,6 +103,7 @@ type runOptions struct {
 	Name              string
 	Input             string
 	Async             bool
+	WorkRef           string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -147,9 +153,14 @@ func postRun(ctx context.Context, backplaneURL string, opts runOptions) (*api.Ru
 		Input: opts.Input,
 		Async: &asyncFlag,
 	}
+	params := &api.RunAgentApiV1AgentsNameRunPostParams{}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		params.MehoWorkRef = &wr
+	}
 	return retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.RunAgentApiV1AgentsNameRunPostResponse, error) {
-			return authed.RunAgentApiV1AgentsNameRunPostWithResponse(ctx, opts.Name, nil, body)
+			return authed.RunAgentApiV1AgentsNameRunPostWithResponse(ctx, opts.Name, params, body)
 		},
 		func(r *api.RunAgentApiV1AgentsNameRunPostResponse) int { return r.StatusCode() },
 	)

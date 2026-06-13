@@ -66,7 +66,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, cast
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,6 +102,7 @@ __all__ = [
     "get_run",
     "heartbeat",
     "increment_turns",
+    "list_runs",
     "release_lease",
     "snapshot_in_flight_policy",
     "start_run",
@@ -283,6 +284,7 @@ async def create_run(
     identity_act: str | None = None,
     agent_definition_id: uuid.UUID | None = None,
     parent_run_id: uuid.UUID | None = None,
+    work_ref: str | None = None,
 ) -> AgentRun:
     """Insert a fresh ``agent_run`` row in the ``pending`` state.
 
@@ -308,6 +310,14 @@ async def create_run(
             executes (soft-FK; ``None`` for an ad-hoc run).
         parent_run_id: The parent run's id when this is an
             agent-invoked child (G11.1-T5); ``None`` otherwise.
+        work_ref: The external change-ticket reference the run works
+            under (work_ref I3-T2 #1662) -- an opaque cross-system
+            string (``"gh:evoila/meho#11"`` / a Jira key / a CR id),
+            normally the request-time
+            :data:`meho_backplane.operations._audit.work_ref_var`
+            binding. ``None`` (the default) when no ticket is bound.
+            Set-at-create-only -- the lifecycle never re-writes it.
+            Distinct from the run's own ``id``.
 
     Returns:
         The inserted :class:`AgentRun`, flushed so its server / ORM
@@ -324,6 +334,7 @@ async def create_run(
         status=AgentRunStatus.PENDING.value,
         turns=0,
         parent_run_id=parent_run_id,
+        work_ref=work_ref,
         created_at=datetime.now(UTC),
     )
     session.add(row)
@@ -342,6 +353,60 @@ async def get_run(session: AsyncSession, run_id: uuid.UUID) -> AgentRun | None:
     surface.
     """
     return await session.get(AgentRun, run_id)
+
+
+#: Server-side cap on the agent-run list page size -- mirrors the bounded
+#: paging discipline of the runbook-run / approval list surfaces so a
+#: single request can never scan an unbounded slice of the table.
+_LIST_RUNS_MAX_LIMIT: Final[int] = 500
+_LIST_RUNS_DEFAULT_LIMIT: Final[int] = 100
+
+
+async def list_runs(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    work_ref: str | None = None,
+    status: AgentRunStatus | None = None,
+    limit: int = _LIST_RUNS_DEFAULT_LIMIT,
+    offset: int = 0,
+) -> list[AgentRun]:
+    """Page through agent runs in *tenant_id*, newest first.
+
+    The read substrate for the agent-run list surface (work_ref I3-T2
+    #1662) -- ``GET /api/v1/agents/runs``, ``meho.agents.list_runs``, and
+    ``meho agent run-list``. Tenant-isolated by the WHERE clause:
+    cross-tenant rows are invisible, so the list cannot leak another
+    tenant's runs.
+
+    Args:
+        session: Open :class:`AsyncSession` (read-only; no commit).
+        tenant_id: The tenant whose runs to list.
+        work_ref: When supplied, narrows to runs whose ``work_ref``
+            matches this external change ticket exactly
+            (``"gh:evoila/meho#11"``). ``None`` applies no work_ref
+            filter (runs with and without a ticket are returned). An
+            empty string is a legitimate exact-match value, distinct
+            from ``None`` -- so the filter is applied whenever the
+            argument is not ``None``.
+        status: When supplied, narrows to runs in this lifecycle state.
+            ``None`` returns every state.
+        limit: Max rows per page. Clamped to ``[1, 500]``.
+        offset: Rows to skip (paging). Negative offsets are clamped to 0.
+
+    Returns:
+        The matching :class:`AgentRun` rows ordered ``created_at DESC``.
+    """
+    bounded_limit = max(1, min(limit, _LIST_RUNS_MAX_LIMIT))
+    bounded_offset = max(0, offset)
+    stmt = select(AgentRun).where(AgentRun.tenant_id == tenant_id)
+    if work_ref is not None:
+        stmt = stmt.where(AgentRun.work_ref == work_ref)
+    if status is not None:
+        stmt = stmt.where(AgentRun.status == status.value)
+    stmt = stmt.order_by(AgentRun.created_at.desc()).limit(bounded_limit).offset(bounded_offset)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
 
 
 async def transition(
@@ -427,6 +492,11 @@ async def transition(
                 "agent_definition_id": (
                     str(row.agent_definition_id) if row.agent_definition_id is not None else None
                 ),
+                # work_ref I3-T2 #1662: the change ticket the run worked
+                # under, so a subscriber's JSONB filter can route the
+                # follow-up against runs of a specific change record.
+                # NULL when the run carried no ticket.
+                "work_ref": row.work_ref,
             },
         )
 

@@ -78,6 +78,7 @@ import socket
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Final
 
@@ -111,6 +112,7 @@ from meho_backplane.operations._audit import (
     AgentRunAuditMeta,
     agent_run_audit_meta_var,
     agent_session_id_var,
+    work_ref_var,
 )
 from meho_backplane.operations.budget_enforcement import (
     BudgetDecision,
@@ -129,6 +131,7 @@ __all__ = [
     "AgentRunNotFoundError",
     "AgentRunOutcome",
     "AgentRunStatusView",
+    "AgentRunSummary",
     "BudgetExceededError",
     "ScheduledRunNoInputError",
     "get_agent_invoker",
@@ -197,6 +200,31 @@ class AgentRunStatusView:
     model: str | None
     output: dict[str, object] | None
     error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunSummary:
+    """A list-row view of a run, read from the durable ``agent_run`` row.
+
+    The projection the agent-run list surface (work_ref I3-T2 #1662)
+    returns per row: identity, lifecycle state, the resolved model
+    coordinates, timestamps, and the ``work_ref`` change-ticket
+    reference the list filters on. The full ``output`` blob is *not*
+    carried -- the list is a scannable index; a caller wanting the
+    result polls :meth:`AgentInvoker.poll` for the specific run.
+    """
+
+    run_id: uuid.UUID
+    status: AgentRunStatus
+    trigger: str
+    model_tier: str
+    provider: str | None
+    model: str | None
+    turns: int
+    work_ref: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,6 +596,15 @@ class AgentInvoker:
         scheduled run has no firing-trigger row to snapshot, and
         ``fail_into_audit`` is the conservative reclaim outcome the
         reaper applies.
+
+        work_ref I3-T2 (#1662): the run's external change-ticket
+        reference is read here off the shared
+        :data:`~meho_backplane.operations._audit.work_ref_var` ContextVar
+        -- the same boundary every transport (REST / MCP / scheduler)
+        binds it on, so all three call sites (:meth:`run`,
+        :meth:`stream_events`, :meth:`_launch_scheduled_run`) inherit it
+        without per-caller plumbing. ``None`` when no ticket is bound;
+        set-at-create-only on the row.
         """
         owner = _lease_owner()
         sessionmaker = get_sessionmaker()
@@ -579,6 +616,7 @@ class AgentInvoker:
                 trigger=trigger,
                 model_tier=entry.model_tier,
                 agent_definition_id=entry.id,
+                work_ref=work_ref_var.get(),
             )
             await run_lifecycle.start_run(session, row, provider=provider, model=model)
             await run_lifecycle.claim_lease(
@@ -1153,6 +1191,36 @@ class AgentInvoker:
                 raise AgentRunNotFoundError(run_id)
             return _row_to_view(row)
 
+    async def list_runs(
+        self,
+        operator: Operator,
+        *,
+        work_ref: str | None = None,
+        status: AgentRunStatus | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentRunSummary]:
+        """List the operator's tenant's runs, newest first (work_ref I3-T2).
+
+        Reads the durable ``agent_run`` rows, tenant-isolated to the
+        operator's tenant. ``work_ref`` (when not ``None``) narrows to
+        runs whose external change-ticket reference matches exactly;
+        ``status`` (when not ``None``) narrows to one lifecycle state.
+        The slice is bounded server-side -- the operation clamps the page
+        size -- so a single call never scans an unbounded table.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            rows = await run_lifecycle.list_runs(
+                session,
+                tenant_id=operator.tenant_id,
+                work_ref=work_ref,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+            return [_row_to_summary(r) for r in rows]
+
     async def stream_events(
         self,
         operator: Operator,
@@ -1275,6 +1343,15 @@ async def _record_child_run(
     the ``invoke_agent`` tool can heartbeat the child for its loop's lifetime
     and the reaper can reclaim a child whose worker died mid-flight.
 
+    work_ref I3-T2 (#1662): the child run inherits the parent's external
+    change-ticket reference off the shared
+    :data:`~meho_backplane.operations._audit.work_ref_var` ContextVar -- the
+    same boundary the top-level path reads in
+    :meth:`AgentInvoker._create_run_row`. Children are recorded inside the
+    parent's ``invoker.run`` call, so the var is still bound at child-creation
+    time and the child lands the same ``work_ref`` as its parent instead of
+    ``None``.
+
     The row's *terminal* state is closed by the companion
     :func:`_finalize_child_run` (G11.1-T8 #1087) after the child loop returns,
     so the child reaches ``succeeded`` / ``failed``. A definition deleted
@@ -1299,6 +1376,7 @@ async def _record_child_run(
             model_tier=entry.model_tier,
             agent_definition_id=entry.id,
             parent_run_id=parent_run_id,
+            work_ref=work_ref_var.get(),
         )
         await run_lifecycle.start_run(session, row, provider=provider, model=model)
         await run_lifecycle.claim_lease(
@@ -1350,6 +1428,23 @@ def _row_to_view(row: AgentRunRow) -> AgentRunStatusView:
         model=row.model,
         output=row.output,
         error=row.error,
+    )
+
+
+def _row_to_summary(row: AgentRunRow) -> AgentRunSummary:
+    """Project an ``agent_run`` row onto the list-row summary (no output blob)."""
+    return AgentRunSummary(
+        run_id=row.id,
+        status=AgentRunStatus(row.status),
+        trigger=row.trigger,
+        model_tier=row.model_tier,
+        provider=row.provider,
+        model=row.model,
+        turns=row.turns,
+        work_ref=row.work_ref,
+        created_at=row.created_at,
+        started_at=row.started_at,
+        ended_at=row.ended_at,
     )
 
 

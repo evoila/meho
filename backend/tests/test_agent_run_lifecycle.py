@@ -60,6 +60,7 @@ from meho_backplane.operations.agent_run import (
     get_run,
     heartbeat,
     increment_turns,
+    list_runs,
     release_lease,
     snapshot_in_flight_policy,
     start_run,
@@ -154,6 +155,186 @@ async def test_get_run_returns_none_for_absent_id() -> None:
     async with sessionmaker() as session:
         result = await get_run(session, uuid.uuid4())
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# work_ref column (I3-T2 #1662): set-at-create, distinct from id, NULL absent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_run_persists_work_ref() -> None:
+    """``create_run(work_ref=...)`` writes the change-ticket ref on the row."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        run = await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="user-7",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#11",
+        )
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+    assert loaded is not None
+    assert loaded.work_ref == "gh:evoila/meho#11"
+    # work_ref is a genuinely distinct column -- it must not be conflated
+    # with the run's own id / agent_session_id lineage key.
+    assert str(loaded.id) != loaded.work_ref
+
+
+@pytest.mark.asyncio
+async def test_create_run_work_ref_defaults_to_null() -> None:
+    """A run created without a work_ref has ``work_ref = NULL``."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        run = await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="user-7",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+        )
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+    assert loaded is not None
+    assert loaded.work_ref is None
+
+
+# ---------------------------------------------------------------------------
+# list_runs (I3-T2 #1662): tenant isolation + work_ref filter + paging
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_runs_returns_tenant_runs_newest_first() -> None:
+    """``list_runs`` returns the tenant's runs ordered ``created_at DESC``."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        for sub in ("a", "b", "c"):
+            await create_run(
+                session,
+                tenant_id=tenant_id,
+                identity_sub=sub,
+                trigger=AgentRunTrigger.DIRECT,
+                model_tier="cheap",
+            )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        runs = await list_runs(session, tenant_id=tenant_id)
+    assert len(runs) == 3
+    # Newest-first: created_at is non-increasing across the page.
+    created = [r.created_at for r in runs]
+    assert created == sorted(created, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_list_runs_filters_by_work_ref_exact_match() -> None:
+    """``work_ref`` narrows to the runs under that exact change ticket."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        match = await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="a",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#11",
+        )
+        await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="b",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#22",
+        )
+        await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="c",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+        )
+        await session.commit()
+        match_id = match.id
+
+    async with sessionmaker() as session:
+        filtered = await list_runs(session, tenant_id=tenant_id, work_ref="gh:evoila/meho#11")
+    assert [r.id for r in filtered] == [match_id]
+
+
+@pytest.mark.asyncio
+async def test_list_runs_no_filter_returns_runs_with_and_without_work_ref() -> None:
+    """``work_ref=None`` applies no filter -- ticketed + un-ticketed runs return."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="a",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#11",
+        )
+        await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="b",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        all_runs = await list_runs(session, tenant_id=tenant_id, work_ref=None)
+    assert len(all_runs) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_runs_is_tenant_isolated() -> None:
+    """``list_runs`` never returns another tenant's runs."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_a = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        tenant_b = await _seed_tenant(session, slug=f"t-{uuid.uuid4().hex[:8]}")
+        await create_run(
+            session,
+            tenant_id=tenant_a,
+            identity_sub="a",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#11",
+        )
+        await create_run(
+            session,
+            tenant_id=tenant_b,
+            identity_sub="b",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="cheap",
+            work_ref="gh:evoila/meho#11",
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        # Tenant B has a run with the same work_ref, but tenant A's list
+        # must not see it.
+        a_runs = await list_runs(session, tenant_id=tenant_a, work_ref="gh:evoila/meho#11")
+    assert len(a_runs) == 1
+    assert all(r.tenant_id == tenant_a for r in a_runs)
 
 
 # ---------------------------------------------------------------------------

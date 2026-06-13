@@ -431,6 +431,177 @@ needs an explicit rebuild before it answers, and rebuilds serialize per
 project) from the agent, surfacing them only as the collection's lifecycle
 `status`.
 
+## Corpus wire contract — what meho REQUIRES of a `corpus-http` backend
+
+The sections above cover how meho is **configured to reach** a corpus
+(the `backend.ref` endpoint/audience, the legacy `corpus_*` settings) and
+the operator-facing **lifecycle** (probe → enable). They do **not** state
+the HTTP shapes a `corpus-http` backend must speak. This section does: it
+is the normative "your corpus must speak this" contract a corpus
+implementer (MEHO.Knowledge today, an ECP-side corpus tomorrow) builds
+against. Every shape below is derived verbatim from the federation client
+in [`backend/src/meho_backplane/auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py)
+— that file is the source of truth; if this section and the code ever
+disagree, the code wins and this section is the bug.
+
+> **Why this matters (the #1732 footgun).** The first true in-cluster
+> `search_docs` round-trip returned **zero hits from a populated corpus**
+> because the corpus answered `{"results": [{"text": …, "source_uri": …}]}`
+> at a `/readyz` readiness path, while meho reads top-level **`chunks`**
+> with per-chunk **`content`** / **`source_url`** and derives its
+> readiness URL as **`/status`**. The shapes parsed cleanly into an empty
+> hit list rather than failing loud (see the fail-closed note at the end).
+> A corpus that satisfies the contract below cannot hit that class of
+> silent mismatch.
+
+### Search — request
+
+meho issues `POST <backend.ref.endpoint>` (the per-collection corpus
+search URL; the legacy global `corpus_url` for an unmigrated deploy) with
+a JSON body and a forwarded operator JWT:
+
+```http
+POST /v1/search HTTP/1.1
+Host: corpus.example
+Authorization: Bearer <operator JWT>
+Content-Type: application/json
+
+{
+  "query": "config maximums",
+  "limit": 10,
+  "metadata_filters": {"product": "nsx", "version": "9.0"},
+  "audience": "https://corpus.example"
+}
+```
+
+| Key | Type | Sent when | Notes |
+|---|---|---|---|
+| `query` | `str` | always | The free-text search query. |
+| `limit` | `int` | always | Maximum chunks to return. A corpus that reads only `top_k` (or `k`/`size`) and ignores `limit` silently caps at *its* default — the **non-fatal** #1732 mismatch. Read `limit`. |
+| `metadata_filters` | `{key: scalar}` | only when non-empty | Binary `{key: value}` narrowing (e.g. `{"product": "vmware"}`). Omitted entirely when meho has no filters — do not require the key. |
+| `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
+
+- **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw
+  JWT is forwarded (not a meho service token), so the corpus authenticates
+  **and audits** the call as the operator, the same forward-the-JWT
+  contract meho uses for Vault. The corpus must accept and audit it as the
+  forwarded operator. (`corpus.py:184`.)
+- **Source:** request body `corpus.py:178-182`; JWT header `:184`;
+  per-collection endpoint/audience resolution
+  [`docs_search/backends/corpus_http.py`](../../backend/src/meho_backplane/docs_search/backends/corpus_http.py)`:105-128`.
+
+### Search — response
+
+meho expects a `2xx` JSON body with a **top-level `chunks`** array, ranked
+**best-first** (meho preserves the corpus's order; it does not re-sort):
+
+```json
+{
+  "chunks": [
+    {
+      "chunk_id": "c-001",
+      "document_id": "d-042",
+      "content": "The supported maximum is …",
+      "source_url": "https://docs.example/vmware/9.0/maximums#c-001",
+      "score": 0.87,
+      "metadata": {"product": "vmware", "version": "9.0"}
+    }
+  ]
+}
+```
+
+| Field | Type | Required | meho reads |
+|---|---|---|---|
+| `chunks` | `[chunk]` | **yes** (top-level key) | The ordered hit list. **Not** `results` / `hits` / `data`. |
+| `chunk_id` | `str` | **yes** | Per-chunk id. |
+| `document_id` | `str` | **yes** | Owning document id. |
+| `content` | `str` | **yes** | The chunk text. **Not** `text` / `body` / `snippet`. |
+| `source_url` | `str` | optional | Citation URL. **Not** `source_uri` / `url`. |
+| `score` | `float` | optional | Rank score (meho keeps corpus order regardless). |
+| `metadata` | `object` | optional | Per-chunk attributes (e.g. `product` / `version`); passed through. |
+
+meho reads top-level **`chunks`** and per-chunk **`content`** /
+**`source_url`** — a corpus that returns `results` / `text` / `source_uri`
+is **not** speaking this contract (and triggers the empty-parse footgun
+below, not a loud failure). Extra fields meho does not name are ignored
+(`extra="ignore"`), so a corpus may add fields freely; **dropping** a
+required field (`chunk_id` / `document_id` / `content`) fails parse and is
+surfaced as `CorpusUnavailable` → 503. Source: `CorpusChunk` /
+`CorpusSearchResponse`, `corpus.py:88-122`.
+
+### Readiness — request + response
+
+meho reads corpus readiness with a `GET` at a **derived** URL — there is
+**no fixed `/status` literal**. `derive_status_url(<search endpoint>)`
+(`corpus.py:248-265`) computes it:
+
+- If the search URL's final path segment is **`search`**, that segment is
+  rewritten to **`status`**:
+  `https://corpus.example/v1/search` → `https://corpus.example/v1/status`.
+- Otherwise **`/status`** is **appended** as a child segment:
+  `https://corpus.example/v1/lookup` → `https://corpus.example/v1/lookup/status`.
+- Any query string / fragment on the search URL is **dropped** from the
+  readiness URL.
+
+So a corpus that exposes readiness at `/readyz` (or any path the rule does
+not produce) is **not reachable** by meho's probe — expose readiness at
+the derived `/status` URL. On readiness, **`audience` is forwarded as a
+query param**, not a body key (contrast search above):
+
+```http
+GET /v1/status?audience=https://corpus.example HTTP/1.1
+Host: corpus.example
+Authorization: Bearer <operator JWT>
+```
+
+The expected `2xx` JSON body:
+
+```json
+{
+  "index_built": true,
+  "doc_count": 17234,
+  "last_ingested_at": "2026-06-05T09:12:00Z"
+}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `index_built` | `bool` | **yes** | `false` ⇒ corpus is **reachable but not yet answerable** (ANN index rebuilding, or registered-but-never-ingested). meho surfaces this as the collection's `rebuilding` / `provisioning` lifecycle `status`, **not** as a silent empty search. |
+| `doc_count` | `int` | optional | Indexed document count (operator liveness). |
+| `last_ingested_at` | `datetime` | optional | ISO-8601 timestamp of the last ingest. |
+
+`audience` is a **query param** here (`corpus.py:311`) versus a **body
+key** on `/search` (`corpus.py:181-182`) — a corpus that only reads
+`audience` from one of the two will mis-bind the token on the other path.
+Source: `derive_status_url` `corpus.py:248-265`; `CorpusStatusResponse`
+`:224-245`; audience-as-query-param `:311`.
+
+### Fail-closed semantics meho enforces
+
+Every error path collapses to **one** typed `CorpusUnavailable`, which the
+`search_docs` route renders as **HTTP 503** (and `-32603` at the MCP face)
+— never a silent empty result. meho fails closed when the corpus is:
+
+- **unconfigured** — no `backend.ref` endpoint and an empty legacy
+  `corpus_url` (`corpus.py:172-175`, `:303-307`);
+- **unreachable / timed out** — any transport error or a request exceeding
+  `corpus_timeout_seconds` (`:190-195`, `:318-320`);
+- **non-2xx** — the upstream status is logged; the response **body is
+  never** echoed into the 503 (`:197-205`, `:322-327`);
+- **non-JSON** — a `2xx` whose body is not JSON (`:207-213`, `:329-333`);
+- **schema-drift** — a `2xx` JSON body missing a required field or with a
+  wrong type (`:215-221`, `:335-339`).
+
+> **The one non-loud branch (#1732 footgun).** A `2xx` whose JSON body has
+> **neither `chunks` nor any field meho consumes** parses to an **empty
+> hit list**, not a `CorpusUnavailable`. Because `chunks` defaults to `[]`
+> (`CorpusSearchResponse`, `corpus.py:120-122`) and unknown keys are
+> ignored, a corpus returning `{"results": […]}` yields **zero hits**
+> rather than failing loud — exactly the #1732 symptom. The corpus side
+> must therefore return the `chunks` envelope above; making this branch
+> fail loud instead is a **code** change tracked on #1732 and is out of
+> scope for this doc.
+
 ## Verify
 
 Prove the add-on end-to-end. The contract is: an entitled collection is
@@ -542,6 +713,15 @@ the answer.
 
 - Codebase walkthrough (how the surface is wired):
   [`docs/codebase/docs-search.md`](../codebase/docs-search.md).
+- Corpus wire-contract source of truth (the federation client this
+  contract is derived from):
+  [`backend/src/meho_backplane/auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py)
+  (search request/response + `derive_status_url` + readiness + fail-closed
+  branches) and the calling adapter
+  [`backend/src/meho_backplane/docs_search/backends/corpus_http.py`](../../backend/src/meho_backplane/docs_search/backends/corpus_http.py)
+  (per-collection `backend.ref` endpoint/audience resolution). Sibling code
+  arm: [#1732](https://github.com/evoila/meho/issues/1732)
+  (corpus-http ↔ MEHO.Knowledge `/search` contract mismatch).
 - Realm-side claim recipe (the capabilities claim follows this pattern):
   [`keycloak-tenant-claims.md`](keycloak-tenant-claims.md).
 - Catalogue Initiative: [#1548](https://github.com/evoila/meho/issues/1548)

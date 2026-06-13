@@ -385,14 +385,23 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # rebrand replaced DaisyUI's ``card``/``card-body`` shell).
     # Five surface cards + one deploy card = 6 card blocks.
     assert body.count("meho-card") >= 6
-    # HTMX SSE wiring on the recent-activity tray. The dashboard
-    # subscribes to ``/api/v1/feed`` with no query parameters; the
-    # feed endpoint (G6.1-T4 #310) does not accept a ``limit`` knob
-    # and FastAPI silently drops unknown query params, so any
-    # ``?limit=N`` here would only be a no-op surface promise. Trim-
-    # to-last-N is G10.1 (#338) client-side surface work.
-    assert 'sse-connect="/api/v1/feed"' in body
+    # HTMX SSE wiring on the recent-activity tray (G0.25 #1696). The
+    # tray subscribes to the session-gated bridge -- NOT the
+    # Bearer-only ``/api/v1/feed``, which a browser ``EventSource``
+    # can never authenticate against (no Authorization header
+    # support), so the old wiring 401-looped behind its
+    # "Connecting..." placeholder forever.
+    assert 'sse-connect="/ui/broadcast/stream"' in body
     assert 'sse-swap="broadcast"' in body
+    assert 'sse-connect="/api/v1/feed"' not in body
+    # Frames are consumed via the hidden-sink + Alpine pattern (raw
+    # BroadcastEvent JSON must never be swapped into the DOM): the
+    # component wrapper, its head-level controller script (#1692
+    # ordering seam), and the pre-render placeholder all render
+    # server-side.
+    assert "dashboardFeedTray({" in body
+    assert '<script src="/ui/static/src/app/dashboard-feed.js" defer></script>' in body
+    assert "Connecting to live feed" in body
     # Version footer renders the deployed-build label the chassis env
     # binds from CHART_VERSION / GIT_SHA (#1698). No hardcoded ``v``
     # prefix anymore -- the label carries its own when it is a release

@@ -17,31 +17,46 @@
       (5 cols). Below: live-feed tray (8) + readiness checks (4).
       Cards stagger in via the CSS-only ``meho-reveal`` animation.
     * The live recent-activity snippet -- HTMX SSE extension
-      subscribes to /api/v1/feed and swaps events into the
-      ``#meho-feed-tray`` container as they arrive. Pre-render
-      placeholder text covers the SSE-not-yet-connected window.
-      (Trim-to-last-N is G10.1 client-side surface work; the feed
-      endpoint streams the live tail.)
+      subscribes to the session-gated /ui/broadcast/stream bridge
+      (#1696; the Bearer-only /api/v1/feed is unreachable for
+      EventSource, which cannot send an Authorization header). A
+      hidden sink + the ``dashboardFeedTray`` Alpine controller
+      consume the BroadcastEvent JSON frames and render them as
+      x-text-bound rows in ``#meho-feed-tray`` -- the same
+      raw-swap-cancelling pattern as the broadcast + connectors
+      surfaces, so markup-bearing event fields stay inert text.
+      Pre-render placeholder copy covers the SSE-not-yet-connected
+      window; the controller trims the tray to ``feed_tray_cap``
+      rows (richer bounded-tray UX is G10.1 surface work).
 -#}
 {% extends "base.html" %}
 {% from "_icons.html" import icon %}
+
+{#-
+  Registers the ``dashboardFeedTray`` Alpine component. Injected into
+  the head-level ``component_scripts`` block so it executes BEFORE
+  ``vendor/alpine.min.js`` (deferred scripts run in document order):
+  the controller registers on ``alpine:init``, and Alpine's CDN bundle
+  fires that event from a microtask at the end of its own script task
+  -- a body-end script registers the listener too late and the
+  ``x-data="dashboardFeedTray(...)"`` wrapper stays dead (#1692).
+-#}
+{% block component_scripts %}
+  <script src="/ui/static/src/app/dashboard-feed.js" defer></script>
+{% endblock %}
 
 {% block page_title %}MEHO Operator Console{% endblock %}
 
 {% block content %}
 {#-
-  HTMX 2 SSE extension wiring (https://htmx.org/extensions/sse/) --
-  ``hx-ext="sse"`` activates the extension on the wrapper element;
-  ``sse-connect`` points at the SSE endpoint;
-  ``sse-swap="broadcast"`` listens for ``event: broadcast`` frames the
-  feed emits per G6.1-T4 (#310) and swaps the data payload into
-  ``#meho-feed-tray``. The ``hx-headers`` on the wrapper forwards
-  the CSRF token on any state-changing HTMX request anywhere in this
-  page subtree.
+  The ``hx-headers`` on the wrapper forwards the CSRF token on any
+  state-changing HTMX request anywhere in this page subtree. The SSE
+  wiring lives on the recent-activity tray's hidden sink below --
+  ``hx-ext="sse"`` + ``sse-connect`` belong on the same element per
+  https://htmx.org/extensions/sse/.
 -#}
 <section
   class="space-y-8"
-  hx-ext="sse"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
 
@@ -123,10 +138,21 @@
   {# -------- Live feed tray + readiness, side by side -------- #}
   <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
 
-    {# Live feed snippet (HTMX SSE). #}
+    {# Live feed snippet (HTMX SSE via the session-gated bridge, #1696).
+       The section is the ``dashboardFeedTray`` component root: the
+       htmx:sse-* events dispatched on the hidden sink bubble up to the
+       Alpine listeners here. ``onSseMessage`` cancels the extension's
+       raw swap (BroadcastEvent JSON must never be parsed into DOM) and
+       prepends the frame to ``events``; rows render through ``x-text``
+       bindings only, so operator-influenced event fields stay inert
+       text -- mirrors broadcast/_feed.html + connectors/_recent_ops.html. #}
     <section
       class="meho-card meho-reveal col-span-1 lg:col-span-8"
       aria-label="Recent broadcast events (live)"
+      x-data='dashboardFeedTray({ cap: {{ feed_tray_cap }} })'
+      x-on:htmx:sse-before-message="onSseMessage($event)"
+      x-on:htmx:sse-open="connected = true"
+      x-on:htmx:sse-error="connected = false"
     >
       <div class="flex h-full flex-col p-5">
         <div class="flex items-baseline justify-between gap-4">
@@ -138,16 +164,45 @@
             Open broadcast surface {{ icon("arrow-right", class="size-3") }}
           </a>
         </div>
+
+        {# SSE sink -- the extension binds the EventSource here and owns
+           reconnect/backoff (Last-Event-Id replay rides on the bridge's
+           ``id:`` lines exactly as on the broadcast surface). #}
+        <div
+          hx-ext="sse"
+          sse-connect="{{ feed_endpoint }}"
+          sse-swap="broadcast"
+          class="hidden"
+          aria-hidden="true"
+        ></div>
+
         <ul
           id="meho-feed-tray"
           class="mt-3 max-h-72 divide-y divide-base-content/6 overflow-y-auto overflow-x-hidden font-mono text-xs leading-6 text-base-content/70 [overflow-wrap:anywhere]"
-          sse-connect="{{ feed_endpoint }}"
-          sse-swap="broadcast"
-          hx-swap="afterbegin"
+          aria-live="polite"
         >
-          <li class="py-2 text-base-content/50">
+          {# Server-rendered copy covers the pre-Alpine window; once the
+             controller mounts, x-text keeps the copy in step with the
+             connection state until the first frame hides the row. #}
+          <li
+            x-show="events.length === 0"
+            class="py-2 text-base-content/50"
+            x-text="connected ? 'Connected — waiting for activity…' : 'Connecting to live feed…'"
+          >
             Connecting to live feed&hellip;
           </li>
+          <template x-for="ev in events" :key="ev.event_id">
+            <li class="flex items-center gap-2 py-1.5">
+              <time
+                class="shrink-0 text-base-content/50"
+                x-bind:datetime="ev.ts"
+                x-text="formatTs(ev.ts)"
+              ></time>
+              <span class="max-w-40 shrink-0 truncate text-base-content/50" x-text="ev.principal_sub"></span>
+              <span class="min-w-0 truncate" x-text="ev.op_id"></span>
+              <span class="ml-auto shrink-0 text-base-content/50" x-text="ev.result_status"></span>
+            </li>
+          </template>
         </ul>
       </div>
     </section>

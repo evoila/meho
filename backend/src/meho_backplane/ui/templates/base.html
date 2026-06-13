@@ -250,16 +250,21 @@
                 </button>
               </div>
 
-              {# Status line #}
+              {# Status line. ``app_version`` is the deployed-build
+                 label (chart version, short git sha, or "unknown") the
+                 chassis env binds from the same CHART_VERSION/GIT_SHA
+                 env vars GET /version reads -- it carries its own
+                 ``v`` prefix when it is a release version, so none is
+                 hardcoded here (#1698). #}
               <div
                 class="flex items-center gap-2 px-0.5 font-mono text-[0.68rem] text-base-content/50"
-                title="MEHO backplane v{{ app_version }}"
+                title="MEHO backplane {{ app_version }}"
               >
                 <span
                   class="inline-block h-1.5 w-1.5 rounded-full {% if ready %}bg-success{% else %}bg-warning{% endif %}"
                   aria-hidden="true"
                 ></span>
-                <span>v{{ app_version }}</span>
+                <span>{{ app_version }}</span>
                 <span aria-hidden="true">&middot;</span>
                 <span>{% if ready %}ready{% else %}starting{% endif %}</span>
               </div>

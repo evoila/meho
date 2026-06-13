@@ -30,10 +30,18 @@ Configuration decisions:
   500 into a structlog event the operator sees in CI / kubectl logs.
 
 The environment exposes one extra global, ``app_version``, bound from
-:data:`meho_backplane.__version__` so every template can show the
-backplane version in the footer without each route having to pass it
-explicitly. Tenant / operator-identity globals will be wired by T4
-(#865) once the session middleware lands.
+:func:`meho_backplane.version.deployed_version_label` so every template
+can show the *deployed* build identity in the footer without each route
+having to pass it explicitly. The label reads the same ``CHART_VERSION``
+/ ``GIT_SHA`` environment variables ``GET /version`` reports (#1698 —
+the global used to bind the static package ``__version__``, which is
+pinned to ``0.1.0-dev`` by design and never tracks the deployed image).
+Binding once at environment construction is equivalent to reading
+per-request: the env vars are injected at image build / Pod start and
+cannot change for the life of the process. Tests that monkeypatch them
+rebuild the singleton via :func:`reset_templating_for_testing`. Tenant /
+operator-identity globals will be wired by T4 (#865) once the session
+middleware lands.
 
 This module deliberately does **not** wire FastAPI dependencies or
 ``Request`` objects. T5 (#866) builds the ``TemplateResponse`` helper
@@ -50,8 +58,8 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from starlette.requests import Request
 
-from meho_backplane import __version__
 from meho_backplane.ui.paths import templates_dir
+from meho_backplane.version import deployed_version_label
 
 # Cached environment singleton. Module-level cache rather than
 # functools.lru_cache so the type checker sees the concrete return
@@ -97,7 +105,7 @@ def get_jinja_env() -> Environment:
             # cleanly.
             keep_trailing_newline=True,
         )
-        _ENV.globals["app_version"] = __version__
+        _ENV.globals["app_version"] = deployed_version_label()
     return _ENV
 
 

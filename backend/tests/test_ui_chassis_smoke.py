@@ -50,6 +50,7 @@ from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
+from meho_backplane import __version__
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
@@ -392,8 +393,14 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # to-last-N is G10.1 (#338) client-side surface work.
     assert 'sse-connect="/api/v1/feed"' in body
     assert 'sse-swap="broadcast"' in body
-    # Version footer renders the chassis version global.
-    assert "MEHO backplane v" in body
+    # Version footer renders the deployed-build label the chassis env
+    # binds from CHART_VERSION / GIT_SHA (#1698). No hardcoded ``v``
+    # prefix anymore -- the label carries its own when it is a release
+    # version -- and the static package ``__version__`` (0.1.0-dev by
+    # design) must never leak into a rendered page, whatever the
+    # ambient env vars say.
+    assert "MEHO backplane " in body
+    assert __version__ not in body
     # CSRF cookie set on the response so subsequent state-changing
     # requests can echo it back.
     assert CSRF_COOKIE_NAME in response.cookies

@@ -37,6 +37,12 @@ field was set" means:
   payload carried (the JSON-Schema ``additionalProperties: false``
   guard already rejects unknown keys upstream), so membership is the
   same set-vs-unset discriminant.
+* The UI create form (#1697) uses ``expires_at is not None`` on the
+  parsed form value -- FastAPI coerces both an absent field and the
+  empty string a blank ``<input type="datetime-local">`` submits to
+  ``None``, and a browser form cannot express the explicit-``null``
+  opt-out, so set-vs-unset collapses to datetime-vs-``None`` on that
+  surface.
 
 The policy itself lives here -- one place to change the default
 windowing, one place to widen the gate to other scopes, one place

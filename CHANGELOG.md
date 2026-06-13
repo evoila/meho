@@ -165,6 +165,18 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Test suite: deflaked
+  `test_retrieval_usage.py::test_route_audit_row_count_matches_total_searches`,
+  which intermittently red-flaked the unit lane with `total_searches == 0`.
+  Root cause was a time-bomb, not the hypothesised xdist engine-isolation
+  race: the route test seeded `audit_log` rows at a fixed past date
+  (`_NOW = 2026-05-14`) while the route resolves its default `since`
+  window relative to the real wall clock (`now - 30d`), so the rows fell
+  out of the window once the calendar advanced ~30 days past `_NOW`. The
+  seed timestamps now anchor to `datetime.now(UTC)`; both assertions
+  (`total_searches == 2` and `payload["row_count"] == 2`) are unchanged,
+  and the fix is tests-only (no production engine/session behaviour
+  change) (#1722)
 - Operator console: broadcast feed/wall and the connectors recent-ops
   card rendered dead (empty state despite a healthy stream, console
   errors on every SSE frame) because their Alpine component scripts

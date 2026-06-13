@@ -358,6 +358,8 @@ async def _approve_handler(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     request_id = _require_id(arguments)
+    reason = arguments.get("reason")
+    reason_str = str(reason) if reason is not None else ""
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_IDS["approve"],
         audit_op_class="write",
@@ -375,6 +377,7 @@ async def _approve_handler(
                 request_id,
                 operator=operator,
                 params=None,
+                reason=reason_str,
             )
             await session.commit()
         except ApprovalNotFoundError as exc:
@@ -457,6 +460,10 @@ register_mcp_tool(
             "properties": {
                 "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
                 "id": _APPROVAL_LEGACY_ID_PROPERTY,
+                "reason": {
+                    "type": "string",
+                    "description": "Optional rationale recorded on the decision audit row.",
+                },
             },
             "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,

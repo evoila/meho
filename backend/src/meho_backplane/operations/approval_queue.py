@@ -380,12 +380,16 @@ async def create_pending_request(
     return request
 
 
+# code-quality-allow: 101 lines but ~70 are the Args/Raises docstring documenting
+# the four preconditions + the params/reason contract; the executable body is ~15
+# lines. Splitting it would scatter one linear approve flow for a line-count win.
 async def approve_request(
     session: AsyncSession,
     request_id: uuid.UUID,
     *,
     operator: Operator,
     params: dict[str, Any] | None = None,
+    reason: str = "",
 ) -> ApprovalRequest:
     """Approve a pending request.
 
@@ -430,6 +434,8 @@ async def approve_request(
         params: The **original** dispatch params (un-modified). Required
             on the REST path so the hash check applies; ``None`` on the
             MCP/CLI operator-decision path.
+        reason: Optional human-readable approval reason (recorded in the
+            audit payload). Mirrors :func:`reject_request`.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -453,6 +459,10 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
+    extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
+    if reason:
+        extra["reason"] = reason
+
     approve_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
@@ -462,7 +472,7 @@ async def approve_request(
         path="approval.decision",
         status_code=_DECISION_STATUS_CODE_APPROVED,
         duration_ms=0.0,
-        extra_payload={"decision": "approved", "reviewed_by": operator.sub},
+        extra_payload=extra,
     )
 
     _log.info(

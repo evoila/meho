@@ -501,6 +501,117 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
 
 
 @pytest.mark.asyncio
+async def test_approve_request_records_reason_in_decision_payload(
+    session: AsyncSession,
+) -> None:
+    """A non-empty approve ``reason`` lands in the decision audit payload;
+    omitting it leaves the payload free of a ``reason`` key — mirroring reject.
+    """
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
+    params = {}
+    params_hash = compute_params_hash(params)
+
+    with_reason = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    without_reason = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(
+            s2, with_reason.id, operator=reviewer, params=params, reason="rollback window approved"
+        )
+        await approve_request(s2, without_reason.id, operator=reviewer, params=params)
+        await s2.commit()
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        decision_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    by_request = {row.payload["approval_request_id"]: row.payload for row in decision_rows}
+    assert by_request[str(with_reason.id)]["decision"] == "approved"
+    assert by_request[str(with_reason.id)]["reason"] == "rollback window approved"
+    # Omitting the reason leaves the payload unchanged from today (no key).
+    assert "reason" not in by_request[str(without_reason.id)]
+
+
+@pytest.mark.asyncio
+async def test_approve_and_reject_reason_payloads_are_symmetric(
+    session: AsyncSession,
+) -> None:
+    """approve and reject decision-row payloads carry the ``reason`` field
+    in the same structural shape (side-by-side assertion)."""
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
+    params = {}
+    params_hash = compute_params_hash(params)
+
+    to_approve = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    to_reject = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.delete",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        await approve_request(
+            s2, to_approve.id, operator=reviewer, params=params, reason="why-approve"
+        )
+        await reject_request(s2, to_reject.id, operator=reviewer, reason="why-reject")
+        await s2.commit()
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = {
+            row.payload["approval_request_id"]: row.payload
+            for row in (
+                await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.decision"))
+            )
+            .scalars()
+            .all()
+        }
+    approve_payload = rows[str(to_approve.id)]
+    reject_payload = rows[str(to_reject.id)]
+    assert approve_payload["decision"] == "approved"
+    assert reject_payload["decision"] == "rejected"
+    assert approve_payload["reason"] == "why-approve"
+    assert reject_payload["reason"] == "why-reject"
+    # Same key set up to the decision-specific value.
+    assert set(approve_payload) == set(reject_payload)
+
+
+@pytest.mark.asyncio
 async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) -> None:
     """Supplying different params raises ParamsMismatchError."""
     requester = _make_operator(sub="requester-sub")

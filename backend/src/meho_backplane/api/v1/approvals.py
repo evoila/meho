@@ -114,6 +114,7 @@ class ApprovalRequestView(BaseModel):
     decided_at: str | None
     created_at: str
     expires_at: str | None
+    work_ref: str | None
 
 
 class ApproveRequestBody(BaseModel):
@@ -187,6 +188,7 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
+        work_ref=row.work_ref,
     )
 
 
@@ -285,13 +287,23 @@ async def list_approvals(
             "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
         ),
     ),
+    work_ref: str | None = Query(
+        default=None,
+        description=(
+            "Filter by external change-ticket reference (exact match), e.g. "
+            "'gh:evoila/meho#1' — the requests authorised by change ticket X "
+            "(work_ref I2-T1 #1659). Omit for no work_ref filter."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
     Defaults to listing only ``pending`` requests. Supports filtering
     by status via ``?status=approved`` / ``?status=rejected`` /
-    ``?status=expired``. Returns newest-first (``created_at DESC``).
+    ``?status=expired`` and by change ticket via
+    ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
+    (``created_at DESC``).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
@@ -312,8 +324,10 @@ async def list_approvals(
             select(ApprovalRequest)
             .where(ApprovalRequest.tenant_id == operator.tenant_id)
             .where(ApprovalRequest.status == status_filter.value)
-            .order_by(ApprovalRequest.created_at.desc())
         )
+        if work_ref is not None:
+            stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 

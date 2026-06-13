@@ -24,6 +24,7 @@ import (
 func newListCmd() *cobra.Command {
 	var (
 		statusFilter      string
+		workRef           string
 		limit             int
 		offset            int
 		jsonOut           bool
@@ -35,7 +36,9 @@ func newListCmd() *cobra.Command {
 		Long: "list calls GET /api/v1/approvals and renders approval " +
 			"requests in the operator's tenant, newest first. Use " +
 			"--status pending for the most common query: requests " +
-			"awaiting a decision. --limit caps the page size " +
+			"awaiting a decision. --work-ref filters to the requests " +
+			"authorised by an external change ticket (exact match, " +
+			"e.g. gh:evoila/meho#1). --limit caps the page size " +
 			"(1..500, server default 50). --offset advances the page " +
 			"window. --json emits the raw JSON array for " +
 			"jq pipelines.",
@@ -45,6 +48,7 @@ func newListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(cmd, listOpts{
 				StatusFilter:      statusFilter,
+				WorkRef:           workRef,
 				Limit:             limit,
 				Offset:            offset,
 				JSONOut:           jsonOut,
@@ -54,6 +58,8 @@ func newListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by status: pending, approved, rejected, expired (default: all)")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"filter by external change-ticket reference, exact match (e.g. gh:evoila/meho#1)")
 	// --limit and --offset are preserved for CLI-signature compatibility
 	// (operator scripts may pass them). The backend's
 	// /api/v1/approvals route doesn't accept either parameter today
@@ -75,6 +81,7 @@ func newListCmd() *cobra.Command {
 
 type listOpts struct {
 	StatusFilter      string
+	WorkRef           string
 	Limit             int
 	Offset            int
 	JSONOut           bool
@@ -154,6 +161,10 @@ func fetchList(
 	if opts.StatusFilter != "" {
 		s := opts.StatusFilter
 		params.Status = &s
+	}
+	if opts.WorkRef != "" {
+		w := opts.WorkRef
+		params.WorkRef = &w
 	}
 	resp, err := client.ListApprovalsApiV1ApprovalsGetWithResponse(ctx, params)
 	if err != nil {

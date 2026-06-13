@@ -73,6 +73,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditLog,
 )
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
@@ -241,6 +242,14 @@ async def _write_audit_row(
         request_id=None,
         duration_ms=Decimal(str(round(duration_ms, 2))),
         payload=payload,
+        # work_ref I2-T1 (#1659): stamp the authorising change-ticket ref
+        # straight off the request row rather than re-reading work_ref_var.
+        # The approval-request and decision audit rows are written from the
+        # request's own lifecycle (create, then a later approve/reject on a
+        # different operator's task whose var is unset), so the row is the
+        # durable source of truth -- it keeps both audit rows aligned with
+        # the value the request was parked under.
+        work_ref=request.work_ref,
     )
     session.add(row)
     await session.flush()
@@ -317,6 +326,11 @@ async def create_pending_request(
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
 
+    # External change-ticket ref (work_ref I2-T1 #1659): read from the
+    # same request-time ContextVar the audit writers read (bound at the
+    # transport/agent boundary, #1657), so the parked request, its
+    # decision audit row, and the re-dispatched op all carry one ref.
+    # NULL when nothing bound it.
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -332,6 +346,7 @@ async def create_pending_request(
         status=ApprovalRequestStatus.PENDING.value,
         created_at=_now(),
         expires_at=expires_at,
+        work_ref=work_ref_var.get(),
     )
     session.add(request)
     await session.flush()
@@ -606,14 +621,27 @@ async def resume_dispatch_after_approval(
 
     from meho_backplane.operations.dispatcher import dispatch
 
-    return await dispatch(
-        operator=operator,
-        connector_id=request.connector_id,
-        op_id=request.op_id,
-        target=resolved_target,
-        params=effective_params,
-        _approved=True,
-    )
+    # Re-bind the request's stored work_ref onto the ContextVar for the
+    # re-dispatch (work_ref I2-T1 #1659). The operator decision surfaces
+    # (REST /approve, /decide, MCP by-id) run on a fresh task whose
+    # work_ref_var is unset, so the re-dispatched op's audit rows would
+    # otherwise lose the authorising ticket the parked request carried.
+    # The in-process agent-run resume path keeps its own bound var and
+    # does not call this helper, so it inherits the ref unchanged. Reset
+    # the token afterward to avoid leaking the ref onto unrelated work on
+    # the same task.
+    token = work_ref_var.set(request.work_ref)
+    try:
+        return await dispatch(
+            operator=operator,
+            connector_id=request.connector_id,
+            op_id=request.op_id,
+            target=resolved_target,
+            params=effective_params,
+            _approved=True,
+        )
+    finally:
+        work_ref_var.reset(token)
 
 
 async def _rehydrate_resume_target(
@@ -848,6 +876,7 @@ async def list_pending(
     *,
     tenant_id: uuid.UUID,
     status: str | None = "pending",
+    work_ref: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[ApprovalRequest]:
@@ -855,14 +884,19 @@ async def list_pending(
 
     G11.2-T5 (#818) read substrate. ``status=None`` returns every state;
     ``status="pending"`` (the default for the operator UX) returns only
-    requests awaiting a decision. Tenant-isolated by the WHERE clause —
-    cross-tenant ids are invisible.
+    requests awaiting a decision. ``work_ref`` (work_ref I2-T1 #1659),
+    when supplied, narrows to requests authorised by that exact external
+    change ticket (``"gh:evoila/meho#1"``); ``None`` applies no work_ref
+    filter. Tenant-isolated by the WHERE clause — cross-tenant ids are
+    invisible.
     """
     from sqlalchemy import select
 
     stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(ApprovalRequest.status == status)
+    if work_ref is not None:
+        stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
     stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())

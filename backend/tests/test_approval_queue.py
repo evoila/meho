@@ -49,6 +49,7 @@ from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -59,6 +60,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     create_pending_request,
     expire_stale_requests,
+    list_pending,
     reject_request,
 )
 from meho_backplane.settings import get_settings
@@ -308,6 +310,117 @@ async def test_create_pending_request_sets_run_id(session: AsyncSession) -> None
     )
     await session.commit()
     assert request.run_id == run_id
+
+
+# ---------------------------------------------------------------------------
+# work_ref (I2-T1 #1659)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_captures_bound_work_ref(
+    session: AsyncSession,
+) -> None:
+    """A parked request captures the bound ``work_ref_var`` value.
+
+    work_ref I2-T1 #1659 AC1: a USER principal with no standing grant
+    dispatched under a bound work_ref parks an :class:`ApprovalRequest`
+    carrying the matching ``work_ref``, surfaced on the read view and the
+    MCP dict.
+    """
+    from meho_backplane.api.v1.approvals import _view
+    from meho_backplane.mcp.tools.approvals import _row_to_dict
+
+    operator = _make_operator(sub="human-sub", principal_kind=PrincipalKind.USER)
+    token = work_ref_var.set("gh:evoila/meho#1659")
+    try:
+        request = await create_pending_request(
+            session,
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params={"k": "v"},
+            params_hash=compute_params_hash({"k": "v"}),
+        )
+        await session.commit()
+    finally:
+        work_ref_var.reset(token)
+
+    assert request.work_ref == "gh:evoila/meho#1659"
+    assert _view(request).work_ref == "gh:evoila/meho#1659"
+    assert _row_to_dict(request)["work_ref"] == "gh:evoila/meho#1659"
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_work_ref_null_when_unbound(
+    session: AsyncSession,
+) -> None:
+    """No bound work_ref → the parked row's ``work_ref`` is NULL."""
+    operator = _make_operator()
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+    assert request.work_ref is None
+
+
+@pytest.mark.asyncio
+async def test_list_pending_filters_by_work_ref(session: AsyncSession) -> None:
+    """``list_pending(work_ref=...)`` returns only exact-match requests.
+
+    work_ref I2-T1 #1659 AC2 (service layer behind ``meho approvals list
+    --work-ref``): an exact ``work_ref`` filter narrows to the matching
+    requests; an unrelated ref returns none.
+    """
+    operator = _make_operator()
+
+    async def _park(ref: str | None) -> None:
+        token = work_ref_var.set(ref) if ref is not None else None
+        try:
+            await create_pending_request(
+                session,
+                operator=operator,
+                connector_id="vault-1.x",
+                op_id="vault.kv.write",
+                target=None,
+                params={"r": ref},
+                params_hash=compute_params_hash({"r": ref}),
+            )
+        finally:
+            if token is not None:
+                work_ref_var.reset(token)
+
+    await _park("gh:evoila/meho#10")
+    await _park("gh:evoila/meho#20")
+    await _park(None)
+    await session.commit()
+
+    matched = await list_pending(
+        session,
+        tenant_id=_TENANT_ID,
+        status=None,
+        work_ref="gh:evoila/meho#10",
+    )
+    assert len(matched) == 1
+    assert matched[0].work_ref == "gh:evoila/meho#10"
+
+    none_matched = await list_pending(
+        session,
+        tenant_id=_TENANT_ID,
+        status=None,
+        work_ref="gh:evoila/meho#999",
+    )
+    assert none_matched == []
+
+    all_rows = await list_pending(session, tenant_id=_TENANT_ID, status=None)
+    assert len(all_rows) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1183,6 +1296,144 @@ async def test_pause_approve_resume_execute(
         _approved=True,
     )
     assert result2.status == "ok"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_work_ref_inherited_through_park_approve_redispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """work_ref survives park → decide → re-dispatch onto every audit row.
+
+    work_ref I2-T1 #1659 AC3: a USER op parked under a bound work_ref,
+    approved by a different operator and re-dispatched via the shared
+    :func:`resume_dispatch_after_approval` helper, stamps the same
+    ``work_ref`` onto the decision audit row AND the re-dispatched op's
+    DISPATCH audit row — even though the approving / resuming task has no
+    work_ref bound on its own ContextVar.
+    """
+    from unittest.mock import AsyncMock
+
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+    class _OkConnector(Connector):
+        product = "reftest"
+        version = "1.x"
+        impl_id = "reftest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="reftest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="reftest", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="reftest",
+        version="1.x",
+        impl_id="reftest",
+        op_id="reftest.op",
+        handler=_approval_test_ok_handler,
+        summary="Test op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    work_ref = "gh:evoila/meho#1659"
+    requester = _make_operator(sub="human-requester", principal_kind=PrincipalKind.USER)
+    params = {"x": 7}
+
+    # Step 1: park the op under a bound work_ref.
+    token = work_ref_var.set(work_ref)
+    try:
+        result1 = await dispatch(
+            operator=requester,
+            connector_id="reftest-1.x",
+            op_id="reftest.op",
+            target=None,
+            params=params,
+        )
+    finally:
+        work_ref_var.reset(token)
+    assert result1.status == "awaiting_approval"
+    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
+
+    # Step 2: a different operator approves — its task has no work_ref
+    # bound, so the decision audit row must source the ref from the row.
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    assert work_ref_var.get() is None
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, approval_request_id, operator=reviewer)
+        await s.commit()
+    assert approved.work_ref == work_ref
+
+    # Step 3: re-dispatch via the shared resume helper (var still unset on
+    # this task). The helper re-binds the row's work_ref around dispatch.
+    assert work_ref_var.get() is None
+    result2 = await resume_dispatch_after_approval(operator=reviewer, request=approved)
+    assert result2.status == "ok"
+    # The re-bind is scoped: the var is reset after the re-dispatch.
+    assert work_ref_var.get() is None
+
+    # Assert: the decision audit row AND the re-dispatched DISPATCH audit
+    # row both carry the work_ref.
+    async with get_sessionmaker()() as fresh:
+        decision_row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .one()
+        )
+        dispatch_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method != "APPROVAL")))
+            .scalars()
+            .all()
+        )
+    assert decision_row.work_ref == work_ref
+    assert dispatch_rows, "expected a re-dispatched DISPATCH audit row"
+    assert all(r.work_ref == work_ref for r in dispatch_rows)
 
     reset_dispatcher_caches()
     clear_registry()

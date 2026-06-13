@@ -3713,6 +3713,13 @@ type RunbookTemplateListResponse struct {
 // callers leave it “None“ and the boundary pins it to the JWT's
 // tenant id. The boundary enforces the RBAC -- this schema only
 // carries the field.
+//
+// *work_ref* (optional, work_ref I3-T3 #1663) is the opaque external
+// change-ticket reference the trigger -- and every run it dispatches --
+// works under. Pinned on the trigger row at create time and inherited
+// by each dispatched run's “agent_run.work_ref“ and audit rows via
+// the shared “work_ref_var“ ContextVar. Set-at-create-only: triggers
+// have no UPDATE path. Omit when the trigger carries no change ticket.
 type ScheduledTriggerCreate struct {
 	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
 	CronExpr          *string                 `json:"cron_expr"`
@@ -3777,6 +3784,7 @@ type ScheduledTriggerCreate struct {
 	Kind     ScheduledTriggerKind `json:"kind"`
 	TenantId *openapi_types.UUID  `json:"tenant_id"`
 	Timezone *string              `json:"timezone,omitempty"`
+	WorkRef  *string              `json:"work_ref"`
 }
 
 // ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
@@ -3943,6 +3951,7 @@ type ScheduledTriggerRead struct {
 	TenantId  openapi_types.UUID     `json:"tenant_id"`
 	Timezone  string                 `json:"timezone"`
 	UpdatedAt time.Time              `json:"updated_at"`
+	WorkRef   *string                `json:"work_ref"`
 }
 
 // ScheduledTriggerStatus Closed lifecycle status of a :class:`ScheduledTrigger`.
@@ -5724,6 +5733,7 @@ type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
 	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
 	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	WorkRef       *string                                            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string                                            `json:"authorization,omitempty"`
 }
@@ -16222,6 +16232,22 @@ func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *List
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

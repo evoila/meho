@@ -38,6 +38,7 @@ func newCreateCmd() *cobra.Command {
 		identitySub       string
 		inFlightPolicy    string
 		tenant            string
+		workRef           string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -59,6 +60,9 @@ func newCreateCmd() *cobra.Command {
 			"the default scheduler identity. --in-flight-policy is one of " +
 			"fail_into_audit|resume (default fail_into_audit). --tenant " +
 			"targets another tenant (tenant_admin can act cross-tenant). " +
+			"--work-ref pins an external change-ticket reference (e.g. " +
+			"gh:evoila/meho#13) on the trigger; every run it dispatches " +
+			"inherits it on the run row and its audit trail. " +
 			"\n\nAn unknown --agent-definition returns 422 " +
 			"agent_definition_not_found; an invalid cron expression " +
 			"or timezone returns 422 invalid_arguments.",
@@ -77,6 +81,7 @@ func newCreateCmd() *cobra.Command {
 				IdentitySub:       identitySub,
 				InFlightPolicy:    inFlightPolicy,
 				Tenant:            tenant,
+				WorkRef:           workRef,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -102,6 +107,8 @@ func newCreateCmd() *cobra.Command {
 		"killed-mid-flight policy: fail_into_audit | resume (default fail_into_audit)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (tenant_admin cross-tenant create)")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"external change-ticket reference inherited by every dispatched run (e.g. gh:evoila/meho#13)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw Trigger JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -122,6 +129,7 @@ type createOptions struct {
 	IdentitySub       string
 	InFlightPolicy    string
 	Tenant            string
+	WorkRef           string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -318,6 +326,10 @@ func buildCreateBody(
 	}
 	if tenantID != nil {
 		body.TenantId = tenantID
+	}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		body.WorkRef = &wr
 	}
 	return body
 }

@@ -118,6 +118,7 @@ async def _list_handler(
     )
     kind = arguments.get("kind")
     status = arguments.get("status")
+    work_ref = arguments.get("work_ref")
     limit_raw = arguments.get("limit", 100)
     offset_raw = arguments.get("offset", 0)
     # The inputSchema does first-pass shape + bounds; the int() cast is
@@ -129,6 +130,7 @@ async def _list_handler(
         operator.tenant_id,
         kind=kind if isinstance(kind, str) else None,
         status=status if isinstance(status, str) else None,
+        work_ref=work_ref if isinstance(work_ref, str) else None,
         limit=limit,
         offset=offset,
     )
@@ -144,7 +146,8 @@ register_mcp_tool(
             "(Initiative #804). Operator-level read. Returns "
             "{triggers: [trigger, ...]} sorted newest-first. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
-            "status ('active'|'paused'|'cancelled'|'fired'). "
+            "status ('active'|'paused'|'cancelled'|'fired'), "
+            "work_ref (exact-match change-ticket reference). "
             "Tenant-scoped via the JWT; cross-tenant listing is not "
             "exposed on the MCP transport."
         ),
@@ -160,6 +163,14 @@ register_mcp_tool(
                     "type": "string",
                     "enum": ["active", "paused", "cancelled", "fired"],
                     "description": "Optional status filter.",
+                },
+                "work_ref": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "description": (
+                        "Optional exact-match filter on the trigger's "
+                        "change-ticket reference (e.g. 'gh:evoila/meho#13')."
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -245,7 +256,9 @@ register_mcp_tool(
             "object), identity_sub (default '__scheduler__'), "
             "in_flight_policy ('fail_into_audit'|'resume', default "
             "'fail_into_audit'), tenant_id (UUID; tenant_admin-only "
-            "cross-tenant target). Invalid cron expression -> error with "
+            "cross-tenant target), work_ref (change-ticket reference "
+            "inherited by every dispatched run's audit rows). Invalid "
+            "cron expression -> error with "
             "detail 'invalid_arguments'; unknown agent_definition_id -> "
             "'agent_definition_not_found'; non-admin passing tenant_id -> "
             "'tenant_id_requires_tenant_admin'. Response: {trigger_id, "
@@ -304,6 +317,18 @@ register_mcp_tool(
                         "'tenant_id_requires_tenant_admin'). When omitted "
                         "or null, the trigger is created under the "
                         "caller's tenant."
+                    ),
+                },
+                "work_ref": {
+                    "type": ["string", "null"],
+                    "maxLength": 256,
+                    "description": (
+                        "Optional external change-ticket reference (a "
+                        "GitHub issue 'gh:evoila/meho#13', a Jira key, a "
+                        "CR id) the trigger -- and every run it dispatches "
+                        "-- works under. Pinned on the trigger and "
+                        "inherited by each dispatched run's audit rows. "
+                        "Set-at-create-only."
                     ),
                 },
             },

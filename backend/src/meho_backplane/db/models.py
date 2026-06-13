@@ -3873,6 +3873,22 @@ class ScheduledTrigger(Base):
         default="__scheduler__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # External change-ticket reference (work_ref I3-T3 #1663). The opaque
+    # cross-system reference (a GitHub issue ``"gh:evoila/meho#13"``, a
+    # Jira key, a CR id) of the change record this trigger -- and every
+    # run it dispatches -- works under. Set at create time; the scheduler
+    # binds the shared ``work_ref_var`` ContextVar from this column around
+    # each dispatched run so the dispatched ``agent_run.work_ref`` and the
+    # run's audit rows inherit the trigger's ref end-to-end
+    # (:data:`meho_backplane.operations._audit.work_ref_var`). Triggers
+    # have no UPDATE path, so this is set-at-create-only. NULL when no
+    # work_ref is bound (pre-#1663 rows). No FK -- opaque cross-system
+    # string. Added by migration ``0043``.
+    work_ref: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -3897,6 +3913,16 @@ class ScheduledTrigger(Base):
             "scheduled_trigger_tenant_idx",
             "tenant_id",
             "kind",
+            postgresql_using="btree",
+        ),
+        # work_ref I3-T3 #1663 -- composite (tenant_id, work_ref) drives
+        # the tenant-scoped exact-match ``--work-ref`` filter the
+        # scheduled-trigger list surfaces. Mirrors
+        # agent_run_tenant_work_ref_idx / runbook_runs_tenant_work_ref_idx.
+        Index(
+            "scheduled_trigger_tenant_work_ref_idx",
+            "tenant_id",
+            "work_ref",
             postgresql_using="btree",
         ),
         sa.CheckConstraint(

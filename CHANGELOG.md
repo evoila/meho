@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-13
+
 ### Added
 
 - Doc-collection **create/import** surface across all three fronts
@@ -145,6 +147,33 @@ connector-related release-notes line.
   trigger → run seam). The scheduler-trigger list filters by
   `--work-ref` and surfaces it (`meho scheduler list --work-ref`,
   `meho scheduler create --work-ref`) (#1663)
+- End-to-end `work_ref` change-ticket threading across the audit,
+  approvals, agent-run, and runbook surfaces (the scheduler seam is the
+  bullet above, #1663). A `work_ref` is captured once at the request
+  boundary — bound into a `work_ref_var` `ContextVar` from the MCP
+  argument, the `X-Work-Ref` header, or the dispatch seam (#1655, #1657)
+  — and then persisted on, and filterable across, every downstream
+  record: `audit_log.work_ref` with a `query_audit` filter, `AuditEntry`
+  surfacing, a `GET /api/v1/audit/by-work-ref` route, and a
+  `meho audit --work-ref` CLI filter (#1655, #1657); the approval queue
+  (`approval_request.work_ref`, inherited by re-dispatched runs and
+  filterable in the queue, #1717) plus an optional free-text reason on
+  approve for parity with reject (#1718); the agent-run list
+  (`agent_run.work_ref`, filterable, #1720); and runbooks
+  (`work_ref` on `meho.runbook.start`, inherited by every per-step audit
+  row, exposed on the run-list filter, #1719). One change-ticket
+  reference now ties a scheduled trigger → agent run → approval →
+  per-step audit trail together (#1713).
+- Per-tenant Vault KV path convention and the accompanying `secret_ref`
+  migration: connector secrets now live under a per-tenant
+  `secret/tenants/{tenant_id}/` layout (replacing the per-`sub`
+  arrangement), with `secret_ref` values rewritten to the new paths.
+  This is the data-layer foundation the templated per-tenant ACL
+  policies (#1724) and the default-on tenant-scope guard (#1725) build
+  on; a deploy still holding secrets under the retired per-`sub` layout
+  must run the migration runbook
+  (`docs/cross-repo/vault-per-tenant-migration.md`) and may hold the
+  guard off with `VAULT_KV_TENANT_SCOPE_PREFIX=""` until it has (#1723)
 
 ### Changed
 
@@ -157,6 +186,9 @@ connector-related release-notes line.
   by design). The MCP tool description, the REST route description, and
   the registered-row `next_step` rationale now name the right surface
   per scope (#1699).
+- Operator console rebrand — a new Graphite & Signal visual theme, a
+  unified app-shell layout, and a standalone dev harness for iterating
+  on the console UI without a full backplane behind it (#1690).
 
 ### Deprecated
 
@@ -298,6 +330,34 @@ connector-related release-notes line.
   and MCP callers branch on the same stable fields and can't drift. This
   closes the last bare-string arm in the ingest route's typed-exception
   table, completing the #1610 400-family parity (#1624)
+- Knowledge corpus federation: the `corpus-http` backend adapter now
+  speaks MEHO.Knowledge's actual `/search` contract. The first real
+  in-cluster `search_docs` round-trip returned **zero hits from a
+  populated corpus** because the adapter read top-level
+  `chunks`/`content`/`source_url` while the corpus returns
+  `results`/`text`/`source_uri`, sent `limit` (which the corpus silently
+  ignores) instead of `top_k`, and probed a derived `/status` URL the
+  corpus does not expose (it serves `/readyz`). The adapter now maps all
+  four mismatches via `AliasChoices`, and — the load-bearing safety fix
+  — a successful 2xx body naming neither envelope raises
+  `CorpusUnavailable` (→ 503) instead of silently parsing an empty list,
+  guarded by a regression test. The corpus wire contract and the
+  single-operator agent-requester approval story are now documented for
+  corpus-http implementers (#1732, #1737, #1738)
+- CLI: an operation parked for human approval
+  (`OperationResult.status="awaiting_approval"`) now renders as a
+  non-error, **exit-0** parked outcome on every dispatch path — hoisted
+  into the shared `dispatch.Render` rather than re-implemented per verb
+  — with the hint `parked for human approval — approve via the approval
+  queue, then re-dispatch`; `--json` emits the full envelope (incl.
+  `extras.approval_request_id`) and also exits 0. Previously the
+  hardcoded `ok`/`error`/`denied` allowlist rejected `awaiting_approval`
+  as an error. The MCP `call_operation` `outputSchema` status enum now
+  includes `awaiting_approval` (#1740)
+- Test suite: pinned an empty `VAULT_KV_TENANT_SCOPE_PREFIX` in the
+  credential-dispatch fixtures so they deterministically exercise the
+  pre-guard path now that #1725 flipped the tenant-scope guard
+  default-on (tests-only) (#1742)
 
 ### Security
 

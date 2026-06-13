@@ -235,8 +235,10 @@ async def refresh_session_tokens(
        time; entering ``rotate_refresh`` with an expired row would
        fire its replay branch, which commits revoke + audit side
        effects on a *dedicated* DB session -- an UPDATE that would
-       wait on the very row lock this transaction holds. Failing
-       closed here keeps that branch unreachable from this call site.
+       wait on the very row lock this transaction holds. The same
+       ``now`` is threaded into ``rotate_refresh`` so its internal
+       expiry gate reads the clock this pre-check read, making the
+       replay branch provably unreachable from this call site.
     5. Rotate via
        :func:`~meho_backplane.ui.auth.session_store.rotate_refresh`
        (one-time-use semantics) and extend ``expires_at`` by the new
@@ -346,8 +348,16 @@ async def _rotate_or_fail(
     effects on a *dedicated* DB session -- an UPDATE that would wait
     on the very row lock this transaction holds (see the
     :func:`refresh_session_tokens` docstring, step 4).
+
+    One ``now`` is read here and threaded into ``rotate_refresh`` so
+    the pre-check and the rotation's internal replay gate evaluate
+    the same instant. With two independent clock reads, an
+    ``expires_at`` landing in the microsecond gap between them would
+    pass the pre-check yet trip the internal "expired" branch -- the
+    exact self-deadlock the pre-check exists to prevent.
     """
-    if locked.expires_at <= datetime.now(UTC):
+    now = datetime.now(UTC)
+    if locked.expires_at <= now:
         # The session crossed expires_at during the token-endpoint
         # round-trip.
         log.warning(
@@ -367,13 +377,14 @@ async def _rotate_or_fail(
             new_access_token=tokens.access_token,
             new_refresh_token=tokens.refresh_token,
             new_lifetime=new_lifetime,
+            now=now,
         )
     except RefreshReplayError as exc:
         # Defensive only: mismatch is impossible (the presented
         # value was decrypted under this very lock), revocation
-        # is blocked by the lock, and expiry was re-checked
-        # above. Kept so a future regression fails closed as a
-        # 401 instead of a 500.
+        # is blocked by the lock, and the expiry gate shares the
+        # pre-check's clock. Kept so a future regression fails
+        # closed as a 401 instead of a 500.
         log.warning(
             "ui_auth_token_refresh_failed",
             session_id=str(session_id),

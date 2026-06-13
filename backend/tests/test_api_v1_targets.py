@@ -2401,3 +2401,104 @@ def test_patch_product_same_value_passes_without_validator(client: TestClient) -
     assert response.status_code == 200
     assert response.json()["product"] == "legacy"
     assert response.json()["host"] == "new.host"
+
+
+# ---------------------------------------------------------------------------
+# #1723 — per-tenant Vault KV secret_ref derivation at create / update
+# ---------------------------------------------------------------------------
+
+
+def test_create_target_derives_per_tenant_secret_ref(client: TestClient) -> None:
+    """A create with no explicit ``secret_ref`` lands on ``tenants/<T>/<name>``.
+
+    #1723: new targets default onto the per-tenant shared path so the
+    #1643 guard can enforce ``tenants/{tenant_id}/`` — not the retired
+    per-``sub`` layout.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={"name": "rdc-vcenter", "product": "ssh", "host": "10.0.0.5"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter"
+    # Never the retired per-``sub`` layout.
+    assert "targets/" not in data["secret_ref"]
+
+
+def test_create_target_honours_explicit_secret_ref(client: TestClient) -> None:
+    """An explicitly-supplied ``secret_ref`` is stored verbatim, not derived."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "custom",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": "tenants/some-other/custom",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["secret_ref"] == "tenants/some-other/custom"
+
+
+@pytest.mark.asyncio
+async def test_update_target_homes_unconfigured_secret_ref(client: TestClient) -> None:
+    """A PATCH not touching ``secret_ref`` on a null-ref row derives the per-tenant path."""
+    key = make_rsa_keypair("kid-A")
+    # Row created out-of-band with no secret_ref (e.g. pre-#1723).
+    await _insert_target(name="legacy-target", product="ssh", host="10.0.0.9", secret_ref=None)
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/legacy-target",
+            json={"host": "moved.host"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["host"] == "moved.host"
+    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/legacy-target"
+
+
+@pytest.mark.asyncio
+async def test_update_target_preserves_existing_secret_ref(client: TestClient) -> None:
+    """A PATCH not touching ``secret_ref`` leaves an already-set ref untouched."""
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(
+        name="configured", product="ssh", host="10.0.0.9", secret_ref="tenants/x/configured"
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/configured",
+            json={"host": "moved.host"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["secret_ref"] == "tenants/x/configured"
+
+
+@pytest.mark.asyncio
+async def test_update_target_clears_secret_ref_when_explicit_null(client: TestClient) -> None:
+    """An explicit ``{"secret_ref": null}`` clears the ref and is not re-derived."""
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(
+        name="to-clear", product="ssh", host="10.0.0.9", secret_ref="tenants/x/to-clear"
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/to-clear",
+            json={"secret_ref": None},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["secret_ref"] is None

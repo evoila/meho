@@ -969,12 +969,26 @@ def build_openapi_schema() -> dict[str, object]:
     (Options A + C from the task body, sharing one source-of-truth
     helper so they cannot drift).
 
-    Calls :func:`_eager_import_connectors` when the registry is empty
-    so the schema is correct even when the override fires before the
-    FastAPI lifespan (the OpenAPI snapshot script under
+    Calls :func:`_eager_import_connectors` **unconditionally** so the
+    schema is correct even when the override fires before the FastAPI
+    lifespan (the OpenAPI snapshot script under
     ``cli/api/snapshot-openapi.py`` calls :meth:`app.openapi` directly
-    without running the lifespan). Idempotent — modules already in
-    ``sys.modules`` are a no-op on the second call.
+    without running the lifespan). The call is idempotent — every
+    connector subpackage is already in ``sys.modules`` after the first
+    import, so a second call re-imports nothing.
+
+    It must run unconditionally rather than behind an
+    ``if not registered_product_tokens()`` guard: a single connector
+    self-registering as an import side-effect (e.g.
+    :mod:`meho_backplane.connectors.vault.tenant_paths` importing
+    ``connectors.vault.ops``, which triggers the ``connectors.vault``
+    package ``__init__`` to register ``VaultConnector`` at import time)
+    leaves the registry non-empty but only *partially* populated. The
+    old guard would then short-circuit and skip the eager import, so the
+    other connector subpackages never load and ``TargetCreate.product``
+    collapses to just the one product that happened to self-register
+    (#1723 / CI ``CLI API snapshot freshness`` truncated the enum
+    18 -> 1). "Registry non-empty" is not "all connectors loaded".
 
     Caches the result on ``app.openapi_schema`` to match FastAPI's
     own caching behaviour.
@@ -982,8 +996,7 @@ def build_openapi_schema() -> dict[str, object]:
     if app.openapi_schema is not None:
         return app.openapi_schema
 
-    if not registered_product_tokens():
-        _eager_import_connectors()
+    _eager_import_connectors()
 
     schema = get_openapi(
         title=app.title,

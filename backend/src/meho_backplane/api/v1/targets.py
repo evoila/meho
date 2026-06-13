@@ -153,6 +153,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
+from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
@@ -876,6 +877,15 @@ async def create_target(
     # may have supplied, so the stored row matches the registry /
     # resolver spelling (G0.18-T2 #1355).
     create_fields["product"] = product
+    # #1723: default a fresh target's secret onto the per-tenant shared
+    # path ``tenants/<tenant_id>/<name>`` so new targets land on the
+    # canonical layout the #1643 guard can enforce, instead of the
+    # retired per-``sub`` layout an operator would otherwise type by
+    # hand. An explicitly-supplied ``secret_ref`` is honoured verbatim
+    # (operator override / a non-default mount layout); only the absent
+    # case is derived.
+    if create_fields.get("secret_ref") is None:
+        create_fields["secret_ref"] = tenant_secret_ref(operator.tenant_id, body.name)
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -989,6 +999,18 @@ async def update_target(
             )
     for k, v in updates.items():
         setattr(t, k, v)
+    # #1723: home an as-yet-unconfigured target onto the per-tenant shared
+    # path. A PATCH that does not touch ``secret_ref`` (the field is absent
+    # from the request body, so it is not in ``updates``) on a row whose
+    # ``secret_ref`` is still unset derives ``tenants/<tenant_id>/<name>``
+    # so the canonical layout is filled in without the operator typing it.
+    # A PATCH that *sends* ``secret_ref`` — including an explicit
+    # ``{"secret_ref": null}`` to clear it — is honoured verbatim and is
+    # never overwritten here (it is in ``updates`` and the branch is
+    # skipped); silent re-homing of an already-configured ref is the
+    # operator-driven migration runbook's job, not the route's.
+    if "secret_ref" not in updates and t.secret_ref is None:
+        t.secret_ref = tenant_secret_ref(operator.tenant_id, t.name)
     t.updated_at = datetime.now(UTC)
     _log.info(
         "target_updated",

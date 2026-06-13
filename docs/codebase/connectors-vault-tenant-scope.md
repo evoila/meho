@@ -69,18 +69,49 @@ The rule is configured by one setting,
   (`tenant-{tenant_id}/`) — a deploy partitions tenants by whichever it
   uses.
 
-## Why opt-in (empty default)
+## The canonical layout is per-tenant (#1723)
+
+As of [#1723](https://github.com/evoila/meho/issues/1723) (Goal #221,
+Initiative #1685) the **canonical** KV layout for target secrets is
+**per-tenant shared**:
+
+```text
+secret/data/tenants/<tenant_id>/<target>
+```
+
+`<tenant_id>` is the canonical dashed lowercase UUID — the exact rendering
+`rendered_tenant_prefix` produces. New targets land on this path
+automatically:
+[`connectors/vault/tenant_paths.py`](../../backend/src/meho_backplane/connectors/vault/tenant_paths.py)'s
+`tenant_secret_ref(tenant_id, target)` derives
+`tenants/<tenant_id>/<target>`, and `api/v1/targets.py`'s `create_target`
+(no explicit `secret_ref`) and `update_target` (PATCH not touching
+`secret_ref` on an unset row) apply it. An explicitly-supplied
+`secret_ref` is always honoured verbatim.
+
+This replaces the retired **per operator `sub`** layout
+(`secret/data/targets/<sub>/*`, `connector-vault-policy.md` §2), which
+duplicated a target's credential per operator and gave the guard no
+universal `{tenant_id}` partition to enforce against. Existing per-`sub`
+secrets are relocated by the operator-driven runbook
+[`docs/cross-repo/vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md)
+(read → write → soft-delete via the `vault_kv_*` ops, then rewrite each
+target's `secret_ref`).
+
+## Why the guard is still opt-in (empty default)
 
 The guard is **disabled by default** (empty prefix → `enforce_tenant_scope`
-is a no-op, behaviour is byte-for-byte pre-#1643). This is deliberate:
+is a no-op, behaviour is byte-for-byte pre-#1643). This is deliberate even
+with the per-tenant layout now canonical:
 
-The shipped Vault layout scopes secrets **per operator `sub`**
-(`secret/data/targets/<sub>/*`, `connector-vault-policy.md` §2), **not per
-tenant**. There is no universal `tenant-<id>/` partition to enforce against
-out of the box, so turning on a hard tenant prefix unconditionally would
-deny every existing `vault.kv.*` call. A deploy whose KV layout *is*
-tenant-partitioned opts in by setting the env var; a deploy that relies
-solely on the per-`sub` Vault policy leaves it empty and is unaffected.
+The backplane homes *new* targets on `tenants/<tenant_id>/`, but a deploy
+may still hold *existing* secrets under the retired per-`sub` layout until
+the migration runbook has run. Turning on a hard tenant prefix
+unconditionally would deny every not-yet-relocated `vault.kv.*` call. A
+deploy whose secrets are all under `tenants/<tenant_id>/` (fresh, or
+post-migration) opts in by setting the env var to
+`tenants/{tenant_id}/`; a deploy mid-migration leaves it empty until every
+caller's secret is relocated.
 
 The **system/shim operator** (the Nil-UUID `tenant_id` the vault connector
 synthesises in `connector.py`, empty `raw_jwt`) is exempt even when the
@@ -117,18 +148,23 @@ It is a deploy/infra decision, **not** a backplane default — the backplane
 ships the prefix empty (#1673 only surfaces and documents the choice; it
 does not make it):
 
-- **Per-`sub` layout (the shipped default).** Secrets live under
-  `secret/data/targets/<sub>/*` and isolation is enforced entirely by the
-  templated `meho-mcp` Vault policy (`connector-vault-policy.md` §2). There
-  is no `tenant-<id>/` partition to bind against, so the prefix stays
-  **empty** and the app-layer guard is intentionally a no-op. The startup
-  advisory fires; for this layout it is expected and can be ignored. Keep
-  the policy template correct — it is the primary (and only) gate here.
+- **Per-`sub` layout (retired; pre-#1723 deploys mid-migration).** Secrets
+  live under `secret/data/targets/<sub>/*` and isolation is enforced
+  entirely by the templated `meho-mcp` Vault policy
+  (`connector-vault-policy.md` §2). There is no `tenant-<id>/` partition to
+  bind against, so the prefix stays **empty** and the app-layer guard is
+  intentionally a no-op. The startup advisory fires; for this layout it is
+  expected and can be ignored. Keep the policy template correct — it is the
+  primary (and only) gate here. Relocate to the per-tenant layout via
+  [`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md).
 
-- **Tenant-partitioned layout (opt-in).** Secrets are physically
-  partitioned by tenant — e.g. mount `secret/tenant-<tenant_id>/...` or a
-  path prefix `tenant-<tenant_id>/...`. Here the app-layer guard becomes a
-  real backstop for a mis-provisioned policy, so you **enable** it.
+- **Per-tenant layout (canonical since #1723; opt-in guard).** Secrets are
+  partitioned by tenant under `tenants/<tenant_id>/<target>` (path prefix)
+  or, for a mount-pinned deploy, `secret/tenant-<tenant_id>/...`. New
+  targets land here automatically; existing per-`sub` secrets are moved by
+  the migration runbook. Once every secret is under the prefix, the
+  app-layer guard becomes a real backstop for a mis-provisioned policy, so
+  you **enable** it (`tenants/{tenant_id}/`).
 
 **Enabling the prefix requires all of:**
 

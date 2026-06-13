@@ -885,6 +885,165 @@ async def test_abort_run_writes_dispatch_audit_row(
 
 
 # ---------------------------------------------------------------------------
+# work_ref correlation (I3-T1 #1661)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_run_persists_work_ref_and_step_audit_inherits(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """start_run with work_ref pins it on the run row; each operation_call
+    step's audit row inherits the same work_ref.
+
+    This is the load-bearing acceptance criterion: the engine binds the
+    run's ``work_ref`` onto ``work_ref_var`` around each step's dispatch,
+    so the dispatcher's audit writer stamps it onto the step's
+    ``audit_log.work_ref`` (or, on schemas predating migration 0039, the
+    column simply does not exist -- guarded by ``hasattr``).
+    """
+    await _seed_stub_op(stub_embedding_service)
+    tenant_id = _TENANT_A
+    await _seed_target(tenant_id, "n")
+    await _seed_published_template(tenant_id, "d", body=_op_call_template())
+    work_ref = "gh:evoila/meho#9"
+
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id,
+        OPERATOR,
+        StartRunRequest(template_slug="d", target="n", params={}, work_ref=work_ref),
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    # The run row carries the work_ref.
+    run_row = (
+        await db_session.scalars(select(RunbookRun).where(RunbookRun.run_id == start.run_id))
+    ).one()
+    assert run_row.work_ref == work_ref
+
+    # Advancing dispatches the operation_call verify; its audit row
+    # inherits the run's work_ref.
+    await run_service.next_step(
+        tenant_id,
+        OPERATOR,
+        start.run_id,
+        NextStepRequest(last_verified=True, verify_response=None),
+    )
+    rows = (
+        await db_session.scalars(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH")
+            .where(AuditLog.path == "stub.op_call")
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].work_ref == work_ref
+
+
+@pytest.mark.asyncio
+async def test_start_run_without_work_ref_leaves_audit_null(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A run started without a work_ref leaves the step audit row's work_ref NULL."""
+    await _seed_stub_op(stub_embedding_service)
+    tenant_id = _TENANT_A
+    await _seed_target(tenant_id, "n")
+    await _seed_published_template(tenant_id, "d", body=_op_call_template())
+
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    run_row = (
+        await db_session.scalars(select(RunbookRun).where(RunbookRun.run_id == start.run_id))
+    ).one()
+    assert run_row.work_ref is None
+
+    await run_service.next_step(
+        tenant_id,
+        OPERATOR,
+        start.run_id,
+        NextStepRequest(last_verified=True, verify_response=None),
+    )
+    rows = (
+        await db_session.scalars(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH")
+            .where(AuditLog.path == "stub.op_call")
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].work_ref is None
+
+
+@pytest.mark.asyncio
+async def test_abort_run_audit_row_inherits_work_ref(db_session: AsyncSession) -> None:
+    """The direct abort audit row carries the run's work_ref."""
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    work_ref = "gh:evoila/meho#9"
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id,
+        OPERATOR,
+        StartRunRequest(template_slug="d", target="n", params={}, work_ref=work_ref),
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    await run_service.abort_run(
+        tenant_id,
+        OPERATOR,
+        start.run_id,
+        AbortRunRequest(reason="customer cancelled"),
+    )
+
+    rows = (
+        await db_session.scalars(select(AuditLog).where(AuditLog.path == "runbook.abort"))
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].work_ref == work_ref
+
+
+@pytest.mark.asyncio
+async def test_list_runs_filters_by_work_ref() -> None:
+    """list_runs with a work_ref filter returns only runs under that ticket;
+    RunSummary surfaces the work_ref."""
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    matching = await run_service.start_run(
+        tenant_id,
+        OPERATOR,
+        StartRunRequest(template_slug="d", target="n", params={}, work_ref="gh:evoila/meho#9"),
+    )
+    assert isinstance(matching, CurrentStepResponse)
+    other = await run_service.start_run(
+        tenant_id,
+        OPERATOR,
+        StartRunRequest(template_slug="d", target="n", params={}, work_ref="gh:evoila/meho#10"),
+    )
+    assert isinstance(other, CurrentStepResponse)
+    await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+
+    rows = await run_service.list_runs(
+        tenant_id,
+        OPERATOR,
+        caller_is_admin=False,
+        filter_=ListRunsFilter(work_ref="gh:evoila/meho#9"),
+    )
+    assert len(rows) == 1
+    assert rows[0].run_id == matching.run_id
+    assert rows[0].work_ref == "gh:evoila/meho#9"
+
+
+# ---------------------------------------------------------------------------
 # abort_run
 # ---------------------------------------------------------------------------
 

@@ -350,6 +350,16 @@ _PARAMS_PROPERTY: Final[dict[str, Any]] = {
     "additionalProperties": True,
 }
 
+_WORK_REF_PROPERTY: Final[dict[str, Any]] = {
+    "type": ["string", "null"],
+    "description": (
+        "Optional external change-ticket reference the run executes "
+        'under (a GitHub issue "gh:evoila/meho#9", a Jira key, a CR id). '
+        "Pinned on the run row and inherited by every operation_call "
+        "step's audit row. Omit when the run carries no change ticket."
+    ),
+}
+
 #: The verify-response payload accepted by ``meho.runbook.next``. A discriminated
 #: union (``confirm`` vs ``operation_call``) but flattened at the wire
 #: level because the Anthropic Messages API rejects top-level ``oneOf``
@@ -398,6 +408,7 @@ async def _start_handler(
                 "template_slug": arguments["template_slug"],
                 "target": arguments["target"],
                 "params": arguments.get("params") or {},
+                "work_ref": arguments.get("work_ref"),
             }
         )
         response = await service.start_run(
@@ -523,6 +534,7 @@ async def _list_runs_handler(
                 "assignee": arguments.get("assignee"),
                 "status": arguments.get("status"),
                 "template_slug": arguments.get("template_slug"),
+                "work_ref": arguments.get("work_ref"),
             }
         )
         limit = int(arguments.get("limit", _DEFAULT_LIST_LIMIT))
@@ -554,6 +566,7 @@ register_mcp_tool(
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
                 "target": _TARGET_PROPERTY,
                 "params": _PARAMS_PROPERTY,
+                "work_ref": _WORK_REF_PROPERTY,
             },
             "required": ["template_slug", "target"],
             "additionalProperties": False,
@@ -665,6 +678,13 @@ register_mcp_tool(
                 "template_slug": {
                     "type": ["string", "null"],
                     "description": "Optional template-slug filter.",
+                },
+                "work_ref": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Optional exact-match filter on the run's external "
+                        'change-ticket reference (e.g. "gh:evoila/meho#9").'
+                    ),
                 },
                 "limit": {
                     "type": "integer",

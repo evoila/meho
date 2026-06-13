@@ -4741,6 +4741,23 @@ class RunbookRun(Base):
         default=dict,
     )
     state: Mapped[str] = mapped_column(Text, nullable=False, default="in_progress")
+    # External change-ticket reference (work_ref I3-T1 #1661). The opaque
+    # cross-system reference (a GitHub issue, a Jira key, a CR id, e.g.
+    # ``"gh:evoila/meho#9"``) of the change record this run executes
+    # under. Pinned on the run row at start so every per-step
+    # ``operation_call`` audit row can inherit it: the engine binds the
+    # shared ``work_ref_var`` ContextVar from this column around each
+    # step's dispatch (alongside ``run_id``), so the dispatcher's audit
+    # writer stamps the same value on each step's ``audit_log.work_ref``
+    # (:data:`meho_backplane.operations._audit.work_ref_var`). NULL when
+    # the run was started without a change ticket. No FK -- same soft-
+    # reference discipline as ``tenant_id`` / ``audit_log.work_ref``.
+    # Added by migration ``0040``.
+    work_ref: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
     started_by: Mapped[str] = mapped_column(Text, nullable=False)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -4771,6 +4788,12 @@ class RunbookRun(Base):
             "tenant_id",
             "template_slug",
             "template_version",
+            postgresql_using="btree",
+        ),
+        Index(
+            "runbook_runs_tenant_work_ref_idx",
+            "tenant_id",
+            "work_ref",
             postgresql_using="btree",
         ),
         sa.CheckConstraint(

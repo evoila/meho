@@ -48,6 +48,7 @@ func newRunsCmd() *cobra.Command {
 		assignee          string
 		statusFilter      string
 		templateSlug      string
+		workRef           string
 		limit             int
 		jsonOut           bool
 		backplaneOverride string
@@ -59,7 +60,8 @@ func newRunsCmd() *cobra.Command {
 			"matching runs as a compact 7-column table. Filters: " +
 			"--assignee (TENANT_ADMIN: any subject; OPERATOR: ignored " +
 			"server-side), --status (in_progress / completed / " +
-			"abandoned), --template-slug, --limit (1..500, server " +
+			"abandoned), --template-slug, --work-ref (exact-match " +
+			"change-ticket reference), --limit (1..500, server " +
 			"default 100).\n\n" +
 			"Operators see only their own runs (the backend forces " +
 			"assignee=self regardless of the filter). Tenant_admins see " +
@@ -77,6 +79,7 @@ func newRunsCmd() *cobra.Command {
 				Assignee:          assignee,
 				Status:            statusFilter,
 				TemplateSlug:      templateSlug,
+				WorkRef:           workRef,
 				Limit:             limit,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -89,6 +92,8 @@ func newRunsCmd() *cobra.Command {
 		"filter by run state: in_progress, completed, or abandoned")
 	cmd.Flags().StringVar(&templateSlug, "template-slug", "",
 		"filter by template slug")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#9)")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max runs per page (1..500, server default 100 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
@@ -102,6 +107,7 @@ type listRunsOptions struct {
 	Assignee          string
 	Status            string
 	TemplateSlug      string
+	WorkRef           string
 	Limit             int
 	JSONOut           bool
 	BackplaneOverride string
@@ -181,6 +187,10 @@ func listRunsParams(opts listRunsOptions) *api.ListRunsApiV1RunbooksRunsGetParam
 	if opts.TemplateSlug != "" {
 		ts := opts.TemplateSlug
 		params.TemplateSlug = &ts
+	}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		params.WorkRef = &wr
 	}
 	if opts.Limit > 0 {
 		l := opts.Limit

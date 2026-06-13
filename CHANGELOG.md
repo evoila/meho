@@ -92,6 +92,15 @@ connector-related release-notes line.
 
 ### Added
 
+- `meho connector ingest-status <job-id> [--wait] [--json]` — poll or
+  inspect an async ingest job after `meho connector ingest --no-wait`
+  (or a lost waiting session), the CLI twin of the
+  `meho.connector.ingest_status` MCP tool. Snapshots a `running` job
+  (identity + lifecycle echo) by default, `--wait` polls to terminal;
+  terminal rendering and the poll loop are shared with `meho connector
+  ingest` (no duplicated lifecycle switch). The `--no-wait` hint and
+  the poll-phase error guidance now name the verb. Closes the PR #1618
+  gap (#1621)
 - Connector DELETE surface for the zero-op registry stubs aborted
   ingests leave behind: `DELETE /api/v1/connectors/{connector_id}`
   (204, tenant_admin, always operator-tenant-scoped) and the

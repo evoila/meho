@@ -405,20 +405,52 @@ func runIngestAsync(
 	if err != nil {
 		return renderIngestWaitError(cmd, backplaneURL, handle, err, opts.JSONOut)
 	}
+	return renderIngestTerminal(cmd, st, opts.DryRun, opts.JSONOut)
+}
+
+// renderIngestTerminal renders a *terminal* IngestJobStatusResponse
+// (the job has already left "running") to the exact shapes the
+// async-ingest waiting path and the `ingest-status` verb both emit —
+// this is the single lifecycle switch the task #1621 acceptance
+// criterion pins ("one lifecycle switch, not copy-pasted"). Callers
+// are responsible for never handing it a "running" status; that's a
+// snapshot, not a terminal render, and lives in the verb that reads
+// it (`ingest-status` without --wait).
+//
+//   - succeeded → the assembled IngestResponse (the same summary /
+//     --json document the sync 200 path emits), exit 0.
+//   - failed → error_class + capped error as unexpected_response
+//     (exit 4), the family the sync path's pipeline failures land in.
+//   - degraded → same exit-4 error shape, but the full job document
+//     still rides out on stdout under --json for diagnosis (#1647):
+//     a degraded job is a terminal failure, and a --json consumer
+//     reading it as exit 0 is the false-success this guards against.
+//   - any other status → loud unexpected_response (exit 4); never a
+//     silent success.
+//
+// dryRun feeds printIngestSummary's heading (a polled job is never a
+// dry run — dry runs execute synchronously — but the parameter keeps
+// the summary call identical to the sync path's).
+func renderIngestTerminal(
+	cmd *cobra.Command,
+	st *api.IngestJobStatusResponse,
+	dryRun bool,
+	jsonOut bool,
+) error {
 	switch st.Status {
 	case api.IngestJobStatusResponseStatusSucceeded:
 		if st.Ingestion == nil {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(fmt.Sprintf(
 					"ingest job %s reports succeeded but carries no ingestion result", st.JobId)),
-				opts.JSONOut,
+				jsonOut,
 			)
 		}
 		result := &api.IngestResponse{Ingestion: *st.Ingestion, Grouping: st.Grouping}
-		if opts.JSONOut {
+		if jsonOut {
 			return output.PrintJSON(cmd.OutOrStdout(), result)
 		}
-		printIngestSummary(cmd.OutOrStdout(), opts, result)
+		printIngestSummary(cmd.OutOrStdout(), ingestOptions{DryRun: dryRun}, result)
 		return nil
 	case api.IngestJobStatusResponseStatusFailed:
 		errClass := "IngestJobFailed"
@@ -432,7 +464,7 @@ func runIngestAsync(
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"ingest job %s failed: %s: %s", st.JobId, errClass, detail)),
-			opts.JSONOut,
+			jsonOut,
 		)
 	case api.IngestJobStatusResponseStatusDegraded:
 		// The pipeline ran to completion but left the connector
@@ -450,7 +482,7 @@ func runIngestAsync(
 		if st.Error != nil && *st.Error != "" {
 			detail = *st.Error
 		}
-		if opts.JSONOut {
+		if jsonOut {
 			// Emit the full job document (counts + error_class) to stdout
 			// for diagnosis, then still exit non-zero: a degraded job is a
 			// terminal failure (#1647), and a --json consumer that read this
@@ -470,7 +502,7 @@ func runIngestAsync(
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"ingest job %s degraded: %s: %s", st.JobId, errClass, detail)),
-			opts.JSONOut,
+			jsonOut,
 		)
 	default:
 		// Forward-compat: a status outside the documented
@@ -480,7 +512,7 @@ func runIngestAsync(
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"ingest job %s returned undocumented status %q", st.JobId, st.Status)),
-			opts.JSONOut,
+			jsonOut,
 		)
 	}
 }
@@ -544,8 +576,8 @@ func renderIngestWaitError(
 	jsonOut bool,
 ) error {
 	recheck := fmt.Sprintf(
-		"the job keeps running server-side — re-check GET %s (or `meho connector list`) before re-running ingest, "+
-			"a re-run would start a second job", handle.PollUrl)
+		"the job keeps running server-side — re-check it with `meho connector ingest-status %s` "+
+			"(or `meho connector list`) before re-running ingest, a re-run would start a second job", handle.JobId)
 	var he *httpResponseError
 	if errors.As(err, &he) {
 		switch he.statusCode {
@@ -568,7 +600,8 @@ func renderIngestWaitError(
 				output.Unexpected(fmt.Sprintf(
 					"ingest job %s is no longer tracked by the backplane (pod restart or registry eviction); "+
 						"the pipeline may have completed or died with the pod — check `meho connector list` "+
-						"for the connector before re-running ingest", handle.JobId)),
+						"for the connector before re-running ingest (`meho connector ingest-status %s` reports the "+
+						"same lost-job state)", handle.JobId, handle.JobId)),
 				jsonOut,
 			)
 		default:
@@ -603,10 +636,11 @@ func printIngestJobHandle(w io.Writer, handle *api.IngestJobHandle) {
 	fmt.Fprintf(w, "  poll: GET %s\n", handle.PollUrl)
 	fmt.Fprintf(w,
 		"\nThe pipeline keeps running server-side; re-running ingest would start a second job.\n"+
-			"Poll the URL above (or watch `meho connector list`) until the connector lands in\n"+
+			"Check the job with `meho connector ingest-status %s` (add --wait to block until it\n"+
+			"completes), or watch `meho connector list`, until the connector lands in\n"+
 			"review_status=staged, then:\n"+
 			"  meho connector review <connector_id>\n"+
-			"  meho connector enable <connector_id> --confirm\n")
+			"  meho connector enable <connector_id> --confirm\n", handle.JobId)
 }
 
 // sleepCtx waits d or until ctx is cancelled, whichever comes first.

@@ -86,6 +86,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())
+	cmd.AddCommand(newIngestStatusCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newCatalogCmd())
 	cmd.AddCommand(newReviewCmd())

@@ -1219,6 +1219,27 @@ into retrying and double-ingesting. `--dry-run` is unaffected
 (always sync, see above), and `--no-wait --dry-run` is rejected
 client-side.
 
+**Re-attaching after `--no-wait` (#1621).** `meho connector
+ingest-status <job-id> [--wait] [--json]`
+(`cli/internal/cmd/connector/ingest_status.go`) closes the loop the
+`--no-wait` exit deliberately left open: once an operator has
+detached, or lost the waiting session, this verb re-reads the same
+`GET /api/v1/connectors/ingest/jobs/{job_id}` route. Without `--wait`
+it reads one snapshot -- a `running` job prints its identity +
+lifecycle echo (job_id, status, the originating request descriptors,
+`started_at`) and exits 0 (`--json` emits the raw
+`IngestJobStatusResponse`); a terminal job renders exactly what the
+waiting-ingest path renders. With `--wait` it re-attaches the same
+2s poll loop until terminal. Terminal rendering and the poll loop are
+**shared** with `ingest` (the extracted `renderIngestTerminal` switch
++ `pollIngestJob`), not duplicated, so succeeded / failed / degraded /
+undocumented-status / 401 / 403 / 404 all behave identically across
+the two verbs. A non-UUID `<job-id>` fails fast client-side as
+`unexpected_response`. The verb is the CLI twin of the MCP
+`meho.connector.ingest_status` poll tool (#1531); the `--no-wait`
+output and the poll-phase error guidance now name it instead of only
+the raw poll URL.
+
 **The MCP surface shares the offload (G3.5-T2 / #1531).** The
 `meho.connector.ingest` admin MCP tool carries the same async shape:
 `async=true` (with `dry_run=false`) creates a job in the **same**

@@ -151,7 +151,7 @@ class AdvanceOutcome:
       ``no``/``escalate``, or the ``operation_call`` verify's ``actual``
       did not match ``expect``). T3 writes the current step's state to
       ``failed``; the run as a whole remains ``in_progress`` and the
-      operator either retries (by re-issuing ``runbook_next`` with a
+      operator either retries (by re-issuing ``meho.runbook.next`` with a
       corrected response) or aborts.
 
     :attr:`verify_response_persisted` is the canonical response shape T3

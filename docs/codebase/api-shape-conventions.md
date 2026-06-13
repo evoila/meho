@@ -1022,21 +1022,21 @@ Every multi-verb domain family on the MCP surface uses the dotted
 `meho.agent_principals.*`). The runbook family was the lone flat
 hold-out (`runbook_start`, `runbook_show_template`, …) until #1612
 canonicalised the 11 tools as `meho.runbook.<verb>`. The flat names
-stay registered as deprecated aliases — same handler object, same
-schema, DEPRECATED pointer description, per-call
-`mcp_tool_name_deprecated` warning log — until removal in v0.15.0
-(the original one-release v0.14.0 deadline slipped past the v0.14.0
-tag and was re-pinned, with a public CHANGELOG erratum, by #1702).
-The same change unified the template identifier on
-`template_slug` across all 11 tools (the template verbs previously
-took `slug` while the run verbs took `template_slug`); `slug` is
-accepted as a deprecated input alias on the template verbs for the
-same window, and template-verb responses mirror the id as
+were kept as deprecated aliases for one release and **removed in
+v0.15.0** by #1625 (the original one-release v0.14.0 deadline slipped
+past the v0.14.0 tag and was re-pinned, with a public CHANGELOG
+erratum, by #1702). The runbook family now serves exactly the 11
+dotted tools; a flat name falls through to the dispatcher's standard
+unknown-tool error. The same #1612 change unified the template
+identifier on `template_slug` across all 11 tools (the template verbs
+previously took `slug` while the run verbs took `template_slug`);
+`slug` was accepted as a deprecated input alias on the template verbs
+for the same window and was removed alongside the flat names, so
+`template_slug` is now a plain required field (no `anyOf`, no `slug`
+sibling). Template-verb responses still mirror the id as
 `template_slug` so a value read from `show_template` /
-`list_templates` round-trips into `meho.runbook.start` verbatim.
-Alias mechanics live in `register_deprecated_mcp_tool_alias`
-(`backend/src/meho_backplane/mcp/registry.py`); see also
-[`mcp.md`](mcp.md) §Tool naming grammar.
+`list_templates` round-trips into `meho.runbook.start` verbatim. See
+also [`mcp.md`](mcp.md) §Tool naming grammar.
 
 ### Code reference
 

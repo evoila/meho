@@ -162,44 +162,41 @@ in #1612:
   `meho.runbook.show_template` or a `list_templates` summary is
   accepted by `meho.runbook.start` verbatim, no rename.
 
-### Deprecation-window mechanics
+### Alias window (closed — removed in v0.15.0, #1625)
 
 Renames on an agent-facing wire surface always ship with a one-release
 alias window (the `content`→`body`, `since`→`cursor`, and
-`id`→`approval_request_id` precedents). For #1612 the window covers
-two alias kinds, both **removed in v0.15.0** (originally pinned to
-v0.14.0, but v0.14.0 was tagged with the aliases still registered and
-no release-notes line, so #1702 re-pinned the deadline to v0.15.0 and
-published a `### Deprecated` erratum on the v0.14.0 CHANGELOG section;
-removal executes as the scheduled task #1625, re-scheduled to the
-v0.15.0 cycle, and `removal_version` is warning/description text only
-— deliberately not a runtime version gate, because `__version__` is
-build-metadata-dependent; see #1698):
+`id`→`approval_request_id` precedents). #1612 added two alias kinds for
+the runbook family; both have now been **removed in v0.15.0** by #1625.
+The removal was originally pinned to v0.14.0, but v0.14.0 was tagged
+with the aliases still registered and no release-notes line, so #1702
+re-pinned the deadline to v0.15.0 and published a `### Deprecated`
+erratum on the v0.14.0 CHANGELOG section. (There was never a runtime
+version gate — `removal_version` was warning/description text only,
+because `__version__` is build-metadata-dependent; see #1698 — so the
+removal is enforced by #1625 and the release checklist, not by dispatch
+logic.)
 
-* **Tool-name aliases.** The flat `runbook_*` names stay registered
-  via `register_deprecated_mcp_tool_alias`
-  (`backend/src/meho_backplane/mcp/registry.py`): the alias shares the
-  canonical tool's handler *object*, `inputSchema`, role gate, and
-  capability gate, differing only in name + a generated
-  `DEPRECATED alias for …` description. The MCP 2025-06-18 `Tool`
-  object has no first-class deprecation field, so the description is
-  the agent-visible marker; the MEHO-internal
-  `ToolDefinition.deprecated_alias_for` field (never serialised to the
-  wire) is the machine-readable one. `handle_tools_call` emits a
-  structured `mcp_tool_name_deprecated` warning (with `replacement=`)
-  per alias call, so operators can grep logs to confirm consumers have
-  migrated before the removal release. Audit rows keep recording the
-  *called* name — migration forensics stay queryable.
-* **Field aliases.** The five template verbs accept `slug` as a
-  deprecated alias for `template_slug` (schema-level: both properties
-  declared, the alias flagged `"deprecated": true`, a top-level
-  `anyOf` requiring exactly one of the two — stripped from the wire
-  copy per the Anthropic top-level-combinator restriction but enforced
-  server-side). The handler-level resolver enforces the XOR (`-32602`
-  when both are supplied) and logs
-  `runbook_template_slug_field_deprecated` on alias use. The mirrored
-  `slug` key in template-verb responses is part of the same window and
-  is dropped with the aliases.
+* **Tool-name aliases (removed).** The flat `runbook_*` names were
+  registered alongside their dotted canonical tools via a
+  `register_deprecated_mcp_tool_alias` helper that shared the canonical
+  handler object and schema and marked the alias with a MEHO-internal
+  `ToolDefinition.deprecated_alias_for` field; `handle_tools_call`
+  emitted a per-call `mcp_tool_name_deprecated` warning so operators
+  could watch consumers migrate. #1625 deleted the registrations, the
+  helper, the field, and the warning — a flat name now falls through to
+  the dispatcher's standard unknown-tool error. The runbook family was
+  the only adopter of the alias machinery, so it was removed wholesale.
+* **Field alias (removed).** The five template verbs accepted `slug` as
+  a deprecated alias for `template_slug`, guarded by a top-level `anyOf`
+  and a handler-level XOR resolver that logged
+  `runbook_template_slug_field_deprecated`. #1625 removed the `slug`
+  property and the `anyOf`; `template_slug` is now an ordinary required
+  field, and supplying `slug` is an unknown property rejected by the
+  schema's `additionalProperties: false` gate. The response mirror —
+  template-verb responses carry `template_slug` alongside the model's
+  native `slug` — stays: it is canonical post-#1612 behaviour, not part
+  of the alias window.
 
 The conventions are structurally pinned in
 [`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
@@ -283,8 +280,9 @@ resource.
 * G0.14-T13 (#1202) — protocol-version mismatch observability
   (this section).
 * G0.22-T7 (#1612) — runbook tool-name + `template_slug`
-  canonicalisation; deprecated flat aliases removed in v0.15.0
-  (deferred from v0.14.0 by #1702).
+  canonicalisation; deprecated flat aliases + `slug` input alias
+  removed in v0.15.0 by #1625 (deadline deferred once from v0.14.0 by
+  #1702).
 * MCP spec (2025-06-18) §Tools (Tool object shape — no first-class
   deprecation field):
   https://modelcontextprotocol.io/specification/2025-06-18/server/tools

@@ -13,7 +13,7 @@ current position.
 Two patterns are allowlisted by Initiative #1198, both single-flat-level:
 
 * ``${run.target}`` -- the run's subject (the host, cluster, cert
-  thumbprint) supplied at ``runbook_start`` time.
+  thumbprint) supplied at ``meho.runbook.start`` time.
 * ``${run.params.X}`` -- one of the named run parameters, where ``X``
   matches ``[a-z_][a-z0-9_]*``. Nested paths (``${run.params.X.Y}``) are
   not allowed and are rejected at publish time -- this module assumes the

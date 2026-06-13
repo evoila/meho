@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: load-bearing tool descriptions per issue #1298; the
+# six template-verb descriptions teach the multi-session drafting pattern,
+# fork-on-edit semantics, and the opacity-floor carve-out, and are
+# regression-tested verbatim. The file was already over the 600-line limit
+# on main; #1625's removal of the deprecated-alias machinery shrank it.
+# Splitting would obscure the contract. Same structural choice as the
+# sibling mcp/tools/runbook_runs.py (run-side).
 
 """``meho.runbook.*`` template-lifecycle MCP tools (G12.2-T4).
 
@@ -13,21 +20,20 @@ and the ``in_flight_run_count`` query all live in one place (T2, #1296).
 Naming + field canonicalisation (#1612)
 =======================================
 
-The canonical tool names are dotted — ``meho.runbook.draft_template``,
+The tool names are dotted — ``meho.runbook.draft_template``,
 ``meho.runbook.show_template``, … — matching the ``meho.<noun>.<verb>``
 grammar every other multi-verb family on the surface uses. The original
-flat ``runbook_*`` names remain registered as deprecated aliases (same
-handler object, same schema) and are removed in v0.15.0 — deferred from
-the original one-release v0.14.0 window by #1702; calling one emits the
-dispatcher's ``mcp_tool_name_deprecated`` warning.
+flat ``runbook_*`` names were kept as deprecated aliases for one window
+after #1612 and were removed in v0.15.0 (#1625; the deadline was
+deferred once from the original v0.14.0 window by #1702).
 
-The template identifier is canonically ``template_slug`` on every wire
-input (matching ``meho.runbook.start`` / ``meho.runbook.list_runs`` on
-the run side), with the pre-#1612 ``slug`` accepted as a deprecated
-input alias for the same window via :func:`_resolve_template_slug`.
-Responses mirror the model's ``slug`` key as ``template_slug`` (see
-:func:`_mirror_template_slug`) so an id read from any template verb
-round-trips verbatim into ``meho.runbook.start`` with no field rename.
+The template identifier is ``template_slug`` on every wire input
+(matching ``meho.runbook.start`` / ``meho.runbook.list_runs`` on the run
+side); the pre-#1612 ``slug`` input alias was removed alongside the flat
+names. Responses still mirror the model's ``slug`` key as
+``template_slug`` (see :func:`_mirror_template_slug`) so an id read from
+any template verb round-trips verbatim into ``meho.runbook.start`` with
+no field rename.
 
 Why the descriptions are long
 =============================
@@ -91,7 +97,6 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.mcp.registry import (
     ToolDefinition,
-    register_deprecated_mcp_tool_alias,
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -122,18 +127,6 @@ _log = structlog.get_logger(__name__)
 #: flips are ``write``; list + show are ``read``.
 _OP_CLASS_READ: Final[str] = "read"
 _OP_CLASS_WRITE: Final[str] = "write"
-
-#: Release that drops the deprecated flat ``runbook_*`` tool-name
-#: aliases and the ``slug`` input-field alias (#1612). Originally one
-#: release after the canonicalisation shipped (v0.14.0, mirroring the
-#: v0.6.x ``content``→``body`` one-cycle shim), but v0.14.0 was tagged
-#: with the aliases still registered and no release-notes line, so
-#: #1702 re-pinned the deadline to v0.15.0 with a public deferral
-#: erratum on the v0.14.0 CHANGELOG section. The value is description/
-#: warning text only — removal is executed by the scheduled task
-#: (#1625, re-scheduled to the v0.15.0 cycle), not by a runtime
-#: version gate (``__version__`` is build-metadata-dependent; #1698).
-_ALIAS_REMOVAL_VERSION: Final[str] = "0.15.0"
 
 #: The caller-actionable service exceptions that map to JSON-RPC
 #: ``-32602``. Bad input or a missing / wrong-state entity is the
@@ -168,40 +161,17 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
 
 
 def _resolve_template_slug(tool: str, arguments: dict[str, Any]) -> str:
-    """Resolve the template id from ``template_slug`` (canonical) or ``slug``.
+    """Read the required ``template_slug`` template id from *arguments*.
 
-    One-cycle deprecation shim for the #1612 ``slug`` → ``template_slug``
-    field unification, mirroring the v0.6.x ``content`` → ``body`` shim
-    on ``add_to_memory``: exactly one of the two names must be supplied
-    (both → ``-32602``), and the deprecated name emits a structured
-    ``runbook_template_slug_field_deprecated`` warning so operators can
-    watch consumers migrate before the alias is dropped in v0.15.0
-    (:data:`_ALIAS_REMOVAL_VERSION`; deferred from v0.14.0 by #1702).
-
-    The dispatcher's JSON-Schema gate (:data:`_TEMPLATE_SLUG_ANYOF`)
-    guarantees at least one name is present; the neither-supplied branch
-    is the fail-closed answer to a schema regression, not a real
-    run-time path.
+    ``template_slug`` is the single canonical field name across all 11
+    runbook tools (#1612). The dispatcher's JSON-Schema gate marks it
+    ``required`` on every template verb, so the absent branch is the
+    fail-closed answer to a schema regression, not a real run-time path
+    (the deprecated ``slug`` input alias and its XOR guard were removed
+    in v0.15.0 per #1625).
     """
-    has_canonical = "template_slug" in arguments
-    has_alias = "slug" in arguments
-    if has_canonical and has_alias:
-        raise McpInvalidParamsError(
-            f"{tool}: pass either `template_slug` (canonical) or `slug` "
-            "(deprecated alias), not both",
-        )
-    if has_alias:
-        _log.warning(
-            "runbook_template_slug_field_deprecated",
-            tool=tool,
-            replacement="template_slug",
-            removal_version=_ALIAS_REMOVAL_VERSION,
-        )
-        return str(arguments["slug"])
-    if not has_canonical:
-        raise McpInvalidParamsError(
-            f"{tool}: one of `template_slug` or `slug` must be supplied",
-        )
+    if "template_slug" not in arguments:
+        raise McpInvalidParamsError(f"{tool}: `template_slug` is required")
     return str(arguments["template_slug"])
 
 
@@ -211,11 +181,10 @@ def _mirror_template_slug(payload: dict[str, Any]) -> dict[str, Any]:
     The shared Pydantic response models keep their ``slug`` field (the
     REST surface is out of #1612's scope), so the MCP handlers mirror it
     at the wire boundary: every template-verb response carries
-    ``template_slug`` (canonical, what ``meho.runbook.start`` accepts
-    verbatim) *and* ``slug`` (kept for the same alias window as the
-    input alias, dropped with it in v0.15.0 per #1702). Top-level only — the
-    nested ``forked_from.slug`` names the fork *source* and is not a
-    round-trip input.
+    ``template_slug`` (canonical, the field name ``meho.runbook.start``
+    accepts verbatim) alongside the model's native ``slug``. Top-level
+    only — the nested ``forked_from.slug`` names the fork *source* and is
+    not a round-trip input.
     """
     if "slug" in payload:
         payload["template_slug"] = payload["slug"]
@@ -321,8 +290,9 @@ _LIST_DESCRIPTION: Final[str] = (
     "List runbook templates in the operator's tenant. Returns "
     "template_slugs + titles + status\n"
     "+ target_kind + edited_at. Does NOT return step bodies — use\n"
-    "`meho.runbook.show_template` (TENANT_ADMIN-only) to read full "
-    "content.\n\n"
+    "`meho.runbook.show_template` to read full content (TENANT_ADMIN "
+    "unconditionally; OPERATOR only for a template they hold a "
+    "completed or abandoned run against).\n\n"
     "Operators see this surface to discover available procedures before\n"
     "`meho.runbook.start` — each summary's `template_slug` is accepted "
     "verbatim by `meho.runbook.start`. TENANT_ADMINs see the same to "
@@ -377,43 +347,11 @@ _TEMPLATE_SLUG_PROPERTY: Final[dict[str, Any]] = {
         "Template identifier in kebab-case (the same slug shape as kb "
         "entries): must start with a lowercase letter and contain only "
         "lowercase letters, digits, hyphens, or dots. Example: "
-        "'vcenter-9.0-cert-rotation'. REQUIRED (unless the deprecated "
-        "`slug` alias is supplied instead). Canonical field name across "
-        "all 11 runbook tools (#1612) — the same name "
+        "'vcenter-9.0-cert-rotation'. REQUIRED. Canonical field name "
+        "across all 11 runbook tools (#1612) — the same name "
         "`meho.runbook.start` takes and every template response returns."
     ),
 }
-
-#: Deprecated ``slug`` input alias kept for the pre-#1612 wire shape.
-#: Same constraints as :data:`_TEMPLATE_SLUG_PROPERTY`; the handler
-#: enforces the XOR and emits the migration warning (see
-#: :func:`_resolve_template_slug`).
-_SLUG_ALIAS_PROPERTY: Final[dict[str, Any]] = {
-    "type": "string",
-    "minLength": 1,
-    "description": (
-        "DEPRECATED alias for `template_slug` (pre-#1612 wire shape); "
-        f"removed in v{_ALIAS_REMOVAL_VERSION}. Accepted for backward "
-        "compatibility; new callers MUST use `template_slug`. Mutually "
-        "exclusive with `template_slug`; passing both rejects with "
-        "-32602. Supplying `slug` emits a structured "
-        "`runbook_template_slug_field_deprecated` warning log."
-    ),
-    "deprecated": True,
-}
-
-#: Either field name satisfies the "template id required" constraint;
-#: the handler enforces the XOR. Top-level ``anyOf`` is stripped from
-#: the *wire* copy of the schema by ``_wire_safe_input_schema`` (the
-#: Anthropic Messages API rejects top-level combinators), so the wire
-#: ``required`` omits the template id and the property descriptions
-#: carry the contract; server-side ``jsonschema.validate`` still
-#: enforces it before the handler runs. Same shape as the
-#: ``approval_request_id``/``id`` and ``body``/``content`` shims.
-_TEMPLATE_SLUG_ANYOF: Final[list[dict[str, Any]]] = [
-    {"required": ["template_slug"]},
-    {"required": ["slug"]},
-]
 
 #: The author-facing template body shape. Mirrors
 #: :class:`~meho_backplane.runbooks.schemas.RunbookTemplateBody`; the
@@ -675,11 +613,7 @@ def _opacity_floor_denial() -> McpInvalidParamsError:
     Centralised so every operator-path denial uses the same message --
     anti-enumeration relies on the response being identical regardless of
     which leg of the predicate failed (slug missing, version missing, no
-    completed run). The message names the canonical tool even when the
-    call arrived via the deprecated ``runbook_show_template`` alias --
-    deriving it from the called name would cost the single-message
-    property nothing, but pinning it keeps the denial byte-identical
-    across both names for the deprecation window.
+    completed run).
     """
     return McpInvalidParamsError("meho.runbook.show_template: opacity_floor")
 
@@ -697,11 +631,9 @@ register_mcp_tool(
             "type": "object",
             "properties": {
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
-                "slug": _SLUG_ALIAS_PROPERTY,
                 "body": _BODY_PROPERTY,
             },
-            "required": ["body"],
-            "anyOf": _TEMPLATE_SLUG_ANYOF,
+            "required": ["template_slug", "body"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
@@ -719,11 +651,9 @@ register_mcp_tool(
             "type": "object",
             "properties": {
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
-                "slug": _SLUG_ALIAS_PROPERTY,
                 "body": _BODY_PROPERTY,
             },
-            "required": ["body"],
-            "anyOf": _TEMPLATE_SLUG_ANYOF,
+            "required": ["template_slug", "body"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
@@ -741,11 +671,9 @@ register_mcp_tool(
             "type": "object",
             "properties": {
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
-                "slug": _SLUG_ALIAS_PROPERTY,
                 "version": _VERSION_PROPERTY,
             },
-            "required": ["version"],
-            "anyOf": _TEMPLATE_SLUG_ANYOF,
+            "required": ["template_slug", "version"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
@@ -763,11 +691,9 @@ register_mcp_tool(
             "type": "object",
             "properties": {
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
-                "slug": _SLUG_ALIAS_PROPERTY,
                 "version": _VERSION_PROPERTY,
             },
-            "required": ["version"],
-            "anyOf": _TEMPLATE_SLUG_ANYOF,
+            "required": ["template_slug", "version"],
             "additionalProperties": False,
         },
         required_role=TenantRole.TENANT_ADMIN,
@@ -819,7 +745,6 @@ register_mcp_tool(
             "type": "object",
             "properties": {
                 "template_slug": _TEMPLATE_SLUG_PROPERTY,
-                "slug": _SLUG_ALIAS_PROPERTY,
                 "version": {
                     **_VERSION_PROPERTY,
                     "description": (
@@ -827,11 +752,7 @@ register_mcp_tool(
                     ),
                 },
             },
-            # No `required` array — the template id is the only required
-            # input and it is accepted under either alias name, so the
-            # `anyOf` is the only required-shape declaration (the
-            # broadcast.watch cursor/since_cursor precedent, §14.2).
-            "anyOf": _TEMPLATE_SLUG_ANYOF,
+            "required": ["template_slug"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -839,27 +760,3 @@ register_mcp_tool(
     ),
     handler=_show_template_handler,
 )
-
-
-# ---------------------------------------------------------------------------
-# Deprecated flat-name aliases (#1612) — removed in v0.15.0
-# (`_ALIAS_REMOVAL_VERSION`; deferred from the original one-release
-# v0.14.0 window by #1702). Registered strictly after their
-# canonical targets; each shares the canonical handler object and
-# schema, differing only in name + DEPRECATED pointer description.
-# ---------------------------------------------------------------------------
-
-
-for _flat_alias, _canonical in (
-    ("runbook_draft_template", "meho.runbook.draft_template"),
-    ("runbook_edit_template", "meho.runbook.edit_template"),
-    ("runbook_publish_template", "meho.runbook.publish_template"),
-    ("runbook_deprecate_template", "meho.runbook.deprecate_template"),
-    ("runbook_list_templates", "meho.runbook.list_templates"),
-    ("runbook_show_template", "meho.runbook.show_template"),
-):
-    register_deprecated_mcp_tool_alias(
-        alias=_flat_alias,
-        canonical=_canonical,
-        removal_version=_ALIAS_REMOVAL_VERSION,
-    )

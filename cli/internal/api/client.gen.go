@@ -408,7 +408,7 @@ const (
 	Published  RunbooksListUiRunbooksListGetParamsStatus = "published"
 )
 
-// AbortRunRequest Request body for “runbook_abort“ -- terminate the run mid-flight.
+// AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
 //
 // :attr:`reason` is required and non-empty (“Field(min_length=1)“)
 // because it is persisted to “audit_log.payload“ for the abort
@@ -418,7 +418,7 @@ type AbortRunRequest struct {
 	Reason string `json:"reason"`
 }
 
-// AbortRunResponse Returned by “runbook_abort“ -- the terminal-state coordinates.
+// AbortRunResponse Returned by “meho.runbook.abort“ -- the terminal-state coordinates.
 type AbortRunResponse struct {
 	AbandonedAt time.Time          `json:"abandoned_at"`
 	RunId       openapi_types.UUID `json:"run_id"`
@@ -1990,7 +1990,7 @@ type CriterionResultName string
 // CriterionResultVerdict defines model for CriterionResult.Verdict.
 type CriterionResultVerdict string
 
-// CurrentStepResponse Returned by “runbook_start“ and the non-completion path of “runbook_next“.
+// CurrentStepResponse Returned by “meho.runbook.start“ and the non-completion path of “meho.runbook.next“.
 //
 // Carries the run coordinates (“run_id“ / “template_slug“ /
 // “template_version“), the structural position hint
@@ -2005,7 +2005,7 @@ type CriterionResultVerdict string
 // (option 1 of the design decision documented at the module docstring
 // and the #1300 issue body).
 type CurrentStepResponse struct {
-	// CurrentStep The opaque-by-construction single-step shape returned by ``runbook_next``.
+	// CurrentStep The opaque-by-construction single-step shape returned by ``meho.runbook.next``.
 	//
 	// All ``${run.target}`` and ``${run.params.X}`` substitutions are
 	// already resolved by the engine (G12.3-T2, #1301); the strings here
@@ -2021,7 +2021,7 @@ type CurrentStepResponse struct {
 	// * :attr:`op_id` / :attr:`params` -- populated only for
 	//   ``operation_call`` steps; the substituted call shape.
 	// * :attr:`verify` -- the substituted-and-frozen verify gate the
-	//   caller must respond to on the next ``runbook_next`` call.
+	//   caller must respond to on the next ``meho.runbook.next`` call.
 	//
 	// What this shape **must not** carry, by structural construction
 	// (regression-tested in ``test_step_body_omits_future_step_fields``):
@@ -2139,7 +2139,7 @@ type DecideResponseBody_DispatchResult struct {
 	union json.RawMessage
 }
 
-// DeprecateTemplateResponse Response for “runbook_deprecate_template“ -- the now-deprecated coordinates.
+// DeprecateTemplateResponse Response for “meho.runbook.deprecate_template“ -- the now-deprecated coordinates.
 type DeprecateTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -2195,7 +2195,7 @@ type DocsChunk struct {
 	SourceUrl  *string  `json:"source_url"`
 }
 
-// DraftTemplateRequest Request body for “runbook_draft_template“ -- create a new draft.
+// DraftTemplateRequest Request body for “meho.runbook.draft_template“ -- create a new draft.
 //
 // :attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug
 // contract, reused verbatim).
@@ -2217,7 +2217,7 @@ type DraftTemplateRequest struct {
 	Slug string              `json:"slug"`
 }
 
-// DraftTemplateResponse Response for “runbook_draft_template“ -- the created draft's coordinates.
+// DraftTemplateResponse Response for “meho.runbook.draft_template“ -- the created draft's coordinates.
 type DraftTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -2332,7 +2332,7 @@ type EditOpWarning struct {
 	Message        string `json:"message"`
 }
 
-// EditTemplateResponse Response for “runbook_edit_template“.
+// EditTemplateResponse Response for “meho.runbook.edit_template“.
 //
 // :attr:`version` equals the input version when editing a draft in
 // place; it is a new version when forking from a published template, in
@@ -2340,7 +2340,7 @@ type EditOpWarning struct {
 // :class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is
 // “None“.
 type EditTemplateResponse struct {
-	// ForkedFrom Surfaced by ``runbook_edit_template`` when editing a published template forks.
+	// ForkedFrom Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.
 	//
 	// Editing a *published* template cannot mutate it in place (published
 	// templates are immutable); the edit forks a new draft instead. This
@@ -2411,7 +2411,7 @@ type FingerprintResult struct {
 	Version     *string                 `json:"version"`
 }
 
-// ForkInfo Surfaced by “runbook_edit_template“ when editing a published template forks.
+// ForkInfo Surfaced by “meho.runbook.edit_template“ when editing a published template forks.
 //
 // Editing a *published* template cannot mutate it in place (published
 // templates are immutable); the edit forks a new draft instead. This
@@ -2956,7 +2956,7 @@ type MemoryListResponse struct {
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
 
-// NextStepRequest Request body for “runbook_next“ -- advance the run.
+// NextStepRequest Request body for “meho.runbook.next“ -- advance the run.
 //
 // :attr:`last_verified` is the caller's *claim* that the previous
 // step's verify gate was satisfied. It is **informational only**:
@@ -2971,7 +2971,7 @@ type MemoryScope string
 // :attr:`verify_response` carries the operator's answer for a
 // “confirm“ step or the engine's captured result for an
 // “operation_call“ step. “None“ is valid only on the very first
-// “runbook_next“ call (when no prior step exists to verify).
+// “meho.runbook.next“ call (when no prior step exists to verify).
 type NextStepRequest struct {
 	LastVerified   bool                            `json:"last_verified"`
 	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
@@ -3214,7 +3214,7 @@ type PromoteBody struct {
 	To MemoryScope `json:"to"`
 }
 
-// PublishTemplateResponse Response for “runbook_publish_template“ -- the now-published coordinates.
+// PublishTemplateResponse Response for “meho.runbook.publish_template“ -- the now-published coordinates.
 type PublishTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -3243,18 +3243,18 @@ type QueryResult struct {
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
 
-// ReassignRunRequest Request body for “runbook_reassign“ -- transfer ownership of a run.
+// ReassignRunRequest Request body for “meho.runbook.reassign“ -- transfer ownership of a run.
 //
 // :attr:`new_assignee` is the operator subject identifier of the
 // new owner. Non-empty (“Field(min_length=1)“) because the
 // reassign path writes to “runbook_runs.assigned_to“ which is
 // “NOT NULL“ at the storage layer and is the predicate for
-// every subsequent “runbook_next“ ownership check.
+// every subsequent “meho.runbook.next“ ownership check.
 type ReassignRunRequest struct {
 	NewAssignee string `json:"new_assignee"`
 }
 
-// ReassignRunResponse Returned by “runbook_reassign“ -- the new ownership coordinates.
+// ReassignRunResponse Returned by “meho.runbook.reassign“ -- the new ownership coordinates.
 type ReassignRunResponse struct {
 	AssignedTo   string             `json:"assigned_to"`
 	ReassignedAt time.Time          `json:"reassigned_at"`
@@ -3494,7 +3494,7 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
-// RunCompletedResponse Returned by “runbook_next“ when the previous step was the last.
+// RunCompletedResponse Returned by “meho.runbook.next“ when the previous step was the last.
 //
 // The terminal-state shape: no step body, just the run coordinates
 // and the transition timestamp. The companion abort-side shape is
@@ -3513,11 +3513,11 @@ type RunCompletedResponse struct {
 	State       *string            `json:"state,omitempty"`
 }
 
-// RunSummary List-view projection returned by “runbook_list_runs“.
+// RunSummary List-view projection returned by “meho.runbook.list_runs“.
 //
 // Run-level state only: no step contents are exposed. The
 // step-by-step content is opaque-by-construction (only
-// “runbook_next“ ever returns a step body, and only one step at a
+// “meho.runbook.next“ ever returns a step body, and only one step at a
 // time), so :attr:`current_step_id` is the *id* of the step the
 // run is currently on -- enough for a UI to render "step 3:
 // drain-node" -- but not the body.
@@ -3946,7 +3946,7 @@ type SearchDocsResponse struct {
 	Chunks []DocsChunk `json:"chunks"`
 }
 
-// ShowTemplateResponse Full template surface returned by “runbook_show_template“.
+// ShowTemplateResponse Full template surface returned by “meho.runbook.show_template“.
 //
 // The complete template including the ordered :attr:`steps` and the
 // authorship / timestamp provenance. Mirrors the
@@ -4015,7 +4015,7 @@ type SpecSource struct {
 	Uri     string  `json:"uri"`
 }
 
-// StartRunRequest Request body for “runbook_start“ -- begin a new run on a template.
+// StartRunRequest Request body for “meho.runbook.start“ -- begin a new run on a template.
 //
 // :attr:`template_slug` references a *published* runbook template; the
 // service layer (G12.3-T3) resolves it to a pinned “(slug, version)“
@@ -4030,7 +4030,7 @@ type StartRunRequest struct {
 	TemplateSlug string                  `json:"template_slug"`
 }
 
-// StepBody The opaque-by-construction single-step shape returned by “runbook_next“.
+// StepBody The opaque-by-construction single-step shape returned by “meho.runbook.next“.
 //
 // All “${run.target}“ and “${run.params.X}“ substitutions are
 // already resolved by the engine (G12.3-T2, #1301); the strings here
@@ -4046,7 +4046,7 @@ type StartRunRequest struct {
 //   - :attr:`op_id` / :attr:`params` -- populated only for
 //     “operation_call“ steps; the substituted call shape.
 //   - :attr:`verify` -- the substituted-and-frozen verify gate the
-//     caller must respond to on the next “runbook_next“ call.
+//     caller must respond to on the next “meho.runbook.next“ call.
 //
 // What this shape **must not** carry, by structural construction
 // (regression-tested in “test_step_body_omits_future_step_fields“):
@@ -4408,7 +4408,7 @@ type TargetsDiscoverResult struct {
 	Skipped    []SkippedConnector `json:"skipped"`
 }
 
-// TemplateSummary Operator-readable summary row surfaced by “runbook_list_templates“.
+// TemplateSummary Operator-readable summary row surfaced by “meho.runbook.list_templates“.
 //
 // The list-view projection -- enough to identify a template and its
 // lifecycle state without loading the full step list (which

@@ -74,11 +74,13 @@ from meho_backplane.operations.ingest import (
     LlmClient,
     LlmOutputInvalid,
     OpIdCollision,
+    UncoveredVersionLabel,
     UnsupportedSpecError,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     default_llm_client_factory,
     ensure_connector_class_registered,
@@ -2722,8 +2724,12 @@ def test_ingest_returns_422_when_version_outside_registered_class_range(
     """A registered class with ``">=8.5,<10.0"`` + label ``"7.0"`` → 422.
 
     The pre-flight raises :exc:`UncoveredVersionLabel` (mapped to
-    422); the response detail names the existing class so the
-    operator can see exactly which range the label fell outside of.
+    422); the response detail is the structured envelope from
+    ``build_uncovered_version_label_detail`` (#1624) — the same dict
+    the MCP path ships — naming the submitted triple and each existing
+    class's ``supported_version_range`` so the operator (or agent) can
+    pick a covered label and retry. The human-readable substrings the
+    bare-string body used to carry now live on ``detail["message"]``.
     """
     spec_path = tmp_path / "vcenter.yaml"
     spec_path.write_text(
@@ -2757,9 +2763,79 @@ paths:
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
-    assert "version='7.0'" in detail
-    assert ">=8.5,<10.0" in detail
-    assert "_RangedTestConnector" in detail
+    assert detail["product"] == "t9-vmware"
+    assert detail["version"] == "7.0"
+    assert detail["impl_id"] == "t9-vmware-rest"
+    assert detail["registered_classes"] == [
+        {
+            "class_name": "_RangedTestConnector",
+            "version": "9.0",
+            "impl_id": "t9-vmware-rest",
+            "supported_version_range": ">=8.5,<10.0",
+        },
+    ]
+    # The human-readable substrings the bare-string body carried now
+    # live on the structured ``message`` member.
+    assert "version='7.0'" in detail["message"]
+    assert ">=8.5,<10.0" in detail["message"]
+    assert "_RangedTestConnector" in detail["message"]
+
+
+def test_ingest_uncovered_version_label_wire_body_matches_builder(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+    _registered_ranged_connector: None,
+) -> None:
+    """The REST 422 wire body equals ``build_uncovered_version_label_detail``.
+
+    #1624 route-boundary test (the #1610 ``test_ingest_spec_error_family_
+    returns_structured_400`` pattern, one status-family over). Pins
+    ``response.json()["detail"] == builder(exc)`` for the exception the
+    pre-flight raises in this fixture's scenario, so the REST 422 detail
+    and the MCP ``-32602`` ``error.data`` member (same shared builder)
+    can't drift.
+    """
+    spec_path = tmp_path / "vcenter.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: vcenter
+  version: '7.0'
+paths:
+  /api/vcenter/cluster:
+    get:
+      summary: list clusters
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vcenter-7-wire.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "t9-vmware",
+                "version": "7.0",
+                "impl_id": "t9-vmware-rest",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    # The same exception the pre-flight raises for this triple + registered
+    # class. ``candidates`` is ``(version, impl_id, class_name, range)``.
+    expected_exc = UncoveredVersionLabel(
+        product="t9-vmware",
+        version="7.0",
+        impl_id="t9-vmware-rest",
+        candidates=[("9.0", "t9-vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
+    )
+    assert response.json()["detail"] == build_uncovered_version_label_detail(expected_exc)
 
 
 def test_ingest_dry_run_returns_422_when_version_outside_registered_class_range(
@@ -2804,7 +2880,10 @@ paths:
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
-    assert "version='7.0'" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["version"] == "7.0"
+    assert detail["registered_classes"][0]["supported_version_range"] == ">=8.5,<10.0"
+    assert "version='7.0'" in detail["message"]
 
 
 # ---------------------------------------------------------------------------

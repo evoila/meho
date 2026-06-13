@@ -95,6 +95,7 @@ from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
+from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import (
     make_rsa_keypair,
     mint_token,
@@ -282,6 +283,17 @@ async def vault_operations_app(
         yield _root_client(vault_dev_addr)
 
     monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _root_client_cm)
+
+    # The default-on tenant-scope guard (#1725) pins KV calls under
+    # ``secret/tenants/{tenant_id}/``. This e2e exercises the
+    # JWT-bind → Vault-read path against a fixed legacy seed path
+    # (``g08-t8/federation`` on the default ``secret`` mount), not the
+    # per-tenant layout, so the guard would deny it with
+    # VaultTenantScopeError. Disable the guard explicitly for this test
+    # (the scope under test is the federated read path, not tenant
+    # scoping — covered by ``test_connectors_vault_tenant_scope.py``).
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
 
     app = build_integration_app()
     app.include_router(operations_router)

@@ -318,3 +318,65 @@ def test_agent_runs_disabled_tenants_rejects_non_uuid(raw: str) -> None:
             agent_runs_disabled_tenants=raw,
         )
     assert "AGENT_RUNS_DISABLED_TENANTS" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# #1725 M2 — vault_kv_tenant_scope_prefix template validation at construction
+# ---------------------------------------------------------------------------
+
+
+def test_vault_tenant_scope_prefix_default_is_valid() -> None:
+    """The shipped default-on prefix constructs without raising.
+
+    The mount-pinned ``secret/tenants/{tenant_id}/`` default carries the
+    required ``{tenant_id}`` placeholder and no other, so it passes the
+    construction-time template check.
+    """
+    settings = Settings(**_settings_kwargs("sqlite+aiosqlite:///:memory:"))  # type: ignore[arg-type]
+    assert settings.vault_kv_tenant_scope_prefix == "secret/tenants/{tenant_id}/"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",  # explicit-disable sentinel
+        "   ",  # whitespace-only → disabled
+        "secret/tenants/{tenant_id}/",  # the default
+        "kv-prod/{tenant_id}/",  # custom mount, single placeholder
+        "{tenant_id}/",  # path-only single placeholder
+    ],
+)
+def test_vault_tenant_scope_prefix_accepts_valid_templates(raw: str) -> None:
+    """The empty sentinel and any clean single-``{tenant_id}`` template construct."""
+    settings = Settings(
+        **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        vault_kv_tenant_scope_prefix=raw,
+    )
+    assert settings.vault_kv_tenant_scope_prefix == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "secret/tenants/",  # missing the {tenant_id} placeholder
+        "secret/tenants/{tenant_id",  # unbalanced brace
+        "secret/tenants/{0}/",  # positional placeholder, not named
+        "secret/tenants/{tenant_id}/{region}/",  # extra placeholder
+        "secret/{sub}/{tenant_id}/",  # extra named placeholder
+    ],
+)
+def test_vault_tenant_scope_prefix_rejects_malformed_templates(raw: str) -> None:
+    """A non-empty prefix that isn't a clean ``{tenant_id}`` template fails construction.
+
+    #1725 M2 — a malformed override would otherwise fail at first
+    ``vault.kv.*`` call (and a placeholder-less one silently collapses
+    every operator to one shared namespace). Eager validation at
+    construction surfaces the misconfig at pod startup with the offending
+    value quoted.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            vault_kv_tenant_scope_prefix=raw,
+        )
+    assert "VAULT_KV_TENANT_SCOPE_PREFIX" in str(exc_info.value)

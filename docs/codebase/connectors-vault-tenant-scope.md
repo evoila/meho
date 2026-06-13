@@ -33,10 +33,13 @@ straight through.
 ## The guard
 
 [`connectors/vault/tenant_scope.py`](../../backend/src/meho_backplane/connectors/vault/tenant_scope.py)
-adds `enforce_tenant_scope(operator, mount=..., path=...)`, called by
-**every** KV-v2 handler (`read`, `list`, `versions`, `put`, `patch`,
-`delete`) immediately after it extracts `mount`/`path` and **before** the
-`vault_client_for_operator(...)` login. On a violation it raises
+adds `enforce_tenant_scope(operator, mount=..., path=..., read_only=...)`,
+called by **every** KV-v2 handler (`read`, `list`, `versions`, `put`,
+`patch`, `delete`) immediately after it extracts `mount`/`path` and
+**before** the `vault_client_for_operator(...)` login. `read_only` is
+`True` for the read/list/versions handlers and `False` for
+put/patch/delete; it gates the platform-path exemption (below) to
+read-only verbs. On a violation it raises
 `VaultTenantScopeError`; the dispatcher's `connector_error` branch wraps
 it into a structured `OperationResult` with
 `extras["exception_class"] == "VaultTenantScopeError"` — distinct from the
@@ -98,20 +101,58 @@ secrets are relocated by the operator-driven runbook
 (read → write → soft-delete via the `vault_kv_*` ops, then rewrite each
 target's `secret_ref`).
 
-## Why the guard is still opt-in (empty default)
+## The guard is default-on (as of #1725)
 
-The guard is **disabled by default** (empty prefix → `enforce_tenant_scope`
-is a no-op, behaviour is byte-for-byte pre-#1643). This is deliberate even
-with the per-tenant layout now canonical:
+The guard ships **enforced by default** with the mount-pinned prefix
+`secret/tenants/{tenant_id}/`. With the per-tenant layout now canonical
+(#1723), tenant isolation is enforced at the app layer out of the box — no
+per-deploy opt-in.
 
-The backplane homes *new* targets on `tenants/<tenant_id>/`, but a deploy
-may still hold *existing* secrets under the retired per-`sub` layout until
-the migration runbook has run. Turning on a hard tenant prefix
-unconditionally would deny every not-yet-relocated `vault.kv.*` call. A
-deploy whose secrets are all under `tenants/<tenant_id>/` (fresh, or
-post-migration) opts in by setting the env var to
-`tenants/{tenant_id}/`; a deploy mid-migration leaves it empty until every
-caller's secret is relocated.
+**Why the mount segment is in the default.** The guard matches a normalised
+`<mount>/<path>` candidate (see "The namespace convention"), and the KV-v2
+handlers default `mount="secret"` (`ops.py` `_DEFAULT_KV_MOUNT`). The
+canonical layout addresses secrets as mount `secret`, path
+`tenants/<tenant_id>/<target>`, so the candidate is
+`secret/tenants/<tenant_id>/<target>`. A *path-only* prefix
+`tenants/{tenant_id}/` would render to `tenants/<id>/` and never match that
+candidate — it would deny **every** legitimate per-tenant call. The default
+is therefore the mount-pinned `secret/tenants/{tenant_id}/`.
+
+**Migration prerequisite.** The backplane homes *new* targets on
+`tenants/<tenant_id>/`, but a deploy upgrading from a pre-#1723 release may
+still hold *existing* secrets under the retired per-`sub` layout. Until
+those are relocated by the migration runbook
+([`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md)),
+the default-on guard would deny every not-yet-relocated `vault.kv.*` call.
+Such a deploy must **explicitly disable** the guard
+(`VAULT_KV_TENANT_SCOPE_PREFIX=""`) until the migration completes, then drop
+the override to let the default enforce. A fresh deploy (all secrets under
+`tenants/<tenant_id>/`) needs no action — the default already enforces.
+
+**Platform-path exemption.** A closed allow-list of fixed, shared,
+non-tenant platform secrets (`PLATFORM_EXEMPT_PATHS` in `tenant_scope.py`)
+is exempt regardless of operator. The only entry today is the
+federation-proof health secret `secret/meho/test/federation` that
+`GET /api/v1/health` reads under the *real* request operator's identity to
+prove the JWT→OIDC→Vault chain — it carries no tenant data and is
+provisioned shared per the Goal #11 cross-repo contract, so the default-on
+guard must not deny the platform's own probe. The exemption is an
+**exact-match** set, never a prefix or glob, so a caller cannot smuggle a
+tenant escape through it; a regression test pins it equal to the health
+route's path. It is also scoped to **read-only** verbs (gated on the
+`read_only` argument): the health route only ever reads this path, so a
+`put`/`patch`/`delete` to it under a non-owning operator is still
+tenant-scoped and denied.
+
+**Prefix template validation.** `vault_kv_tenant_scope_prefix` is validated
+at `Settings` construction (a pydantic `@field_validator`): a non-empty
+value must contain the `{tenant_id}` placeholder and be a clean
+`str.format` template (no unbalanced braces, no positional `{0}`, no extra
+named placeholder). The empty string (explicit-disable) is accepted
+verbatim. A malformed override therefore fails the pod start with an
+actionable message rather than failing at first `vault.kv.*` call (or, for
+a placeholder-less value, silently collapsing every operator to one shared
+namespace).
 
 The **system/shim operator** (the Nil-UUID `tenant_id` the vault connector
 synthesises in `connector.py`, empty `raw_jwt`) is exempt even when the
@@ -121,9 +162,11 @@ identity to bind against.
 
 ## Startup advisory (unenforced state is visible)
 
-Because the guard is default-off, a deploy whose Vault layout *is*
-tenant-partitioned could leave the prefix empty and never know the guard
-is silently a no-op. To make that state visible,
+Because the guard is now default-on, the advisory is **silent on the common
+deploy**. It fires only when an operator has *explicitly disabled* the guard
+(`VAULT_KV_TENANT_SCOPE_PREFIX=""`) — e.g. while still mid-migration with
+secrets under the retired per-`sub` layout — so that running unenforced is
+never silent.
 [`main._advise_vault_tenant_scope_unenforced`](../../backend/src/meho_backplane/main.py)
 runs in the FastAPI lifespan and emits **exactly one** structured advisory
 at startup when `vault_kv_tenant_scope_prefix` is empty:
@@ -133,58 +176,63 @@ vault_tenant_scope_unenforced  enable_via=VAULT_KV_TENANT_SCOPE_PREFIX  doc=docs
 ```
 
 It is **observability-only** — loud-but-non-fatal, like the embedding
-preload advisory: no dispatch change, no raise, the default is not flipped.
-A deploy that relies solely on the per-`sub` Vault policy can ignore the
-line; a tenant-partitioned deploy treats it as the cue to set the prefix
-(see "Choosing a layout"). Once the prefix is set the advisory is silent.
-The behaviour is covered by
+preload advisory: no dispatch change, no raise. A deploy that has
+deliberately opted out (mid-migration) can ignore the line; otherwise it is
+the cue that tenant isolation is not being enforced at the app layer. Once
+the prefix is restored to a non-empty value (or left at the default) the
+advisory is silent. The behaviour is covered by
 [`backend/tests/test_vault_tenant_scope_advisory.py`](../../backend/tests/test_vault_tenant_scope_advisory.py)
-(fires unset, silent when set, never blocks boot).
+(silent on default, silent when set, fires when explicitly emptied, never
+blocks boot).
 
 ## Choosing a layout
 
-Which Vault KV layout you run determines whether this guard does anything.
-It is a deploy/infra decision, **not** a backplane default — the backplane
-ships the prefix empty (#1673 only surfaces and documents the choice; it
-does not make it):
+The guard is default-on (`secret/tenants/{tenant_id}/`), matching the
+canonical per-tenant layout. The only deploy that needs to touch the prefix
+is one still holding secrets under the retired per-`sub` layout:
+
+- **Per-tenant layout (canonical since #1723; guard default-on).** Secrets
+  are partitioned by tenant under `tenants/<tenant_id>/<target>` on the
+  default `secret` mount. New targets land here automatically; existing
+  per-`sub` secrets are moved by the migration runbook. The default-on guard
+  is a real backstop for a mis-provisioned Vault policy — **no action
+  required** (leave `VAULT_KV_TENANT_SCOPE_PREFIX` unset).
 
 - **Per-`sub` layout (retired; pre-#1723 deploys mid-migration).** Secrets
   live under `secret/data/targets/<sub>/*` and isolation is enforced
   entirely by the templated `meho-mcp` Vault policy
   (`connector-vault-policy.md` §2). There is no `tenant-<id>/` partition to
-  bind against, so the prefix stays **empty** and the app-layer guard is
-  intentionally a no-op. The startup advisory fires; for this layout it is
-  expected and can be ignored. Keep the policy template correct — it is the
-  primary (and only) gate here. Relocate to the per-tenant layout via
-  [`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md).
+  bind against, so the default-on guard would deny every not-yet-relocated
+  call. **Explicitly disable** the guard with
+  `VAULT_KV_TENANT_SCOPE_PREFIX=""` until the migration runbook has run; the
+  startup advisory fires to keep that unenforced state visible. Keep the
+  policy template correct — it is the primary (and only) gate while the
+  guard is disabled. Relocate to the per-tenant layout via
+  [`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md),
+  then drop the override.
 
-- **Per-tenant layout (canonical since #1723; opt-in guard).** Secrets are
-  partitioned by tenant under `tenants/<tenant_id>/<target>` (path prefix)
-  or, for a mount-pinned deploy, `secret/tenant-<tenant_id>/...`. New
-  targets land here automatically; existing per-`sub` secrets are moved by
-  the migration runbook. Once every secret is under the prefix, the
-  app-layer guard becomes a real backstop for a mis-provisioned policy, so
-  you **enable** it (`tenants/{tenant_id}/`).
+**The active (default) prefix and its preconditions:**
 
-**Enabling the prefix requires all of:**
-
-1. A Vault KV layout actually partitioned by `tenant_id` (mount or path) —
-   the prefix only denies; it never relocates secrets.
-2. Setting `VAULT_KV_TENANT_SCOPE_PREFIX` to the matching `str.format`
-   template with a single `{tenant_id}` placeholder, e.g.
-   `tenant-{tenant_id}/` (path prefix) or `secret/tenant-{tenant_id}/`
-   (mount-pinned). The rendered `tenant_id` is the canonical dashed
-   lowercase UUID (see "The namespace convention").
-3. Confirming every legitimate `vault.kv.*` caller's secrets already live
-   **under** that prefix — once set, any in-namespace mismatch is denied
-   with `exception_class=VaultTenantScopeError` *before* the hvac call.
-   The system/shim operator (Nil-UUID tenant, `vault.sys.health` only) is
-   exempt, so enabling the prefix does not break the health probe.
+1. The canonical Vault KV layout is per-tenant: mount `secret`, path
+   `tenants/<tenant_id>/<target>`. The prefix only denies; it never
+   relocates secrets.
+2. The default `VAULT_KV_TENANT_SCOPE_PREFIX` is the mount-pinned
+   `secret/tenants/{tenant_id}/` — a `str.format` template with a single
+   `{tenant_id}` placeholder. The mount segment is required because the
+   guard matches a normalised `<mount>/<path>` candidate on the default
+   `secret` mount; a path-only `tenants/{tenant_id}/` would never match and
+   would deny every legitimate call. The rendered `tenant_id` is the
+   canonical dashed lowercase UUID (see "The namespace convention").
+3. Every legitimate `vault.kv.*` caller's secrets must already live
+   **under** that prefix — any in-namespace mismatch is denied with
+   `exception_class=VaultTenantScopeError` *before* the hvac call. The
+   system/shim operator (Nil-UUID tenant, `vault.sys.health` only) is
+   exempt, so the default does not break the health probe.
 
 Because step 3 denies every per-`sub` call that is *not* under a
-`tenant-<id>/` prefix, flipping this on against the shipped per-`sub`
-layout would break dispatch — which is exactly why the default is empty
-and the switch is left to the operator.
+`tenants/<id>/` prefix, a deploy still on the retired per-`sub` layout must
+disable the guard until its secrets are relocated — which is exactly what
+the `VAULT_KV_TENANT_SCOPE_PREFIX=""` opt-out is for.
 
 ## Scope notes
 

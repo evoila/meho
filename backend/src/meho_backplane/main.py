@@ -231,23 +231,25 @@ def _advise_vault_tenant_scope_unenforced() -> None:
     """Emit a one-time startup advisory when the Vault tenant-scope guard is off.
 
     The application-layer ``vault.kv.*`` tenant-scope guard (#1643) is
-    **opt-in** and **default-off** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``),
-    because the shipped Vault layout scopes secrets per operator ``sub``
-    rather than per tenant, so a hard tenant prefix would deny every
-    existing call. The consequence is silent: an operator running a
-    **tenant-partitioned** Vault gets no signal that the guard is a no-op
-    and cross-tenant ``vault.kv.*`` isolation is therefore unenforced at
-    the app layer (the empty-prefix branch of
-    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`).
+    **default-on** as of #1725
+    (``VAULT_KV_TENANT_SCOPE_PREFIX="secret/tenants/{tenant_id}/"``), so the
+    common deploy is silent here. An operator only reaches this advisory by
+    **explicitly disabling** the guard (setting the prefix back to ``""``) —
+    e.g. while still mid-migration with secrets under the retired per-``sub``
+    layout. The consequence of running unenforced is silent otherwise: with
+    the empty prefix
+    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`
+    is a no-op and cross-tenant ``vault.kv.*`` isolation is unenforced at the
+    app layer, with no other signal.
 
-    This logs **one** structured advisory at startup naming the env var
-    that enables the guard. It is purely observability — it does **not**
-    change dispatch behaviour or flip the default; whether to enable the
-    prefix (and migrate the Vault layout) is an explicit human/infra
-    decision, documented under "Choosing a layout" in
-    ``docs/codebase/connectors-vault-tenant-scope.md``. A deploy that
-    relies solely on the per-``sub`` Vault policy can ignore the line; a
-    tenant-partitioned deploy treats it as the cue to set the prefix.
+    This logs **one** structured advisory at startup naming the env var that
+    re-enables the guard. It is purely observability — it does **not** change
+    dispatch behaviour or flip the default; whether to keep the guard
+    disabled (and finish migrating the Vault layout) is an explicit
+    human/infra decision, documented under "Choosing a layout" in
+    ``docs/codebase/connectors-vault-tenant-scope.md``. A deploy that has
+    deliberately opted out can ignore the line; otherwise it is the cue that
+    tenant isolation is not being enforced at the app layer.
 
     Mirrors the loud-but-non-fatal advisory shape the rest of the
     lifespan uses (e.g. :func:`_preload_embedding_model`): a single

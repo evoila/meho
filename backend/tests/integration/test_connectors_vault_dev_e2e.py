@@ -396,6 +396,14 @@ async def vault_e2e(
     # container so the sys.health / sys.seal_status path (which does
     # not go through vault_client_for_operator) hits the dev Vault.
     monkeypatch.setenv("VAULT_ADDR", vault_dev_addr)
+    # The default-on tenant-scope guard (#1725) would deny the seeded
+    # legacy paths exercised here (``app/config``, ``app/written`` … on
+    # the default ``secret`` mount) under the test operator's real
+    # tenant. This suite proves the connector → hvac → dispatch → audit
+    # path, not tenant scoping (covered by
+    # ``test_connectors_vault_tenant_scope.py``); disable the guard
+    # explicitly so the legacy KV layout under test stays reachable.
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
     from meho_backplane.settings import get_settings
 
     get_settings.cache_clear()

@@ -2412,8 +2412,8 @@ def test_create_target_derives_per_tenant_secret_ref(client: TestClient) -> None
     """A create with no explicit ``secret_ref`` lands on ``tenants/<T>/<name>``.
 
     #1723: new targets default onto the per-tenant shared path so the
-    #1643 guard can enforce ``tenants/{tenant_id}/`` — not the retired
-    per-``sub`` layout.
+    default-on #1643 guard (``secret/tenants/{tenant_id}/``, #1725) enforces
+    against it — not the retired per-``sub`` layout.
     """
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:

@@ -298,8 +298,9 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     # Defense-in-depth tenant-scope check (#1643): deny a path outside the
     # operator's tenant namespace BEFORE the hvac call. No-op unless
     # ``vault_kv_tenant_scope_prefix`` is configured. Behind the Vault
-    # ``meho-mcp`` ACL policy, never a replacement for it.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # ``meho-mcp`` ACL policy, never a replacement for it. ``read_only``
+    # so the platform-path allow-list (health read) applies.
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     # vault_client_for_operator is accessed via the module reference so
     # test monkeypatches on vault_module._build_client propagate through
@@ -398,8 +399,8 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
-    # Tenant-scope guard (#1643) — see vault_kv_read.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         list_payload = await asyncio.to_thread(
@@ -505,8 +506,9 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
     secret: dict[str, Any] = params["data"]
     cas = params.get("cas")
 
-    # Tenant-scope guard (#1643) — see vault_kv_read.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # Tenant-scope guard (#1643) — see vault_kv_read. Mutating put: the
+    # platform-path allow-list does NOT apply (read-only only, #1725 M1).
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         write_payload = await asyncio.to_thread(
@@ -668,8 +670,9 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     path: str = str(params["path"]).strip()
     secret: dict[str, Any] = params["data"]
 
-    # Tenant-scope guard (#1643) — see vault_kv_read.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # Tenant-scope guard (#1643) — see vault_kv_read. Mutating patch: the
+    # platform-path allow-list does NOT apply (read-only only, #1725 M1).
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         patch_payload = await asyncio.to_thread(
@@ -745,8 +748,8 @@ async def vault_kv_versions(
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
-    # Tenant-scope guard (#1643) — see vault_kv_read.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         meta_payload = await asyncio.to_thread(
@@ -840,8 +843,9 @@ async def vault_kv_delete(
     path: str = str(params["path"]).strip()
     versions: list[int] = list(params["versions"])
 
-    # Tenant-scope guard (#1643) — see vault_kv_read.
-    enforce_tenant_scope(operator, mount=mount, path=path)
+    # Tenant-scope guard (#1643) — see vault_kv_read. Mutating delete: the
+    # platform-path allow-list does NOT apply (read-only only, #1725 M1).
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with _auth_vault.vault_client_for_operator(operator) as client:
         await asyncio.to_thread(

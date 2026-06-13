@@ -271,6 +271,30 @@ connector-related release-notes line.
   closes the last bare-string arm in the ingest route's typed-exception
   table, completing the #1610 400-family parity (#1624)
 
+### Security
+
+- The #1643 Vault tenant-scope guard is now **default-on**: agent-supplied
+  `vault.kv.*` calls are confined to the calling operator's tenant
+  namespace out of the box, no per-deploy opt-in. The default
+  `VAULT_KV_TENANT_SCOPE_PREFIX` is the **mount-pinned**
+  `secret/tenants/{tenant_id}/` — the mount segment is required because the
+  guard matches a normalised `<mount>/<path>` candidate on the default
+  `secret` KV mount, so a path-only `tenants/{tenant_id}/` would deny every
+  legitimate per-tenant call. Builds on the per-tenant layout (#1723) and
+  templated policies (#1724). The startup advisory inverts accordingly:
+  silent on the default, firing only when an operator explicitly sets the
+  prefix back to empty. The platform's own federation-proof health read
+  (`secret/meho/test/federation`, `GET /api/v1/health`) is exempt via a
+  closed allow-list so the default-on guard does not deny it; the exemption
+  is scoped to **read-only** verbs, so a `put`/`patch`/`delete` to that
+  shared platform path under a non-owning operator stays tenant-scoped. A
+  malformed `VAULT_KV_TENANT_SCOPE_PREFIX` (missing the `{tenant_id}`
+  placeholder, unbalanced braces, or an extra placeholder) is now rejected
+  at startup rather than failing at first `vault.kv.*` call. A deploy still
+  holding secrets under the retired per-`sub` layout disables the guard with
+  `VAULT_KV_TENANT_SCOPE_PREFIX=""` until the migration runbook
+  (`docs/cross-repo/vault-per-tenant-migration.md`) has run (#1725)
+
 ## [0.14.0] - 2026-06-12
 
 ### Security

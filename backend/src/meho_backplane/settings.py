@@ -1092,14 +1092,70 @@ class Settings(BaseModel):
     #: (``docs/codebase/connectors-vault-tenant-scope.md``). When a caller
     #: requests a ``path`` outside their rendered prefix the handler raises
     #: :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
-    #: *before* the hvac call. **Empty (the default) disables the guard** —
-    #: the shipped deploy convention scopes per operator ``sub``
-    #: (``secret/data/targets/<sub>/*``, ``connector-vault-policy.md`` §2),
-    #: not per tenant, so enforcing a hard tenant prefix unconditionally
-    #: would break every existing call; a deploy whose KV layout *is*
-    #: tenant-partitioned opts in by setting e.g. ``"tenant-{tenant_id}/"``.
+    #: *before* the hvac call. **Default-on** as of this release: the
+    #: canonical KV layout is now per-tenant
+    #: (``secret/data/tenants/<tenant_id>/<target>``, #1723), so the guard
+    #: ships enforcing the mount-pinned ``"secret/tenants/{tenant_id}/"``
+    #: prefix. The mount segment is required because the guard matches a
+    #: normalised ``<mount>/<path>`` candidate and the KV-v2 handlers default
+    #: ``mount="secret"`` (``connectors/vault/ops.py`` ``_DEFAULT_KV_MOUNT``);
+    #: a path-only ``"tenants/{tenant_id}/"`` would never match that
+    #: candidate and would deny every legitimate per-tenant call. A deploy
+    #: still mid-migration (secrets under the retired per-``sub`` layout)
+    #: opts **out** by setting ``VAULT_KV_TENANT_SCOPE_PREFIX=""`` until its
+    #: secrets are relocated. Pre-#1725 this defaulted empty (guard off).
     #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
-    vault_kv_tenant_scope_prefix: str = ""
+    vault_kv_tenant_scope_prefix: str = "secret/tenants/{tenant_id}/"
+
+    @field_validator("vault_kv_tenant_scope_prefix")
+    @classmethod
+    def _vault_tenant_prefix_must_template_tenant_id(cls, value: str) -> str:
+        """Reject a tenant-scope prefix that isn't a clean ``{tenant_id}`` template.
+
+        The guard renders this prefix per-operator via
+        ``value.format(tenant_id=...)``
+        (:func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`).
+        Pulled up to :class:`Settings` construction so two otherwise-silent
+        misconfigurations of ``VAULT_KV_TENANT_SCOPE_PREFIX`` surface at pod
+        startup rather than at first ``vault.kv.*`` call:
+
+        * **Missing ``{tenant_id}`` placeholder**: ``str.format`` returns the
+          literal prefix, so every operator shares one rendered prefix and
+          tenant isolation silently collapses to a single shared namespace.
+        * **Malformed template** — unbalanced braces, a positional ``{0}``,
+          or an extra named placeholder (``{tenant_id}/{region}``): the
+          render raises :class:`KeyError` / :class:`IndexError` /
+          :class:`ValueError` at request time, denying every legitimate
+          per-tenant call.
+
+        The empty string is the **explicit-disable** sentinel
+        (``VAULT_KV_TENANT_SCOPE_PREFIX=""`` opts a mid-migration deploy
+        out of the guard) and is accepted verbatim. Same fail-closed-at-
+        startup discipline as
+        :meth:`_scheduler_secret_pattern_must_substitute_client_id`.
+        """
+        if not value.strip():
+            # Explicit-disable sentinel — guard is a no-op; nothing to render.
+            return value
+        if "{tenant_id}" not in value:
+            raise ValueError(
+                f"VAULT_KV_TENANT_SCOPE_PREFIX must include '{{tenant_id}}' so "
+                f"each operator's KV calls are scoped to their own tenant "
+                f"namespace; got: {value!r}. Set it to the empty string to "
+                f"disable the tenant-scope guard."
+            )
+        try:
+            # A clean template renders with ONLY tenant_id; an extra named
+            # placeholder raises KeyError, a positional {0} raises IndexError,
+            # unbalanced braces raise ValueError.
+            value.format(tenant_id="00000000-0000-0000-0000-000000000000")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"VAULT_KV_TENANT_SCOPE_PREFIX must be a valid str.format "
+                f"template whose only placeholder is '{{tenant_id}}'; got: "
+                f"{value!r}"
+            ) from exc
+        return value
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -1452,5 +1508,7 @@ def get_settings() -> Settings:
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
         ),
-        vault_kv_tenant_scope_prefix=os.environ.get("VAULT_KV_TENANT_SCOPE_PREFIX", "").strip(),
+        vault_kv_tenant_scope_prefix=os.environ.get(
+            "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"
+        ).strip(),
     )

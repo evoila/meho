@@ -179,6 +179,16 @@ connector-related release-notes line.
   `CHART_VERSION` / `GIT_SHA` env metadata `GET /version` reports —
   `v0.14.0`-style on chart deploys, a 12-char commit id on bare-image
   runs, `unknown` on local runs without build metadata (#1698)
+- Operator console: an expired Keycloak access token mid-session no
+  longer dead-ends the UI on raw JSON `{"detail": "token_expired"}` —
+  the BFF now silently refreshes the token pair inline (RFC 6749 § 6
+  refresh grant, rotated one-time-use per RFC 9700 § 4.14 under a
+  per-session row lock, session lifetime re-extended within the
+  absolute cap), and when the refresh itself fails (revoked SSO
+  session, unreachable Keycloak) HTML requests get a `302` back to
+  `/ui/auth/login?return_to=<page>` with the dead cookie cleared
+  instead of a JSON error page. Session and CSRF cookies are never
+  rotated by a refresh, so already-open pages keep working (#1694)
 
 ## [0.14.0] - 2026-06-12
 

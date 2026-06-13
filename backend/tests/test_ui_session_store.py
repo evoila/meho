@@ -394,6 +394,71 @@ async def test_rotate_refresh_missing_session_writes_audit(
     assert row.payload["reason"] == "missing_session"
 
 
+@pytest.mark.asyncio
+async def test_rotate_refresh_honours_caller_supplied_clock(
+    session: AsyncSession,
+) -> None:
+    """The expiry replay gate runs on the caller's ``now=``, not its own.
+
+    Single-clock contract (#1711 M1): the inline refresh path
+    pre-checks ``expires_at`` and threads the same reading into
+    ``rotate_refresh``. Were the gate to take a second wall-clock
+    reading, an ``expires_at`` landing between the two would fire the
+    replay branch, whose dedicated-session revoke UPDATE waits on the
+    row lock the caller's transaction holds. Pin both directions: a
+    row already expired on the wall clock still rotates under a
+    caller clock that predates ``expires_at``, and a caller clock at
+    ``expires_at`` fires the expired replay branch.
+    """
+    original_refresh = "rt-clock-AAAAAAAAAAAAAAAAAAAAAA"
+    async with session.begin():
+        created = await create_session(
+            session,
+            operator_sub="op-alice",
+            tenant_id=uuid.uuid4(),
+            access_token="at-clock-old",
+            refresh_token=original_refresh,
+            lifetime=timedelta(minutes=-5),  # expires_at already past
+        )
+
+    pre_expiry = created.expires_at - timedelta(seconds=30)
+    async with session.begin():
+        rotated = await rotate_refresh(
+            session,
+            created.id,
+            presented_refresh=original_refresh,
+            new_access_token="at-clock-new",
+            new_refresh_token="rt-clock-new",
+            now=pre_expiry,
+        )
+    assert rotated.access_token == "at-clock-new"
+    assert rotated.refresh_token == "rt-clock-new"
+
+    # Not revoked: the gate consumed the supplied clock, not the wall
+    # clock that already sits past ``expires_at``.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as inspect_session:
+        row = await inspect_session.get(WebSession, created.id)
+    assert row is not None
+    assert row.revoked_at is None
+
+    # The same parameter drives the gate in the other direction.
+    with pytest.raises(RefreshReplayError) as excinfo:
+        async with session.begin():
+            await rotate_refresh(
+                session,
+                created.id,
+                presented_refresh="rt-clock-new",
+                new_access_token="at-clock-x",
+                new_refresh_token="rt-clock-x",
+                now=created.expires_at,
+            )
+    async with sessionmaker() as inspect_session:
+        audit = await inspect_session.get(AuditLog, excinfo.value.audit_id)
+    assert audit is not None
+    assert audit.payload["reason"] == "expired"
+
+
 # ---------------------------------------------------------------------------
 # Concurrent rotation: row-lock serializes (RFC 9700 § 4.14 single-use)
 # ---------------------------------------------------------------------------

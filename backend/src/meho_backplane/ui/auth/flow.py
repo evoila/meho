@@ -25,6 +25,12 @@ hosts the OAuth-client plumbing the ``/ui/auth/*`` route handlers in
   ``authorization_endpoint`` / ``token_endpoint`` /
   ``end_session_endpoint`` URLs. Backed by a TTL'd in-process cache
   identical in shape to :mod:`meho_backplane.auth.jwt`'s JWKS cache.
+* :func:`refresh_access_token` -- RFC 6749 § 6 refresh-token grant
+  (G0.25 #1694). POSTs ``grant_type=refresh_token`` with the stored
+  refresh token to the discovery-resolved token endpoint and returns
+  the fresh token pair. Single attempt, no retry -- the caller
+  (:mod:`meho_backplane.ui.auth.refresh`) maps every failure class to
+  a fail-closed 401.
 
 Library choice (per Task #865 acceptance + ADR 0004): authlib's
 :class:`authlib.integrations.httpx_client.AsyncOAuth2Client`. authlib
@@ -115,6 +121,7 @@ __all__ = [
     "clear_discovery_cache",
     "exchange_code_for_tokens",
     "get_verifier_store",
+    "refresh_access_token",
     "reset_verifier_store_for_testing",
     "resolve_oidc_endpoints",
 ]
@@ -289,12 +296,24 @@ def _ensure_client_configured(settings: Settings) -> None:
         raise OAuthFlowConfigurationError(MISSING_CLIENT_SECRET_DETAIL)
 
 
-def _build_oauth_client(settings: Settings, *, redirect_uri: str) -> AsyncOAuth2Client:
+def _build_oauth_client(
+    settings: Settings,
+    *,
+    redirect_uri: str | None = None,
+) -> AsyncOAuth2Client:
     """Construct a fresh :class:`AsyncOAuth2Client` bound to the BFF client.
 
     A new instance per call: authlib's client carries per-flow state
     on the instance, so reusing one across concurrent flows would
     cross-contaminate. Construction is cheap.
+
+    ``redirect_uri`` is required for the authorization-code legs
+    (Keycloak exact-matches it at the authorization endpoint and
+    cross-checks it at the token endpoint) and irrelevant for the
+    refresh-token grant -- RFC 6749 § 6 does not carry the parameter,
+    and authlib omits it from the ``grant_type=refresh_token`` form
+    body, so :func:`refresh_access_token` constructs the client
+    without one.
 
     ``scope='openid profile email'`` is the standard OIDC set that
     yields ``sub`` / ``name`` / ``email`` / tenant claims on the
@@ -529,3 +548,44 @@ async def exchange_code_for_tokens(
         expires_in=result.expires_in,
     )
     return result
+
+
+async def refresh_access_token(*, refresh_token: str) -> TokenExchangeResult:
+    """Exchange *refresh_token* for a fresh token pair (RFC 6749 § 6).
+
+    The silent-refresh leg of the BFF session lifecycle (G0.25 #1694):
+    one ``grant_type=refresh_token`` POST to the discovery-resolved
+    token endpoint via authlib's ``AsyncOAuth2Client.refresh_token``,
+    carrying the confidential-client credentials exactly like the
+    code-exchange leg and inheriting its 5 s
+    :data:`_HTTP_TIMEOUT_SECONDS`. **Single attempt, no retry** -- the
+    caller (:mod:`meho_backplane.ui.auth.refresh`) maps each failure
+    class (:class:`OAuthFlowConfigurationError` /
+    :class:`OAuthFlowError` / authlib ``OAuthError`` /
+    :class:`httpx.HTTPError`, all propagated raw from here) to a
+    structured reason and fails the request closed.
+
+    The returned :class:`TokenExchangeResult` reuses the callback-leg
+    shape with ``return_to=""`` -- a refresh has no post-auth redirect
+    target. When Keycloak is configured without refresh-token rotation
+    it may echo the presented refresh token back (authlib backfills the
+    presented value when the response omits the field, per RFC 6749
+    § 6's "the old refresh token stays valid" branch); rotating the
+    row to the same plaintext preserves the one-time-use bookkeeping
+    without special-casing.
+    """
+    settings = get_settings()
+    _ensure_client_configured(settings)
+    endpoints = await resolve_oidc_endpoints()
+    async with _build_oauth_client(settings) as client:
+        token: Any = await client.refresh_token(
+            endpoints.token_endpoint,
+            refresh_token=refresh_token,
+        )
+    if not isinstance(token, dict):
+        raise OAuthFlowError("token_response_unexpected_shape")
+    # No log line here -- success/failure events with session context
+    # (session_id, expires_at deltas, time cost) are owned by the
+    # session-level caller. This module never sees a session id and
+    # must never log token material.
+    return _project_token_response(dict(token), "")

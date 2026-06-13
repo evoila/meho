@@ -30,14 +30,25 @@ The four entry points
   client-supplied) so refreshing it from the request hot path is
   safe.
 
+* :func:`load_session_for_update` -- side-effect-free variant of
+  :func:`load_session` that row-locks the session via
+  ``SELECT ... FOR UPDATE`` for the duration of the caller's
+  transaction. The refresh orchestrator (G0.25 #1694,
+  :mod:`meho_backplane.ui.auth.refresh`) uses it to serialise
+  concurrent refresh attempts on the same session: the second
+  request blocks on the lock, then observes the first request's
+  rotated tokens and skips its own token-endpoint round-trip.
+
 * :func:`revoke_session` -- soft-delete on logout (and on any
   operator-initiated revoke surface). Sets ``revoked_at = now()``;
   keeps the row visible-but-marked for audit-trail back-reference.
   Idempotent on already-revoked rows.
 
-* :func:`rotate_refresh` -- the RFC 9700 § 4.14 contract. Called
-  by the Task #865 refresh handler when the access token has
-  expired but the operator's session has not. Verifies the
+* :func:`rotate_refresh` -- the RFC 9700 § 4.14 contract. Called by
+  the inline refresh orchestrator
+  (:mod:`meho_backplane.ui.auth.refresh`, G0.25 #1694) when the
+  access token has expired -- or is about to expire -- but the
+  operator's session has not. Verifies the
   presented refresh token matches the stored one; on match the
   row's tokens are swapped to the new pair (one-time-use semantics
   -- the previous refresh value never decrypts to a valid
@@ -114,6 +125,7 @@ __all__ = [
     "SessionStoreError",
     "create_session",
     "load_session",
+    "load_session_for_update",
     "reset_fernet_cache_for_testing",
     "revoke_session",
     "rotate_refresh",
@@ -449,6 +461,60 @@ async def load_session(
     )
 
 
+async def load_session_for_update(
+    session: AsyncSession,
+    cookie_id: uuid.UUID,
+) -> DecryptedSession | None:
+    """Load + decrypt a session under a ``SELECT ... FOR UPDATE`` row lock.
+
+    The serialisation primitive for the inline token-refresh path
+    (G0.25 #1694). Unlike :func:`load_session` this variant is
+    **side-effect-free** -- no ``last_seen_at`` bump, no sliding
+    extension -- because the caller is about to mutate the row through
+    :func:`rotate_refresh` anyway and the refresh decision must be
+    made against stable, lock-protected values.
+
+    The lock holds for the remainder of the caller's transaction, so
+    two concurrent refresh attempts on the same session serialise
+    here: the second blocks until the first commits its rotation, then
+    re-reads and finds the already-rotated tokens. SQLite caveat as in
+    :func:`rotate_refresh` -- aiosqlite serialises at the connection /
+    database level rather than per row, but the behavioural contract
+    (exactly one winner; the loser observes the winner's write) holds
+    on both engines.
+
+    Returns
+    -------
+    DecryptedSession | None
+        Decrypted plaintext view when the row is present, active
+        (``revoked_at IS NULL``), and not past ``expires_at``.
+        ``None`` otherwise -- same collapse contract as
+        :func:`load_session`.
+    """
+    result = await session.execute(
+        select(WebSession).where(WebSession.id == cookie_id).with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    if row.revoked_at is not None:
+        return None
+    now = datetime.now(UTC)
+    expires_at = _coerce_utc(row.expires_at)
+    if expires_at <= now:
+        return None
+    return DecryptedSession(
+        id=row.id,
+        operator_sub=row.operator_sub,
+        tenant_id=row.tenant_id,
+        created_at=_coerce_utc(row.created_at),
+        expires_at=expires_at,
+        access_token=_decrypt(row.access_token),
+        refresh_token=_decrypt(row.refresh_token),
+        last_seen_at=row.last_seen_at,
+    )
+
+
 async def revoke_session(
     session: AsyncSession,
     cookie_id: uuid.UUID,
@@ -484,105 +550,137 @@ async def rotate_refresh(
     presented_refresh: str,
     new_access_token: str,
     new_refresh_token: str,
+    new_lifetime: timedelta | None = None,
+    now: datetime | None = None,
 ) -> DecryptedSession:
     """Swap the row's tokens for a new pair after a successful refresh.
 
     The RFC 9700 § 4.14 "refresh-token rotation" contract:
 
     * On success (presented refresh matches stored refresh AND the
-      session is still active), both columns are overwritten with
-      the fresh ciphertext. The previous refresh value becomes
-      un-presentable (it never decrypts to the new stored value).
+      session is still active), both columns are overwritten with the
+      fresh ciphertext; the previous refresh value never presents
+      again (one-time use).
 
-    * On replay (presented refresh does not match, OR the session
-      is already revoked, OR the session is past
-      ``expires_at``), the session row is revoked AND an
-      :class:`AuditLog` row is written
+    * On replay (presented refresh does not match, OR the session is
+      already revoked / past ``expires_at``), the session row is
+      revoked AND an :class:`AuditLog` row is written
       ``path='ui.session.refresh_replay'`` so the security surface
-      (G2.4 audit-export / G8.1 replay-detection) sees the event.
-      A :class:`RefreshReplayError` carrying the freshly-allocated
-      audit_id propagates to the caller (Task #865's refresh
-      handler) which maps it to a 401 + cookie-clear.
+      (G2.4 audit-export / G8.1 replay-detection) sees the event. A
+      :class:`RefreshReplayError` carrying the freshly-allocated
+      audit_id propagates; the caller maps it to a 401 + cookie-clear.
 
-    The replay branch also fires when the row is *missing*
-    altogether -- the caller cannot recover a session that the
-    storage layer cannot find, and the "no row at all" shape is
-    treated as "the cookie was never valid, or the session has
-    been hard-deleted by an out-of-band ops action" -- either way
-    a 401 + cookie-clear is the right response and the audit row
-    documents the attempt.
+    The replay branch also fires when the row is *missing* altogether
+    (the cookie was never valid, or the session was hard-deleted by an
+    out-of-band ops action) -- either way a 401 + cookie-clear is the
+    right response and the audit row documents the attempt.
 
     Parameters
     ----------
     session
-        Open :class:`AsyncSession` for the **happy path**. The
-        caller's outer transaction owns the commit on success; this
-        function flushes after the in-row mutations. On the replay
-        path the function **does not write to this session** at all
-        -- it opens its own dedicated session (via
-        :func:`get_sessionmaker`) for the revoke + audit-row writes
-        and commits that session independently. The replay-path
-        side effects therefore survive even when the caller's
-        outer transaction rolls back on the propagating
-        :class:`RefreshReplayError`.
+        Open :class:`AsyncSession` for the **happy path** (caller's
+        outer transaction owns the commit; this function flushes).
+        The replay path never writes through it -- revoke + audit
+        side effects commit on a dedicated session
+        (:func:`_commit_replay_side_effects`) and survive the
+        caller's rollback on the propagating error.
     cookie_id
-        The session's UUID PK -- parsed from the ``meho_session``
-        cookie by Task #865's refresh handler.
+        The session's UUID PK (the ``meho_session`` cookie value).
     presented_refresh
-        The refresh token the client (or, more correctly, the
-        backplane-side refresh handler operating on behalf of the
-        BFF session) is presenting back to this rotation call.
-        Compared bytes-for-bytes against the decrypted stored
-        value.
+        The refresh token presented back to this rotation call.
+        Compared bytes-for-bytes against the decrypted stored value.
     new_access_token
-        Fresh access token returned by Keycloak's token endpoint.
-        Encrypted before write.
+        Fresh access token from Keycloak's token endpoint. Encrypted
+        before write.
     new_refresh_token
-        Fresh refresh token returned alongside ``new_access_token``.
-        Encrypted before write.
+        Fresh refresh token alongside it. Encrypted before write.
+    new_lifetime
+        Optional session-lifetime extension derived from the fresh
+        access token's ``expires_in`` minus the login-time clock-skew
+        margin (G0.25 #1694). When provided, ``expires_at`` is pushed
+        to ``now + new_lifetime`` under the same monotonic + capped
+        discipline :func:`_maybe_extend_expiry` applies (clamped to
+        ``created_at + ui_session_absolute_lifetime_seconds``, never
+        moved backwards) -- a refresh alone can never mint an immortal
+        session. ``None`` (the default) leaves ``expires_at``
+        untouched, preserving the pre-#1694 contract.
+    now
+        Optional caller-supplied clock consumed by the replay gate's
+        expiry check and the expiry extension; ``None`` (the default)
+        reads the wall clock. Callers that pre-check ``expires_at``
+        (the inline refresh path, :mod:`meho_backplane.ui.auth.refresh`)
+        pass their own reading so the pre-check and the gate cannot
+        straddle expiry between two clock reads -- an ``expires_at``
+        in that gap would reach the "expired" replay branch, whose
+        dedicated-session revoke UPDATE waits on the very row lock
+        the caller's transaction holds (#1711 M1).
 
     Returns
     -------
     DecryptedSession
-        Plaintext view of the rotated row -- callers do not need
-        to re-decrypt.
+        Plaintext view of the rotated row -- no re-decrypt needed.
 
     Raises
     ------
     RefreshReplayError
-        ``presented_refresh`` does not match the stored value, or
-        the session is already revoked / past expiry / missing.
-        The session is revoked + an audit row is written
-        **independently of the caller's transaction** before the
-        exception propagates.
+        ``presented_refresh`` does not match the stored value, or the
+        session is already revoked / past expiry / missing. The
+        session is revoked + an audit row is written **independently
+        of the caller's transaction** before the exception propagates.
     """
-    # RFC 9700 § 4.14 demands single-use refresh tokens, which means
-    # two concurrent requests presenting the same valid refresh value
-    # must not BOTH pass the mismatch / revoked / expired gate and
-    # both successfully rotate. A naive ``session.get`` is a
-    # non-locking read; two transactions could each load the row,
-    # each check ``refresh_token == stored``, and each write a new
-    # ciphertext on top -- the second-writer wins but the
-    # second-presenter still received a "rotation OK" response,
-    # which is exactly the one-time-use breach the RFC closes.
-    #
-    # ``SELECT ... FOR UPDATE`` row-locks the session row for the
-    # duration of the caller's transaction. The second concurrent
-    # rotation blocks until the first commits; when it unblocks and
-    # re-reads, the stored refresh value has already rotated, so
-    # ``presented_refresh != stored_refresh`` and the replay branch
-    # fires -- exactly the one-time-use property the RFC mandates.
-    #
-    # SQLite caveat: aiosqlite's locking is database-level rather
-    # than row-level, so on the dev/test path the serialization
-    # comes from the connection-level write lock rather than a true
-    # row lock. The behavioural contract (exactly one rotation
-    # wins; the other surfaces as replay) holds on both engines.
+    now = datetime.now(UTC) if now is None else now
+    row = await _locked_row_or_replay(
+        session,
+        cookie_id,
+        presented_refresh=presented_refresh,
+        now=now,
+    )
+    return await _apply_rotation(
+        session,
+        row,
+        new_access_token=new_access_token,
+        new_refresh_token=new_refresh_token,
+        new_lifetime=new_lifetime,
+        now=now,
+    )
+
+
+async def _locked_row_or_replay(
+    session: AsyncSession,
+    cookie_id: uuid.UUID,
+    *,
+    presented_refresh: str,
+    now: datetime,
+) -> WebSession:
+    """Row-lock the session and gate it through the replay defences.
+
+    RFC 9700 § 4.14 demands single-use refresh tokens, which means
+    two concurrent requests presenting the same valid refresh value
+    must not BOTH pass the mismatch / revoked / expired gate and
+    both successfully rotate. A naive ``session.get`` is a
+    non-locking read; two transactions could each load the row,
+    each check ``refresh_token == stored``, and each write a new
+    ciphertext on top -- the second-writer wins but the
+    second-presenter still received a "rotation OK" response,
+    which is exactly the one-time-use breach the RFC closes.
+
+    ``SELECT ... FOR UPDATE`` row-locks the session row for the
+    duration of the caller's transaction. The second concurrent
+    rotation blocks until the first commits; when it unblocks and
+    re-reads, the stored refresh value has already rotated, so
+    ``presented_refresh != stored_refresh`` and the replay branch
+    fires -- exactly the one-time-use property the RFC mandates.
+
+    SQLite caveat: aiosqlite's locking is database-level rather
+    than row-level, so on the dev/test path the serialization
+    comes from the connection-level write lock rather than a true
+    row lock. The behavioural contract (exactly one rotation
+    wins; the other surfaces as replay) holds on both engines.
+    """
     result = await session.execute(
         select(WebSession).where(WebSession.id == cookie_id).with_for_update()
     )
     row = result.scalar_one_or_none()
-    now = datetime.now(UTC)
 
     if row is None:
         # Cannot replay-revoke a row that does not exist, but the
@@ -621,19 +719,48 @@ async def rotate_refresh(
         )
         raise RefreshReplayError(session_id=cookie_id, audit_id=audit_id)
 
-    # Happy path -- one-time-use rotation. Both columns
-    # overwritten with the fresh ciphertext; the previous refresh
-    # value becomes un-presentable.
+    return row
+
+
+async def _apply_rotation(
+    session: AsyncSession,
+    row: WebSession,
+    *,
+    new_access_token: str,
+    new_refresh_token: str,
+    new_lifetime: timedelta | None,
+    now: datetime,
+) -> DecryptedSession:
+    """Happy-path rotation: swap ciphertext, optionally extend expiry.
+
+    Both columns are overwritten with the fresh ciphertext; the
+    previous refresh value becomes un-presentable (one-time-use).
+    ``new_lifetime`` -- when the caller is the inline refresh path
+    (G0.25 #1694) -- pushes ``expires_at`` forward through
+    :func:`_refresh_extended_expiry`'s monotonic + absolute-cap
+    discipline.
+    """
     row.access_token = _encrypt(new_access_token)
     row.refresh_token = _encrypt(new_refresh_token)
     row.last_seen_at = now
+    effective_expires_at = _coerce_utc(row.expires_at)
+    if new_lifetime is not None:
+        extended = _refresh_extended_expiry(
+            current=effective_expires_at,
+            created_at=_coerce_utc(row.created_at),
+            now=now,
+            new_lifetime=new_lifetime,
+        )
+        if extended > effective_expires_at:
+            row.expires_at = extended
+            effective_expires_at = extended
     await session.flush()
     return DecryptedSession(
         id=row.id,
         operator_sub=row.operator_sub,
         tenant_id=row.tenant_id,
         created_at=_coerce_utc(row.created_at),
-        expires_at=_coerce_utc(row.expires_at),
+        expires_at=effective_expires_at,
         access_token=new_access_token,
         refresh_token=new_refresh_token,
         last_seen_at=row.last_seen_at,
@@ -708,6 +835,39 @@ def _maybe_extend_expiry(
         return current
     row.expires_at = extended
     return extended
+
+
+def _refresh_extended_expiry(
+    *,
+    current: datetime,
+    created_at: datetime,
+    now: datetime,
+    new_lifetime: timedelta,
+) -> datetime:
+    """Compute the post-refresh ``expires_at``, capped and monotonic.
+
+    The refresh-driven sibling of :func:`_maybe_extend_expiry`
+    (G0.25 #1694): a successful token refresh extends the session to
+    ``now + new_lifetime`` (the fresh token's ``expires_in`` minus the
+    login-time margin), but
+
+    * never past the absolute ceiling ``created_at +
+      ui_session_absolute_lifetime_seconds`` -- chained refreshes
+      cannot mint an immortal session (OWASP ASVS v4 § 3.3 absolute
+      timeout), and
+    * never backwards -- when the sliding extension (#869) already
+      pushed ``expires_at`` beyond the fresh token's own lifetime,
+      shrinking it would log out a wall display the sliding window
+      deliberately keeps alive. The access token inside the row simply
+      refreshes again on its next expiry.
+
+    Returns the effective ``expires_at``; the caller decides whether
+    to write it back.
+    """
+    settings = get_settings()
+    ceiling = created_at + timedelta(seconds=settings.ui_session_absolute_lifetime_seconds)
+    candidate = min(now + new_lifetime, ceiling)
+    return candidate if candidate > current else current
 
 
 def _coerce_utc(value: datetime) -> datetime:

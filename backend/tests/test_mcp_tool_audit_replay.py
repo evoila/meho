@@ -70,6 +70,7 @@ def _node(node_id: str, *, depth: int, children: list[ReplayNode] | None = None)
         result_status="ok",
         parent_audit_id=None,
         agent_session_id=uuid.UUID(_SESSION_ID),
+        work_ref=None,
         broadcast_event_id=None,
         depth=depth,
         children=children or [],

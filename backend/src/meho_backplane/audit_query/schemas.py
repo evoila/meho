@@ -99,6 +99,7 @@ class AuditQueryFilters(BaseModel):
     audit_id: uuid.UUID | None = None
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
+    work_ref: str | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 
@@ -120,6 +121,9 @@ class AuditEntry(BaseModel):
     * ``op_id`` / ``op_class`` / ``result_status`` — computed at query time
     * ``parent_audit_id`` ← ``audit_log.parent_audit_id`` (lineage; #398)
     * ``agent_session_id`` ← ``audit_log.agent_session_id`` (MCP session; #1009)
+    * ``work_ref`` ← ``audit_log.work_ref`` (external change-ticket reference;
+      work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat
+      ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.
     * ``principal_name`` ← ``payload['principal_name']`` when set. The MCP
       audit-write helper (``write_mcp_audit_row``) populates it from
       ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain
@@ -149,6 +153,7 @@ class AuditEntry(BaseModel):
     result_status: str
     parent_audit_id: uuid.UUID | None
     agent_session_id: uuid.UUID | None
+    work_ref: str | None
     broadcast_event_id: uuid.UUID | None
 
 

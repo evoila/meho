@@ -3,8 +3,8 @@
 
 """``/api/v1/audit/*`` — REST surface for the audit-query substrate (G8.1-T2).
 
-Mounts five routes. Four dispatch through the T1
-:func:`~meho_backplane.audit_query.query_audit` handler; the fifth
+Mounts six routes. Five dispatch through the T1
+:func:`~meho_backplane.audit_query.query_audit` handler; the sixth
 (replay, G8.2-T4) dispatches through
 :func:`~meho_backplane.audit_query.replay_session`:
 
@@ -12,6 +12,9 @@ Mounts five routes. Four dispatch through the T1
   :class:`~meho_backplane.api.v1.audit_models.AuditQueryRequest`.
 * ``GET /api/v1/audit/who-touched/{target}`` — pre-canned shortcut
   bound to ``target=<path>``.
+* ``GET /api/v1/audit/by-work-ref/{ref}`` — pre-canned shortcut bound
+  to ``work_ref=<path>`` (exact match); the "show every write
+  authorised by change-ticket X" lookup (work_ref I1-T1 #1655).
 * ``GET /api/v1/audit/my-recent`` — pre-canned shortcut bound to
   ``principal=<operator.sub>``.
 * ``GET /api/v1/audit/show/{audit_id}`` — single-row fetch. 404 (not
@@ -243,6 +246,7 @@ async def query(
         audit_id=body.audit_id,
         parent_audit_id=body.parent_audit_id,
         agent_session_id=body.agent_session_id,
+        work_ref=body.work_ref,
         limit=body.limit,
         cursor=body.cursor,
     )
@@ -270,6 +274,45 @@ async def who_touched(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(target=target, since=since_dt, limit=limit)
+    return await _dispatch(filters, tenant_id=operator.tenant_id)
+
+
+@router.get("/by-work-ref/{ref:path}", response_model=AuditQueryResult)
+async def by_work_ref(
+    ref: str,
+    since: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=100, ge=1, le=1000),
+    operator: Operator = _require_operator,
+) -> AuditQueryResult:
+    """Audit rows authorised by the external change-ticket reference *ref*.
+
+    Pre-canned shortcut over :func:`query_audit` with the ``work_ref``
+    filter bound to the path param (work_ref I1-T1 #1655) — the headline
+    "show every write authorised by ticket X" lookup. The match is
+    **exact**: ``ref`` is an opaque identifier (e.g. ``gh:evoila/meho#1``),
+    not a search term, so a non-matching value returns an empty result,
+    never an error.
+
+    Unlike :func:`who_touched` / :func:`my_recent`, ``since`` has **no**
+    default window: a change-ticket lookup wants the whole governed history
+    of that ref, not just the last 24h. Passing ``?since=`` narrows it when
+    a window is wanted.
+
+    The path converter is ``{ref:path}`` (not the default ``{ref}``) because a
+    work_ref carries embedded slashes — ``gh:evoila/meho#1`` — that the default
+    converter would refuse to match (404). The ``#`` is passed percent-encoded
+    (``%23``); FastAPI decodes it. The OpenAPI path string is still
+    ``/api/v1/audit/by-work-ref/{ref}``.
+    """
+    _bind_audit_overrides()
+    since_dt = None
+    if since is not None:
+        now = datetime.now(UTC)
+        try:
+            since_dt = parse_duration(since, now=now)
+        except DurationParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filters = AuditQueryFilters(work_ref=ref, since=since_dt, limit=limit)
     return await _dispatch(filters, tenant_id=operator.tenant_id)
 
 

@@ -33,10 +33,13 @@ straight through.
 ## The guard
 
 [`connectors/vault/tenant_scope.py`](../../backend/src/meho_backplane/connectors/vault/tenant_scope.py)
-adds `enforce_tenant_scope(operator, mount=..., path=...)`, called by
-**every** KV-v2 handler (`read`, `list`, `versions`, `put`, `patch`,
-`delete`) immediately after it extracts `mount`/`path` and **before** the
-`vault_client_for_operator(...)` login. On a violation it raises
+adds `enforce_tenant_scope(operator, mount=..., path=..., read_only=...)`,
+called by **every** KV-v2 handler (`read`, `list`, `versions`, `put`,
+`patch`, `delete`) immediately after it extracts `mount`/`path` and
+**before** the `vault_client_for_operator(...)` login. `read_only` is
+`True` for the read/list/versions handlers and `False` for
+put/patch/delete; it gates the platform-path exemption (below) to
+read-only verbs. On a violation it raises
 `VaultTenantScopeError`; the dispatcher's `connector_error` branch wraps
 it into a structured `OperationResult` with
 `extras["exception_class"] == "VaultTenantScopeError"` — distinct from the
@@ -136,7 +139,20 @@ provisioned shared per the Goal #11 cross-repo contract, so the default-on
 guard must not deny the platform's own probe. The exemption is an
 **exact-match** set, never a prefix or glob, so a caller cannot smuggle a
 tenant escape through it; a regression test pins it equal to the health
-route's path.
+route's path. It is also scoped to **read-only** verbs (gated on the
+`read_only` argument): the health route only ever reads this path, so a
+`put`/`patch`/`delete` to it under a non-owning operator is still
+tenant-scoped and denied.
+
+**Prefix template validation.** `vault_kv_tenant_scope_prefix` is validated
+at `Settings` construction (a pydantic `@field_validator`): a non-empty
+value must contain the `{tenant_id}` placeholder and be a clean
+`str.format` template (no unbalanced braces, no positional `{0}`, no extra
+named placeholder). The empty string (explicit-disable) is accepted
+verbatim. A malformed override therefore fails the pod start with an
+actionable message rather than failing at first `vault.kv.*` call (or, for
+a placeholder-less value, silently collapsing every operator to one shared
+namespace).
 
 The **system/shim operator** (the Nil-UUID `tenant_id` the vault connector
 synthesises in `connector.py`, empty `raw_jwt`) is exempt even when the

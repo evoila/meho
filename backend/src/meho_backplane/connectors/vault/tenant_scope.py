@@ -44,15 +44,20 @@ The system/shim operator (Nil-UUID tenant, empty ``raw_jwt``) is exempt:
 its only callers exercise the unauthenticated ``vault.sys.health`` op and
 forward no token to Vault, so there is no tenant identity to bind against.
 
-A small set of **platform paths** is also exempt regardless of operator —
-fixed, shared, non-tenant secrets the platform itself reads under any
-authenticated operator's identity. The only such path today is the
-federation-proof health-check secret (``secret/meho/test/federation``,
-read by ``GET /api/v1/health`` to prove the JWT→OIDC→Vault chain). It is
-provisioned shared per the Goal #11 cross-repo contract and carries no
-tenant data, so the per-tenant guard must not deny it once enforced by
-default (#1725). The exemption is deliberately a closed allow-list, not a
-pattern, so it cannot be widened by a caller-supplied path.
+A small set of **platform paths** is also exempt — but only for
+**read-only** ops — fixed, shared, non-tenant secrets the platform itself
+reads under any authenticated operator's identity. The only such path
+today is the federation-proof health-check secret
+(``secret/meho/test/federation``, read by ``GET /api/v1/health`` to prove
+the JWT→OIDC→Vault chain). It is provisioned shared per the Goal #11
+cross-repo contract and carries no tenant data, so the per-tenant guard
+must not deny that read once enforced by default (#1725). The exemption is
+deliberately a closed allow-list, not a pattern, so it cannot be widened
+by a caller-supplied path; and it is scoped to read-only verbs
+(``vault.kv.read`` / ``vault.kv.list`` / ``vault.kv.versions``) so a
+``put`` / ``patch`` / ``delete`` to the shared platform path under a
+non-owning operator is still tenant-scoped (#1725 M1) — the health route
+only ever reads it.
 """
 
 from __future__ import annotations
@@ -135,18 +140,19 @@ def _normalised_logical_path(mount: str, path: str) -> str:
     return f"{clean_mount}/{clean_path}"
 
 
-def enforce_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
+def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only: bool) -> None:
     """Deny a ``vault.kv.*`` call whose path escapes the operator's tenant namespace.
 
     Enforced by default
     (``vault_kv_tenant_scope_prefix="secret/tenants/{tenant_id}/"``). No-op
     only when the prefix is explicitly emptied
     (``VAULT_KV_TENANT_SCOPE_PREFIX=""``), when *operator* is the Nil-tenant
-    system shim, or when the normalised ``<mount>/<path>`` is one of the
-    fixed :data:`PLATFORM_EXEMPT_PATHS` (shared non-tenant platform secrets,
-    e.g. the federation-proof health read). Otherwise renders the operator's
-    tenant prefix from the template and raises :class:`VaultTenantScopeError`
-    unless the normalised ``<mount>/<path>`` begins with it.
+    system shim, or — for **read-only** ops only — when the normalised
+    ``<mount>/<path>`` is one of the fixed :data:`PLATFORM_EXEMPT_PATHS`
+    (shared non-tenant platform secrets, e.g. the federation-proof health
+    read). Otherwise renders the operator's tenant prefix from the template
+    and raises :class:`VaultTenantScopeError` unless the normalised
+    ``<mount>/<path>`` begins with it.
 
     Parameters
     ----------
@@ -158,6 +164,16 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
     mount, path
         The mount handle and logical path the handler is about to forward
         to hvac, already ``.strip()``-ed by the handler.
+    read_only
+        Whether the calling op only reads/lists (``vault.kv.read`` /
+        ``vault.kv.list`` / ``vault.kv.versions``) or mutates
+        (``vault.kv.put`` / ``vault.kv.patch`` / ``vault.kv.delete``). The
+        :data:`PLATFORM_EXEMPT_PATHS` allow-list is honoured **only** for
+        read-only ops: the sole exempt path is the federation-proof health
+        secret which the health route only ever reads, so a write/delete to
+        it under a non-owning operator must still be tenant-scoped (#1725
+        M1). Required (no default) so every callsite makes its verb class
+        explicit rather than silently inheriting an exemption.
 
     Raises
     ------
@@ -174,10 +190,12 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str) -> None:
         return
 
     candidate = _normalised_logical_path(mount, path)
-    if candidate in PLATFORM_EXEMPT_PATHS:
+    if read_only and candidate in PLATFORM_EXEMPT_PATHS:
         # A fixed, shared, non-tenant platform secret (e.g. the
         # federation-proof health read) — exempt by closed allow-list so
         # default-on enforcement does not deny the platform's own probes.
+        # Scoped to read-only ops: the health route only reads this path,
+        # so a put/patch/delete to it stays tenant-scoped (#1725 M1).
         return
 
     prefix = rendered_tenant_prefix(operator, template=template)

@@ -351,18 +351,32 @@ async def test_rest_only_dogfood_zero_is_not_context_free(
     ``total_searches`` stays ``0`` — but the response now states which
     surfaces *do* count and that REST is excluded, so the zero reads as
     "REST is not counted", not "no usage".
+
+    The seed timestamps are anchored to ``datetime.now(UTC)`` rather than
+    the module-level fixed ``_NOW`` (mirroring
+    :func:`test_route_audit_row_count_matches_total_searches`). This is a
+    route test driving the HTTP endpoint with its **default** ``since`` of
+    ``30d``, which the route resolves against the real wall clock. The
+    rows must fall *inside* that rolling ``[now-30d, now]`` window so that
+    ``total_searches == 0`` proves *surface exclusion* (REST is not a
+    counted search surface) and not *window expiry*. A fixed ``_NOW`` seed
+    aged out of the window once the calendar advanced ~30 days past it,
+    letting ``compute_usage``'s ``WHERE occurred_at >= since`` filter drop
+    the rows before the exclusion logic ran — making the count guard
+    vacuous (#1734).
     """
+    base = datetime.now(UTC)
     await _seed_audit_row(
         operator_sub="op-rest",
         tenant_id=_FIXED_TENANT,
         path="/api/v1/retrieve",
-        occurred_at=_NOW - timedelta(days=10),
+        occurred_at=base - timedelta(days=10),
     )
     await _seed_audit_row(
         operator_sub="op-rest",
         tenant_id=_FIXED_TENANT,
         path="/api/v1/retrieve",
-        occurred_at=_NOW - timedelta(days=2),
+        occurred_at=base - timedelta(days=2),
     )
 
     key = _make_rsa_keypair("kid-A")

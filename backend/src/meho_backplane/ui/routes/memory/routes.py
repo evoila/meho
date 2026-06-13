@@ -62,6 +62,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.memory import MemoryScope
+from meho_backplane.memory.ttl import resolve_default_expires_at
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.routes.memory._modal_shared import (
     TAGS_MAX_LENGTH,
@@ -202,6 +203,19 @@ async def _create_submit_handler(
     typical UX shape for the v0.2 surface). ``expires_at`` is
     parsed by FastAPI's :class:`datetime` form coercion from the
     ISO-8601 string a ``<input type="datetime-local">`` produces.
+
+    ``expires_at`` then runs through the shared G5.2-T2 (#624)
+    default-TTL resolver before the persist -- same seam the REST
+    ``remember`` route and the MCP ``add_to_memory`` tool consume
+    (#1697): a blank picker on a ``user``-scope create injects
+    ``now(UTC) + Settings.memory_user_default_ttl_days``, non-``user``
+    scopes stay ``None``, and an explicit timestamp is honoured
+    verbatim. The surface-native "field was set" discriminant is
+    ``expires_at is not None``: FastAPI coerces both an absent field
+    and the empty string a blank ``datetime-local`` input submits to
+    ``None`` (verified against the installed FastAPI 0.136.3), and a
+    browser form cannot express the REST surface's explicit-``null``
+    opt-out, so set-vs-unset collapses to datetime-vs-``None`` here.
     """
     return await create_entry(
         request,
@@ -211,7 +225,11 @@ async def _create_submit_handler(
         body=body,
         slug=slug,
         tags_raw=tags,
-        expires_at=expires_at,
+        expires_at=resolve_default_expires_at(
+            scope,
+            expires_at_was_set=expires_at is not None,
+            explicit_expires_at=expires_at,
+        ),
         target_name=target_name,
     )
 

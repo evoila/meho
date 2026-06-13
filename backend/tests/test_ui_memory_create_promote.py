@@ -42,6 +42,7 @@ import re
 import uuid
 import warnings
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import patch as _patch
@@ -246,7 +247,6 @@ def _seed_session_sync(
     operator_sub: str,
 ) -> uuid.UUID:
     """Create a ``web_session`` row carrying *access_token* and return its UUID."""
-    from datetime import timedelta
 
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
@@ -324,6 +324,38 @@ def _count_documents(tenant_id: uuid.UUID, scope: MemoryScope) -> int:
                 )
             )
             return len(list(result.scalars().all()))
+
+    return asyncio.run(_do())
+
+
+def _document_expires_at(tenant_id: uuid.UUID, scope: MemoryScope) -> str | None:
+    """Return ``doc_metadata['expires_at']`` of the single ``(tenant, scope)`` row.
+
+    The create-submit default-TTL tests (#1697) assert what actually
+    landed on the persisted row -- not what the handler passed
+    downstream -- because the UI suite runs the real
+    :meth:`MemoryService.remember` (only the embedding service is
+    stubbed). Asserts exactly one row exists so a silently-failed
+    persist can't masquerade as "no expiry was set".
+    """
+
+    async def _do() -> str | None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(Document).where(
+                    Document.tenant_id == tenant_id,
+                    Document.source == MEMORY_SOURCE,
+                    Document.kind == kind_for_scope(scope),
+                )
+            )
+            rows = list(result.scalars().all())
+            assert len(rows) == 1, (
+                f"expected exactly one ({tenant_id}, {scope}) row, got {len(rows)}"
+            )
+            value = rows[0].doc_metadata.get("expires_at")
+            assert value is None or isinstance(value, str)
+            return value
 
     return asyncio.run(_do())
 
@@ -692,6 +724,147 @@ def test_create_submit_real_modal_cookie_header_pair_returns_204() -> None:
     assert response.status_code == 204, response.text
     assert response.headers.get("HX-Redirect") == "/ui/memory"
     assert _count_documents(_TENANT_A, MemoryScope.USER) == 1
+
+
+# ---------------------------------------------------------------------------
+# Create submit -- default-TTL injection (#1697, policy from G5.2-T2 #624)
+# ---------------------------------------------------------------------------
+#
+# The create form promises "Leave blank to use the scope's default
+# TTL", and the submit handler routes the parsed ``expires_at`` form
+# value through the shared ``resolve_default_expires_at`` seam the
+# REST + MCP write paths consume. A blank ``<input
+# type="datetime-local">`` submits ``expires_at=`` (empty string),
+# which FastAPI coerces to ``None`` exactly like an absent field --
+# both shapes mean "unset" on this surface, so the tests below cover
+# one of each. Unlike the REST suite (which mocks ``remember`` and
+# asserts the kwarg), these tests read ``doc_metadata.expires_at``
+# back off the persisted row: the UI suite runs the real service with
+# only the embedding stubbed, so the row is the cheapest honest
+# assertion target.
+
+
+def test_create_submit_user_scope_blank_expires_at_injects_default_ttl() -> None:
+    """USER scope + blank picker -> row expires at ``now(UTC) + 7d`` (#1697).
+
+    Regression: the UI handler used to pass the raw ``None`` straight
+    to :meth:`MemoryService.remember`, so user-scope rows created via
+    the form persisted ``metadata.expires_at = null`` and the expiry
+    sweeper (G5.2-T1 #623, null rows skipped) never reaped them --
+    the template's default-TTL promise was a no-op on this surface.
+    The POST carries ``expires_at=""`` -- the exact shape a browser
+    submits for a blank ``datetime-local`` input.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    before = datetime.now(UTC)
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={
+                    "scope": "user",
+                    "body": "session-scoped hint",
+                    "expires_at": "",
+                },
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+    after = datetime.now(UTC)
+    assert response.status_code == 204, response.text
+    raw = _document_expires_at(_TENANT_A, MemoryScope.USER)
+    assert raw is not None, "user-scope row persisted without the default TTL"
+    expires_at = datetime.fromisoformat(raw)
+    # The resolver returns ``now(UTC) + memory_user_default_ttl_days``
+    # (Settings default: 7). Bounding by [before+7d, after+7d] proves
+    # the 7-day window without coupling to a fixed-second cutoff --
+    # same clock-drift-tolerant shape the REST suite pins.
+    assert before + timedelta(days=7) <= expires_at <= after + timedelta(days=7)
+
+
+def test_create_submit_tenant_scope_blank_expires_at_stays_null() -> None:
+    """TENANT scope + blank picker -> ``expires_at`` stays ``null``.
+
+    #624 narrows the default-TTL gate to :attr:`MemoryScope.USER`;
+    a tenant admin's shared note must not silently expire in 7 days.
+    The field is omitted entirely here (vs the empty string in the
+    USER test) so the suite covers both "unset" arrival shapes.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "tenant", "body": "team policy"},
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert _document_expires_at(_TENANT_A, MemoryScope.TENANT) is None
+
+
+def test_create_submit_explicit_expires_at_honoured_verbatim() -> None:
+    """USER scope + explicit timestamp -> persisted verbatim (override path).
+
+    The picker's ``datetime-local`` value has no seconds and no
+    offset; FastAPI parses it tz-naive and the resolver must not
+    touch it (``expires_at_was_set=True``). The substrate's
+    ``metadata_datetime`` reader normalises tz-naive ISO strings to
+    UTC on the way out, so the naive persist shape stays sound for
+    the expiry sweeper.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={
+                    "scope": "user",
+                    "body": "expires on jun 1",
+                    "expires_at": "2027-06-01T12:00",
+                },
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    raw = _document_expires_at(_TENANT_A, MemoryScope.USER)
+    assert raw is not None
+    assert datetime.fromisoformat(raw) == datetime(2027, 6, 1, 12, 0)
 
 
 # ---------------------------------------------------------------------------

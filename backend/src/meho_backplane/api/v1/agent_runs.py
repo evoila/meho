@@ -47,13 +47,15 @@ errors this module maps.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from datetime import datetime
 from typing import Annotated, Final
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -63,6 +65,7 @@ from meho_backplane.agent.invocation import (
     AgentNotFoundError,
     AgentRunNotFoundError,
     AgentRunOutcome,
+    AgentRunSummary,
     BudgetExceededError,
     get_agent_invoker,
 )
@@ -70,6 +73,7 @@ from meho_backplane.agent.run import AgentRunEvent
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.models import AgentRunStatus
+from meho_backplane.operations._audit import work_ref_var
 
 __all__ = ["router"]
 
@@ -149,6 +153,31 @@ class AgentRunStatusResponse(BaseModel):
     error: str | None
 
 
+class AgentRunSummaryResponse(BaseModel):
+    """One row of the agent-run list (``GET /agents/runs``).
+
+    A scannable index row: identity, lifecycle state, resolved model
+    coordinates, timestamps, and the ``work_ref`` change-ticket
+    reference the list filters on (work_ref I3-T2 #1662). The full
+    ``output`` blob is omitted — a caller wanting a run's result polls
+    ``GET /agents/runs/{handle}``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: uuid.UUID
+    status: AgentRunStatus
+    trigger: str
+    model_tier: str
+    provider: str | None
+    model: str | None
+    turns: int
+    work_ref: str | None
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+
+
 def _outcome_response(outcome: AgentRunOutcome) -> JSONResponse:
     """Render an :class:`AgentRunOutcome` as the right JSON response.
 
@@ -182,11 +211,52 @@ def _outcome_response(outcome: AgentRunOutcome) -> JSONResponse:
     )
 
 
+@contextlib.contextmanager
+def _bound_work_ref(raw: str | None) -> Iterator[None]:
+    """Bind the inbound ``Meho-Work-Ref`` header onto ``work_ref_var``.
+
+    work_ref I3-T2 (#1662): the agent runner reads ``work_ref_var`` when it
+    creates the durable run row, but the chassis audit middleware only binds
+    the header around its *post-response* audit write (so the binding is not
+    live during the route handler). This binds the same header value for the
+    duration of the invoker call so the run row inherits it, mirroring the
+    set/reset discipline the approval-queue boundary uses. A missing /
+    blank header binds nothing — the run's ``work_ref`` lands ``NULL``.
+    """
+    cleaned = raw.strip() if raw is not None else None
+    if not cleaned:
+        yield
+        return
+    token = work_ref_var.set(cleaned)
+    try:
+        yield
+    finally:
+        work_ref_var.reset(token)
+
+
+def _summary_response(summary: AgentRunSummary) -> AgentRunSummaryResponse:
+    """Project an :class:`AgentRunSummary` onto the list-row wire model."""
+    return AgentRunSummaryResponse(
+        run_id=summary.run_id,
+        status=summary.status,
+        trigger=summary.trigger,
+        model_tier=summary.model_tier,
+        provider=summary.provider,
+        model=summary.model,
+        turns=summary.turns,
+        work_ref=summary.work_ref,
+        created_at=summary.created_at,
+        started_at=summary.started_at,
+        ended_at=summary.ended_at,
+    )
+
+
 @router.post("/{name}/run")
 async def run_agent(
     name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
     body: AgentRunRequest,
     operator: Operator = _require_operator,
+    meho_work_ref: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """Run the named agent for the operator's tenant.
 
@@ -197,6 +267,10 @@ async def run_agent(
     budget-refused run (per-identity cap reached, per-tenant or global
     kill switch on — G11.5-T6 #1080) is 429 with the reason in the
     ``detail`` body so the operator sees which gate fired.
+
+    The optional ``Meho-Work-Ref`` header binds the run to an external
+    change ticket (work_ref I3-T2 #1662); it is stamped on the durable run
+    row at create time and filterable on ``GET /agents/runs``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["run"],
@@ -205,7 +279,8 @@ async def run_agent(
     )
     invoker = get_agent_invoker()
     try:
-        outcome = await invoker.run(operator, name, body.input, async_mode=body.async_)
+        with _bound_work_ref(meho_work_ref):
+            outcome = await invoker.run(operator, name, body.input, async_mode=body.async_)
     except AgentNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -222,6 +297,58 @@ async def run_agent(
             detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return _outcome_response(outcome)
+
+
+@router.get("/runs", response_model=list[AgentRunSummaryResponse])
+async def list_runs(
+    work_ref: str | None = Query(
+        default=None,
+        description=(
+            "Filter by external change-ticket reference (exact match), e.g. "
+            "'gh:evoila/meho#11' — the runs that worked under change ticket X "
+            "(work_ref I3-T2 #1662). Omit for no work_ref filter."
+        ),
+    ),
+    status: AgentRunStatus | None = Query(
+        default=None,
+        description=(
+            "Filter by lifecycle status (pending / running / awaiting_approval / "
+            "succeeded / failed / cancelled). Omit for every state."
+        ),
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Max runs per page (1..500, default 100).",
+    ),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description="Rows to skip for paging.",
+    ),
+    operator: Operator = _require_operator,
+) -> list[AgentRunSummaryResponse]:
+    """List the operator's tenant's agent runs, newest first.
+
+    Tenant-isolated server-side via the JWT — cross-tenant runs are
+    invisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one
+    change ticket (exact match); ``?status=running`` narrows to one
+    lifecycle state. Returns ``created_at DESC``.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.list_runs",
+        audit_op_class="read",
+    )
+    invoker = get_agent_invoker()
+    summaries = await invoker.list_runs(
+        operator,
+        work_ref=work_ref,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return [_summary_response(s) for s in summaries]
 
 
 @router.get("/runs/{handle}", response_model=AgentRunStatusResponse)
@@ -274,6 +401,7 @@ async def _events_generator(
     operator: Operator,
     name: str,
     inputs: str,
+    work_ref: str | None,
 ) -> AsyncIterator[str]:
     """SSE generator: drive a fresh run inline, yield one frame per event.
 
@@ -281,10 +409,15 @@ async def _events_generator(
     the pending iteration; the underlying loop's ``async with agent.iter``
     cleanup cancels the run, and the cancellation re-raises so the task tree
     unwinds per asyncio's contract (Sonar S7497).
+
+    The work_ref binding (#1662) is held for the whole stream so the run row
+    the stream creates inherits the change ticket; it resets when the
+    generator finalises (stream end, client disconnect, cancel).
     """
     invoker = get_agent_invoker()
-    async for run_id, event in invoker.stream_events(operator, name, inputs):
-        yield _format_event(run_id, event)
+    with _bound_work_ref(work_ref):
+        async for run_id, event in invoker.stream_events(operator, name, inputs):
+            yield _format_event(run_id, event)
 
 
 @router.post("/{name}/run/events")
@@ -292,6 +425,7 @@ async def run_agent_events(
     name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
     body: AgentRunRequest,
     operator: Operator = _require_operator,
+    meho_work_ref: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
     """Stream a fresh run's events for the named agent as Server-Sent Events.
 
@@ -331,7 +465,7 @@ async def run_agent_events(
             detail={"error": "budget_exceeded", "reason": exc.reason},
         ) from exc
     return StreamingResponse(
-        _events_generator(operator, name, body.input),
+        _events_generator(operator, name, body.input, meho_work_ref),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",

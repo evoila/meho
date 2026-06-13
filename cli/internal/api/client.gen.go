@@ -767,6 +767,62 @@ type AgentRunStatusResponse struct {
 	Turns  int            `json:"turns"`
 }
 
+// AgentRunSummaryResponse One row of the agent-run list (“GET /agents/runs“).
+//
+// A scannable index row: identity, lifecycle state, resolved model
+// coordinates, timestamps, and the “work_ref“ change-ticket
+// reference the list filters on (work_ref I3-T2 #1662). The full
+// “output“ blob is omitted — a caller wanting a run's result polls
+// “GET /agents/runs/{handle}“.
+type AgentRunSummaryResponse struct {
+	CreatedAt time.Time          `json:"created_at"`
+	EndedAt   *time.Time         `json:"ended_at"`
+	Model     *string            `json:"model"`
+	ModelTier string             `json:"model_tier"`
+	Provider  *string            `json:"provider"`
+	RunId     openapi_types.UUID `json:"run_id"`
+	StartedAt *time.Time         `json:"started_at"`
+
+	// Status Closed lifecycle status of an :class:`AgentRun`.
+	//
+	// Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+	// hosts an LLM tool-use loop in MEHO's process; every invocation is
+	// one ``agent_run`` row whose ``status`` walks an explicit, enforced
+	// state machine. The legal transitions live in
+	// :data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the
+	// service rejects any edge not on that map so an illegal jump (e.g.
+	// ``succeeded`` -> ``running``) cannot land in the DB.
+	//
+	// Members:
+	//
+	// * :attr:`PENDING` -- the row was created but the loop has not
+	//   started executing yet (initial state on insert).
+	// * :attr:`RUNNING` -- the loop is executing tool-use turns.
+	// * :attr:`AWAITING_APPROVAL` -- the loop is paused on a
+	//   policy-gated tool call whose verdict is ``needs-approval``
+	//   (G11.2 resolves the verdict; the runtime parks the run here in
+	//   the meantime). Resumable back to ``running``.
+	// * :attr:`SUCCEEDED` -- the loop completed and produced ``output``
+	//   (terminal).
+	// * :attr:`FAILED` -- the loop errored or exhausted its turn budget
+	//   without producing a usable result (terminal).
+	// * :attr:`CANCELLED` -- an authorized operator cancelled a
+	//   non-terminal run (terminal). The cancellation path is the
+	//   ``running`` / ``pending`` / ``awaiting_approval`` ->
+	//   ``cancelled`` edge.
+	//
+	// Mirrors the closed-enum + DB ``CHECK`` discipline
+	// :class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the
+	// enum and the ``CHECK (status IN (...))`` constraint move in
+	// lock-step via migration ``0015``; the drift guard
+	// :func:`tests.test_db_agent_run.test_status_check_matches_enum`
+	// enforces the equality at unit-test time.
+	Status  AgentRunStatus `json:"status"`
+	Trigger string         `json:"trigger"`
+	Turns   int            `json:"turns"`
+	WorkRef *string        `json:"work_ref"`
+}
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
@@ -5174,6 +5230,22 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
+type ListRunsApiV1AgentsRunsGetParams struct {
+	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter.
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+
+	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
+	Status *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Limit Max runs per page (1..500, default 100).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Rows to skip for paging.
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetParams defines parameters for GetRunStatusApiV1AgentsRunsHandleGet.
 type GetRunStatusApiV1AgentsRunsHandleGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -5196,11 +5268,13 @@ type EditAgentApiV1AgentsNamePatchParams struct {
 
 // RunAgentApiV1AgentsNameRunPostParams defines parameters for RunAgentApiV1AgentsNameRunPost.
 type RunAgentApiV1AgentsNameRunPostParams struct {
+	MehoWorkRef   *string `json:"meho-work-ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // RunAgentEventsApiV1AgentsNameRunEventsPostParams defines parameters for RunAgentEventsApiV1AgentsNameRunEventsPost.
 type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
+	MehoWorkRef   *string `json:"meho-work-ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7014,6 +7088,9 @@ type ClientInterface interface {
 	// ShowGrantApiV1AgentsGrantsGrantIdGet request
 	ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListRunsApiV1AgentsRunsGet request
+	ListRunsApiV1AgentsRunsGet(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetRunStatusApiV1AgentsRunsHandleGet request
 	GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -7797,6 +7874,18 @@ func (c *Client) RevokeGrantApiV1AgentsGrantsGrantIdDelete(ctx context.Context, 
 
 func (c *Client) ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(c.Server, grantId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunsApiV1AgentsRunsGet(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunsApiV1AgentsRunsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -11169,6 +11258,118 @@ func NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(server string, grantId opena
 	return req, nil
 }
 
+// NewListRunsApiV1AgentsRunsGetRequest generates requests for ListRunsApiV1AgentsRunsGet
+func NewListRunsApiV1AgentsRunsGetRequest(server string, params *ListRunsApiV1AgentsRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewGetRunStatusApiV1AgentsRunsHandleGetRequest generates requests for GetRunStatusApiV1AgentsRunsHandleGet
 func NewGetRunStatusApiV1AgentsRunsHandleGetRequest(server string, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams) (*http.Request, error) {
 	var err error
@@ -11424,15 +11625,26 @@ func NewRunAgentApiV1AgentsNameRunPostRequestWithBody(server string, name string
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.MehoWorkRef != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "meho-work-ref", runtime.ParamLocationHeader, *params.MehoWorkRef)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("meho-work-ref", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 	}
@@ -11486,15 +11698,26 @@ func NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(server string,
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.MehoWorkRef != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "meho-work-ref", runtime.ParamLocationHeader, *params.MehoWorkRef)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("meho-work-ref", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 	}
@@ -20859,6 +21082,9 @@ type ClientWithResponsesInterface interface {
 	// ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse request
 	ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error)
 
+	// ListRunsApiV1AgentsRunsGetWithResponse request
+	ListRunsApiV1AgentsRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1AgentsRunsGetResponse, error)
+
 	// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request
 	GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error)
 
@@ -21738,6 +21964,29 @@ func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunsApiV1AgentsRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]AgentRunSummaryResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunsApiV1AgentsRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunsApiV1AgentsRunsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25439,6 +25688,15 @@ func (c *ClientWithResponses) ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(c
 	return ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp)
 }
 
+// ListRunsApiV1AgentsRunsGetWithResponse request returning *ListRunsApiV1AgentsRunsGetResponse
+func (c *ClientWithResponses) ListRunsApiV1AgentsRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1AgentsRunsGetResponse, error) {
+	rsp, err := c.ListRunsApiV1AgentsRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunsApiV1AgentsRunsGetResponse(rsp)
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetWithResponse request returning *GetRunStatusApiV1AgentsRunsHandleGetResponse
 func (c *ClientWithResponses) GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
 	rsp, err := c.GetRunStatusApiV1AgentsRunsHandleGet(ctx, handle, params, reqEditors...)
@@ -27720,6 +27978,39 @@ func ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp *http.Response) (*Sho
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AgentGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunsApiV1AgentsRunsGetResponse parses an HTTP response from a ListRunsApiV1AgentsRunsGetWithResponse call
+func ParseListRunsApiV1AgentsRunsGetResponse(rsp *http.Response) (*ListRunsApiV1AgentsRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunsApiV1AgentsRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []AgentRunSummaryResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -249,3 +249,75 @@ func TestRunEvents403SingleErrorLine(t *testing.T) {
 		t.Errorf("403 must not surface as 'unreachable' (B1 regression); got %q", got)
 	}
 }
+
+// --- run-list ---
+
+func TestRunListHappyPathRendersTable(t *testing.T) {
+	workRef := "gh:evoila/meho#11"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{
+			{
+				RunId:     uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+				Status:    api.AgentRunStatusSucceeded,
+				Trigger:   "direct",
+				ModelTier: "standard",
+				Turns:     2,
+				WorkRef:   &workRef,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"succeeded", "direct", workRef} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunListPassesWorkRefFilter(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	err := runRunList(cmd, runListOptions{
+		WorkRef:           "gh:evoila/meho#11",
+		Status:            "succeeded",
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(gotQuery, "work_ref=gh") {
+		t.Errorf("request must carry the work_ref filter; got query %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "status=succeeded") {
+		t.Errorf("request must carry the status filter; got query %q", gotQuery)
+	}
+	if !strings.Contains(stdout.String(), "no agent runs") {
+		t.Errorf("empty list should print 'no agent runs'; got %q", stdout.String())
+	}
+}
+
+func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
+	params := listRunsParams(runListOptions{})
+	if params.WorkRef != nil || params.Status != nil || params.Limit != nil {
+		t.Errorf("empty options must leave filters nil; got %+v", params)
+	}
+}

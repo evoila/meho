@@ -122,6 +122,7 @@ def test_operator_sees_run_tools(
     names = {t["name"] for t in resp.json()["result"]["tools"]}
     assert "meho.agents.run" in names
     assert "meho.agents.run_status" in names
+    assert "meho.agents.list_runs" in names
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -145,6 +146,27 @@ async def test_run_then_poll_round_trip(
     assert status_body["run_id"] == handle
     assert status_body["status"] == "succeeded"
     assert status_body["output"] == {"text": "triaged via mcp"}
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_list_runs_returns_tenant_runs(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """meho.agents.list_runs returns the operator's tenant's runs (#1662)."""
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id)
+    _install_invoker("triaged via mcp")
+
+    run = _call(client, "meho.agents.run", {"name": "triage", "input": "go"})
+    handle = _result_dict(run)["run_id"]
+
+    listed = _call(client, "meho.agents.list_runs", {}, rpc_id=2)
+    body = _result_dict(listed)
+    assert [r["run_id"] for r in body["runs"]] == [handle]
+    # work_ref is surfaced on the list row (None here -- no header bound).
+    assert body["runs"][0]["work_ref"] is None
+    assert body["runs"][0]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

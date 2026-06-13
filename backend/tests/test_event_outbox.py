@@ -344,6 +344,53 @@ async def test_fail_run_publishes_outbox_event() -> None:
     assert completed[0].payload["status"] == AgentRunStatus.FAILED.value
 
 
+async def test_completed_event_surfaces_work_ref() -> None:
+    """The ``agent_run.completed`` payload carries the run's ``work_ref`` (#1662)."""
+    await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await create_run(
+            session,
+            tenant_id=_TENANT_A,
+            identity_sub="seed-user",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="standard",
+            work_ref="gh:evoila/meho#11",
+        )
+        await transition(session, row, AgentRunStatus.RUNNING)
+        run_id = row.id
+        await session.commit()
+
+    async with sessionmaker() as session:
+        attached = await session.get(AgentRun, run_id)
+        assert attached is not None
+        await succeed_run(session, attached, output={"result": "ok"})
+        await session.commit()
+
+    rows = await _all_outbox_rows()
+    completed = [r for r in rows if r.event_kind == AGENT_RUN_COMPLETED_EVENT_KIND]
+    assert len(completed) == 1
+    assert completed[0].payload["work_ref"] == "gh:evoila/meho#11"
+
+
+async def test_completed_event_work_ref_is_null_when_unset() -> None:
+    """A run with no work_ref surfaces ``work_ref=None`` on the completed event."""
+    await _seed_tenant()
+    run = await _make_agent_run(status=AgentRunStatus.RUNNING)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        attached = await session.get(AgentRun, run.id)
+        assert attached is not None
+        await succeed_run(session, attached, output={"result": "ok"})
+        await session.commit()
+
+    rows = await _all_outbox_rows()
+    completed = [r for r in rows if r.event_kind == AGENT_RUN_COMPLETED_EVENT_KIND]
+    assert len(completed) == 1
+    assert completed[0].payload["work_ref"] is None
+
+
 async def test_terminal_event_rolls_back_with_run_transition() -> None:
     """If the run transition rolls back, the outbox event rolls back too.
 

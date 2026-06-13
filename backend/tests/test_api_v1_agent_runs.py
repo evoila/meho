@@ -234,6 +234,84 @@ async def test_sync_run_converts_to_async_on_timeout(
 
 
 @pytest.mark.asyncio
+async def test_list_runs_filters_by_work_ref_from_header(client: TestClient) -> None:
+    """A run launched with the Meho-Work-Ref header is findable via ?work_ref.
+
+    Exercises the full boundary: the chassis binds ``work_ref_var`` from the
+    inbound header, ``_create_run_row`` stamps it onto the ``agent_run`` row,
+    and ``GET /agents/runs?work_ref=`` returns only the matching run
+    (work_ref I3-T2 #1662).
+    """
+    await _seed_definition()
+    _install_invoker("triaged: ok")
+    key = make_rsa_keypair("kid-list")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # One run tagged with a change ticket, one without.
+        tagged = client.post(
+            "/api/v1/agents/triage/run",
+            json={"input": "go"},
+            headers={**headers, "Meho-Work-Ref": "gh:evoila/meho#11"},
+        )
+        assert tagged.status_code == 200, tagged.text
+        tagged_run_id = tagged.json()["run_id"]
+        untagged = client.post(
+            "/api/v1/agents/triage/run",
+            json={"input": "go"},
+            headers=headers,
+        )
+        assert untagged.status_code == 200, untagged.text
+
+        filtered = client.get(
+            "/api/v1/agents/runs",
+            params={"work_ref": "gh:evoila/meho#11"},
+            headers=headers,
+        )
+        assert filtered.status_code == 200, filtered.text
+        rows = filtered.json()
+        assert [row["run_id"] for row in rows] == [tagged_run_id]
+        assert rows[0]["work_ref"] == "gh:evoila/meho#11"
+
+        # No filter returns both runs.
+        unfiltered = client.get("/api/v1/agents/runs", headers=headers)
+        assert unfiltered.status_code == 200, unfiltered.text
+        assert len(unfiltered.json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_runs_is_tenant_isolated(client: TestClient) -> None:
+    """The agent-run list never returns another tenant's runs."""
+    await _seed_definition(name="triage", tenant_id=_TENANT_A)
+    await _seed_definition(name="triage", tenant_id=_TENANT_B)
+    _install_invoker("triaged: ok")
+    key = make_rsa_keypair("kid-iso")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Tenant B runs an agent under the same work_ref.
+        b_headers = {
+            "Authorization": f"Bearer {_token(key, sub='op-b', tenant_id=_TENANT_B)}",
+            "Meho-Work-Ref": "gh:evoila/meho#11",
+        }
+        b_run = client.post(
+            "/api/v1/agents/triage/run",
+            json={"input": "go"},
+            headers=b_headers,
+        )
+        assert b_run.status_code == 200, b_run.text
+
+        # Tenant A lists with the same work_ref filter -- must see nothing.
+        a_headers = {"Authorization": f"Bearer {_token(key, sub='op-a', tenant_id=_TENANT_A)}"}
+        a_list = client.get(
+            "/api/v1/agents/runs",
+            params={"work_ref": "gh:evoila/meho#11"},
+            headers=a_headers,
+        )
+        assert a_list.status_code == 200, a_list.text
+        assert a_list.json() == []
+
+
+@pytest.mark.asyncio
 async def test_run_events_streams_sse(client: TestClient) -> None:
     """The SSE events route returns text/event-stream with turn + final frames."""
     await _seed_definition()

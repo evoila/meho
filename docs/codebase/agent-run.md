@@ -102,8 +102,10 @@ What is **not** in T6 or T4 (other tasks own these):
   resolver maps it to a concrete pair), `provider` / `model` (resolved,
   nullable until `start`), `status`, `turns`, `cost` (stub until C3),
   `output`, `error`, `parent_run_id` (self-referential soft-FK for
-  agent-invoked child runs, G11.1-T5), `created_at`, `started_at`,
-  `ended_at`.
+  agent-invoked child runs, G11.1-T5), `work_ref` (nullable Text — the
+  external change-ticket reference the run works under, work_ref I3-T2
+  #1662, migration `0041`; set at create time, distinct from `id`),
+  `created_at`, `started_at`, `ended_at`.
 - `AgentRunStatus` — closed `StrEnum`: `pending`, `running`,
   `awaiting_approval`, `succeeded`, `failed`, `cancelled`.
 - `AgentRunTrigger` — closed `StrEnum`: `direct`, `scheduled`, `event`,
@@ -173,10 +175,22 @@ and leave the commit to the caller — the same transaction contract
 one transaction):
 
 - `create_run(session, *, tenant_id, identity_sub, trigger, model_tier,
-  identity_act=None, agent_definition_id=None, parent_run_id=None)
-  -> AgentRun` — inserts a `pending` row; `run.id` is the lineage key.
+  identity_act=None, agent_definition_id=None, parent_run_id=None,
+  work_ref=None) -> AgentRun` — inserts a `pending` row; `run.id` is the
+  lineage key. `work_ref` (work_ref I3-T2 #1662) stamps the external
+  change-ticket reference on the row at create time; the invoker passes
+  it off the shared `work_ref_var` ContextVar so the REST `Meho-Work-Ref`
+  header / MCP `work_ref` arg flows through to the row. Set-at-create-only.
 - `get_run(session, run_id) -> AgentRun | None` — read side; returns
   `None` for a missing id (the caller shapes the 404).
+- `list_runs(session, *, tenant_id, work_ref=None, status=None,
+  limit=100, offset=0) -> list[AgentRun]` — the agent-run list read
+  substrate (work_ref I3-T2 #1662), newest-first, tenant-isolated.
+  `work_ref` narrows to one exact change ticket (composite
+  `(tenant_id, work_ref)` index); `status` narrows to one lifecycle
+  state; the page size is clamped server-side to `[1, 500]`. Surfaced as
+  `GET /api/v1/agents/runs`, the `meho.agents.list_runs` MCP tool, and
+  `meho agent run-list --work-ref`.
 - `transition(session, row, to_status) -> AgentRun` — the single
   status-mutation point. Stamps `started_at` on the first entry into
   `running` (the `awaiting_approval` -> `running` resume does not reset

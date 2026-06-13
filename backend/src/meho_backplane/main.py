@@ -790,6 +790,21 @@ app.include_router(api_v1_broadcast_overrides_router)
 # ``show_agent`` because the grants router only matches paths under
 # its own ``/api/v1/agents/grants`` prefix.
 app.include_router(api_v1_agent_grants_router)
+# G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
+# (sync block-and-return, or async handle on the timeout / async flag),
+# GET /agents/runs (list the tenant's runs, --work-ref filter; work_ref
+# I3-T2 #1662), GET /agents/runs/{handle} (poll the durable run state),
+# and POST /agents/{name}/run/events (SSE stream of a fresh run's turn /
+# tool-call / final events). Operator-level; tenant-scoped via the JWT;
+# runs only an enabled definition in the operator's tenant.
+#
+# Registered BEFORE ``api_v1_agents_router`` for the same reason the
+# grants router is (G11.2 follow-up #1168): FastAPI dispatches routes in
+# include order, so the agents-router's ``GET /{name}`` would otherwise
+# shadow the one-segment ``GET /api/v1/agents/runs`` (matching
+# ``name="runs"``). Specific ``/runs`` route first → the list resolves;
+# every other name still falls through to ``show_agent``.
+app.include_router(api_v1_agent_runs_router)
 # G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
 # / edit / delete) over the AgentDefinition ORM model. Reads gated to
 # operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
@@ -803,13 +818,6 @@ app.include_router(api_v1_agents_router)
 # Reads gated to operator+; writes gated to tenant_admin.
 # Tenant-scoped via the JWT; cross-tenant probes return 404.
 app.include_router(api_v1_agent_principals_router)
-# G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
-# (sync block-and-return, or async handle on the timeout / async flag),
-# GET /agents/runs/{handle} (poll the durable run state), and POST
-# /agents/{name}/run/events (SSE stream of a fresh run's turn / tool-call
-# / final events). Operator-level; tenant-scoped via the JWT; runs only an
-# enabled definition in the operator's tenant.
-app.include_router(api_v1_agent_runs_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

@@ -49,7 +49,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import get_settings
@@ -85,6 +85,36 @@ class CorpusUnavailable(RuntimeError):  # noqa: N818 -- "Unavailable" reads bett
         super().__init__(message)
 
 
+def _parse_2xx_body[ModelT: BaseModel](
+    response: httpx.Response,
+    model: type[ModelT],
+    *,
+    event_prefix: str,
+) -> ModelT:
+    """Decode a 2xx corpus response body and validate it against *model*.
+
+    Both fail-closed branches map to one :class:`CorpusUnavailable` so the
+    consuming route renders a single 503: a non-JSON body and a body that
+    does not match the model (a dropped/renamed consumed field, or — for
+    :class:`CorpusSearchResponse` — an unrecognised envelope that names
+    neither ``chunks`` nor ``results``, #1732). Neither the raw body nor
+    the validation error detail is echoed, so a corpus error page or a
+    leaky field value cannot ride out through the 503. *event_prefix*
+    namespaces the structlog event (``corpus`` vs ``corpus_status``).
+    """
+    try:
+        body: Any = response.json()
+    except ValueError as exc:
+        _log.warning(f"{event_prefix}_response_not_json")
+        raise CorpusUnavailable("corpus returned a non-JSON body") from exc
+
+    try:
+        return model.model_validate(body)
+    except ValueError as exc:
+        _log.warning(f"{event_prefix}_response_invalid_schema")
+        raise CorpusUnavailable("corpus response did not match the expected schema") from exc
+
+
 class CorpusChunk(BaseModel):
     """One cited chunk returned by the external corpus.
 
@@ -97,14 +127,26 @@ class CorpusChunk(BaseModel):
     result. ``metadata`` keeps the corpus's per-chunk attributes (e.g.
     ``product`` / ``version`` the T3 filters key off) without MEHO
     having to model every one.
+
+    The text and source-link fields each accept **two** wire names via a
+    validation alias (#1732): MEHO.Knowledge's ``/search`` returns
+    ``text`` / ``source_uri`` while an earlier corpus shape (and MEHO's
+    own internal projection) uses ``content`` / ``source_url``. Accepting
+    both keeps the one consumed name (``content`` / ``source_url``) stable
+    for downstream callers regardless of which wire dialect the corpus
+    speaks. ``populate_by_name=True`` keeps the internal name usable when
+    constructing the model directly in tests.
     """
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
     chunk_id: str
     document_id: str
-    content: str
-    source_url: str | None = None
+    content: str = Field(validation_alias=AliasChoices("content", "text"))
+    source_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("source_url", "source_uri"),
+    )
     score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -115,11 +157,22 @@ class CorpusSearchResponse(BaseModel):
     Frozen adapter; ``chunks`` is the ordered hit list (best first, as
     the corpus ranks them). The consuming route (T3) projects these into
     MEHO's own cited-chunk surface and binds the central audit row.
+
+    The hit list accepts **two** envelope names via a validation alias
+    (#1732): MEHO.Knowledge's ``/search`` returns ``{"results": [...]}``
+    while an earlier corpus shape (and MEHO's own internal projection)
+    uses ``{"chunks": [...]}``. The field is **required** — it carries no
+    default — so a 2xx body that names *neither* envelope fails parse
+    loudly (surfaced as :class:`CorpusUnavailable`) rather than silently
+    validating to an empty hit list. That fail-loud posture is the whole
+    point of #1732: a populated corpus returning an unrecognised envelope
+    must not read back as "zero hits". ``populate_by_name=True`` keeps the
+    internal ``chunks`` name usable when constructing the model directly.
     """
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
-    chunks: list[CorpusChunk] = Field(default_factory=list)
+    chunks: list[CorpusChunk] = Field(validation_alias=AliasChoices("chunks", "results"))
 
 
 async def search_corpus(
@@ -175,7 +228,11 @@ async def search_corpus(
         raise CorpusUnavailable("corpus_url is not configured")
     resolved_audience = audience if audience is not None else settings.corpus_audience
 
-    payload: dict[str, Any] = {"query": query, "limit": limit}
+    # MEHO.Knowledge's ``/search`` reads ``top_k`` for the hit cap and
+    # silently ignores ``limit`` (#1732) — sending ``limit`` let the
+    # corpus fall back to its server-side default. Send the key the corpus
+    # actually honours so ``limit`` reaches it.
+    payload: dict[str, Any] = {"query": query, "top_k": limit}
     if metadata_filters:
         payload["metadata_filters"] = metadata_filters
     if resolved_audience:
@@ -204,43 +261,46 @@ async def search_corpus(
             status=response.status_code,
         )
 
-    try:
-        body: Any = response.json()
-    except ValueError as exc:
-        # A 2xx with a non-JSON body is a broken corpus contract —
-        # fail closed rather than leaking a raw JSONDecodeError.
-        _log.warning("corpus_response_not_json")
-        raise CorpusUnavailable("corpus returned a non-JSON body") from exc
-
-    try:
-        return CorpusSearchResponse.model_validate(body)
-    except ValueError as exc:
-        # Schema drift (a consumed field dropped / wrong type) is also a
-        # broken contract; fail closed without echoing the payload.
-        _log.warning("corpus_response_invalid_schema")
-        raise CorpusUnavailable("corpus response did not match the expected schema") from exc
+    return _parse_2xx_body(response, CorpusSearchResponse, event_prefix="corpus")
 
 
 class CorpusStatusResponse(BaseModel):
     """Parsed corpus readiness response — the liveness the probe reads back.
 
-    The consumer-side adapter over the corpus's ``/status`` contract (the
-    readiness sibling of :class:`CorpusSearchResponse`). The probe Task
-    (T6 #1555) reads ``index_built`` / ``doc_count`` / ``last_ingested_at``
-    here and the collection-probe route persists them onto the
-    ``doc_collections`` row on success. ``extra="ignore"`` absorbs corpus
-    fields MEHO does not consume; a dropped consumed field fails parse
-    rather than silently degrading — surfaced as :class:`CorpusUnavailable`.
+    The consumer-side adapter over the corpus's readiness endpoint. The
+    probe Task (T6 #1555) reads ``index_built`` / ``doc_count`` /
+    ``last_ingested_at`` here and the collection-probe route persists them
+    onto the ``doc_collections`` row on success. ``extra="ignore"`` absorbs
+    corpus fields MEHO does not consume.
 
     ``index_built`` is the managed-RAG footgun: ``False`` means the corpus
     is reachable but its ANN index is not yet answerable (a rebuild is in
     flight, or the corpus was registered but never ingested), so the
     search path can fail typed instead of returning an empty 200. Frozen.
+
+    Readiness wire shape (#1732). MEHO.Knowledge has **no** ``/status``
+    route; it exposes ``GET /readyz`` returning a ``HealthResponse`` whose
+    200 *is* the "ready" signal — it need not carry an ``index_built``
+    field. So this adapter:
+
+    * accepts ``index_built`` under any of ``index_built`` / ``ready`` /
+      ``index_ready`` (the names a health body may use), and
+    * **defaults it to ``True``** — a corpus that answers its readiness
+      probe with a 2xx and no explicit readiness flag is treated as
+      answerable. A corpus that wants to advertise an in-flight rebuild
+      still can, by returning the flag set ``False``.
+
+    ``doc_count`` / ``last_ingested_at`` stay optional liveness, populated
+    only when the health body carries them. ``populate_by_name=True`` keeps
+    the canonical names usable when constructing the model directly.
     """
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
-    index_built: bool
+    index_built: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("index_built", "ready", "index_ready"),
+    )
     doc_count: int | None = None
     last_ingested_at: datetime | None = None
 
@@ -248,21 +308,17 @@ class CorpusStatusResponse(BaseModel):
 def derive_status_url(search_url: str) -> str:
     """Derive the corpus readiness URL from its *search_url*.
 
-    The corpus exposes its readiness check as a sibling of the search
-    endpoint: the final path segment ``search`` is swapped for ``status``
-    (``https://corpus/v1/search`` → ``https://corpus/v1/status``). A URL
-    whose final segment is not ``search`` gets ``status`` appended as a
-    child segment so an unconventional layout still resolves to a single
-    deterministic readiness URL. Query string and fragment are dropped —
-    they are search-request shape, never part of the status endpoint.
+    MEHO.Knowledge exposes its readiness as ``GET /readyz`` at the service
+    root (no ``/status`` route, #1732), so the readiness URL is the search
+    URL's **host root** plus ``/readyz``
+    (``https://corpus/v1/search`` → ``https://corpus/readyz``). Anchoring
+    at the root rather than swapping the final path segment matches a
+    health endpoint that lives beside the API version prefix, not inside
+    it. Query string and fragment are dropped — they are search-request
+    shape, never part of the readiness endpoint.
     """
     parts = urlsplit(search_url)
-    path = parts.path.rstrip("/")
-    if path.rsplit("/", 1)[-1] == "search":
-        new_path = path[: -len("search")] + "status"
-    else:
-        new_path = f"{path}/status"
-    return urlunsplit((parts.scheme, parts.netloc, new_path, "", ""))
+    return urlunsplit((parts.scheme, parts.netloc, "/readyz", "", ""))
 
 
 async def corpus_status(
@@ -326,14 +382,4 @@ async def corpus_status(
             status=response.status_code,
         )
 
-    try:
-        body: Any = response.json()
-    except ValueError as exc:
-        _log.warning("corpus_status_response_not_json")
-        raise CorpusUnavailable("corpus returned a non-JSON body") from exc
-
-    try:
-        return CorpusStatusResponse.model_validate(body)
-    except ValueError as exc:
-        _log.warning("corpus_status_response_invalid_schema")
-        raise CorpusUnavailable("corpus status response did not match the expected schema") from exc
+    return _parse_2xx_body(response, CorpusStatusResponse, event_prefix="corpus_status")

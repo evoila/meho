@@ -140,9 +140,14 @@ check fails loud rather than claiming "ready").
 managed-RAG footgun: reachable but the index is not yet answerable.
 
 `CorpusHttpBackend.probe` reads the corpus's readiness via
-`corpus_status` (a GET to the corpus `/status` endpoint derived from the
-search URL by `derive_status_url`, forwarding the operator JWT, bounded
-by `corpus_timeout_seconds`, failing closed to one `CorpusUnavailable`).
+`corpus_status` (a GET to the corpus `/readyz` endpoint — the search
+URL's host root plus `/readyz`, derived by `derive_status_url`;
+MEHO.Knowledge exposes `/readyz`, not a `/status` sibling, #1732 —
+forwarding the operator JWT, bounded by `corpus_timeout_seconds`, failing
+closed to one `CorpusUnavailable`). A `/readyz` 200 with no explicit
+readiness flag reads as `index_built=True` (the 200 *is* the ready
+signal); a body advertising `index_built`/`ready`/`index_ready` `false`
+maps to `index_built=False`.
 The **per-project rebuild serialization** lives inside the adapter: a
 `defaultdict[str, asyncio.Lock]` keyed on the resolved corpus endpoint,
 held across the corpus round-trip, so two concurrent probes against the

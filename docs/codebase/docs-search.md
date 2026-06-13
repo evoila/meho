@@ -50,10 +50,22 @@ by `settings.corpus_timeout_seconds`. The URL and RFC 8707 audience are
 optional overrides (`corpus_url=` / `audience=`); `None` falls back to
 the global `settings.corpus_url` / `settings.corpus_audience` — the
 seam the `corpus-http` backend uses to pass a per-collection endpoint
-(see the router below). Models the corpus's response behind a small
-frozen Pydantic adapter (`CorpusChunk` / `CorpusSearchResponse`,
-`extra="ignore"` so additive corpus fields are absorbed silently while a
-dropped consumed field fails loudly).
+(see the router below). The request sends `top_k` for the hit cap (the
+key MEHO.Knowledge's `/search` reads — `limit` was silently ignored,
+#1732). Models the corpus's response behind a small frozen Pydantic
+adapter (`CorpusChunk` / `CorpusSearchResponse`, `extra="ignore"` so
+additive corpus fields are absorbed silently while a dropped consumed
+field fails loudly).
+
+The adapter speaks **two wire dialects** via validation aliases (#1732):
+the hit list is read from `results` (MEHO.Knowledge) **or** `chunks`, and
+each chunk's text/source-link from `text`/`source_uri` (MEHO.Knowledge)
+**or** `content`/`source_url`. The consumed names downstream callers read
+stay `chunks` / `content` / `source_url` regardless of dialect. Crucially
+the hit list is **required** (no default) so a 2xx body that names
+*neither* envelope raises `CorpusUnavailable` (→ 503) rather than parsing
+to a silent empty list — the original SEV-2 was a `{results:[…5 hits…]}`
+200 reading back as zero hits.
 
 Fail-closed by construction: an unconfigured (no URL), unreachable,
 non-2xx, or malformed-response corpus all collapse to one typed

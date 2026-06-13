@@ -408,7 +408,7 @@ const (
 	Published  RunbooksListUiRunbooksListGetParamsStatus = "published"
 )
 
-// AbortRunRequest Request body for “runbook_abort“ -- terminate the run mid-flight.
+// AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
 //
 // :attr:`reason` is required and non-empty (“Field(min_length=1)“)
 // because it is persisted to “audit_log.payload“ for the abort
@@ -418,7 +418,7 @@ type AbortRunRequest struct {
 	Reason string `json:"reason"`
 }
 
-// AbortRunResponse Returned by “runbook_abort“ -- the terminal-state coordinates.
+// AbortRunResponse Returned by “meho.runbook.abort“ -- the terminal-state coordinates.
 type AbortRunResponse struct {
 	AbandonedAt time.Time          `json:"abandoned_at"`
 	RunId       openapi_types.UUID `json:"run_id"`
@@ -767,6 +767,62 @@ type AgentRunStatusResponse struct {
 	Turns  int            `json:"turns"`
 }
 
+// AgentRunSummaryResponse One row of the agent-run list (“GET /agents/runs“).
+//
+// A scannable index row: identity, lifecycle state, resolved model
+// coordinates, timestamps, and the “work_ref“ change-ticket
+// reference the list filters on (work_ref I3-T2 #1662). The full
+// “output“ blob is omitted — a caller wanting a run's result polls
+// “GET /agents/runs/{handle}“.
+type AgentRunSummaryResponse struct {
+	CreatedAt time.Time          `json:"created_at"`
+	EndedAt   *time.Time         `json:"ended_at"`
+	Model     *string            `json:"model"`
+	ModelTier string             `json:"model_tier"`
+	Provider  *string            `json:"provider"`
+	RunId     openapi_types.UUID `json:"run_id"`
+	StartedAt *time.Time         `json:"started_at"`
+
+	// Status Closed lifecycle status of an :class:`AgentRun`.
+	//
+	// Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+	// hosts an LLM tool-use loop in MEHO's process; every invocation is
+	// one ``agent_run`` row whose ``status`` walks an explicit, enforced
+	// state machine. The legal transitions live in
+	// :data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the
+	// service rejects any edge not on that map so an illegal jump (e.g.
+	// ``succeeded`` -> ``running``) cannot land in the DB.
+	//
+	// Members:
+	//
+	// * :attr:`PENDING` -- the row was created but the loop has not
+	//   started executing yet (initial state on insert).
+	// * :attr:`RUNNING` -- the loop is executing tool-use turns.
+	// * :attr:`AWAITING_APPROVAL` -- the loop is paused on a
+	//   policy-gated tool call whose verdict is ``needs-approval``
+	//   (G11.2 resolves the verdict; the runtime parks the run here in
+	//   the meantime). Resumable back to ``running``.
+	// * :attr:`SUCCEEDED` -- the loop completed and produced ``output``
+	//   (terminal).
+	// * :attr:`FAILED` -- the loop errored or exhausted its turn budget
+	//   without producing a usable result (terminal).
+	// * :attr:`CANCELLED` -- an authorized operator cancelled a
+	//   non-terminal run (terminal). The cancellation path is the
+	//   ``running`` / ``pending`` / ``awaiting_approval`` ->
+	//   ``cancelled`` edge.
+	//
+	// Mirrors the closed-enum + DB ``CHECK`` discipline
+	// :class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the
+	// enum and the ``CHECK (status IN (...))`` constraint move in
+	// lock-step via migration ``0015``; the drift guard
+	// :func:`tests.test_db_agent_run.test_status_check_matches_enum`
+	// enforces the equality at unit-test time.
+	Status  AgentRunStatus `json:"status"`
+	Trigger string         `json:"trigger"`
+	Turns   int            `json:"turns"`
+	WorkRef *string        `json:"work_ref"`
+}
+
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
 // Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
@@ -835,12 +891,16 @@ type ApprovalRequestView struct {
 	Status   ApprovalRequestStatus `json:"status"`
 	TargetId *openapi_types.UUID   `json:"target_id"`
 	TenantId openapi_types.UUID    `json:"tenant_id"`
+	WorkRef  *string               `json:"work_ref"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
 type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
+
+	// Reason Optional human-readable approval reason (recorded in the audit row).
+	Reason *string `json:"reason,omitempty"`
 }
 
 // ApproveResponseBody Response for a successful approve + re-dispatch.
@@ -1986,7 +2046,7 @@ type CriterionResultName string
 // CriterionResultVerdict defines model for CriterionResult.Verdict.
 type CriterionResultVerdict string
 
-// CurrentStepResponse Returned by “runbook_start“ and the non-completion path of “runbook_next“.
+// CurrentStepResponse Returned by “meho.runbook.start“ and the non-completion path of “meho.runbook.next“.
 //
 // Carries the run coordinates (“run_id“ / “template_slug“ /
 // “template_version“), the structural position hint
@@ -2001,7 +2061,7 @@ type CriterionResultVerdict string
 // (option 1 of the design decision documented at the module docstring
 // and the #1300 issue body).
 type CurrentStepResponse struct {
-	// CurrentStep The opaque-by-construction single-step shape returned by ``runbook_next``.
+	// CurrentStep The opaque-by-construction single-step shape returned by ``meho.runbook.next``.
 	//
 	// All ``${run.target}`` and ``${run.params.X}`` substitutions are
 	// already resolved by the engine (G12.3-T2, #1301); the strings here
@@ -2017,7 +2077,7 @@ type CurrentStepResponse struct {
 	// * :attr:`op_id` / :attr:`params` -- populated only for
 	//   ``operation_call`` steps; the substituted call shape.
 	// * :attr:`verify` -- the substituted-and-frozen verify gate the
-	//   caller must respond to on the next ``runbook_next`` call.
+	//   caller must respond to on the next ``meho.runbook.next`` call.
 	//
 	// What this shape **must not** carry, by structural construction
 	// (regression-tested in ``test_step_body_omits_future_step_fields``):
@@ -2135,7 +2195,7 @@ type DecideResponseBody_DispatchResult struct {
 	union json.RawMessage
 }
 
-// DeprecateTemplateResponse Response for “runbook_deprecate_template“ -- the now-deprecated coordinates.
+// DeprecateTemplateResponse Response for “meho.runbook.deprecate_template“ -- the now-deprecated coordinates.
 type DeprecateTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -2191,7 +2251,7 @@ type DocsChunk struct {
 	SourceUrl  *string  `json:"source_url"`
 }
 
-// DraftTemplateRequest Request body for “runbook_draft_template“ -- create a new draft.
+// DraftTemplateRequest Request body for “meho.runbook.draft_template“ -- create a new draft.
 //
 // :attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug
 // contract, reused verbatim).
@@ -2213,7 +2273,7 @@ type DraftTemplateRequest struct {
 	Slug string              `json:"slug"`
 }
 
-// DraftTemplateResponse Response for “runbook_draft_template“ -- the created draft's coordinates.
+// DraftTemplateResponse Response for “meho.runbook.draft_template“ -- the created draft's coordinates.
 type DraftTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -2328,7 +2388,7 @@ type EditOpWarning struct {
 	Message        string `json:"message"`
 }
 
-// EditTemplateResponse Response for “runbook_edit_template“.
+// EditTemplateResponse Response for “meho.runbook.edit_template“.
 //
 // :attr:`version` equals the input version when editing a draft in
 // place; it is a new version when forking from a published template, in
@@ -2336,7 +2396,7 @@ type EditOpWarning struct {
 // :class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is
 // “None“.
 type EditTemplateResponse struct {
-	// ForkedFrom Surfaced by ``runbook_edit_template`` when editing a published template forks.
+	// ForkedFrom Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.
 	//
 	// Editing a *published* template cannot mutate it in place (published
 	// templates are immutable); the edit forks a new draft instead. This
@@ -2407,7 +2467,7 @@ type FingerprintResult struct {
 	Version     *string                 `json:"version"`
 }
 
-// ForkInfo Surfaced by “runbook_edit_template“ when editing a published template forks.
+// ForkInfo Surfaced by “meho.runbook.edit_template“ when editing a published template forks.
 //
 // Editing a *published* template cannot mutate it in place (published
 // templates are immutable); the edit forks a new draft instead. This
@@ -2952,7 +3012,7 @@ type MemoryListResponse struct {
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
 
-// NextStepRequest Request body for “runbook_next“ -- advance the run.
+// NextStepRequest Request body for “meho.runbook.next“ -- advance the run.
 //
 // :attr:`last_verified` is the caller's *claim* that the previous
 // step's verify gate was satisfied. It is **informational only**:
@@ -2967,7 +3027,7 @@ type MemoryScope string
 // :attr:`verify_response` carries the operator's answer for a
 // “confirm“ step or the engine's captured result for an
 // “operation_call“ step. “None“ is valid only on the very first
-// “runbook_next“ call (when no prior step exists to verify).
+// “meho.runbook.next“ call (when no prior step exists to verify).
 type NextStepRequest struct {
 	LastVerified   bool                            `json:"last_verified"`
 	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
@@ -3210,7 +3270,7 @@ type PromoteBody struct {
 	To MemoryScope `json:"to"`
 }
 
-// PublishTemplateResponse Response for “runbook_publish_template“ -- the now-published coordinates.
+// PublishTemplateResponse Response for “meho.runbook.publish_template“ -- the now-published coordinates.
 type PublishTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
@@ -3239,18 +3299,18 @@ type QueryResult struct {
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
 
-// ReassignRunRequest Request body for “runbook_reassign“ -- transfer ownership of a run.
+// ReassignRunRequest Request body for “meho.runbook.reassign“ -- transfer ownership of a run.
 //
 // :attr:`new_assignee` is the operator subject identifier of the
 // new owner. Non-empty (“Field(min_length=1)“) because the
 // reassign path writes to “runbook_runs.assigned_to“ which is
 // “NOT NULL“ at the storage layer and is the predicate for
-// every subsequent “runbook_next“ ownership check.
+// every subsequent “meho.runbook.next“ ownership check.
 type ReassignRunRequest struct {
 	NewAssignee string `json:"new_assignee"`
 }
 
-// ReassignRunResponse Returned by “runbook_reassign“ -- the new ownership coordinates.
+// ReassignRunResponse Returned by “meho.runbook.reassign“ -- the new ownership coordinates.
 type ReassignRunResponse struct {
 	AssignedTo   string             `json:"assigned_to"`
 	ReassignedAt time.Time          `json:"reassigned_at"`
@@ -3490,7 +3550,7 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
-// RunCompletedResponse Returned by “runbook_next“ when the previous step was the last.
+// RunCompletedResponse Returned by “meho.runbook.next“ when the previous step was the last.
 //
 // The terminal-state shape: no step body, just the run coordinates
 // and the transition timestamp. The companion abort-side shape is
@@ -3509,11 +3569,11 @@ type RunCompletedResponse struct {
 	State       *string            `json:"state,omitempty"`
 }
 
-// RunSummary List-view projection returned by “runbook_list_runs“.
+// RunSummary List-view projection returned by “meho.runbook.list_runs“.
 //
 // Run-level state only: no step contents are exposed. The
 // step-by-step content is opaque-by-construction (only
-// “runbook_next“ ever returns a step body, and only one step at a
+// “meho.runbook.next“ ever returns a step body, and only one step at a
 // time), so :attr:`current_step_id` is the *id* of the step the
 // run is currently on -- enough for a UI to render "step 3:
 // drain-node" -- but not the body.
@@ -3947,7 +4007,7 @@ type SearchDocsResponse struct {
 	Chunks []DocsChunk `json:"chunks"`
 }
 
-// ShowTemplateResponse Full template surface returned by “runbook_show_template“.
+// ShowTemplateResponse Full template surface returned by “meho.runbook.show_template“.
 //
 // The complete template including the ordered :attr:`steps` and the
 // authorship / timestamp provenance. Mirrors the
@@ -4016,7 +4076,7 @@ type SpecSource struct {
 	Uri     string  `json:"uri"`
 }
 
-// StartRunRequest Request body for “runbook_start“ -- begin a new run on a template.
+// StartRunRequest Request body for “meho.runbook.start“ -- begin a new run on a template.
 //
 // :attr:`template_slug` references a *published* runbook template; the
 // service layer (G12.3-T3) resolves it to a pinned “(slug, version)“
@@ -4040,7 +4100,7 @@ type StartRunRequest struct {
 	WorkRef      *string                 `json:"work_ref"`
 }
 
-// StepBody The opaque-by-construction single-step shape returned by “runbook_next“.
+// StepBody The opaque-by-construction single-step shape returned by “meho.runbook.next“.
 //
 // All “${run.target}“ and “${run.params.X}“ substitutions are
 // already resolved by the engine (G12.3-T2, #1301); the strings here
@@ -4056,7 +4116,7 @@ type StartRunRequest struct {
 //   - :attr:`op_id` / :attr:`params` -- populated only for
 //     “operation_call“ steps; the substituted call shape.
 //   - :attr:`verify` -- the substituted-and-frozen verify gate the
-//     caller must respond to on the next “runbook_next“ call.
+//     caller must respond to on the next “meho.runbook.next“ call.
 //
 // What this shape **must not** carry, by structural construction
 // (regression-tested in “test_step_body_omits_future_step_fields“):
@@ -4418,7 +4478,7 @@ type TargetsDiscoverResult struct {
 	Skipped    []SkippedConnector `json:"skipped"`
 }
 
-// TemplateSummary Operator-readable summary row surfaced by “runbook_list_templates“.
+// TemplateSummary Operator-readable summary row surfaced by “meho.runbook.list_templates“.
 //
 // The list-view projection -- enough to identify a template and its
 // lifecycle state without loading the full step list (which
@@ -5184,6 +5244,22 @@ type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListRunsApiV1AgentsRunsGetParams defines parameters for ListRunsApiV1AgentsRunsGet.
+type ListRunsApiV1AgentsRunsGetParams struct {
+	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' — the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter.
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+
+	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
+	Status *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Limit Max runs per page (1..500, default 100).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Rows to skip for paging.
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetParams defines parameters for GetRunStatusApiV1AgentsRunsHandleGet.
 type GetRunStatusApiV1AgentsRunsHandleGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -5206,18 +5282,23 @@ type EditAgentApiV1AgentsNamePatchParams struct {
 
 // RunAgentApiV1AgentsNameRunPostParams defines parameters for RunAgentApiV1AgentsNameRunPost.
 type RunAgentApiV1AgentsNameRunPostParams struct {
+	MehoWorkRef   *string `json:"meho-work-ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // RunAgentEventsApiV1AgentsNameRunEventsPostParams defines parameters for RunAgentEventsApiV1AgentsNameRunEventsPost.
 type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
+	MehoWorkRef   *string `json:"meho-work-ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListApprovalsApiV1ApprovalsGetParams defines parameters for ListApprovalsApiV1ApprovalsGet.
 type ListApprovalsApiV1ApprovalsGetParams struct {
 	// Status Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.
-	Status        *string `form:"status,omitempty" json:"status,omitempty"`
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+
+	// WorkRef Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' — the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.
+	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7022,6 +7103,9 @@ type ClientInterface interface {
 	// ShowGrantApiV1AgentsGrantsGrantIdGet request
 	ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListRunsApiV1AgentsRunsGet request
+	ListRunsApiV1AgentsRunsGet(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetRunStatusApiV1AgentsRunsHandleGet request
 	GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -7805,6 +7889,18 @@ func (c *Client) RevokeGrantApiV1AgentsGrantsGrantIdDelete(ctx context.Context, 
 
 func (c *Client) ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(c.Server, grantId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunsApiV1AgentsRunsGet(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunsApiV1AgentsRunsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -11177,6 +11273,118 @@ func NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(server string, grantId opena
 	return req, nil
 }
 
+// NewListRunsApiV1AgentsRunsGetRequest generates requests for ListRunsApiV1AgentsRunsGet
+func NewListRunsApiV1AgentsRunsGetRequest(server string, params *ListRunsApiV1AgentsRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewGetRunStatusApiV1AgentsRunsHandleGetRequest generates requests for GetRunStatusApiV1AgentsRunsHandleGet
 func NewGetRunStatusApiV1AgentsRunsHandleGetRequest(server string, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams) (*http.Request, error) {
 	var err error
@@ -11432,15 +11640,26 @@ func NewRunAgentApiV1AgentsNameRunPostRequestWithBody(server string, name string
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.MehoWorkRef != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "meho-work-ref", runtime.ParamLocationHeader, *params.MehoWorkRef)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("meho-work-ref", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 	}
@@ -11494,15 +11713,26 @@ func NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(server string,
 
 	if params != nil {
 
-		if params.Authorization != nil {
+		if params.MehoWorkRef != nil {
 			var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "meho-work-ref", runtime.ParamLocationHeader, *params.MehoWorkRef)
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("authorization", headerParam0)
+			req.Header.Set("meho-work-ref", headerParam0)
+		}
+
+		if params.Authorization != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam1)
 		}
 
 	}
@@ -11535,6 +11765,22 @@ func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprova
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -20867,6 +21113,9 @@ type ClientWithResponsesInterface interface {
 	// ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse request
 	ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error)
 
+	// ListRunsApiV1AgentsRunsGetWithResponse request
+	ListRunsApiV1AgentsRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1AgentsRunsGetResponse, error)
+
 	// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request
 	GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error)
 
@@ -21746,6 +21995,29 @@ func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunsApiV1AgentsRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]AgentRunSummaryResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunsApiV1AgentsRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunsApiV1AgentsRunsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25447,6 +25719,15 @@ func (c *ClientWithResponses) ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(c
 	return ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp)
 }
 
+// ListRunsApiV1AgentsRunsGetWithResponse request returning *ListRunsApiV1AgentsRunsGetResponse
+func (c *ClientWithResponses) ListRunsApiV1AgentsRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1AgentsRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1AgentsRunsGetResponse, error) {
+	rsp, err := c.ListRunsApiV1AgentsRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunsApiV1AgentsRunsGetResponse(rsp)
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetWithResponse request returning *GetRunStatusApiV1AgentsRunsHandleGetResponse
 func (c *ClientWithResponses) GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
 	rsp, err := c.GetRunStatusApiV1AgentsRunsHandleGet(ctx, handle, params, reqEditors...)
@@ -27728,6 +28009,39 @@ func ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp *http.Response) (*Sho
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AgentGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunsApiV1AgentsRunsGetResponse parses an HTTP response from a ListRunsApiV1AgentsRunsGetWithResponse call
+func ParseListRunsApiV1AgentsRunsGetResponse(rsp *http.Response) (*ListRunsApiV1AgentsRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunsApiV1AgentsRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []AgentRunSummaryResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

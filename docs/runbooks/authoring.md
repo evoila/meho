@@ -61,12 +61,13 @@ each `meho.runbook.edit_template` call persists the whole body, and a new
 session re-reads it with `meho.runbook.show_template`.
 
 > **Naming note (#1612).** The dotted `meho.runbook.<verb>` names are
-> canonical; the original flat `runbook_*` names remain callable as
-> deprecated aliases (removed in v0.15.0, deferred from the original
-> one-release v0.14.0 window by #1702). The template
-> id field is `template_slug` everywhere — `slug` is accepted as a
-> deprecated alias on the template verbs for the same window, and
-> responses carry both keys until the window closes.
+> canonical; the original flat `runbook_*` names were kept as deprecated
+> aliases for one release and removed in v0.15.0 (#1625; the deadline was
+> deferred once from the original v0.14.0 window by #1702). The template
+> id field is `template_slug` everywhere — the deprecated `slug` input
+> alias on the template verbs was removed alongside the flat names,
+> though template-verb responses still carry both `template_slug` and the
+> model's `slug` key.
 
 The load-bearing property: **drafts are mutable, and editing a draft does not
 bump the version.** A published version is pinned and immutable; a draft is a

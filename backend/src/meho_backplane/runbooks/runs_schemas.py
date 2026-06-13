@@ -13,7 +13,7 @@ scrolling past authoring types.
 
 The load-bearing data structure here is :class:`StepBody` -- the
 *opaque-by-construction* single-step shape returned by the
-``runbook_next`` tool. The structural property that makes the entire
+``meho.runbook.next`` tool. The structural property that makes the entire
 Initiative #1198 adherence floor real is that this shape carries
 **exactly one step body** (the one the operator is currently on, with
 ``${run.target}`` / ``${run.params.X}`` substitutions resolved) and no
@@ -31,7 +31,7 @@ module established:
   (``"confirm"`` / ``"operation_call"``); the operator/engine's answer to
   the current step's verify gate.
 * :data:`NextStepResponse` -- discriminated on ``kind``
-  (``"current_step"`` / ``"completed"``); the ``runbook_next`` tool's
+  (``"current_step"`` / ``"completed"``); the ``meho.runbook.next`` tool's
   reply shape. The explicit ``kind`` tag is chosen deliberately over a
   field-presence-based callable discriminator because (a) it is more
   debuggable at the wire boundary, and (b) it matches the existing
@@ -115,7 +115,7 @@ class OperationCallVerifyResponse(BaseModel):
 
 
 #: The verify-response surface a caller (operator) sends back to
-#: ``runbook_next`` or the engine populates from a dispatched call.
+#: ``meho.runbook.next`` or the engine populates from a dispatched call.
 #: Discriminated on ``type`` -- the same tag the template-side
 #: :class:`~meho_backplane.runbooks.schemas.Verify` union uses, so the
 #: response shape mirrors the gate shape one-for-one. An unknown ``type``
@@ -159,7 +159,7 @@ class StepBodyVerify(BaseModel):
 
 
 class StepBody(BaseModel):
-    """The opaque-by-construction single-step shape returned by ``runbook_next``.
+    """The opaque-by-construction single-step shape returned by ``meho.runbook.next``.
 
     All ``${run.target}`` and ``${run.params.X}`` substitutions are
     already resolved by the engine (G12.3-T2, #1301); the strings here
@@ -175,7 +175,7 @@ class StepBody(BaseModel):
     * :attr:`op_id` / :attr:`params` -- populated only for
       ``operation_call`` steps; the substituted call shape.
     * :attr:`verify` -- the substituted-and-frozen verify gate the
-      caller must respond to on the next ``runbook_next`` call.
+      caller must respond to on the next ``meho.runbook.next`` call.
 
     What this shape **must not** carry, by structural construction
     (regression-tested in ``test_step_body_omits_future_step_fields``):
@@ -236,7 +236,7 @@ class StepPosition(BaseModel):
 
 
 class StartRunRequest(BaseModel):
-    """Request body for ``runbook_start`` -- begin a new run on a template.
+    """Request body for ``meho.runbook.start`` -- begin a new run on a template.
 
     :attr:`template_slug` references a *published* runbook template; the
     service layer (G12.3-T3) resolves it to a pinned ``(slug, version)``
@@ -264,7 +264,7 @@ class StartRunRequest(BaseModel):
 
 
 class CurrentStepResponse(BaseModel):
-    """Returned by ``runbook_start`` and the non-completion path of ``runbook_next``.
+    """Returned by ``meho.runbook.start`` and the non-completion path of ``meho.runbook.next``.
 
     Carries the run coordinates (``run_id`` / ``template_slug`` /
     ``template_version``), the structural position hint
@@ -291,7 +291,7 @@ class CurrentStepResponse(BaseModel):
 
 
 class RunCompletedResponse(BaseModel):
-    """Returned by ``runbook_next`` when the previous step was the last.
+    """Returned by ``meho.runbook.next`` when the previous step was the last.
 
     The terminal-state shape: no step body, just the run coordinates
     and the transition timestamp. The companion abort-side shape is
@@ -313,7 +313,7 @@ class RunCompletedResponse(BaseModel):
     completed_at: datetime
 
 
-#: Reply shape of ``runbook_next`` -- discriminated on ``kind``. The
+#: Reply shape of ``meho.runbook.next`` -- discriminated on ``kind``. The
 #: non-completion path returns a :class:`CurrentStepResponse` (one step
 #: body, no future-step leakage); the completion path returns a
 #: :class:`RunCompletedResponse` (terminal-state marker, no step
@@ -326,7 +326,7 @@ NextStepResponse = Annotated[
 
 
 class NextStepRequest(BaseModel):
-    """Request body for ``runbook_next`` -- advance the run.
+    """Request body for ``meho.runbook.next`` -- advance the run.
 
     :attr:`last_verified` is the caller's *claim* that the previous
     step's verify gate was satisfied. It is **informational only**:
@@ -341,7 +341,7 @@ class NextStepRequest(BaseModel):
     :attr:`verify_response` carries the operator's answer for a
     ``confirm`` step or the engine's captured result for an
     ``operation_call`` step. ``None`` is valid only on the very first
-    ``runbook_next`` call (when no prior step exists to verify).
+    ``meho.runbook.next`` call (when no prior step exists to verify).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -351,7 +351,7 @@ class NextStepRequest(BaseModel):
 
 
 class AbortRunRequest(BaseModel):
-    """Request body for ``runbook_abort`` -- terminate the run mid-flight.
+    """Request body for ``meho.runbook.abort`` -- terminate the run mid-flight.
 
     :attr:`reason` is required and non-empty (``Field(min_length=1)``)
     because it is persisted to ``audit_log.payload`` for the abort
@@ -365,7 +365,7 @@ class AbortRunRequest(BaseModel):
 
 
 class AbortRunResponse(BaseModel):
-    """Returned by ``runbook_abort`` -- the terminal-state coordinates."""
+    """Returned by ``meho.runbook.abort`` -- the terminal-state coordinates."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -375,13 +375,13 @@ class AbortRunResponse(BaseModel):
 
 
 class ReassignRunRequest(BaseModel):
-    """Request body for ``runbook_reassign`` -- transfer ownership of a run.
+    """Request body for ``meho.runbook.reassign`` -- transfer ownership of a run.
 
     :attr:`new_assignee` is the operator subject identifier of the
     new owner. Non-empty (``Field(min_length=1)``) because the
     reassign path writes to ``runbook_runs.assigned_to`` which is
     ``NOT NULL`` at the storage layer and is the predicate for
-    every subsequent ``runbook_next`` ownership check.
+    every subsequent ``meho.runbook.next`` ownership check.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -390,7 +390,7 @@ class ReassignRunRequest(BaseModel):
 
 
 class ReassignRunResponse(BaseModel):
-    """Returned by ``runbook_reassign`` -- the new ownership coordinates."""
+    """Returned by ``meho.runbook.reassign`` -- the new ownership coordinates."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -400,7 +400,7 @@ class ReassignRunResponse(BaseModel):
 
 
 class ListRunsFilter(BaseModel):
-    """Optional filters for ``runbook_list_runs``.
+    """Optional filters for ``meho.runbook.list_runs``.
 
     All three fields default to ``None`` (no filter applied). A bare
     :class:`ListRunsFilter` -- equivalent to passing no filter at all
@@ -427,11 +427,11 @@ class ListRunsFilter(BaseModel):
 
 
 class RunSummary(BaseModel):
-    """List-view projection returned by ``runbook_list_runs``.
+    """List-view projection returned by ``meho.runbook.list_runs``.
 
     Run-level state only: no step contents are exposed. The
     step-by-step content is opaque-by-construction (only
-    ``runbook_next`` ever returns a step body, and only one step at a
+    ``meho.runbook.next`` ever returns a step body, and only one step at a
     time), so :attr:`current_step_id` is the *id* of the step the
     run is currently on -- enough for a UI to render "step 3:
     drain-node" -- but not the body.

@@ -260,17 +260,17 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(topology)
     importlib.reload(topology_create_node)
     # G12.2-T4 (#1298): the runbook template MCP tools
-    # (``runbook_*_template`` x 6) join the reload list for the same
+    # (``meho.runbook.*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse
     # ``clear_registries()`` above would otherwise leave them
     # unregistered in any test file that imports this fixture after
     # the first one runs in the process.
     importlib.reload(runbooks)
-    # G12.3-T6 (#1313): the runbook *run* MCP tools (``runbook_start``
-    # / ``runbook_next`` / ``runbook_abort`` / ``runbook_reassign`` /
-    # ``runbook_list_runs``) join the reload list for the same reason
-    # as the template-side module above. The five tools are imported
-    # but unused here -- pytest collects them via the side-effect
+    # G12.3-T6 (#1313): the runbook *run* MCP tools
+    # (``meho.runbook.start`` / ``.next`` / ``.abort`` / ``.reassign`` /
+    # ``.list_runs``) join the reload list for the same reason as the
+    # template-side module above. The five tools are imported but unused
+    # here -- pytest collects them via the side-effect
     # ``register_mcp_tool`` calls in the module body, not by name.
     importlib.reload(runbook_runs)
     importlib.reload(memory_tools)

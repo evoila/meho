@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0040_add_runbook_runs_work_ref``.
+"""Behavioural tests for Alembic migration ``0042_add_runbook_runs_work_ref``.
 
 Initiative #1654, Task #1661 (work_ref I3-T1). Adds the nullable
 ``runbook_runs.work_ref`` column + its composite ``(tenant_id, work_ref)``
@@ -36,7 +36,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL (sync fixture)."""
-    db_path = tmp_path / "migration_0040.db"
+    db_path = tmp_path / "migration_0042.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -94,24 +94,24 @@ def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str])
     command.upgrade(cfg, "head")
 
     assert "work_ref" in _runbook_runs_columns(sync_url), (
-        "migration 0040 must add runbook_runs.work_ref on upgrade head"
+        "migration 0042 must add runbook_runs.work_ref on upgrade head"
     )
     assert _runbook_runs_column_is_nullable(sync_url, "work_ref"), (
         "work_ref must be nullable -- NULL when the run carries no change ticket"
     )
     assert "runbook_runs_tenant_work_ref_idx" in _runbook_runs_indexes(sync_url), (
-        "migration 0040 must create runbook_runs_tenant_work_ref_idx on upgrade head"
+        "migration 0042 must create runbook_runs_tenant_work_ref_idx on upgrade head"
     )
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade "0039"`` drops column + index; ``upgrade head`` restores them."""
+    """``downgrade "0041"`` drops column + index; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
     assert "work_ref" in _runbook_runs_columns(sync_url)
     assert "runbook_runs_tenant_work_ref_idx" in _runbook_runs_indexes(sync_url)
 
-    command.downgrade(cfg, "0039")
+    command.downgrade(cfg, "0041")
     assert "work_ref" not in _runbook_runs_columns(sync_url), "downgrade must drop work_ref"
     assert "runbook_runs_tenant_work_ref_idx" not in _runbook_runs_indexes(sync_url), (
         "downgrade must drop runbook_runs_tenant_work_ref_idx"
@@ -123,14 +123,14 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
 
 
 def test_prior_runbook_runs_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
-    """The pre-existing runbook_runs columns + indexes survive 0040."""
+    """The pre-existing runbook_runs columns + indexes survive 0042."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
 
     columns = _runbook_runs_columns(sync_url)
-    assert "assigned_to" in columns, "the assigned_to column must survive 0040"
-    assert "template_slug" in columns, "the template_slug column must survive 0040"
-    assert "state" in columns, "the state column must survive 0040"
+    assert "assigned_to" in columns, "the assigned_to column must survive 0042"
+    assert "template_slug" in columns, "the template_slug column must survive 0042"
+    assert "state" in columns, "the state column must survive 0042"
     assert "work_ref" in columns
 
     indexes = _runbook_runs_indexes(sync_url)

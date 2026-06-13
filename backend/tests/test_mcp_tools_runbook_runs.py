@@ -14,9 +14,10 @@ on the MCP transport:
 * RBAC: four tools (``meho.runbook.start`` / ``.next`` / ``.abort`` /
   ``.list_runs``) are ``OPERATOR``-callable; ``meho.runbook.reassign``
   is ``TENANT_ADMIN``-only.
-* #1612 naming canonicalisation: the dotted names are canonical; the
-  flat ``runbook_*`` names resolve as deprecated aliases routed to the
-  same handler objects, including end-to-end through the dispatcher.
+* #1612 naming canonicalisation + #1625 removal: the dotted names are
+  the only registered names; the flat ``runbook_*`` aliases kept for one
+  release by #1612 were removed, so a flat-name call now falls through to
+  the dispatcher's unknown-tool error.
 * Typed-exception -> ``-32602`` mapping for the ten operator-actionable
   service + engine errors.
 * The load-bearing ``meho.runbook.next`` description carries the verbatim
@@ -60,7 +61,6 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Target
-from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.operations import (
     register_typed_operation,
@@ -87,15 +87,16 @@ _OPERATOR_TOOLS = {
 _ADMIN_TOOLS = {"meho.runbook.reassign"}
 _ALL_TOOLS = _OPERATOR_TOOLS | _ADMIN_TOOLS
 
-#: Deprecated flat aliases (#1612) — kept resolvable for one release;
-#: each maps to its canonical dotted name.
-_FLAT_ALIASES = {
-    "runbook_start": "meho.runbook.start",
-    "runbook_next": "meho.runbook.next",
-    "runbook_abort": "meho.runbook.abort",
-    "runbook_reassign": "meho.runbook.reassign",
-    "runbook_list_runs": "meho.runbook.list_runs",
-}
+#: Flat run-verb aliases removed by #1625 (kept as deprecated aliases
+#: for one release by #1612). Each must now fall through to the
+#: dispatcher's unknown-tool error.
+_REMOVED_FLAT_ALIASES = (
+    "runbook_start",
+    "runbook_next",
+    "runbook_abort",
+    "runbook_reassign",
+    "runbook_list_runs",
+)
 
 
 def _template_body(
@@ -1014,58 +1015,34 @@ async def test_next_operation_call_match_advances(
 
 
 # ---------------------------------------------------------------------------
-# #1612 — deprecated flat-name aliases + template_slug round-trip
+# #1625 — removal of the deprecated flat-name aliases + template_slug round-trip
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_flat_aliases_listed_deprecated_and_route_to_same_handler(
+def test_removed_flat_run_aliases_return_unknown_tool(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC #1612: every flat alias resolves, is DEPRECATED-marked, shares the handler.
+    """AC #1625: the flat run-verb names no longer resolve.
 
-    Mirrors the template-side assertion for the five run-lifecycle pairs:
-    both names listed for an admin, the alias's wire description is the
-    standard DEPRECATED pointer, and the registry routes both names to
-    the same handler object.
+    #1612 kept the flat names as deprecated aliases for one release;
+    #1625 removed them. The flat names are absent from ``tools/list`` and
+    calling one returns the dispatcher's standard unknown-tool error
+    (``-32602``, ``unknown tool: …``).
     """
     client, _op = client_with_operator
-    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    listed = {
+        t["name"]
+        for t in post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()[
+            "result"
+        ]["tools"]
+    }
+    assert not [name for name in listed if name.startswith("runbook_")]
 
-    for alias, canonical in _FLAT_ALIASES.items():
-        assert canonical in tools_by_name, canonical
-        assert alias in tools_by_name, alias
-        alias_desc = tools_by_name[alias]["description"]
-        assert alias_desc.startswith(f"DEPRECATED alias for `{canonical}`"), alias_desc
-        assert tools_by_name[alias]["inputSchema"] == tools_by_name[canonical]["inputSchema"]
-
-        canonical_entry = get_tool(canonical)
-        alias_entry = get_tool(alias)
-        assert canonical_entry is not None and alias_entry is not None
-        assert alias_entry[1] is canonical_entry[1], alias
-        assert alias_entry[0].deprecated_alias_for == canonical
-
-
-@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
-@pytest.mark.asyncio
-async def test_flat_alias_call_behaves_identically(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """AC #1612: calling the flat ``runbook_start`` alias behaves like the dotted name.
-
-    Same arguments, same dispatcher path, same response shape — the
-    pre-#1612 wire contract holds verbatim for the deprecation window.
-    """
-    client, op = client_with_operator
-    await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
-
-    payload = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
-    )
-    assert payload["kind"] == "current_step"
-    assert payload["template_slug"] == "r1"
-    assert payload["current_step"]["id"] == "step-1"
+    for flat in _REMOVED_FLAT_ALIASES:
+        body = _call(client, flat, {"template_slug": "r1", "target": "host-1"})
+        assert body["error"]["code"] == INVALID_PARAMS, flat
+        assert "unknown tool" in body["error"]["message"], flat
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

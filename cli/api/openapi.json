@@ -5701,6 +5701,303 @@
         }
       }
     },
+    "/api/v1/agents/{name}/run": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Run Agent",
+        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409; a\nbudget-refused run (per-identity cap reached, per-tenant or global\nkill switch on \u2014 G11.5-T6 #1080) is 429 with the reason in the\n``detail`` body so the operator sees which gate fired.\n\nThe optional ``Meho-Work-Ref`` header binds the run to an external\nchange ticket (work_ref I3-T2 #1662); it is stamped on the durable run\nrow at create time and filterable on ``GET /agents/runs``.",
+        "operationId": "run_agent_api_v1_agents__name__run_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "meho-work-ref",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Meho-Work-Ref"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/runs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Runs",
+        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state. Returns ``created_at DESC``.",
+        "operationId": "list_runs_api_v1_agents_runs_get",
+        "parameters": [
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter.",
+              "title": "Work Ref"
+            },
+            "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#11' \u2014 the runs that worked under change ticket X (work_ref I3-T2 #1662). Omit for no work_ref filter."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AgentRunStatus",
+              "nullable": true,
+              "description": "Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.",
+              "title": "Status"
+            },
+            "description": "Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Max runs per page (1..500, default 100).",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Max runs per page (1..500, default 100)."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Rows to skip for paging.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Rows to skip for paging."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentRunSummaryResponse"
+                  },
+                  "title": "Response List Runs Api V1 Agents Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/runs/{handle}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Get Run Status",
+        "description": "Poll a run's durable status by handle (the run id).\n\nReads the durable ``agent_run`` row, so it works after the request that\nstarted the run has returned. An unknown / cross-tenant handle is 404.",
+        "operationId": "get_run_status_api_v1_agents_runs__handle__get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/run/events": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Run Agent Events",
+        "description": "Stream a fresh run's events for the named agent as Server-Sent Events.\n\nDrives a new run inline and emits ``turn`` / ``tool_call`` /\n``tool_result`` / ``final`` / ``error`` events as they happen. The run\nis recorded on a durable ``agent_run`` row, so a consumer can poll the\nrun's recorded outcome after the stream ends (the ``data:`` field of\nevery frame carries the ``run_id``). A cross-tenant / absent name is\n404; a disabled definition is 409 \u2014 resolved before the stream opens so\nthe error is a normal HTTP status, not a torn stream.",
+        "operationId": "run_agent_events_api_v1_agents__name__run_events_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "meho-work-ref",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Meho-Work-Ref"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "tags": [
@@ -6218,184 +6515,6 @@
         }
       }
     },
-    "/api/v1/agents/{name}/run": {
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Run Agent",
-        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409; a\nbudget-refused run (per-identity cap reached, per-tenant or global\nkill switch on \u2014 G11.5-T6 #1080) is 429 with the reason in the\n``detail`` body so the operator sees which gate fired.",
-        "operationId": "run_agent_api_v1_agents__name__run_post",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentRunRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agents/runs/{handle}": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Get Run Status",
-        "description": "Poll a run's durable status by handle (the run id).\n\nReads the durable ``agent_run`` row, so it works after the request that\nstarted the run has returned. An unknown / cross-tenant handle is 404.",
-        "operationId": "get_run_status_api_v1_agents_runs__handle__get",
-        "parameters": [
-          {
-            "name": "handle",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Handle"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentRunStatusResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agents/{name}/run/events": {
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Run Agent Events",
-        "description": "Stream a fresh run's events for the named agent as Server-Sent Events.\n\nDrives a new run inline and emits ``turn`` / ``tool_call`` /\n``tool_result`` / ``final`` / ``error`` events as they happen. The run\nis recorded on a durable ``agent_run`` row, so a consumer can poll the\nrun's recorded outcome after the stream ends (the ``data:`` field of\nevery frame carries the ``run_id``). A cross-tenant / absent name is\n404; a disabled definition is 409 \u2014 resolved before the stream opens so\nthe error is a normal HTTP status, not a torn stream.",
-        "operationId": "run_agent_events_api_v1_agents__name__run_events_post",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentRunRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/scheduler/triggers": {
       "get": {
         "tags": [
@@ -6621,7 +6740,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``. Returns newest-first (``created_at DESC``).",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired`` and by change ticket via\n``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first\n(``created_at DESC``).",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -6635,6 +6754,18 @@
               "title": "Status"
             },
             "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter.",
+              "title": "Work Ref"
+            },
+            "description": "Filter by external change-ticket reference (exact match), e.g. 'gh:evoila/meho#1' \u2014 the requests authorised by change ticket X (work_ref I2-T1 #1659). Omit for no work_ref filter."
           },
           {
             "name": "authorization",
@@ -10192,7 +10323,7 @@
           "reason"
         ],
         "title": "AbortRunRequest",
-        "description": "Request body for ``runbook_abort`` -- terminate the run mid-flight.\n\n:attr:`reason` is required and non-empty (``Field(min_length=1)``)\nbecause it is persisted to ``audit_log.payload`` for the abort\nevent -- an empty reason would defeat the audit trail that\nInitiative #1198's \"abort-with-audit\" guarantee rests on."
+        "description": "Request body for ``meho.runbook.abort`` -- terminate the run mid-flight.\n\n:attr:`reason` is required and non-empty (``Field(min_length=1)``)\nbecause it is persisted to ``audit_log.payload`` for the abort\nevent -- an empty reason would defeat the audit trail that\nInitiative #1198's \"abort-with-audit\" guarantee rests on."
       },
       "AbortRunResponse": {
         "properties": {
@@ -10219,7 +10350,7 @@
           "abandoned_at"
         ],
         "title": "AbortRunResponse",
-        "description": "Returned by ``runbook_abort`` -- the terminal-state coordinates."
+        "description": "Returned by ``meho.runbook.abort`` -- the terminal-state coordinates."
       },
       "AgentDefinitionCreate": {
         "properties": {
@@ -10792,6 +10923,78 @@
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
       },
+      "AgentRunSummaryResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentRunStatus"
+          },
+          "trigger": {
+            "type": "string",
+            "title": "Trigger"
+          },
+          "model_tier": {
+            "type": "string",
+            "title": "Model Tier"
+          },
+          "provider": {
+            "type": "string",
+            "nullable": true,
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "nullable": true,
+            "title": "Model"
+          },
+          "turns": {
+            "type": "integer",
+            "title": "Turns"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "trigger",
+          "model_tier",
+          "provider",
+          "model",
+          "turns",
+          "work_ref",
+          "created_at",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "AgentRunSummaryResponse",
+        "description": "One row of the agent-run list (``GET /agents/runs``).\n\nA scannable index row: identity, lifecycle state, resolved model\ncoordinates, timestamps, and the ``work_ref`` change-ticket\nreference the list filters on (work_ref I3-T2 #1662). The full\n``output`` blob is omitted \u2014 a caller wanting a run's result polls\n``GET /agents/runs/{handle}``."
+      },
       "ApprovalRequestStatus": {
         "type": "string",
         "enum": [
@@ -10874,6 +11077,11 @@
             "type": "string",
             "nullable": true,
             "title": "Expires At"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
           }
         },
         "type": "object",
@@ -10892,7 +11100,8 @@
           "reviewed_by",
           "decided_at",
           "created_at",
-          "expires_at"
+          "expires_at",
+          "work_ref"
         ],
         "title": "ApprovalRequestView",
         "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
@@ -10904,6 +11113,12 @@
             "type": "object",
             "title": "Params",
             "description": "The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Optional human-readable approval reason (recorded in the audit row).",
+            "default": ""
           }
         },
         "additionalProperties": false,
@@ -12703,7 +12918,7 @@
           "current_step"
         ],
         "title": "CurrentStepResponse",
-        "description": "Returned by ``runbook_start`` and the non-completion path of ``runbook_next``.\n\nCarries the run coordinates (``run_id`` / ``template_slug`` /\n``template_version``), the structural position hint\n(:class:`StepPosition`), and -- crucially -- exactly one\n:class:`StepBody`: the step the run is *currently on*. No previous\nsteps (already executed), no following steps (the opacity property\nthis Initiative is built around).\n\nTagged with ``kind: Literal[\"current_step\"]`` so the parent\n:data:`NextStepResponse` discriminated union routes payloads on a\nvisible field rather than a callable shape-sniffing discriminator\n(option 1 of the design decision documented at the module docstring\nand the #1300 issue body)."
+        "description": "Returned by ``meho.runbook.start`` and the non-completion path of ``meho.runbook.next``.\n\nCarries the run coordinates (``run_id`` / ``template_slug`` /\n``template_version``), the structural position hint\n(:class:`StepPosition`), and -- crucially -- exactly one\n:class:`StepBody`: the step the run is *currently on*. No previous\nsteps (already executed), no following steps (the opacity property\nthis Initiative is built around).\n\nTagged with ``kind: Literal[\"current_step\"]`` so the parent\n:data:`NextStepResponse` discriminated union routes payloads on a\nvisible field rather than a callable shape-sniffing discriminator\n(option 1 of the design decision documented at the module docstring\nand the #1300 issue body)."
       },
       "DailyUsageBucket": {
         "properties": {
@@ -12859,7 +13074,7 @@
           "status"
         ],
         "title": "DeprecateTemplateResponse",
-        "description": "Response for ``runbook_deprecate_template`` -- the now-deprecated coordinates."
+        "description": "Response for ``meho.runbook.deprecate_template`` -- the now-deprecated coordinates."
       },
       "DocCollectionSummary": {
         "properties": {
@@ -13006,7 +13221,7 @@
           "body"
         ],
         "title": "DraftTemplateRequest",
-        "description": "Request body for ``runbook_draft_template`` -- create a new draft.\n\n:attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug\ncontract, reused verbatim)."
+        "description": "Request body for ``meho.runbook.draft_template`` -- create a new draft.\n\n:attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug\ncontract, reused verbatim)."
       },
       "DraftTemplateResponse": {
         "properties": {
@@ -13031,7 +13246,7 @@
           "status"
         ],
         "title": "DraftTemplateResponse",
-        "description": "Response for ``runbook_draft_template`` -- the created draft's coordinates."
+        "description": "Response for ``meho.runbook.draft_template`` -- the created draft's coordinates."
       },
       "EditGroupBody": {
         "properties": {
@@ -13159,7 +13374,7 @@
           "status"
         ],
         "title": "EditTemplateResponse",
-        "description": "Response for ``runbook_edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``."
+        "description": "Response for ``meho.runbook.edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``."
       },
       "EvalRequest": {
         "properties": {
@@ -13299,7 +13514,7 @@
           "in_flight_run_count"
         ],
         "title": "ForkInfo",
-        "description": "Surfaced by ``runbook_edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
+        "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
       },
       "GraphEdgeKind": {
         "type": "string",
@@ -14017,7 +14232,7 @@
           "last_verified"
         ],
         "title": "NextStepRequest",
-        "description": "Request body for ``runbook_next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``runbook_next`` call (when no prior step exists to verify)."
+        "description": "Request body for ``meho.runbook.next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``meho.runbook.next`` call (when no prior step exists to verify)."
       },
       "OperationCallStep": {
         "properties": {
@@ -14441,7 +14656,7 @@
           "status"
         ],
         "title": "PublishTemplateResponse",
-        "description": "Response for ``runbook_publish_template`` -- the now-published coordinates."
+        "description": "Response for ``meho.runbook.publish_template`` -- the now-published coordinates."
       },
       "QueryResult": {
         "properties": {
@@ -14524,7 +14739,7 @@
           "new_assignee"
         ],
         "title": "ReassignRunRequest",
-        "description": "Request body for ``runbook_reassign`` -- transfer ownership of a run.\n\n:attr:`new_assignee` is the operator subject identifier of the\nnew owner. Non-empty (``Field(min_length=1)``) because the\nreassign path writes to ``runbook_runs.assigned_to`` which is\n``NOT NULL`` at the storage layer and is the predicate for\nevery subsequent ``runbook_next`` ownership check."
+        "description": "Request body for ``meho.runbook.reassign`` -- transfer ownership of a run.\n\n:attr:`new_assignee` is the operator subject identifier of the\nnew owner. Non-empty (``Field(min_length=1)``) because the\nreassign path writes to ``runbook_runs.assigned_to`` which is\n``NOT NULL`` at the storage layer and is the predicate for\nevery subsequent ``meho.runbook.next`` ownership check."
       },
       "ReassignRunResponse": {
         "properties": {
@@ -14550,7 +14765,7 @@
           "reassigned_at"
         ],
         "title": "ReassignRunResponse",
-        "description": "Returned by ``runbook_reassign`` -- the new ownership coordinates."
+        "description": "Returned by ``meho.runbook.reassign`` -- the new ownership coordinates."
       },
       "RefreshResult": {
         "properties": {
@@ -15126,7 +15341,7 @@
           "completed_at"
         ],
         "title": "RunCompletedResponse",
-        "description": "Returned by ``runbook_next`` when the previous step was the last.\n\nThe terminal-state shape: no step body, just the run coordinates\nand the transition timestamp. The companion abort-side shape is\n:class:`AbortRunResponse`.\n\nThe :attr:`state` and :attr:`kind` literals both carry ``\"completed\"``\nby design: :attr:`kind` is the parent-union discriminator (per the\nexplicit-tag decision documented at the module docstring), while\n:attr:`state` matches the run's storage-level state column\n(``runbook_runs.state``) so the response shape mirrors the row\none-for-one."
+        "description": "Returned by ``meho.runbook.next`` when the previous step was the last.\n\nThe terminal-state shape: no step body, just the run coordinates\nand the transition timestamp. The companion abort-side shape is\n:class:`AbortRunResponse`.\n\nThe :attr:`state` and :attr:`kind` literals both carry ``\"completed\"``\nby design: :attr:`kind` is the parent-union discriminator (per the\nexplicit-tag decision documented at the module docstring), while\n:attr:`state` matches the run's storage-level state column\n(``runbook_runs.state``) so the response shape mirrors the row\none-for-one."
       },
       "RunSummary": {
         "properties": {
@@ -15203,7 +15418,7 @@
           "started_at"
         ],
         "title": "RunSummary",
-        "description": "List-view projection returned by ``runbook_list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``runbook_next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``.\n\n:attr:`work_ref` surfaces the external change-ticket reference the\nrun was started under (work_ref I3-T1 #1661); ``None`` when the run\ncarries no ticket."
+        "description": "List-view projection returned by ``meho.runbook.list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``meho.runbook.next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``.\n\n:attr:`work_ref` surfaces the external change-ticket reference the\nrun was started under (work_ref I3-T1 #1661); ``None`` when the run\ncarries no ticket."
       },
       "RunbookListRunsResponse": {
         "properties": {
@@ -15660,7 +15875,7 @@
           "edited_at"
         ],
         "title": "ShowTemplateResponse",
-        "description": "Full template surface returned by ``runbook_show_template``.\n\nThe complete template including the ordered :attr:`steps` and the\nauthorship / timestamp provenance. Mirrors the\n:class:`~meho_backplane.db.models.RunbookTemplate` column set projected\nto wire types."
+        "description": "Full template surface returned by ``meho.runbook.show_template``.\n\nThe complete template including the ordered :attr:`steps` and the\nauthorship / timestamp provenance. Mirrors the\n:class:`~meho_backplane.db.models.RunbookTemplate` column set projected\nto wire types."
       },
       "SkippedConnector": {
         "properties": {
@@ -15731,7 +15946,7 @@
           "target"
         ],
         "title": "StartRunRequest",
-        "description": "Request body for ``runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
+        "description": "Request body for ``meho.runbook.start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
       },
       "StepBody": {
         "properties": {
@@ -15779,7 +15994,7 @@
           "verify"
         ],
         "title": "StepBody",
-        "description": "The opaque-by-construction single-step shape returned by ``runbook_next``.\n\nAll ``${run.target}`` and ``${run.params.X}`` substitutions are\nalready resolved by the engine (G12.3-T2, #1301); the strings here\nare post-substitution and final. This is what the operator / agent\nsees -- *and the only step they see* at this position in the run.\n\nWhat this shape carries:\n\n* :attr:`id` -- the step's id (matches ``runbook_run_step_states.step_id``).\n* :attr:`title` / :attr:`body` -- substituted authoring text.\n* :attr:`type` -- ``\"operation_call\"`` (MEHO dispatches the action) or\n  ``\"manual\"`` (operator performs the step off-MEHO).\n* :attr:`op_id` / :attr:`params` -- populated only for\n  ``operation_call`` steps; the substituted call shape.\n* :attr:`verify` -- the substituted-and-frozen verify gate the\n  caller must respond to on the next ``runbook_next`` call.\n\nWhat this shape **must not** carry, by structural construction\n(regression-tested in ``test_step_body_omits_future_step_fields``):\n\n* The full template's step list.\n* Any reference to step ids other than the current one.\n* The unsubstituted (template) body.\n\nNo discriminated union split between operation-call and manual\nvariants is used here -- ``op_id`` / ``params`` are simply nullable\nby ``type``. The split would buy stronger typing at the cost of an\nextra adapter layer for callers that just want to render the\nbody; the issue spec explicitly chose the flat shape (#1300)."
+        "description": "The opaque-by-construction single-step shape returned by ``meho.runbook.next``.\n\nAll ``${run.target}`` and ``${run.params.X}`` substitutions are\nalready resolved by the engine (G12.3-T2, #1301); the strings here\nare post-substitution and final. This is what the operator / agent\nsees -- *and the only step they see* at this position in the run.\n\nWhat this shape carries:\n\n* :attr:`id` -- the step's id (matches ``runbook_run_step_states.step_id``).\n* :attr:`title` / :attr:`body` -- substituted authoring text.\n* :attr:`type` -- ``\"operation_call\"`` (MEHO dispatches the action) or\n  ``\"manual\"`` (operator performs the step off-MEHO).\n* :attr:`op_id` / :attr:`params` -- populated only for\n  ``operation_call`` steps; the substituted call shape.\n* :attr:`verify` -- the substituted-and-frozen verify gate the\n  caller must respond to on the next ``meho.runbook.next`` call.\n\nWhat this shape **must not** carry, by structural construction\n(regression-tested in ``test_step_body_omits_future_step_fields``):\n\n* The full template's step list.\n* Any reference to step ids other than the current one.\n* The unsubstituted (template) body.\n\nNo discriminated union split between operation-call and manual\nvariants is used here -- ``op_id`` / ``params`` are simply nullable\nby ``type``. The split would buy stronger typing at the cost of an\nextra adapter layer for callers that just want to render the\nbody; the issue spec explicitly chose the flat shape (#1300)."
       },
       "StepBodyVerify": {
         "properties": {
@@ -16447,7 +16662,7 @@
           "edited_at"
         ],
         "title": "TemplateSummary",
-        "description": "Operator-readable summary row surfaced by ``runbook_list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+        "description": "Operator-readable summary row surfaced by ``meho.runbook.list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
       },
       "Thresholds": {
         "properties": {

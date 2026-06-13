@@ -16,8 +16,8 @@ Route inventory
   ``operator``.
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
-  Body: :class:`ApproveRequestBody` (``params`` dict). Role:
-  ``operator``.
+  Body: :class:`ApproveRequestBody` (``params`` dict + optional
+  ``reason`` string). Role: ``operator``.
 * ``POST /api/v1/approvals/{request_id}/reject`` — reject a pending
   request; the original dispatch is not executed. Body:
   :class:`RejectRequestBody` (optional ``reason`` string). Role:
@@ -114,6 +114,7 @@ class ApprovalRequestView(BaseModel):
     decided_at: str | None
     created_at: str
     expires_at: str | None
+    work_ref: str | None
 
 
 class ApproveRequestBody(BaseModel):
@@ -127,6 +128,10 @@ class ApproveRequestBody(BaseModel):
             "The original dispatch params, unchanged. The hash must match "
             "the stored params_hash on the approval request."
         ),
+    )
+    reason: str = Field(
+        default="",
+        description="Optional human-readable approval reason (recorded in the audit row).",
     )
 
 
@@ -187,6 +192,7 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
+        work_ref=row.work_ref,
     )
 
 
@@ -232,7 +238,9 @@ async def _capture_operator_decision(
     try:
         async with sessionmaker() as session:
             if decision == "approved":
-                request = await approve_request(session, request_id, operator=operator, params=None)
+                request = await approve_request(
+                    session, request_id, operator=operator, params=None, reason=reason
+                )
             else:
                 request = await reject_request(
                     session, request_id, operator=operator, reason=reason
@@ -285,13 +293,23 @@ async def list_approvals(
             "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
         ),
     ),
+    work_ref: str | None = Query(
+        default=None,
+        description=(
+            "Filter by external change-ticket reference (exact match), e.g. "
+            "'gh:evoila/meho#1' — the requests authorised by change ticket X "
+            "(work_ref I2-T1 #1659). Omit for no work_ref filter."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
     Defaults to listing only ``pending`` requests. Supports filtering
     by status via ``?status=approved`` / ``?status=rejected`` /
-    ``?status=expired``. Returns newest-first (``created_at DESC``).
+    ``?status=expired`` and by change ticket via
+    ``?work_ref=gh:evoila/meho#1`` (exact match). Returns newest-first
+    (``created_at DESC``).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.list",
@@ -312,8 +330,10 @@ async def list_approvals(
             select(ApprovalRequest)
             .where(ApprovalRequest.tenant_id == operator.tenant_id)
             .where(ApprovalRequest.status == status_filter.value)
-            .order_by(ApprovalRequest.created_at.desc())
         )
+        if work_ref is not None:
+            stmt = stmt.where(ApprovalRequest.work_ref == work_ref)
+        stmt = stmt.order_by(ApprovalRequest.created_at.desc())
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
@@ -386,6 +406,7 @@ async def approve_approval_request(
                 request_id,
                 operator=operator,
                 params=body.params,
+                reason=body.reason,
             )
             await session.commit()
         # Publish AFTER commit (G11.2-T5): a phantom event cannot

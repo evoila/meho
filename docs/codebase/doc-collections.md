@@ -15,8 +15,12 @@ The registry deliberately splits two kinds of field by who writes them
 
 - **Operator-set, authoritative for identity + routing** —
   `collection_key`, `vendor`, `products`, `description`, `when_to_use`,
-  and `backend`. These are seeded by an operator (no create/import API
-  in v1; operator-managed seed only).
+  and `backend`. A tenant_admin registers these through the create
+  surface (#1739) — `POST /api/v1/doc_collections`, the
+  `create_doc_collections` MCP tool, or `meho docs collections create` —
+  which validates the `backend.type`, derives `tenant_id` from the JWT,
+  defaults `status` to `provisioning`, and audits the write. See
+  [Create / register a collection](#create--register-a-collection-1739).
 - **Probe-written liveness** — `status`, `last_ingested_at`,
   `doc_count`, and `readiness`. The backend is the source of truth for
   liveness; the readiness probe (G4.6-T6, #1555) writes these from the
@@ -291,6 +295,55 @@ form pointing at `list_doc_collections` and logs
 delimiters are wrapper-emitted (never substituted from row content), so a
 malicious `when_to_use` carrying the terminator cannot escape the block.
 
+## Create / register a collection (#1739)
+
+The write half of the registry, mirroring the `create_target` precedent
+(`backend/src/meho_backplane/api/v1/targets.py`). It closes the gap Ops
+hit on the first co-located corpus round-trip
+(claude-rdc-hetzner-dc#975): before #1739 the only way to register a
+collection was a raw `INSERT INTO doc_collections`, which bypassed every
+guardrail the rest of MEHO's registry writes enforce (backend
+routability, tenant scoping, typed conflict, audit).
+
+The service primitive
+`create_doc_collection(session, operator, body)`
+(`meho_backplane.docs_collections.service`) owns the substrate:
+
+- **`tenant_id` from the operator**, never the body — a cross-tenant
+  create is structurally impossible (the `DocCollectionCreate` schema is
+  `extra="forbid"`, so a body carrying a `tenant_id` is rejected).
+- **`backend.type` validated against the registry** —
+  `docs_search.backends.registry.all_backends()` is the source of truth;
+  an unregistered type raises `DocCollectionBackendTypeError`, surfaced as
+  a structured `422` whose detail enumerates the registered types (the
+  `create_target` unknown-product shape). This moves the failure forward
+  from a deferred probe/search-time `503` to create time.
+- **Server-derived fields** — `id` / `created_at` / `updated_at` are
+  generated; `status` defaults to `provisioning` (a follow-up `probe`
+  promotes it); the probe-written liveness stays `NULL`.
+- **Typed conflict** — a cross-scope `collection_key` collision (either
+  partial-unique index) maps `IntegrityError` →
+  `DocCollectionConflictError` → `409`, not an opaque `500`.
+- **Audit** — binds `op_id="meho.docs.collections.create"` /
+  `op_class="write"`, so the registration joins the `op_id="meho.docs.*"`
+  who-touched trail every other docs operation shares.
+
+Three fronts forward to the same primitive:
+
+- **REST** — `POST /api/v1/doc_collections` → `201` with the full
+  `DocCollection`, `tenant_admin`-gated (parity with the lifecycle
+  routes). The route maps the two service exceptions to `422` / `409`.
+- **MCP** — the `create_doc_collections` write-class tool
+  (`meho_backplane.mcp.tools.doc_collections_create`), `tenant_admin` +
+  `required_capability="meho-docs"`. The exceptions map to JSON-RPC
+  `INVALID_PARAMS` with the structured detail in `error.data`.
+- **CLI** — `meho docs collections create <key> --vendor … --backend-type …
+  --backend-ref '{…}'` (or `--from-file <path>`), in
+  `cli/internal/cmd/docs/collections_create.go`.
+
+Out of scope (a later follow-up): PATCH / DELETE, cross-tenant sharing,
+and bulk import beyond the single-collection `--from-file` on-ramp.
+
 ## Dependencies
 
 - SQLAlchemy 2.0 typed ORM (`Mapped[...]` / `mapped_column`), the
@@ -324,9 +377,13 @@ malicious `when_to_use` carrying the terminator cannot escape the block.
   terminal `disabled` (403 / `-32602`) from the transient `provisioning` /
   `rebuilding` (409 / `-32603`). There is no second `ensure_collection_searchable`
   duplicate.
-- **No write API.** Collections are operator-managed seed for v1. An
-  `import` verb (mirroring `meho targets import`) is a later add if a
-  collection needs one.
+- **Create is the write half; update / delete / sharing are not.** A
+  tenant_admin registers a collection through the create surface (#1739,
+  see [Create / register a collection](#create--register-a-collection-1739));
+  there is still no PATCH / DELETE and no cross-tenant sharing API — those
+  are a later follow-up (out of scope per #1739). A shared/global row
+  (`tenant_id IS NULL`) is still seeded out-of-band, since the create
+  always scopes to the caller's tenant.
 - **Entitlement is not enforced here.** The per-collection capability
   gate (`meho-docs:<collection>`) and the `audit_collection` binding
   land in T3 (#1552); the registry only stores and resolves rows.

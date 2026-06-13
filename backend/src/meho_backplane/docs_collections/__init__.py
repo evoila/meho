@@ -24,20 +24,30 @@ from meho_backplane.docs_collections.resolver import (
 )
 from meho_backplane.docs_collections.schemas import (
     DocCollection,
+    DocCollectionCreate,
     DocCollectionSummary,
+    project_doc_collection,
     project_doc_collection_to_summary,
 )
 from meho_backplane.docs_collections.service import (
+    DocCollectionBackendTypeError,
+    DocCollectionConflictError,
+    create_doc_collection,
     probe_collection,
     set_collection_enabled,
 )
 
 __all__ = [
     "DocCollection",
+    "DocCollectionBackendTypeError",
+    "DocCollectionConflictError",
+    "DocCollectionCreate",
     "DocCollectionNotFoundError",
     "DocCollectionStateError",
     "DocCollectionSummary",
+    "create_doc_collection",
     "probe_collection",
+    "project_doc_collection",
     "project_doc_collection_to_summary",
     "resolve_doc_collection",
     "set_collection_enabled",

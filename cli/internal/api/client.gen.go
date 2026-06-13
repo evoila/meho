@@ -2202,6 +2202,82 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DocCollection Full read shape — maps 1:1 to the “doc_collections“ table.
+//
+// Frozen so callers can stash instances in request state or structured
+// logs without fear of mutation. “products“ is “tuple[str, ...]“
+// and the JSON columns are “Mapping[str, Any]“ so a frozen instance
+// cannot be mutated in-place via “list.append“ / “dict.__setitem__“.
+//
+// “backend“ is the operator-set “{type, ref}“ routing record the
+// T2 (#1551) router resolves server-side. “status“ is the lifecycle
+// enum (“provisioning“ / “ready“ / “rebuilding“ / “disabled“);
+// “last_ingested_at“ / “doc_count“ / “readiness“ are
+// probe-written liveness (T6 #1555), “None“ until the first probe.
+type DocCollection struct {
+	Backend        map[string]interface{}  `json:"backend"`
+	CollectionKey  string                  `json:"collection_key"`
+	CreatedAt      time.Time               `json:"created_at"`
+	Description    *string                 `json:"description"`
+	DocCount       *int                    `json:"doc_count"`
+	Extras         map[string]interface{}  `json:"extras"`
+	Id             openapi_types.UUID      `json:"id"`
+	LastIngestedAt *time.Time              `json:"last_ingested_at"`
+	Products       []string                `json:"products"`
+	Readiness      *map[string]interface{} `json:"readiness"`
+	Status         string                  `json:"status"`
+	TenantId       *openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	Vendor         string                  `json:"vendor"`
+	WhenToUse      *string                 `json:"when_to_use"`
+}
+
+// DocCollectionBackend The “{type, ref}“ backend routing record a create supplies.
+//
+// “type“ is the search-backend type the row routes to (validated at
+// the service layer against
+// :func:`~meho_backplane.docs_search.backends.registry.all_backends` so
+// an unroutable row is rejected at create time, not at probe time).
+// “ref“ is the per-collection backend config the resolved adapter
+// reads (e.g. “{"endpoint": "https://corpus/v1/search"}“ for
+// “corpus-http“); it is opaque to the create surface — the adapter
+// owns its shape — so it is a free “Mapping“.
+type DocCollectionBackend struct {
+	Ref  map[string]interface{} `json:"ref"`
+	Type string                 `json:"type"`
+}
+
+// DocCollectionCreate Request body for creating a doc collection (#1739).
+//
+// Carries only the operator-set identity + routing fields. The
+// server derives “id“ / “tenant_id“ / “created_at“ /
+// “updated_at“ / “status“ and leaves the probe-written liveness
+// (“last_ingested_at“ / “doc_count“ / “readiness“) NULL until the
+// first probe — so none of those appear here. “tenant_id“ is taken
+// from the JWT in every front, never the body; a body carrying one is
+// not modelled (“extra="forbid"“ rejects it) so a writer cannot even
+// attempt a cross-tenant create. Mirrors
+// :class:`~meho_backplane.targets.schemas.TargetCreate`.
+type DocCollectionCreate struct {
+	// Backend The ``{type, ref}`` backend routing record a create supplies.
+	//
+	// ``type`` is the search-backend type the row routes to (validated at
+	// the service layer against
+	// :func:`~meho_backplane.docs_search.backends.registry.all_backends` so
+	// an unroutable row is rejected at create time, not at probe time).
+	// ``ref`` is the per-collection backend config the resolved adapter
+	// reads (e.g. ``{"endpoint": "https://corpus/v1/search"}`` for
+	// ``corpus-http``); it is opaque to the create surface — the adapter
+	// owns its shape — so it is a free ``Mapping``.
+	Backend       DocCollectionBackend    `json:"backend"`
+	CollectionKey string                  `json:"collection_key"`
+	Description   *string                 `json:"description"`
+	Extras        *map[string]interface{} `json:"extras,omitempty"`
+	Products      *[]string               `json:"products,omitempty"`
+	Vendor        string                  `json:"vendor"`
+	WhenToUse     *string                 `json:"when_to_use"`
+}
+
 // DocCollectionSummary Short shape for the catalogue list (“list_doc_collections“, T4).
 //
 // Carries the fields an agent needs to choose a collection before
@@ -5490,6 +5566,11 @@ type ListDocCollectionsEndpointApiV1DocCollectionsGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// CreateDocCollectionEndpointApiV1DocCollectionsPostParams defines parameters for CreateDocCollectionEndpointApiV1DocCollectionsPost.
+type CreateDocCollectionEndpointApiV1DocCollectionsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams defines parameters for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost.
 type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -6075,6 +6156,9 @@ type CreateConventionApiV1ConventionsPostJSONRequestBody = ConventionCreate
 
 // UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody defines body for UpdateConventionApiV1ConventionsSlugPatch for application/json ContentType.
 type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
+
+// CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
+type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
@@ -7255,6 +7339,11 @@ type ClientInterface interface {
 
 	// ListDocCollectionsEndpointApiV1DocCollectionsGet request
 	ListDocCollectionsEndpointApiV1DocCollectionsGet(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody request with any body
+	CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -8523,6 +8612,30 @@ func (c *Client) ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, 
 
 func (c *Client) ListDocCollectionsEndpointApiV1DocCollectionsGet(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListDocCollectionsEndpointApiV1DocCollectionsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -13680,6 +13793,61 @@ func NewListDocCollectionsEndpointApiV1DocCollectionsGetRequest(server string, p
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequest calls the generic CreateDocCollectionEndpointApiV1DocCollectionsPost builder with application/json body
+func NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequest(server string, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody generates requests for CreateDocCollectionEndpointApiV1DocCollectionsPost with any type of body
+func NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody(server string, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -21282,6 +21450,11 @@ type ClientWithResponsesInterface interface {
 	// ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse request
 	ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*ListDocCollectionsEndpointApiV1DocCollectionsGetResponse, error)
 
+	// CreateDocCollectionEndpointApiV1DocCollectionsPostWithBodyWithResponse request with any body
+	CreateDocCollectionEndpointApiV1DocCollectionsPostWithBodyWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error)
+
+	CreateDocCollectionEndpointApiV1DocCollectionsPostWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
 
@@ -22915,6 +23088,28 @@ func (r ListDocCollectionsEndpointApiV1DocCollectionsGetResponse) Status() strin
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListDocCollectionsEndpointApiV1DocCollectionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateDocCollectionEndpointApiV1DocCollectionsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *DocCollection
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26200,6 +26395,23 @@ func (c *ClientWithResponses) ListDocCollectionsEndpointApiV1DocCollectionsGetWi
 	return ParseListDocCollectionsEndpointApiV1DocCollectionsGetResponse(rsp)
 }
 
+// CreateDocCollectionEndpointApiV1DocCollectionsPostWithBodyWithResponse request with arbitrary body returning *CreateDocCollectionEndpointApiV1DocCollectionsPostResponse
+func (c *ClientWithResponses) CreateDocCollectionEndpointApiV1DocCollectionsPostWithBodyWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error) {
+	rsp, err := c.CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateDocCollectionEndpointApiV1DocCollectionsPostWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error) {
+	rsp, err := c.CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp)
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
 func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
@@ -29286,6 +29498,32 @@ func ParseListDocCollectionsEndpointApiV1DocCollectionsGetResponse(rsp *http.Res
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse parses an HTTP response from a CreateDocCollectionEndpointApiV1DocCollectionsPostWithResponse call
+func ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp *http.Response) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateDocCollectionEndpointApiV1DocCollectionsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest DocCollection
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
 
 	}
 

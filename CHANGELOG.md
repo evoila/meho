@@ -92,6 +92,19 @@ connector-related release-notes line.
 
 ### Added
 
+- Doc-collection **create/import** surface across all three fronts
+  (#1739): `POST /api/v1/doc_collections`, the `create_doc_collections`
+  MCP tool, and `meho docs collections create` (with `--from-file`).
+  Closes the validated, audited create-half gap — registering a
+  collection no longer requires a raw `INSERT INTO doc_collections`. The
+  create derives `tenant_id` from the JWT (never the body), validates
+  `backend.type` against the search-backend registry (an unregistered
+  type is a structured `422`, not a deferred probe-time `503`), maps a
+  cross-scope `collection_key` collision to `409`, defaults `status` to
+  `provisioning`, and writes an audit row under
+  `op_id="meho.docs.collections.create"`. All three fronts are
+  `tenant_admin`-gated (REST/CLI) / `tenant_admin` + `meho-docs`-gated
+  (MCP). Update / delete and cross-tenant sharing remain out of scope.
 - Per-tenant templated Vault ACL policies (≤3, by role) keyed on
   `{{identity.entity.metadata.tenant_id}}`: a deploy runbook
   (`docs/cross-repo/connector-vault-tenant-policy.md`) with the three

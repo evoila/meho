@@ -506,7 +506,16 @@ register_mcp_tool(
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["ok", "error", "denied"],
+                    # ``awaiting_approval`` is the parked outcome the
+                    # dispatcher returns for an approval-gated op that has
+                    # not yet been approved (G11.7-T1 #1401). It is a
+                    # first-class non-error result, so a spec-compliant MCP
+                    # client validating the structured result against this
+                    # outputSchema (MCP 2025-06-18: "Clients SHOULD
+                    # validate structured results against this schema")
+                    # must accept it. The enum lists only statuses the
+                    # dispatcher actually emits (no ``pending``).
+                    "enum": ["ok", "error", "denied", "awaiting_approval"],
                 },
                 "op_id": {"type": "string"},
                 "result": {

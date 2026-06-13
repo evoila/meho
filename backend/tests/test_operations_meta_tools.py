@@ -1639,3 +1639,21 @@ async def test_real_descriptor_embedding_path(
     hits = result["hits"]
     assert hits, "expected at least one hit"
     assert hits[0]["op_id"] == "vault.kv.read"
+
+
+def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -> None:
+    """The ``call_operation`` outputSchema ``status`` enum lists the parked
+    outcome so a spec-compliant MCP client validating the structured result
+    accepts ``awaiting_approval`` (G11.7-T1 #1401 / MCP 2025-06-18 server
+    output contract). The enum stays bounded to statuses the dispatcher
+    actually emits — no ``pending``.
+    """
+    import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
+    from meho_backplane.mcp.registry import get_tool
+
+    entry = get_tool("call_operation")
+    assert entry is not None, "call_operation must be registered"
+    defn, _ = entry
+    assert defn.outputSchema is not None
+    enum = defn.outputSchema["properties"]["status"]["enum"]
+    assert set(enum) == {"ok", "error", "denied", "awaiting_approval"}, enum

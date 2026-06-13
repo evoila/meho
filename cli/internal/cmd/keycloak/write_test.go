@@ -270,3 +270,40 @@ func TestRoleMappingAssignForwardsRoles(t *testing.T) {
 		t.Errorf("username not forwarded: %v", params["username"])
 	}
 }
+
+// TestRoleMappingAssignAwaitingApprovalRealPath — drives the REAL
+// end-to-end path (fake backplane returns status=awaiting_approval →
+// dispatchWrite → renderCallResult → conn.Render). The shared
+// dispatch.Render intercepts the park as a non-error outcome: the
+// command exits 0, stdout carries the parked hint, and stderr never
+// carries the invalid-status diagnostic.
+func TestRoleMappingAssignAwaitingApprovalRealPath(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, CallResult{
+				Status: "awaiting_approval", OpID: "keycloak.role_mapping.assign", DurationMs: 4,
+				Extras: json.RawMessage(`{"approval_request_id":"ar-kc-1"}`),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := newRoleMappingAssignCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{
+		"--target", "rdc-keycloak", "--username", "operator-a",
+		"--role", "tenant_admin", "--backplane", srv.URL,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
+	}
+	if !strings.Contains(out.String(), "parked for human approval") {
+		t.Errorf("expected parked hint on stdout; got %q", out.String())
+	}
+	if strings.Contains(errBuf.String(), "invalid OperationResult") {
+		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
+	}
+}

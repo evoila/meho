@@ -17,14 +17,6 @@ import (
 // opMove is the canonical op_id `meho secret move` dispatches.
 const opMove = "secret.move"
 
-// statusAwaitingApproval is the change-class park status the policy gate
-// returns for an unapproved move. The shared dispatch.Render rejects any
-// status outside ok/error/denied as an exit-4 "invalid OperationResult
-// status", so this verb intercepts awaiting_approval BEFORE delegating to
-// conn.Render (option (b) of #1580 — a package-local render path, leaving
-// the shared status enum and every other vendor verb untouched).
-const statusAwaitingApproval = "awaiting_approval"
-
 // newMoveCmd returns the `meho secret move` command (secret.move —
 // change-class, approval-gated). It dispatches secret.move with the
 // source/sink references and the audit reason as opaque params; the
@@ -108,22 +100,10 @@ func runMove(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderMoveResult(cmd, r, jsonOut)
-}
-
-// renderMoveResult surfaces the secret.move result. awaiting_approval is
-// handled package-locally (the shared conn.Render would exit-4 it as an
-// invalid status); every other status delegates to conn.Render so the
-// ok→exit-0 / error|denied→exit-1 classification and the JSON envelope
-// path are reused unchanged.
-func renderMoveResult(cmd *cobra.Command, r *dispatch.CallResult, jsonOut bool) error {
-	if r.Status == statusAwaitingApproval {
-		if jsonOut {
-			return output.PrintJSON(cmd.OutOrStdout(), r)
-		}
-		printMoveResult(cmd.OutOrStdout(), r)
-		return nil // parked, not failed — exit 0.
-	}
+	// awaiting_approval (the parked, unapproved move) is intercepted by
+	// the shared conn.Render ahead of this pretty-printer (exit 0); the
+	// ok→exit-0 / error|denied→exit-1 classification and the JSON
+	// envelope path are reused unchanged.
 	return conn.Render(cmd, opMove, r, jsonOut, printMoveResult)
 }
 
@@ -132,10 +112,6 @@ func renderMoveResult(cmd *cobra.Command, r *dispatch.CallResult, jsonOut bool) 
 // It never renders a secret value because the response never carries one.
 func printMoveResult(w io.Writer, r *dispatch.CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opMove, r.Status, r.DurationMs)
-	if r.Status == statusAwaitingApproval {
-		fmt.Fprintln(w, "  parked for human approval — approve via the approval queue, then re-dispatch")
-		return
-	}
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

@@ -59,14 +59,12 @@ func loadRepresentation(path string) (map[string]any, *output.StructuredError) {
 // confirmations every write op returns. It renders the op header then the
 // flat result object's scalar fields (id / created / conflict / updated /
 // password_reset / assigned_roles …) — none of which ever carry secret
-// material.
+// material. The awaiting_approval (parked) status never reaches this
+// printer: the shared dispatch.Render intercepts it ahead of the
+// pretty-printer and renders the parked hint itself (exit 0).
 func printWriteResult(opID string) func(w io.Writer, r *CallResult) {
 	return func(w io.Writer, r *CallResult) {
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
-		if r.Status == "awaiting_approval" {
-			fmt.Fprintln(w, "  parked for human approval — approve via the approval queue, then re-dispatch")
-			return
-		}
 		if r.Status != "ok" {
 			printErrorTrailer(w, r)
 			return

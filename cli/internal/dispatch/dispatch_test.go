@@ -431,6 +431,61 @@ func TestRenderStatusMapping(t *testing.T) {
 	}
 }
 
+// TestRenderAwaitingApprovalParkedExitZero — the shared Render owns the
+// parked outcome: status=awaiting_approval renders the status header plus
+// the ParkedHint, returns nil (exit 0), and never writes the
+// invalid-status diagnostic to stderr. This is the single shared
+// interception every vendor verb (argocd/keycloak/secret move) inherits.
+func TestRenderAwaitingApprovalParkedExitZero(t *testing.T) {
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	r := &CallResult{Status: StatusAwaitingApproval, OpID: "argocd.app.sync", DurationMs: 5}
+	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
+		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
+	}
+	if !strings.Contains(out.String(), StatusAwaitingApproval) {
+		t.Errorf("expected status line; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), ParkedHint) {
+		t.Errorf("expected parked hint; got %q", out.String())
+	}
+	if strings.Contains(errBuf.String(), "invalid OperationResult") {
+		t.Errorf("park must not be rejected as invalid status; stderr=%q", errBuf.String())
+	}
+}
+
+// TestRenderAwaitingApprovalJSON — under --json the parked envelope
+// round-trips verbatim (incl. extras.approval_request_id) and Render
+// returns nil.
+func TestRenderAwaitingApprovalJSON(t *testing.T) {
+	c := New("argocd-api-3.x")
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync",
+		Extras: json.RawMessage(`{"approval_request_id":"ar-9"}`),
+	}
+	if err := c.Render(cmd, "argocd.app.sync", r, true, nil); err != nil {
+		t.Fatalf("parked --json must return nil; got %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if decoded["status"] != StatusAwaitingApproval {
+		t.Errorf("json status: got %v", decoded["status"])
+	}
+	extras, ok := decoded["extras"].(map[string]any)
+	if !ok || extras["approval_request_id"] != "ar-9" {
+		t.Errorf("json envelope must carry extras.approval_request_id; got %v", decoded["extras"])
+	}
+}
+
 func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	c := New("c")
 	cmd := &cobra.Command{}

@@ -1027,17 +1027,21 @@ class AgentInvoker:
         # onto the shared ContextVar so the dispatched run inherits it.
         # _create_run_row reads it at create time (-> agent_run.work_ref);
         # the background loop task snapshots it at create_task time (->
-        # the run's audit rows). A blank/None ref binds nothing -- the run
-        # lands NULL work_ref (the pre-#1663 behaviour).
+        # the run's audit rows). The bind is UNCONDITIONAL: a blank/None
+        # trigger ref sets the ContextVar to None so the dispatched run
+        # lands NULL work_ref deterministically -- a pre-existing ambient
+        # work_ref bound elsewhere in this task's context can never bleed
+        # into _create_run_row / agent_run.work_ref / downstream audit
+        # lineage. The dispatched run's work_ref is exactly the trigger's
+        # value (or None). reset() in finally restores the prior binding.
         cleaned_work_ref = work_ref.strip() if work_ref else None
-        work_ref_token = work_ref_var.set(cleaned_work_ref) if cleaned_work_ref else None
+        work_ref_token = work_ref_var.set(cleaned_work_ref)
         try:
             return await self._launch_scheduled_run(
                 name, inputs, operator=operator, entry=entry, settings=settings
             )
         finally:
-            if work_ref_token is not None:
-                work_ref_var.reset(work_ref_token)
+            work_ref_var.reset(work_ref_token)
 
     async def _refuse_scheduled_no_input(
         self,

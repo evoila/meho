@@ -738,6 +738,44 @@ async def test_dispatched_run_inherits_trigger_work_ref() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatched_run_ignores_ambient_work_ref_when_trigger_has_none() -> None:
+    """A no-work_ref trigger lands ``NULL`` even with an ambient ref bound.
+
+    Determinism contract for the dispatch seam: the dispatched run's
+    ``work_ref`` is exactly the firing trigger's value (or ``None``), never
+    whatever ``work_ref_var`` happened to be bound to in the surrounding
+    context. ``run_scheduled`` binds the ContextVar UNCONDITIONALLY -- here
+    to ``None`` -- so a pre-existing ambient ref cannot bleed into
+    ``_create_run_row`` / ``agent_run.work_ref``. Before the unconditional
+    bind (conditional ``set(...) if cleaned_work_ref``), a None trigger ref
+    left the ambient binding in place and the dispatched run would have
+    inherited it.
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    # Trigger has NO work_ref.
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    # Bind an ambient ref in the surrounding context that, absent the
+    # unconditional bind, would bleed into the dispatched run.
+    ambient_token = work_ref_var.set("gh:evoila/meho#9999")
+    try:
+        fires = await run_one_tick(invoker=_make_invoker())
+        assert fires == 1
+        # The dispatch reset() restored the ambient binding it found, rather
+        # than leaving its own None binding in place.
+        assert work_ref_var.get() == "gh:evoila/meho#9999"
+    finally:
+        work_ref_var.reset(ambient_token)
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    # The ambient ref did NOT bleed in -- the run lands NULL work_ref.
+    assert runs[0].work_ref is None
+
+
+@pytest.mark.asyncio
 async def test_dispatched_run_audit_rows_inherit_trigger_work_ref(
     _reset_connector_state: None,
     _stub_embedding_service: AsyncMock,

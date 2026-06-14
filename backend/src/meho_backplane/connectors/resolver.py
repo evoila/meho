@@ -66,6 +66,25 @@ When two or more connectors advertise support for a target's
    version" and shouldn't compete with a connector that names a
    specific version triple.
 
+1b. **Hand-rolled class beats auto-shim.** The spec-ingestion pipeline
+   auto-registers a ``GenericRestConnector`` shim (see
+   :mod:`meho_backplane.operations.ingest.connector_registration`) per
+   ingested ``(product, version, impl_id)`` so a freshly ingested spec
+   resolves before any per-product class exists. On first ingest under a
+   *novel* impl_id, that shim becomes a candidate for the whole
+   ``(product, version)`` label alongside a shipped hand-rolled class.
+   The shim's ``derive_supported_version_range(version)``
+   pins a *narrower* range around the exact ingested version than a
+   hand-rolled class's broad range, so without this rung the shim would
+   win the most-specific-version-match step before ``priority`` is ever
+   consulted — a stray probe ingest shadowing a shipped connector for
+   everyone on a shared registry (#1750). When any hand-rolled candidate
+   is present, every ``GenericRestConnector`` candidate is dropped: a
+   hand-rolled class always outranks an auto-shim for the same label,
+   independent of version-range span or ``priority``. When only shims
+   exist for a label (a genuine catalog-first staging connector not yet
+   replaced), this rung is a no-op and the shim still resolves.
+
 2. **Most-specific-version-match wins.** A connector with
    ``supported_version_range=">=9.0,<10.0"`` (span = 1.0 minor versions)
    beats ``">=6.5,<10.0"`` (span = 3.5 minor versions) for a target with
@@ -86,9 +105,9 @@ When two or more connectors advertise support for a target's
    the integer :attr:`Connector.priority` class attribute breaks the
    tie — higher wins.
 
-If after all four steps two or more candidates remain, the resolver
-raises :exc:`AmbiguousConnectorResolution` listing the candidates so the
-operator can set ``preferred_impl_id`` to pick one.
+If after all the steps above two or more candidates remain, the
+resolver raises :exc:`AmbiguousConnectorResolution` listing the
+candidates so the operator can set ``preferred_impl_id`` to pick one.
 
 Zero candidates → :exc:`NoMatchingConnector`.
 
@@ -328,45 +347,139 @@ def resolve_connector(target: Any) -> type[Connector]:
     )
 
 
+def _demote_wildcards(candidates: list[_Candidate]) -> list[_Candidate]:
+    """Step 1 — versioned beats wildcard.
+
+    When a v1 wildcard entry (registry key ``(product, "", "")``) and ≥1
+    v2 versioned entries share the candidate list, demote the wildcard.
+    The wildcard is the v1 backward-compat fallback (KubernetesConnector
+    self-registers under both ``("k8s", "", "")`` and
+    ``("k8s", "1.x", "k8s")`` so ``get_connector("k8s")`` keeps working
+    for the ``/probe`` route); it should not compete on equal footing
+    with a connector that names a concrete ``(version, impl_id)`` pair.
+    Without this step, an unfingerprinted K8s target
+    (target.fingerprint = None → target_version = None) leaves both
+    entries in play, both score ``(_SPECIFICITY_UNBOUNDED, 0.0)`` on
+    supported_version_range, operator_preference is absent, priorities
+    tie, and ``AmbiguousConnectorResolution`` propagates as a bare-500
+    to the operator (G0.14-T2 / signal 9). The rule generalizes to any
+    future connector that uses the same double-registration shape.
+
+    No-op (returns the input unchanged) when no wildcard is present.
+    """
+    non_wildcards = [c for c in candidates if c.version != "" or c.impl_id != ""]
+    if non_wildcards and len(non_wildcards) < len(candidates):
+        return non_wildcards
+    return candidates
+
+
+def _demote_auto_shims(candidates: list[_Candidate]) -> list[_Candidate]:
+    """Step 1b — hand-rolled class beats auto-shim.
+
+    The spec-ingestion pipeline auto-registers a ``GenericRestConnector``
+    shim per ingested ``(product, version, impl_id)`` so a freshly
+    ingested spec resolves before any per-product class exists; on first
+    ingest under a *novel* impl_id, that shim becomes a candidate for the
+    whole ``(product, version)`` label alongside a shipped hand-rolled
+    class. The shim's ``derive_supported_version_range(version)`` pins a
+    *narrower* range around the exact ingested version than a hand-rolled
+    class's broad range, so without this rung the shim would win the
+    most-specific-version-match step before the hand-rolled class's
+    ``priority`` is ever consulted — a stray probe ingest shadowing a
+    shipped connector for everyone on a shared registry (v0.15.0 dogfood
+    signal, #1750). Drop every shim candidate the moment any hand-rolled
+    candidate is present: a hand-rolled class always outranks an
+    auto-shim for the same label, independent of version-range span or
+    ``priority``. When only shims exist (a genuine catalog-first staging
+    connector not yet replaced), this is a no-op and the shim still wins.
+
+    The ``GenericRestConnector`` import is function-local on purpose: it
+    keeps the ``connectors/`` → ``operations/ingest/`` module edge off
+    import time (the registration module already imports from
+    ``connectors/``, so a module-level import here would close a cycle).
+    """
+    from meho_backplane.operations.ingest.connector_registration import (
+        GenericRestConnector,
+    )
+
+    hand_rolled = [c for c in candidates if not issubclass(c.cls, GenericRestConnector)]
+    if hand_rolled and len(hand_rolled) < len(candidates):
+        return hand_rolled
+    return candidates
+
+
+def _match_operator_preference(
+    candidates: list[_Candidate],
+    preferred_impl_id: str | None,
+) -> list[_Candidate]:
+    """Step 3 — narrow to the operator/tenant-preferred candidate(s).
+
+    Falls through (returns the input unchanged) when the override is
+    unset or doesn't disambiguate — zero matches are ignored; multiple
+    matches (the corner case where two impls share the preferred id) are
+    returned so priority breaks the tie rather than the resolver raising.
+
+    G0.16-T6 Finding C (#1312). Accept both the base ``impl_id``
+    (``"nsx-rest"``) AND the versioned ``"{impl_id}-{version}"`` form
+    (``"nsx-rest-4.2"``) — the latter is the canonical shape per
+    ``docs/codebase/api-shape-conventions.md`` §3 and matches the
+    ``connector_id`` string the dispatcher's ``parse_connector_id``
+    round-trips through. Match on either alias against each candidate's
+    ``impl_id``-or-``impl_id-version`` pair so an operator pinning the
+    versioned form selects the connector that registered under the
+    matching base/version pair.
+    """
+    if not preferred_impl_id:
+        return candidates
+    preferred = [
+        c
+        for c in candidates
+        if c.impl_id == preferred_impl_id
+        or (c.impl_id and c.version and f"{c.impl_id}-{c.version}" == preferred_impl_id)
+    ]
+    return preferred if preferred else candidates
+
+
 def _run_tie_break_ladder(
     candidates: list[_Candidate],
     preferred_impl_id: str | None,
 ) -> tuple[_Candidate | None, str, list[_Candidate]]:
-    """Apply the four-step tie-break ladder to a non-empty candidate list.
+    """Apply the tie-break ladder to a non-empty candidate list.
 
     Returns ``(winner, reason, remaining)``:
 
     * ``winner`` — the single chosen candidate, or ``None`` if the ladder
       ended with two or more candidates still tied.
     * ``reason`` — the step that picked the winner
-      (``"versioned_over_wildcard"`` / ``"specificity"`` /
-      ``"operator_preference"`` / ``"priority"``) or ``"ambiguous"``.
+      (``"versioned_over_wildcard"`` / ``"hand_rolled_over_shim"`` /
+      ``"specificity"`` / ``"operator_preference"`` / ``"priority"``)
+      or ``"ambiguous"``.
     * ``remaining`` — the post-ladder candidate list. When ``winner`` is
       ``None`` the caller raises ``AmbiguousConnectorResolution`` with
       these as the candidates the operator must disambiguate.
+
+    Each rung is a pure ``list[_Candidate] -> list[_Candidate]`` filter
+    (see the ``_demote_*`` / ``_match_*`` helpers); this orchestrator
+    runs them in order and short-circuits the moment a *demotion* rung
+    narrows the field to a single candidate, recording the rung that
+    resolved it. A rung that leaves the field untouched never claims
+    credit — a lone candidate that no demotion rung acted on falls
+    through to the specificity step (reason ``"specificity"``), matching
+    the pre-refactor ``tie_break`` log value.
     """
-    # Step 1 — versioned beats wildcard. When a v1 wildcard entry
-    # (registry key ``(product, "", "")``) and ≥1 v2 versioned entries
-    # share the candidate list, demote the wildcard. The wildcard is the
-    # v1 backward-compat fallback (KubernetesConnector self-registers
-    # under both ``("k8s", "", "")`` and ``("k8s", "1.x", "k8s")`` so
-    # ``get_connector("k8s")`` keeps working for the ``/probe`` route);
-    # it should not compete on equal footing with a connector that
-    # names a concrete ``(version, impl_id)`` pair. Without this step,
-    # an unfingerprinted K8s target (target.fingerprint = None →
-    # target_version = None) leaves both entries in play, both score
-    # ``(_SPECIFICITY_UNBOUNDED, 0.0)`` on supported_version_range,
-    # operator_preference is absent, priorities tie, and
-    # ``AmbiguousConnectorResolution`` propagates as a bare-500 to the
-    # operator (G0.14-T2 / signal 9). The rule generalizes to any
-    # future connector that uses the same double-registration shape.
-    has_versioned = any(c.version != "" or c.impl_id != "" for c in candidates)
-    if has_versioned:
-        non_wildcards = [c for c in candidates if c.version != "" or c.impl_id != ""]
-        if len(non_wildcards) < len(candidates):
-            candidates = non_wildcards
-            if len(candidates) == 1:
-                return candidates[0], "versioned_over_wildcard", candidates
+    # Step 1 — versioned beats wildcard.
+    demoted = _demote_wildcards(candidates)
+    if len(demoted) < len(candidates):
+        candidates = demoted
+        if len(candidates) == 1:
+            return candidates[0], "versioned_over_wildcard", candidates
+
+    # Step 1b — hand-rolled class beats auto-shim.
+    demoted = _demote_auto_shims(candidates)
+    if len(demoted) < len(candidates):
+        candidates = demoted
+        if len(candidates) == 1:
+            return candidates[0], "hand_rolled_over_shim", candidates
 
     # Step 2 — most-specific-version-match.
     best_score = min(c.specificity_score for c in candidates)
@@ -374,31 +487,10 @@ def _run_tie_break_ladder(
     if len(candidates) == 1:
         return candidates[0], "specificity", candidates
 
-    # Step 3 — operator/tenant preference. Falls through to priority when
-    # the override doesn't disambiguate (zero matches → ignored; multiple
-    # matches → corner case where two impls share the preferred id, so
-    # let priority break it rather than raising).
-    #
-    # G0.16-T6 Finding C (#1312). Accept both the base ``impl_id``
-    # (``"nsx-rest"``) AND the versioned ``"{impl_id}-{version}"`` form
-    # (``"nsx-rest-4.2"``) — the latter is the canonical shape per
-    # ``docs/codebase/api-shape-conventions.md`` §3 and matches the
-    # ``connector_id`` string the dispatcher's ``parse_connector_id``
-    # round-trips through. Match on either alias against each
-    # candidate's ``impl_id``-or-``impl_id-version`` pair so an
-    # operator pinning the versioned form selects the connector that
-    # registered under the matching base/version pair.
-    if preferred_impl_id:
-        preferred = [
-            c
-            for c in candidates
-            if c.impl_id == preferred_impl_id
-            or (c.impl_id and c.version and f"{c.impl_id}-{c.version}" == preferred_impl_id)
-        ]
-        if len(preferred) == 1:
-            return preferred[0], "operator_preference", preferred
-        if len(preferred) > 1:
-            candidates = preferred
+    # Step 3 — operator/tenant preference.
+    candidates = _match_operator_preference(candidates, preferred_impl_id)
+    if len(candidates) == 1:
+        return candidates[0], "operator_preference", candidates
 
     # Step 4 — connector class priority (higher wins).
     best_priority = max(c.cls.priority for c in candidates)

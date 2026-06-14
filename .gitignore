@@ -50,6 +50,15 @@ htmlcov/
 .venv/
 venv/
 
+# fastembed model snapshot pre-seeded into the backend Docker build context by
+# the chart.yml ``helm-test`` lane (restored from the unit lane's actions/cache
+# entry) so the model-bake layer skips the HuggingFace download (#1623). Only
+# the ``.gitkeep`` sentinel is tracked — it keeps the directory present for a
+# cold/local ``docker build backend/`` (empty dir -> fastembed downloads as
+# before); CI writes the restored snapshot here and the Dockerfile COPYs it in.
+backend/.model-preseed/*
+!backend/.model-preseed/.gitkeep
+
 # =============================================================================
 # JavaScript / Frontend
 # =============================================================================

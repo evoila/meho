@@ -366,6 +366,46 @@ jobs:
         # two lanes converge on a single buildx version.
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
 
+      - name: Restore fastembed model cache (#1623)
+        # Restore-only: the unit lane (ci.yml "Cache fastembed model") owns the
+        # SAVE on every main push, so this lane reuses its entry and never has
+        # to populate it. SAME key + restore-keys as ci.yml so the entries line
+        # up; GitHub's cache scoping lets a PR/main run restore main-created
+        # entries, so this is effectively never cold. A miss (bumped uv.lock
+        # hash with no restore-key hit, or a fresh repo) leaves the dir absent
+        # and the cold path below kicks in -- the build downloads once, as today.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - name: Pre-seed fastembed snapshot into the build context (#1623)
+        # Stage the restored snapshot into backend/.model-preseed/ so the
+        # Dockerfile's `COPY .model-preseed/ /opt/meho/model-cache/` lands it
+        # ahead of the warm RUN. fastembed probes the cache_dir local-first
+        # (snapshot_download local_files_only=True), so a present snapshot ->
+        # ZERO HuggingFace requests during the bake. The unit lane caches the
+        # fastembed cache_dir root (`.fastembed-cache`), whose layout
+        # (`models--<org>--<repo>/...` HF snapshot) is identical to the bake's
+        # cache_dir -- they run the same `meho_backplane.retrieval.warm`
+        # module -- so the tree copies in verbatim. On a cache miss the dir
+        # stays empty (only the tracked `.gitkeep`) and the warm RUN downloads
+        # once (cold path). `cp -a` preserves the HF blob<->snapshot symlinks
+        # fastembed relies on. The COPY in the Dockerfile keeps working either
+        # way (it always has at least `.gitkeep`).
+        run: |
+          if [ -d "${{ github.workspace }}/.fastembed-cache" ] \
+             && [ -n "$(ls -A "${{ github.workspace }}/.fastembed-cache" 2>/dev/null)" ]; then
+            echo ">> fastembed cache restored; staging into backend/.model-preseed/"
+            cp -a "${{ github.workspace }}/.fastembed-cache/." backend/.model-preseed/
+            echo ">> staged contents:"
+            ls -la backend/.model-preseed/
+          else
+            echo ">> fastembed cache MISS (cold path); warm RUN will download once"
+          fi
+
       - name: Build backplane image locally (load into Docker, not push)
         # ``load: true`` (= ``--output=type=docker``) leaves the image
         # in the local Docker daemon so the next step can ``kind load``

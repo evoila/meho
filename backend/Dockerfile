@@ -204,10 +204,29 @@ COPY --from=builder --chown=meho:0 /app/.venv /app/.venv
 #     of CrashLooping in production — the exact failure green ci.yml on a
 #     runtime-fetched model cannot catch.
 #
+# Pre-seed the fastembed snapshot from the build context BEFORE the warm RUN
+# (#1623). `.model-preseed/` is tracked as an empty dir (only a `.gitkeep`
+# sentinel) and is populated by the chart.yml ``helm-test`` lane, which
+# restores it from the unit lane's actions/cache entry (same cache key) and
+# stages the `models--qdrant--bge-small-en-v1.5-onnx-q` HF snapshot into it.
+# fastembed's bake (`download_model`) probes the cache_dir local-first
+# (`snapshot_download(..., local_files_only=True)`); a present snapshot is a
+# hit, so the warm RUN below performs ZERO HuggingFace requests on a warm
+# helm-test build — killing the per-IP 429 flake on GitHub-hosted runners even
+# when the BuildKit layer cache misses (per-build BUILD_DATE/GIT_SHA args +
+# per-commit venv content invalidate it). Cold/local `docker build backend/`
+# with no pre-seed: the dir holds only `.gitkeep`, the local probe misses, and
+# the warm RUN downloads exactly once as before. The COPY is a no-op layer in
+# the cold path (sentinel only), so the published image is unchanged. The warm
+# RUN still instantiates the model + runs one real embed (the #574 drift guard)
+# in BOTH paths — pre-seeding never short-circuits that assertion.
+COPY .model-preseed/ /opt/meho/model-cache/
+
 # No uv build-cache mount here: the download must land in the image layer,
 # not in a discarded BuildKit cache. Runs while still root so it can create
 # /opt/meho; chowned to the runtime uid (1001, gid 0) afterwards so the
-# non-root USER below can read it. `chmod -R g=u` keeps it group-readable
+# non-root USER below can read it (including any pre-seeded snapshot files and
+# the `.gitkeep` sentinel COPYed above). `chmod -R g=u` keeps it group-readable
 # for the arbitrary-uid / restricted-PSA case (gid is always 0).
 RUN python -m meho_backplane.retrieval.warm \
  && chown -R 1001:0 /opt/meho \

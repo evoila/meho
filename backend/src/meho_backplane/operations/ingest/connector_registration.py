@@ -75,6 +75,7 @@ __all__ = [
     "derive_supported_version_range",
     "ensure_connector_class_registered",
     "resolved_auto_shim_class",
+    "sibling_handrolled_impl_id",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -369,96 +370,85 @@ def ensure_connector_class_registered(
     return True
 
 
-def check_version_covered_by_registered_class(
+def sibling_handrolled_impl_id(
     *,
     product: str,
     version: str,
-    impl_id: str,
-) -> None:
-    """Pre-flight check that the ``version`` label is dispatchable.
+    exclude_impl_id: str,
+) -> str | None:
+    """Return a hand-rolled connector's ``impl_id`` for the same ``(product, version)``.
 
-    G0.9-T9 (#741). The dispatch resolver
-    (:func:`~meho_backplane.connectors.resolver.resolve_connector`)
-    walks :func:`~meho_backplane.connectors.registry.all_connectors_v2`
-    and matches a target's fingerprinted version against each class's
-    PEP 440 ``supported_version_range``. The ingest pipeline keys
-    its rows on ``(product, version, impl_id)`` as a free-form
-    natural-key triple. Without a pre-flight, an operator can ingest
-    under ``(vmware, "7.0", vmware-rest)`` even though the only
-    registered class (``VmwareRestConnector`` with
-    ``supported_version_range=">=8.5,<10.0"``) cannot dispatch a 7.x
-    target — the catalog shows the ops but every call fails with
-    :exc:`NoMatchingConnector` at runtime, far from the ingest call
-    site.
+    G0.25-T2 (#1753). Scans the v2 registry for a **hand-rolled**
+    connector class (one that is *not* a :class:`GenericRestConnector`
+    auto-shim) registered under the same ``(product, version)`` as
+    *exclude_impl_id* but under a **different** ``impl_id``. Returns
+    that sibling's ``impl_id``, or ``None`` when no such class exists.
 
-    This helper runs at ingest time **before**
-    :func:`ensure_connector_class_registered` synthesises the auto-
-    shim (the auto-shim's ``supported_version_range`` is derived
-    from the operator's own ``version`` label so it would always
-    "match" and make the check vacuous).
+    Two callers want the same question answered from opposite ends of
+    the auto-shim lifecycle:
 
-    Behaviour by registry state:
+    * **Ingest near-miss guard** (:func:`check_version_covered_by_registered_class`)
+      — before scaffolding a shim under a one-token-off ``impl_id``
+      (``nsx-rest-probe`` when ``nsx-rest`` already ships a hand-rolled
+      class), warn that the new shim is non-dispatchable and may shadow
+      the sibling (the resolver-tie-break footgun T1 #1750 fixes
+      load-bearingly).
+    * **Dispatch-time error wording** (the dispatcher's
+      ``connector_unsupported`` / ``unreplaced_auto_shim`` arm) — when a
+      stray shim *did* get dispatched, name the sibling that already
+      works so the operator re-ingests under it instead of being told
+      (misleadingly) that the per-product subclass is unwritten future
+      work.
 
-    * **At least one class registered for ``(product, impl_id)``** —
-      every such class is checked. If **none** advertises a range
-      that accepts the operator's ``version``, raise
-      :exc:`UncoveredVersionLabel`. The exception carries every
-      candidate class so the operator-facing 422 detail names
-      exactly which advertised ranges the label fell outside of.
-
-    * **No class registered for ``(product, impl_id)``** — log
-      ``connector_ingest_orphaned_class`` at info level and return.
-      This is the v0.4-staging path where ops land before the
-      hand-coded subclass exists; the dispatcher will surface the
-      gap clearly at the first ``call_operation`` and the warning
-      log is the upstream signal at ingest time.
-
-    The check intentionally filters by ``(product, impl_id)`` and
-    not the full triple — the goal is to confirm the operator's
-    ``version`` label is dispatchable against at least one of the
-    classes already known for that ``impl_id``, not to require a
-    class registered under the same triple. A real subclass at
-    ``(vmware, "9.0", vmware-rest)`` advertising
-    ``">=8.5,<10.0"`` accepts an ingest at
-    ``(vmware, "8.5.1", vmware-rest)`` because the subclass already
-    advertises support for the 8.5.x line; the auto-shim then
-    registers under the new triple to give the ingest its
-    resolvable identity.
+    The "hand-rolled" predicate is ``not issubclass(cls,
+    GenericRestConnector)`` — the same precise ``isinstance`` test the
+    dispatcher uses to classify the ``unreplaced_auto_shim`` cause
+    (#1627), so a registry holding only shims (every ``impl_id`` is an
+    auto-shim) yields ``None`` and no near-miss is claimed. The first
+    matching sibling in registry-iteration order is returned; the
+    near-miss is a single-sibling advisory, not an enumeration.
 
     Args:
-        product, version, impl_id: The connector triple the operator
-            submitted. The triple matches the natural-key shape on
-            :class:`~meho_backplane.db.models.EndpointDescriptor`.
+        product, version: The label whose sibling is sought.
+        exclude_impl_id: The ``impl_id`` being ingested / dispatched —
+            excluded so a class does not flag itself as its own sibling.
 
-    Raises:
-        UncoveredVersionLabel: At least one registered class exists
-            for ``(product, impl_id)`` but none accepts ``version``.
+    Returns:
+        The hand-rolled sibling's ``impl_id``, or ``None``.
     """
-    # Local import — the v2 registry helper lives in a sibling
-    # package; deferring import to call-time mirrors
-    # :func:`ensure_connector_class_registered` and avoids a
-    # top-of-module dependency that would also be loaded at every
-    # import of this subpackage.
     from meho_backplane.connectors.registry import all_connectors_v2
 
-    try:
-        parsed_version = Version(version)
-    except InvalidVersion:
-        # PEP 440 cannot parse the operator's label. We cannot
-        # decide range membership — log + proceed so the operator
-        # is not blocked by a label-parsing quirk the resolver
-        # itself tolerates (the resolver also catches
-        # InvalidVersion and falls through). T8 (#740) validates
-        # the label format against the spec's info.version; this
-        # pre-flight is specifically about range coverage and
-        # should not over-reach into label-shape validation.
-        _log.info(
-            "connector_ingest_version_unparseable",
-            product=product,
-            version=version,
-            impl_id=impl_id,
-        )
-        return
+    for (entry_product, entry_version, entry_impl_id), cls in all_connectors_v2().items():
+        if entry_product != product or entry_version != version:
+            continue
+        if entry_impl_id == exclude_impl_id:
+            continue
+        if issubclass(cls, GenericRestConnector):
+            continue
+        return entry_impl_id
+    return None
+
+
+def _find_class_covering_version(
+    *,
+    product: str,
+    impl_id: str,
+    parsed_version: Version,
+) -> tuple[list[tuple[str, str, str, str]], tuple[str, str, str, str] | None]:
+    """Scan the v2 registry for classes on ``(product, impl_id)`` covering *version*.
+
+    Returns ``(candidates, accepted_by)``: every registered class for
+    the ``(product, impl_id)`` pair as a
+    ``(version, impl_id, class_name, range)`` tuple, plus the first one
+    whose ``supported_version_range`` accepts *parsed_version* (``None``
+    when none does). An empty / ``None`` range counts as "accepts any
+    version" (v1-style wildcard entries). A class whose advertised range
+    is itself unparseable is logged and skipped — a connector-author bug
+    must not block an ingest the other classes would accept. Extracted
+    from :func:`check_version_covered_by_registered_class` so the
+    pre-flight stays under the size budget.
+    """
+    from meho_backplane.connectors.registry import all_connectors_v2
 
     candidates: list[tuple[str, str, str, str]] = []
     accepted_by: tuple[str, str, str, str] | None = None
@@ -469,10 +459,6 @@ def check_version_covered_by_registered_class(
         candidate = (entry_version, entry_impl_id, cls.__name__, spec_str or "")
         candidates.append(candidate)
         if not spec_str:
-            # ``None`` / empty range = "accepts any version" per the
-            # resolver's conventions (v1-style entries register here
-            # with ``version=""`` and no range). One such class is
-            # enough to cover any label.
             accepted_by = candidate
             break
         try:
@@ -480,11 +466,6 @@ def check_version_covered_by_registered_class(
                 accepted_by = candidate
                 break
         except InvalidSpecifier:
-            # An unparseable advertisement is the connector author's
-            # bug, not the operator's. The resolver logs it at
-            # dispatch time and skips that class; mirror the
-            # behaviour here so a typo in one class does not block
-            # an ingest the other classes would have accepted.
             _log.warning(
                 "connector_specifier_invalid_at_ingest_preflight",
                 product=entry_product,
@@ -494,15 +475,130 @@ def check_version_covered_by_registered_class(
                 supported_version_range=spec_str,
             )
             continue
+    return candidates, accepted_by
 
-    if not candidates:
-        # v0.4-staging path: ops land before the class exists.
+
+def _warn_no_covering_class(*, product: str, version: str, impl_id: str) -> None:
+    """Log the no-registered-class outcome for ``(product, impl_id)`` and return.
+
+    Two sub-cases (G0.25-T2 #1753), distinguished by whether a
+    hand-rolled class already covers the same ``(product, version)``
+    under a DIFFERENT ``impl_id``:
+
+    * **Near-miss** — a sibling exists. Emit
+      ``connector_ingest_near_miss_impl_id`` at *warning* level naming
+      it: the shim about to be scaffolded is non-dispatchable and may
+      shadow the working sibling at resolve time (the resolver tie-break
+      T1 #1750 fixes load-bearingly). Defense-in-depth + messaging, so
+      it warns rather than refuses — the ingest proceeds unchanged. The
+      structured ``sibling_impl_id`` field lets an agent branch without
+      re-parsing the message.
+    * **Genuinely novel ``(product, version)``** — no sibling. Emit
+      ``connector_ingest_orphaned_class`` at *info* level (unchanged
+      v0.4-staging path); the dispatcher surfaces the gap at the first
+      ``call_operation`` and the info log is the upstream signal.
+    """
+    sibling = sibling_handrolled_impl_id(
+        product=product,
+        version=version,
+        exclude_impl_id=impl_id,
+    )
+    if sibling is not None:
+        _log.warning(
+            "connector_ingest_near_miss_impl_id",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            sibling_impl_id=sibling,
+            message=(
+                f"a connector class exists for "
+                f"({product}, {version}, {sibling}); ingesting under "
+                f"{impl_id} creates a non-dispatchable shim that may "
+                f"shadow it -- did you mean {sibling}?"
+            ),
+        )
+        return
+    _log.info(
+        "connector_ingest_orphaned_class",
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
+
+
+def check_version_covered_by_registered_class(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> None:
+    """Pre-flight check that the ``version`` label is dispatchable.
+
+    G0.9-T9 (#741). The dispatch resolver
+    (:func:`~meho_backplane.connectors.resolver.resolve_connector`)
+    matches a target's fingerprinted version against each registered
+    class's PEP 440 ``supported_version_range``; the ingest pipeline
+    keys rows on a free-form ``(product, version, impl_id)`` triple.
+    Without a pre-flight an operator can ingest under
+    ``(vmware, "7.0", vmware-rest)`` when the only registered class
+    advertises ``">=8.5,<10.0"`` — the catalog shows the ops but every
+    call later fails with :exc:`NoMatchingConnector`, far from the
+    ingest call site. This runs **before**
+    :func:`ensure_connector_class_registered` synthesises the auto-shim
+    (whose range is derived from the operator's own label, so it would
+    always "match" and make the check vacuous), and filters by
+    ``(product, impl_id)`` — a class at ``(vmware, "9.0", vmware-rest)``
+    advertising ``">=8.5,<10.0"`` covers an ingest at
+    ``(vmware, "8.5.1", vmware-rest)``.
+
+    Three outcomes by registry state (full prose:
+    ``docs/codebase/spec-ingestion.md`` §``check_version_covered_by_registered_class``):
+
+    * **≥1 class for ``(product, impl_id)`` but none accepts the
+      label** → raise :exc:`UncoveredVersionLabel` (mapped to HTTP 422),
+      naming every candidate range.
+    * **No class for ``(product, impl_id)`` but a hand-rolled sibling
+      exists for the same ``(product, version)`` under another
+      ``impl_id``** → warn ``connector_ingest_near_miss_impl_id`` and
+      proceed (G0.25-T2 #1753; the near-miss footgun).
+    * **No class and no sibling** → info-log
+      ``connector_ingest_orphaned_class`` and proceed (v0.4-staging
+      path; a genuinely novel triple is unchanged by #1753).
+
+    Args:
+        product, version, impl_id: The connector triple the operator
+            submitted; matches the natural-key shape on
+            :class:`~meho_backplane.db.models.EndpointDescriptor`.
+
+    Raises:
+        UncoveredVersionLabel: At least one registered class exists
+            for ``(product, impl_id)`` but none accepts ``version``.
+    """
+    try:
+        parsed_version = Version(version)
+    except InvalidVersion:
+        # PEP 440 cannot parse the operator's label. We cannot decide
+        # range membership — log + proceed so the operator is not
+        # blocked by a label-parsing quirk the resolver itself tolerates
+        # (it also catches InvalidVersion and falls through). T8 (#740)
+        # validates the label shape against the spec's info.version;
+        # this pre-flight is specifically about range coverage.
         _log.info(
-            "connector_ingest_orphaned_class",
+            "connector_ingest_version_unparseable",
             product=product,
             version=version,
             impl_id=impl_id,
         )
+        return
+
+    candidates, accepted_by = _find_class_covering_version(
+        product=product,
+        impl_id=impl_id,
+        parsed_version=parsed_version,
+    )
+
+    if not candidates:
+        _warn_no_covering_class(product=product, version=version, impl_id=impl_id)
         return
 
     if accepted_by is None:

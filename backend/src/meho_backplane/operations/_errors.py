@@ -451,12 +451,62 @@ def result_connector_error(
     )
 
 
+def _connector_unsupported_remediation(
+    *,
+    origin: str,
+    cause: Literal["unsupported_feature", "unreplaced_auto_shim"],
+    sibling_impl_id: str | None,
+) -> str:
+    """Build the per-cause remediation clause for ``connector_unsupported``.
+
+    Three shapes (G0.23-T1 #1627 + G0.25-T2 #1753): an
+    ``unreplaced_auto_shim`` whose ``(product, version)`` already has a
+    hand-rolled sibling under a different ``impl_id`` (re-ingest under
+    it), one without a sibling (register the per-product subclass), and
+    an ``unsupported_feature`` (a config matter against the connector's
+    supported modes). Extracted from :func:`result_connector_unsupported`
+    so the builder stays under the size budget.
+    """
+    if cause == "unreplaced_auto_shim" and sibling_impl_id is not None:
+        return (
+            f"{origin} is the auto-registered ingest shim, which cannot "
+            f"authenticate or execute against the upstream -- but a "
+            f"hand-rolled connector class already ships for this "
+            f"(product, version) under impl_id={sibling_impl_id!r}. The "
+            f"shim was ingested under a near-miss impl_id and is shadowing "
+            f"that working class. Re-ingest the spec under "
+            f"impl_id={sibling_impl_id!r} (or delete this shim's ingested "
+            f"ops); do NOT write a new subclass -- one already exists. See "
+            f"docs/codebase/spec-ingestion.md for the auto-shim lifecycle."
+        )
+    if cause == "unreplaced_auto_shim":
+        return (
+            f"{origin} is the auto-registered ingest shim, which cannot "
+            f"authenticate or execute against the upstream. Register the "
+            f"hand-rolled per-product Connector subclass for this "
+            f"(product, version, impl_id) and redeploy before enabling "
+            f"dispatch on this connector's ops -- re-ingesting the spec "
+            f"will NOT replace the shim. See "
+            f"docs/codebase/spec-ingestion.md for the auto-shim "
+            f"lifecycle."
+        )
+    return (
+        f"{origin} deliberately does not implement what this "
+        f"dispatch requires for the target. Re-check the target's "
+        f"configuration (e.g. auth_model) against the modes the "
+        f"connector supports, or route the op at a connector that "
+        f"implements them. See docs/architecture/connector-auth.md "
+        f"for the connector auth contract."
+    )
+
+
 def result_connector_unsupported(
     op_id: str,
     exc: BaseException,
     cause: Literal["unsupported_feature", "unreplaced_auto_shim"],
     connector_class: str | None,
     duration_ms: float,
+    sibling_impl_id: str | None = None,
 ) -> OperationResult:
     """Connector / handler raised :exc:`NotImplementedError` on dispatch.
 
@@ -485,18 +535,35 @@ def result_connector_unsupported(
       connector supports -- a config matter, not a code gap.
     * ``unreplaced_auto_shim`` -- the resolved connector is the
       auto-registered :class:`GenericRestConnector` ingest shim, which
-      can never authenticate or execute. Remediation: register the
-      hand-rolled per-product subclass before enabling dispatch.
+      can never authenticate or execute. Remediation depends on
+      whether a hand-rolled sibling already exists (G0.25-T2 #1753):
+
+      - *sibling_impl_id is None* -- no hand-rolled class for this
+        ``(product, version)`` under any ``impl_id``. Register the
+        per-product subclass before enabling dispatch; re-ingesting
+        the spec will NOT replace the shim.
+      - *sibling_impl_id is set* -- a hand-rolled class for the same
+        ``(product, version)`` already ships under a DIFFERENT
+        ``impl_id``, and the shim is shadowing it (the one-token-off
+        ingest footgun behind T1 #1750). The fix is to re-ingest
+        under the named sibling ``impl_id`` (or delete the stray
+        shim's ops), NOT to write a new subclass -- one already
+        exists. Naming the sibling stops the operator chasing
+        "future work" that is already shipped.
 
     The dispatcher classifies the cause via ``isinstance(...,
     GenericRestConnector)`` at the catch site -- precise, not
-    message-fragile. The shape complies with the #1141 convention: a
+    message-fragile -- and resolves *sibling_impl_id* via
+    :func:`~meho_backplane.operations.ingest.connector_registration.sibling_handrolled_impl_id`
+    (the same registry scan the ingest near-miss guard uses, so the
+    proactive ingest warning and this reactive dispatch error name the
+    same sibling). The shape complies with the #1141 convention: a
     stable ``connector_unsupported`` code, a diagnostic-bearing human
     message (verbatim detail + remediation imperative + doc
     reference), and a structured ``extras`` payload (``cause`` /
-    ``connector_class`` / ``detail``) so an agent can branch without
-    re-parsing the text. ``detail`` reuses the
-    :data:`_EXC_MESSAGE_CAP` discipline from
+    ``connector_class`` / ``detail`` / ``sibling_impl_id``) so an
+    agent can branch without re-parsing the text. ``detail`` reuses
+    the :data:`_EXC_MESSAGE_CAP` discipline from
     :func:`result_connector_error` (both production raise sites are
     comfortably under the cap, so their texts survive verbatim).
     """
@@ -508,26 +575,11 @@ def result_connector_unsupported(
         if connector_class is not None
         else "The resolved handler"
     )
-    if cause == "unreplaced_auto_shim":
-        remediation = (
-            f"{origin} is the auto-registered ingest shim, which cannot "
-            f"authenticate or execute against the upstream. Register the "
-            f"hand-rolled per-product Connector subclass for this "
-            f"(product, version, impl_id) and redeploy before enabling "
-            f"dispatch on this connector's ops -- re-ingesting the spec "
-            f"will NOT replace the shim. See "
-            f"docs/codebase/spec-ingestion.md for the auto-shim "
-            f"lifecycle."
-        )
-    else:
-        remediation = (
-            f"{origin} deliberately does not implement what this "
-            f"dispatch requires for the target. Re-check the target's "
-            f"configuration (e.g. auth_model) against the modes the "
-            f"connector supports, or route the op at a connector that "
-            f"implements them. See docs/architecture/connector-auth.md "
-            f"for the connector auth contract."
-        )
+    remediation = _connector_unsupported_remediation(
+        origin=origin,
+        cause=cause,
+        sibling_impl_id=sibling_impl_id,
+    )
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -538,6 +590,7 @@ def result_connector_unsupported(
             "cause": cause,
             "connector_class": connector_class,
             "detail": detail,
+            "sibling_impl_id": sibling_impl_id,
         },
     )
 

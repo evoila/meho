@@ -390,7 +390,13 @@ Two operator-facing surfaces flag an unreplaced shim:
   `NotImplementedError` maps to the structured
   `connector_unsupported` error with
   `extras.cause='unreplaced_auto_shim'` (see
-  `docs/codebase/error-message-shape.md`).
+  `docs/codebase/error-message-shape.md`). G0.25-T2 (#1753) adds
+  `extras.sibling_impl_id`: when a hand-rolled class for the same
+  `(product, version)` already ships under a different `impl_id`
+  (i.e. the shim is shadowing it — the near-miss footgun), the
+  remediation names that sibling and says "re-ingest under it"
+  instead of "write a subclass" (one already exists). Resolved via
+  `sibling_handrolled_impl_id()`.
 * **Enable-time** (G0.23-T4 #1630) — `ReviewService.edit_op` with
   `is_enabled=True` probes `resolved_auto_shim_class()` (same
   module): a resolver replay against the op's `(product, version)`
@@ -414,19 +420,36 @@ dispatchable against at least one already-registered class for
 `resolver.resolve_connector` PEP 440 `SpecifierSet` check at ingest
 time so orphan-at-ingest is caught at the operator's call site,
 not at the first `call_operation` against the resulting orphan
-rows. Two branches:
+rows. Three branches:
 
 * **At least one class registered** for `(product, impl_id)` but
   none accepts the label → raise `UncoveredVersionLabel` (mapped
   to HTTP 422 in the REST router). The exception names every
   candidate class and its advertised range so the operator-facing
   detail tells them exactly what to fix.
-* **No class registered** for `(product, impl_id)` → log
+* **No class registered** for `(product, impl_id)` but a
+  hand-rolled class exists for the same `(product, version)`
+  under a **different** `impl_id` → log
+  `connector_ingest_near_miss_impl_id` at *warning* level naming
+  the sibling `impl_id` and proceed (G0.25-T2 #1753). This is the
+  one-token-off footgun (`nsx-rest-probe` ingested when `nsx-rest`
+  already ships a hand-rolled class): the shim about to be
+  scaffolded is non-dispatchable and may shadow the working
+  sibling at resolve time (the resolver tie-break T1 #1750 fixes
+  load-bearingly). The guard is defense-in-depth + messaging, so
+  it warns rather than refuses — the ingest proceeds unchanged.
+  The sibling lookup is `sibling_handrolled_impl_id()` (same
+  module), reused by the dispatch-time `connector_unsupported`
+  error so both surfaces name the same sibling. The warning log
+  carries `sibling_impl_id` as a structured field.
+* **No class registered** for `(product, impl_id)` and no sibling
+  for `(product, version)` → log
   `connector_ingest_orphaned_class` at info level and proceed.
   This is the v0.4-staging path where ops land before the class
   exists; the dispatcher will surface the gap at the first
-  `call_operation` and the ingest-time warning is the upstream
-  signal.
+  `call_operation` and the ingest-time info log is the upstream
+  signal. A genuinely novel `(product, version)` triple is
+  unchanged by #1753.
 
 Called from `register_ingested_operations` (real path) and from
 `IngestionPipelineService._run_dry_run` (dry-run path) so an

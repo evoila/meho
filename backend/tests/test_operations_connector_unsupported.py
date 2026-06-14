@@ -287,11 +287,19 @@ def test_result_connector_unsupported_shape_unsupported_feature() -> None:
         "cause": "unsupported_feature",
         "connector_class": "VmwareRestConnector",
         "detail": str(exc),
+        # G0.25-T2 (#1753): additive field; None on the non-shim cause.
+        "sibling_impl_id": None,
     }
 
 
 def test_result_connector_unsupported_shape_unreplaced_auto_shim() -> None:
-    """``unreplaced_auto_shim``: subclass-registration remediation, no re-ingest steer."""
+    """``unreplaced_auto_shim`` with no sibling: subclass-registration remediation.
+
+    The no-sibling path (``sibling_impl_id`` omitted / ``None``) keeps
+    the original wording — "register the per-product subclass, re-ingesting
+    will NOT replace the shim". The sibling-present fork added by
+    G0.25-T2 (#1753) is covered in ``test_connector_registration.py``.
+    """
     exc = NotImplementedError(
         "auto-registered shim for ('acme', '1.0', 'acme-rest') must be "
         "replaced with a per-product Connector subclass before dispatch "
@@ -319,6 +327,8 @@ def test_result_connector_unsupported_shape_unreplaced_auto_shim() -> None:
         "cause": "unreplaced_auto_shim",
         "connector_class": "AutoShim_acme_1_0_acme_rest",
         "detail": str(exc),
+        # G0.25-T2 (#1753): no hand-rolled sibling for this label.
+        "sibling_impl_id": None,
     }
 
 

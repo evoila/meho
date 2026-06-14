@@ -51,13 +51,19 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
+from meho_backplane.connectors.github._catalog_command import (
+    catalog_command_for_github_rest,
+)
 from meho_backplane.connectors.github.composites._read import (
+    _CONNECTOR_ID,
+    _SUB_OPS_PR_STATUS_SUMMARY,
     pr_status_summary_composite,
 )
 from meho_backplane.connectors.github.composites.schemas import (
     PR_STATUS_SUMMARY_PARAMETER_SCHEMA,
     PR_STATUS_SUMMARY_RESPONSE_SCHEMA,
 )
+from meho_backplane.operations.composite_backing import register_composite_backing
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -113,6 +119,12 @@ class _CompositeSpec(NamedTuple):
     tags: list[str]
     safety_level: Literal["safe", "caution", "dangerous"]
     requires_approval: bool
+    #: The L2 sub-op-ids the handler dispatches into -- the SAME tuple the
+    #: handler hands its preflight (``_read.py``'s ``_SUB_OPS_*``). Carried
+    #: on the spec so the import-time backing registration (below) and the
+    #: dispatch-time preflight read one source of truth, and the listing's
+    #: ``unbacked`` marker can never drift from what the composite hits.
+    sub_op_ids: tuple[str, ...]
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -142,8 +154,30 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "pulls", "status"],
         safety_level="safe",
         requires_approval=False,
+        sub_op_ids=_SUB_OPS_PR_STATUS_SUMMARY,
     ),
 )
+
+
+# Import-time backing registration (G0.25-T6 #1757). A pure in-process
+# dict write -- no DB / embedding work -- so it runs at import (when this
+# module is first loaded, alongside the package ``__init__``'s
+# lifespan-registrar queueing), well before any request reaches the op
+# listing. This lets ``search_operations`` mark a composite ``unbacked``
+# with the catalog-ingest ``next_step`` while its L2 sub-ops are absent,
+# instead of advertising it as enabled-but-broken until the first
+# dispatch trips ``composite_l2_missing``. The ``connector_id`` +
+# ``catalog_command`` are the same values the preflight's
+# ``CompositeL2DependencyMissing`` carries, and ``sub_op_ids`` is the same
+# tuple the handler hands the preflight -- one source of truth across the
+# listing and the dispatch.
+for _spec in _COMPOSITES:
+    register_composite_backing(
+        composite_op_id=_spec.op_id,
+        connector_id=_CONNECTOR_ID,
+        sub_op_ids=_spec.sub_op_ids,
+        catalog_command=catalog_command_for_github_rest(),
+    )
 
 
 async def register_github_composite_operations(

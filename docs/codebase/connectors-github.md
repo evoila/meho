@@ -55,6 +55,26 @@ multiple L2 sub-ops into one governed call. T4 ships the first one,
   list. The parent `github/__init__.py` imports this subpackage so the
   registrar lands during `_eager_import_connectors`.
 
+The preflight only fires at **dispatch** time, so a composite whose L2
+sub-ops are not ingested used to look fully enabled on the op listing
+and only dead-ended on the first call (`composite_l2_missing`). G0.25-T6
+(#1757) closes that gap on the **listing**: `_register.py` registers the
+composite's `(connector_id, sub_op_ids, catalog_command)` into the
+process-wide registry in `operations/composite_backing.py` at import
+time (the same `_SUB_OPS_PR_STATUS_SUMMARY` tuple the handler hands the
+preflight, so the two can't drift). `search_operations`
+(`operations/meta_tools.py`) consults
+`unbacked_composite_next_step` per composite hit and, when any raw L2
+sub-op is absent (or ingested-but-disabled — the probe is the
+preflight's enable-aware `lookup_descriptor`), flags the hit
+`unbacked=true` with a `next_step` carrying
+`meho connector ingest --catalog gh/3`. The marker is tenant-scoped and
+disappears once the catalog ingest lands the sub-ops, so the listing
+agrees with what the next dispatch would resolve. Ordinary ops and
+fully-backed composites never gain the marker. The MCP
+`search_operations` `outputSchema` carries the two fields so the agent
+transport sees the same shape.
+
 Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
 intentionally conservative: an unexpected payload shape collapses to
 `"unknown"` rather than guessing, and `_summarize_reviews` honours

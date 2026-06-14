@@ -334,6 +334,34 @@ def test_importing_github_composites_queues_registrar() -> None:
     )
 
 
+def test_importing_github_composites_registers_l2_backing() -> None:
+    """Import-time backing registration wires the composite's L2 surface (G0.25-T6 #1757).
+
+    The op listing reads this registry to mark the composite ``unbacked``
+    while its L2 sub-ops are absent. The registered ``sub_op_ids`` must be
+    the SAME tuple the dispatch-time preflight walks (``_read.py``'s
+    ``_SUB_OPS_PR_STATUS_SUMMARY``) and the ``catalog_command`` the same
+    one ``CompositeL2DependencyMissing`` carries, so the listing and the
+    dispatch can't drift.
+    """
+    from meho_backplane.connectors.github._catalog_command import (
+        catalog_command_for_github_rest,
+    )
+    from meho_backplane.connectors.github.composites._read import (
+        _CONNECTOR_ID,
+        _SUB_OPS_PR_STATUS_SUMMARY,
+    )
+    from meho_backplane.operations.composite_backing import registered_composite_backing
+
+    # The package import (already triggered by this module's top-level
+    # imports) runs the import-time registration as a side effect.
+    backing = registered_composite_backing("gh.composite.pr_status_summary")
+    assert backing is not None, "expected gh.composite.pr_status_summary to register a backing"
+    assert backing.connector_id == _CONNECTOR_ID
+    assert backing.sub_op_ids == _SUB_OPS_PR_STATUS_SUMMARY
+    assert backing.catalog_command == catalog_command_for_github_rest()
+
+
 def test_handler_is_module_level_coroutine_function() -> None:
     """The handler is a plain module-level ``async def`` -- no closures / partials / lambdas.
 

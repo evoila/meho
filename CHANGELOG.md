@@ -99,6 +99,18 @@ connector-related release-notes line.
   pass, leaving every write-shaped op (POST/PUT/PATCH/DELETE)
   default-deny. Tenant-scope-aware, idempotent, and audited as a
   single bulk-enable event with the count of ops enabled (#1749).
+- The operation listing now flags an **enabled-but-unbacked composite**.
+  `search_operations` (REST `GET /api/v1/operations/search` + the MCP
+  tool) marks a composite hit `unbacked=true` with a `next_step`
+  pointing at `meho connector ingest --catalog <product>/<version>`
+  while the composite's L2 sub-operations are not ingested — so an
+  operator/agent sees "enabled — run the catalog ingest first" instead
+  of a silent dead-end (`composite_l2_missing`) at the first dispatch.
+  The marker is tenant-scoped, mirrors the dispatch-time preflight's
+  enable-aware check, and disappears once the catalog ingest lands the
+  sub-ops; ordinary ops and fully-backed composites never carry it.
+  `gh.composite.pr_status_summary` is wired; the registry generalises to
+  future composites (#1757).
 
 ### Changed
 

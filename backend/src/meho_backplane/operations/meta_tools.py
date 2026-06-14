@@ -96,7 +96,9 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations.composite_backing import unbacked_composite_next_step
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.operations.ingest.api_schemas import NextStep
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
 from meho_backplane.targets.resolver import resolve_target
 
@@ -260,6 +262,18 @@ class OperationSearchHit(BaseModel):
     tuning operation description quality want to see whether the top
     candidate scored well on BM25 (lexical match) or cosine (semantic
     match) or both.
+
+    ``unbacked`` / ``next_step`` (G0.25-T6 #1757) flag a composite op that
+    is *enabled* but whose L2 sub-operations are not ingested yet, so its
+    first dispatch would trip ``composite_l2_missing`` before any call.
+    ``unbacked`` is ``True`` exactly when ``next_step`` is set; the
+    ``next_step.verb`` is the ``meho connector ingest --catalog …`` command
+    that closes the gap. Both stay falsy (``unbacked=False``,
+    ``next_step=None``) for ordinary ops and for composites whose sub-ops
+    are fully ingested — the common case — so no existing hit gains a
+    false marker. The verdict mirrors the dispatch-time preflight's
+    enable-aware probe, so the listing and the dispatch agree on whether
+    the composite is callable.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -273,6 +287,8 @@ class OperationSearchHit(BaseModel):
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
+    unbacked: bool = False
+    next_step: NextStep | None = None
 
 
 class OperationDescriptor(BaseModel):
@@ -714,6 +730,43 @@ async def list_operation_groups(
     }
 
 
+async def _attach_unbacked_composite_markers(
+    hits: list[OperationSearchHit],
+    *,
+    tenant_id: uuid.UUID,
+) -> list[OperationSearchHit]:
+    """Flag composite hits whose L2 sub-ops aren't ingested (G0.25-T6 #1757).
+
+    For each hit, :func:`unbacked_composite_next_step` returns the
+    catalog-ingest ``next_step`` when the hit's op_id is a *registered
+    composite* with at least one absent (or disabled) raw L2 sub-op, and
+    ``None`` otherwise — for an ordinary op, or for a composite whose
+    sub-ops are fully ingested. A non-``None`` result re-projects the
+    frozen hit with ``unbacked=True`` + the ``next_step``; everything else
+    passes through unchanged, so the common case allocates nothing new and
+    no hit gains a false marker.
+
+    The probe is enable-aware (it reuses the dispatch-time preflight's
+    :func:`~meho_backplane.operations._lookup.lookup_descriptor`) and
+    tenant-scoped, so the marker reflects what *this* operator's next
+    dispatch of the composite would actually resolve. Each probe opens its
+    own short-lived session; the hit list is tiny (``limit`` ≤ 50) and
+    only the composite hits probe at all, so the extra round-trips are
+    bounded and rare.
+    """
+    marked: list[OperationSearchHit] = []
+    for hit in hits:
+        next_step = await unbacked_composite_next_step(
+            op_id=hit.op_id,
+            tenant_id=tenant_id,
+        )
+        if next_step is None:
+            marked.append(hit)
+            continue
+        marked.append(hit.model_copy(update={"unbacked": True, "next_step": next_step}))
+    return marked
+
+
 async def search_operations(
     operator: Operator,
     arguments: dict[str, Any],
@@ -790,12 +843,19 @@ async def search_operations(
             query=query,
             limit=limit,
         )
+    # Flag any composite hit that is enabled but whose L2 sub-ops aren't
+    # ingested yet, so the operator sees the catalog-ingest next_step on
+    # the listing instead of a silent dead-end at the first dispatch
+    # (G0.25-T6 #1757). Runs after the search session closes — the probe
+    # opens its own short-lived sessions and only the composite hits probe.
+    hits = await _attach_unbacked_composite_markers(hits, tenant_id=operator.tenant_id)
     duration_ms = (time.monotonic() - started) * 1000
     _log.info(
         "search_operations",
         connector_id=connector_id,
         group=group_key,
         hit_count=len(hits),
+        unbacked_composite_count=sum(1 for h in hits if h.unbacked),
         tenant_id=str(operator.tenant_id),
         duration_ms=duration_ms,
     )

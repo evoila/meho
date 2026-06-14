@@ -184,11 +184,57 @@ enforce.
 
 See
 [`connectors-vault-tenant-scope.md`](../codebase/connectors-vault-tenant-scope.md)
-("Enabling the prefix requires all of") for the preconditions and the
-startup advisory. Do **not** enable the prefix until every legitimate
-`vault.kv.*` caller's secrets are under it — once set, any in-namespace
-mismatch is denied with `exception_class=VaultTenantScopeError` before the
-hvac call.
+("The active (default) prefix and its preconditions") for the
+preconditions and the startup advisory. Do **not** enable the prefix until
+every legitimate `vault.kv.*` caller's secrets are under it — once set, any
+in-namespace mismatch is denied with `exception_class=VaultTenantScopeError`
+before the hvac call.
+
+### Custom / non-standard layout (neither per-`sub` nor per-tenant)
+
+The body of this runbook assumes you are moving **from** the retired
+per-`sub` layout (`secret/data/targets/<sub>/*`) **to** the canonical
+per-tenant layout (`secret/data/tenants/<tenant_id>/<target>`). Some
+deploys run secrets under a **deliberate custom layout** that is *neither*
+— e.g. an org-chosen mount or path scheme such as
+`secret/data/<team>/<env>/<target>` set via explicit `secret_ref` values.
+That is a supported configuration: the backplane honours an
+explicitly-supplied `secret_ref` verbatim and never re-homes it (see
+"What the backplane does for you").
+
+**What the default-on guard enforces (#1725).** With
+`VAULT_KV_TENANT_SCOPE_PREFIX` left at its mount-pinned default
+`secret/tenants/{tenant_id}/`, every authenticated `vault.kv.*` call must
+address a normalised `<mount>/<path>` that begins with
+`secret/tenants/<your-tenant-id>/`. A path under any other scheme — your
+custom layout included — is denied with
+`exception_class=VaultTenantScopeError` **before** the hvac call. The
+denial is local (no Vault round-trip) and reports the requested path
+against the rendered tenant prefix.
+
+**Upgrade action.** If your secrets are under neither `targets/<sub>/*`
+nor `secret/tenants/{tenant_id}/`, the default-on guard will reject your
+daily-driver `vault.kv.read` (and every other `vault.kv.*` op) on upgrade
+to v0.15.0. Set the prefix **empty** to keep those calls working:
+
+```text
+VAULT_KV_TENANT_SCOPE_PREFIX=
+```
+
+An empty prefix makes the guard a no-op — behaviour is byte-for-byte what
+it was before the guard existed; isolation falls back entirely to the
+templated `meho-mcp` Vault policy
+([`connector-vault-policy.md`](./connector-vault-policy.md) §2), which
+must stay correct because it is then the only gate. The startup advisory
+(`vault_tenant_scope_unenforced`) fires once at boot to keep that
+unenforced state visible.
+
+**Migrating later is optional, not required.** A custom layout does not
+*have* to move to `secret/tenants/{tenant_id}/`. If you later choose to
+adopt the per-tenant layout so the app-layer guard becomes a real
+backstop, follow the per-target procedure above (relocate the bytes,
+rewrite each `secret_ref`), then drop the empty-prefix override. Until
+then, keeping the prefix empty is the correct steady state.
 
 ## Rollback
 

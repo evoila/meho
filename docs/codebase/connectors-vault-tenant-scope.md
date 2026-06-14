@@ -118,16 +118,29 @@ canonical layout addresses secrets as mount `secret`, path
 candidate — it would deny **every** legitimate per-tenant call. The default
 is therefore the mount-pinned `secret/tenants/{tenant_id}/`.
 
-**Migration prerequisite.** The backplane homes *new* targets on
-`tenants/<tenant_id>/`, but a deploy upgrading from a pre-#1723 release may
-still hold *existing* secrets under the retired per-`sub` layout. Until
-those are relocated by the migration runbook
-([`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md)),
-the default-on guard would deny every not-yet-relocated `vault.kv.*` call.
-Such a deploy must **explicitly disable** the guard
-(`VAULT_KV_TENANT_SCOPE_PREFIX=""`) until the migration completes, then drop
-the override to let the default enforce. A fresh deploy (all secrets under
-`tenants/<tenant_id>/`) needs no action — the default already enforces.
+**Adopter action on upgrade (#1725).** The default-on guard denies any
+authenticated `vault.kv.*` call whose normalised `<mount>/<path>` does not
+begin with `secret/tenants/<tenant_id>/`. Two kinds of deploy must act
+before upgrading to keep their daily-driver `vault.kv.read` path working:
+
+- A deploy upgrading from a pre-#1723 release that still holds *existing*
+  secrets under the retired per-`sub` layout (`secret/data/targets/<sub>/*`).
+  Relocate them with the migration runbook
+  ([`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md)).
+- A deploy running a **deliberate custom layout** under neither
+  `targets/<sub>/*` nor `secret/tenants/{tenant_id}/` (e.g. an org-chosen
+  mount/path scheme set via explicit `secret_ref` values, which the
+  backplane honours verbatim and never re-homes).
+
+In **both** cases, **explicitly disable** the guard before upgrading by
+setting `VAULT_KV_TENANT_SCOPE_PREFIX=""` — otherwise the default-on guard
+denies every not-yet-conforming `vault.kv.*` call with
+`exception_class=VaultTenantScopeError`. A per-`sub` deploy drops the
+override once the migration completes; a custom-layout deploy may keep it
+empty as its steady state (migrating to `secret/tenants/{tenant_id}/` later
+is optional — see the runbook's "Custom / non-standard layout" subsection).
+A fresh deploy (all secrets under `tenants/<tenant_id>/`) needs no action —
+the default already enforces.
 
 **Platform-path exemption.** A closed allow-list of fixed, shared,
 non-tenant platform secrets (`PLATFORM_EXEMPT_PATHS` in `tenant_scope.py`)
@@ -188,8 +201,9 @@ blocks boot).
 ## Choosing a layout
 
 The guard is default-on (`secret/tenants/{tenant_id}/`), matching the
-canonical per-tenant layout. The only deploy that needs to touch the prefix
-is one still holding secrets under the retired per-`sub` layout:
+canonical per-tenant layout. Any deploy whose secrets are **not** under
+`secret/tenants/{tenant_id}/` — the retired per-`sub` layout or a
+deliberate custom layout — must touch the prefix:
 
 - **Per-tenant layout (canonical since #1723; guard default-on).** Secrets
   are partitioned by tenant under `tenants/<tenant_id>/<target>` on the
@@ -211,6 +225,20 @@ is one still holding secrets under the retired per-`sub` layout:
   [`vault-per-tenant-migration.md`](../cross-repo/vault-per-tenant-migration.md),
   then drop the override.
 
+- **Custom / non-standard layout (neither per-`sub` nor per-tenant).**
+  Secrets live under a deploy-chosen mount/path scheme set via explicit
+  `secret_ref` values (the backplane honours these verbatim and never
+  re-homes them), so the candidate never begins with
+  `secret/tenants/<tenant_id>/` and the default-on guard would deny every
+  `vault.kv.*` call. **Explicitly disable** the guard with
+  `VAULT_KV_TENANT_SCOPE_PREFIX=""` before upgrading; isolation then rests
+  entirely on the `meho-mcp` Vault policy, which must stay correct. Unlike
+  the per-`sub` case, a migration is **optional** — keeping the prefix empty
+  is a valid steady state. The runbook's
+  [Custom / non-standard layout](../cross-repo/vault-per-tenant-migration.md)
+  subsection covers the upgrade action and the optional path to adopting the
+  per-tenant layout later.
+
 **The active (default) prefix and its preconditions:**
 
 1. The canonical Vault KV layout is per-tenant: mount `secret`, path
@@ -229,10 +257,13 @@ is one still holding secrets under the retired per-`sub` layout:
    system/shim operator (Nil-UUID tenant, `vault.sys.health` only) is
    exempt, so the default does not break the health probe.
 
-Because step 3 denies every per-`sub` call that is *not* under a
-`tenants/<id>/` prefix, a deploy still on the retired per-`sub` layout must
-disable the guard until its secrets are relocated — which is exactly what
-the `VAULT_KV_TENANT_SCOPE_PREFIX=""` opt-out is for.
+Because step 3 denies every call that is *not* under a `tenants/<id>/`
+prefix, any deploy whose secrets sit elsewhere — the retired per-`sub`
+layout or a deliberate custom layout — must disable the guard with
+`VAULT_KV_TENANT_SCOPE_PREFIX=""` before upgrading. That is exactly what
+the empty-prefix opt-out is for: a per-`sub` deploy drops it once the
+migration completes, while a custom-layout deploy may keep it empty
+indefinitely.
 
 ## Scope notes
 

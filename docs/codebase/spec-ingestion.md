@@ -232,6 +232,7 @@ budget:
 | `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
 | `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
 | `meho.connector.enable` | `tenant_admin` | `ReviewService.enable_connector()` |
+| `meho.connector.enable_reads` | `tenant_admin` | `ReviewService.enable_reads()` |
 | `meho.connector.disable` | `tenant_admin` | `ReviewService.disable_connector()` |
 
 These are administrative tools per CLAUDE.md's "What MEHO is NOT"
@@ -878,13 +879,40 @@ consume so the wire contract is defined once:
 
 ### REST routes (`api/v1/connectors_ingest.py`)
 
-The seven `/api/v1/connectors*` routes that wire the service layer
-to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
+The `/api/v1/connectors*` routes that wire the service layer to the
+operator-facing HTTP surface. RBAC: read paths (GET /, GET
 /{id}/review) require `operator` role minimum; write paths
 (`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
-/enable`, `POST /disable`) require `tenant_admin`. Tenant scoping
-derives from the JWT — there is no body / query parameter that can
-override the operator's tenant.
+/enable`, `POST /enable-reads`, `POST /disable`, `DELETE /{id}`)
+require `tenant_admin`. Tenant scoping derives from the JWT — there
+is no body / query parameter that can override the operator's tenant.
+
+**Bulk read-class enable (G0.25-T7 #1749).** `POST
+/{id}/enable-reads` flips `is_enabled=true` on every *ingested*
+operation whose HTTP `method` is `GET` or `HEAD`
+(`READ_HTTP_METHODS`), leaving every write-shaped verb
+(POST / PUT / PATCH / DELETE) and every typed / composite op
+(`method` NULL) default-deny — writes keep their per-op / composite
+curation by design (the governance boundary). The point is broad
+governed *read* coverage on big ingested surfaces (`vmware-rest-9.0`
+is 3000+ ops, mostly staged GETs) without a per-op death-march.
+`EndpointDescriptor` carries no `op_class` column — the read/write
+taxonomy the MCP tool registry uses lives on `ToolDefinition`, not
+the descriptor row — so HTTP method *is* the per-row read-class
+signal for ingested ops. The route returns `200` with
+`{connector_id, ops_enabled}` (not the `204` the enable / disable
+transitions return) so the count of flipped ops rides the wire;
+unlike `enable`, it does **not** move any group's `review_status`
+(it is a per-op flip, so there is no state-machine guard and no 409
+path). One `meho.connector.enable_reads` audit row is written when
+at least one op flips; idempotent — a re-run flips nothing, writes
+no audit row, and returns `ops_enabled=0`. The bulk UPDATE lives in
+`bulk_enable_read_ops()` (`ingest/_internals.py`), called by
+`ReviewService.enable_reads()`; the CLI (`meho connector
+enable-reads`) and the MCP tool (`meho.connector.enable_reads`,
+optional `tenant_id` for the built-in scope) wrap the same service
+method, the single-source discipline the rest of the surface
+follows.
 
 **Cross-surface write-scope contract (#1699).** The two ingest
 surfaces intentionally default to *different* write scopes:

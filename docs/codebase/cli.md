@@ -232,6 +232,7 @@ cli/
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
+    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent.
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.

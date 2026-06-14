@@ -19,6 +19,9 @@
 //     description, safety level, requires_approval, is_enabled).
 //   - `meho connector enable`     — transition a staged connector to
 //     `review_status=enabled`; operations become dispatchable.
+//   - `meho connector enable-reads` — bulk-enable every read-class
+//     (GET/HEAD) ingested op in one pass; writes stay default-deny
+//     (G0.25-T7 #1749). Reports the count flipped; idempotent.
 //   - `meho connector disable`    — flip back to disabled without
 //     deleting rows (per-op overrides preserved for rollback).
 //
@@ -82,7 +85,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "connector",
-		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / disable)",
+		Short:        "G0.7 spec-ingestion + review workflow (ingest / list / catalog / review / edit / enable / enable-reads / disable)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newIngestCmd())
@@ -93,6 +96,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEditGroupCmd())
 	cmd.AddCommand(newEditOpCmd())
 	cmd.AddCommand(newEnableCmd())
+	cmd.AddCommand(newEnableReadsCmd())
 	cmd.AddCommand(newDisableCmd())
 	return cmd
 }

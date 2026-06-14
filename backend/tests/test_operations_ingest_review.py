@@ -1105,3 +1105,237 @@ async def test_audit_rows_carry_service_method_marker() -> None:
         assert row.method == "SERVICE", (
             f"audit row path={row.path!r} has method={row.method!r}, expected SERVICE"
         )
+
+
+# ---------------------------------------------------------------------------
+# enable_reads — bulk read-class enable path (G0.25-T7 #1749)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_mixed_methods(
+    *,
+    tenant_id: uuid.UUID | None,
+    product: str = "vmware",
+    version: str = "9.0",
+    impl_id: str = "vmware-rest",
+    review_status: str = "staged",
+    op_is_enabled: bool = False,
+) -> dict[str, str]:
+    """Seed one group with one op per HTTP verb plus a typed (method=NULL) op.
+
+    Returns ``{op_id: method}`` so a test can assert exactly which ops
+    the bulk read-class enable should and should not have flipped. The
+    read class is ``GET`` / ``HEAD``; ``POST`` / ``PUT`` / ``PATCH`` /
+    ``DELETE`` are write-shaped; the typed op carries ``method=None`` /
+    ``source_kind='typed'`` and must never be matched (it is not an
+    ingested HTTP row).
+    """
+    sessionmaker = get_sessionmaker()
+    ingested_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
+    op_methods: dict[str, str] = {}
+    async with sessionmaker() as session:
+        group_id = uuid.uuid4()
+        session.add(
+            OperationGroup(
+                id=group_id,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                group_key="mixed",
+                name="Mixed",
+                when_to_use="Use for mixed-verb ops.",
+                review_status=review_status,
+            ),
+        )
+        for method in ingested_methods:
+            op_id = f"{method}:/api/v1/resource"
+            op_methods[op_id] = method
+            session.add(
+                EndpointDescriptor(
+                    tenant_id=tenant_id,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    op_id=op_id,
+                    source_kind="ingested",
+                    method=method,
+                    path="/api/v1/resource",
+                    group_id=group_id,
+                    summary=f"{method} resource",
+                    is_enabled=op_is_enabled,
+                ),
+            )
+        # A typed op (method NULL) — must never be touched by the
+        # read-class filter even though it is a "read" by name.
+        session.add(
+            EndpointDescriptor(
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id="vmware.vm.list",
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref="meho_backplane.connectors.vmware.ops.vm_list",
+                group_id=group_id,
+                summary="List VMs (typed)",
+                is_enabled=op_is_enabled,
+            ),
+        )
+        await session.commit()
+    return op_methods
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_flips_reads_leaves_writes_default_deny() -> None:
+    """AC: GET/HEAD ingested ops flip to enabled; every write-class op stays false."""
+    tenant_id = uuid.uuid4()
+    op_methods = await _seed_mixed_methods(tenant_id=tenant_id, op_is_enabled=False)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+
+    # Two read-class ingested ops flipped (GET + HEAD); the typed
+    # method=NULL op is not counted.
+    assert ops_enabled == 2
+    state = await _ops_enabled_state(tenant_id=tenant_id)
+    for op_id, method in op_methods.items():
+        if method in ("GET", "HEAD"):
+            assert state[op_id] is True, f"read-class {op_id} should be enabled"
+        else:
+            assert state[op_id] is False, f"write-class {op_id} must stay default-deny"
+    # The typed (method NULL) op is never touched.
+    assert state["vmware.vm.list"] is False
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_writes_one_audit_row_with_count() -> None:
+    """AC: exactly one ``meho.connector.enable_reads`` audit row carrying the count."""
+    tenant_id = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=tenant_id, op_is_enabled=False)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+
+    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
+    row = await _latest_audit_row(op_id="meho.connector.enable_reads")
+    payload: Any = row.payload
+    assert payload["connector_id"] == "vmware-rest-9.0"
+    assert payload["ops_enabled_count"] == 2
+    assert row.method == "SERVICE"
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_is_idempotent_no_second_audit_row() -> None:
+    """AC: a re-run enables nothing new, returns 0, and writes no second audit row."""
+    tenant_id = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=tenant_id, op_is_enabled=False)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    first = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+    assert first == 2
+    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
+
+    second = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+    assert second == 0
+    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_does_not_move_group_review_status() -> None:
+    """``enable_reads`` flips per-op flags only — group review_status is untouched."""
+    tenant_id = uuid.uuid4()
+    await _seed_mixed_methods(
+        tenant_id=tenant_id,
+        review_status="staged",
+        op_is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+
+    statuses = await _group_statuses(tenant_id=tenant_id)
+    assert set(statuses.values()) == {"staged"}, "group must stay staged"
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_unknown_connector_raises_not_found() -> None:
+    """A connector triple with no rows yields :class:`ConnectorNotFoundError`."""
+    tenant_id = uuid.uuid4()
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    with pytest.raises(ConnectorNotFoundError):
+        await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_cross_tenant_yields_not_found() -> None:
+    """Tenant A's operator cannot enable-reads tenant B's connector; B untouched."""
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=tenant_b, op_is_enabled=False)
+    service = ReviewService(_make_operator(tenant_id=tenant_a))
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_b)
+
+    # Tenant B's read ops remain default-deny.
+    state = await _ops_enabled_state(tenant_id=tenant_b)
+    assert not any(state.values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_builtin_requires_tenant_admin() -> None:
+    """Non-admin operators get :class:`ConnectorNotFoundError` on built-in scope."""
+    tenant_id = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    operator_role = _make_operator(tenant_id=tenant_id, role=TenantRole.OPERATOR)
+    service = ReviewService(operator_role)
+    with pytest.raises(ConnectorNotFoundError):
+        await service.enable_reads("vmware-rest-9.0", tenant_id=None)
+    # Nothing flipped under the built-in scope.
+    state = await _ops_enabled_state(tenant_id=None)
+    assert not any(state.values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_builtin_accessible_to_tenant_admin() -> None:
+    """``tenant_admin`` bulk-enables built-in reads; audit echoes operator's tenant."""
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=None)
+    assert ops_enabled == 2
+
+    row = await _latest_audit_row(op_id="meho.connector.enable_reads")
+    # Audit row carries the operator's tenant, not the affected rows'
+    # (NULL) scope.
+    assert row.tenant_id == operator_tenant
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_only_flips_disabled_reads() -> None:
+    """An already-enabled read is left alone; the count reflects only true flips."""
+    tenant_id = uuid.uuid4()
+    op_methods = await _seed_mixed_methods(tenant_id=tenant_id, op_is_enabled=False)
+    # Pre-enable the GET op via the per-op edit path so only HEAD is
+    # left to flip.
+    get_op_id = next(op for op, m in op_methods.items() if m == "GET")
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    await service.edit_op(
+        "vmware-rest-9.0",
+        get_op_id,
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+    assert ops_enabled == 1  # only HEAD flipped; GET was already enabled
+
+    state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert state[get_op_id] is True
+    head_op_id = next(op for op, m in op_methods.items() if m == "HEAD")
+    assert state[head_op_id] is True

@@ -2834,3 +2834,144 @@ func primeToken(t *testing.T, backplaneURL string) {
 		t.Fatalf("store.Save: %v", err)
 	}
 }
+
+// ---------- enable-reads verb (G0.25-T7 #1749) ----------
+
+// TestRunEnableReadsRendersCount drives the happy path: the verb POSTs
+// the enable-reads route and renders the ops_enabled count the route
+// returned.
+func TestRunEnableReadsRendersCount(t *testing.T) {
+	var hits int
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/vmware-rest-9.0/enable-reads": func(w http.ResponseWriter, _ *http.Request) {
+			hits++
+			writeJSON(t, w, 200, api.EnableReadsResponse{
+				ConnectorId: "vmware-rest-9.0",
+				OpsEnabled:  42,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runEnableReads(cmd, enableReadsOptions{
+		ConnectorID:       "vmware-rest-9.0",
+		Confirm:           true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runEnableReads: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one POST, got %d", hits)
+	}
+	if !strings.Contains(out.String(), "enabled 42 read operations") {
+		t.Fatalf("output missing count: %q", out.String())
+	}
+}
+
+// TestRunEnableReadsIdempotentZeroCount pins the operator-visible
+// rendering for the idempotent re-run: ops_enabled=0 reads as
+// "no read-class ops to enable", not "enabled 0 read operations".
+func TestRunEnableReadsIdempotentZeroCount(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/vmware-rest-9.0/enable-reads": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.EnableReadsResponse{
+				ConnectorId: "vmware-rest-9.0",
+				OpsEnabled:  0,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runEnableReads(cmd, enableReadsOptions{
+		ConnectorID:       "vmware-rest-9.0",
+		Confirm:           true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runEnableReads: %v", err)
+	}
+	if !strings.Contains(out.String(), "no read-class ops to enable") {
+		t.Fatalf("zero-count output not rendered: %q", out.String())
+	}
+}
+
+// TestRunEnableReadsJSONShape pins the --json envelope: it mirrors the
+// backplane's EnableReadsResponse (connector_id + ops_enabled).
+func TestRunEnableReadsJSONShape(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/vmware-rest-9.0/enable-reads": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.EnableReadsResponse{
+				ConnectorId: "vmware-rest-9.0",
+				OpsEnabled:  7,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runEnableReads(cmd, enableReadsOptions{
+		ConnectorID:       "vmware-rest-9.0",
+		Confirm:           true,
+		JSONOut:           true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runEnableReads --json: %v", err)
+	}
+	var decoded enableReadsResult
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode --json output %q: %v", out.String(), err)
+	}
+	if decoded.ConnectorID != "vmware-rest-9.0" || decoded.OpsEnabled != 7 {
+		t.Fatalf("unexpected --json shape: %+v", decoded)
+	}
+}
+
+// TestRunEnableReadsForbiddenRendersInsufficientRole pins the 403 →
+// insufficient-role mapping the shared renderHTTPStatus path provides
+// for the tenant_admin-gated verb.
+func TestRunEnableReadsForbiddenRendersInsufficientRole(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/vmware-rest-9.0/enable-reads": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 403, map[string]string{"detail": "forbidden"})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	var errBuf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&errBuf)
+
+	err := runEnableReads(cmd, enableReadsOptions{
+		ConnectorID:       "vmware-rest-9.0",
+		Confirm:           true,
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("expected a non-nil error for HTTP 403")
+	}
+	if !strings.Contains(errBuf.String(), "tenant_admin") {
+		t.Fatalf("403 output missing role hint: %q", errBuf.String())
+	}
+}

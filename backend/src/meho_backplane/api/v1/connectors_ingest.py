@@ -31,6 +31,10 @@ Route inventory
 * ``POST /api/v1/connectors/{connector_id}/enable`` — transition all
   groups to ``enabled``; cascade. Returns 204. Idempotent. Role:
   ``tenant_admin``.
+* ``POST /api/v1/connectors/{connector_id}/enable-reads`` — bulk-enable
+  every read-class (GET/HEAD) ingested op; writes stay default-deny.
+  Returns 200 with :class:`EnableReadsResponse` (``ops_enabled``
+  count). Idempotent (G0.25-T7 #1749). Role: ``tenant_admin``.
 * ``POST /api/v1/connectors/{connector_id}/disable`` — transition all
   groups to ``disabled``; cascade. Returns 204. Idempotent. Role:
   ``tenant_admin``.
@@ -162,6 +166,7 @@ from meho_backplane.operations.ingest import (
     EditGroupBody,
     EditOpBody,
     EditOpResponse,
+    EnableReadsResponse,
     IngestionPipelineResult,
     IngestionPipelineService,
     IngestJob,
@@ -1232,6 +1237,56 @@ async def enable_endpoint(
             detail=str(exc),
         ) from exc
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{connector_id}/enable-reads",
+    response_model=EnableReadsResponse,
+)
+async def enable_reads_endpoint(
+    connector_id: str,
+    operator: Operator = _require_admin,
+) -> EnableReadsResponse:
+    """Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).
+
+    Flips ``is_enabled=true`` on every ingested operation whose HTTP
+    method is GET or HEAD in one pass, leaving every write-shaped verb
+    (POST / PUT / PATCH / DELETE) and every typed / composite op
+    default-deny — writes keep their per-op / composite curation by
+    design. The point is broad governed *read* coverage on big
+    ingested surfaces without a per-op death-march; the governance
+    boundary (writes route through a hand-authored composite or
+    command-template) is untouched.
+
+    Returns 200 with an :class:`EnableReadsResponse` carrying the
+    ``ops_enabled`` count (not the 204 the enable / disable
+    transitions return) so the operator and the generated Go client
+    see how many ops flipped. Idempotent: a re-call once the reads are
+    enabled flips nothing, writes no audit row, and returns
+    ``ops_enabled=0``. Unlike ``enable``, this does not move any
+    group's ``review_status`` — it is a per-op flip, so there is no
+    state-machine guard and no 409 path. Unknown / cross-tenant
+    connector → 404 (the deliberate conflation). One
+    ``meho.connector.enable_reads`` audit row is written when at least
+    one op flips.
+
+    Tenant scoping (#1699 contract): no ``tenant_id`` parameter — the
+    scope is always the calling operator's tenant from the JWT. The
+    MCP sibling ``meho.connector.enable_reads`` accepts an optional
+    ``tenant_id`` for the built-in / global scope (tenant_admin only).
+    """
+    service = ReviewService(operator)
+    try:
+        ops_enabled = await service.enable_reads(
+            connector_id,
+            tenant_id=operator.tenant_id,
+        )
+    except ConnectorNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return EnableReadsResponse(connector_id=connector_id, ops_enabled=ops_enabled)
 
 
 @router.post(

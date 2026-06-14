@@ -672,6 +672,31 @@ class EditOpResponse(BaseModel):
     warnings: list[EditOpWarning]
 
 
+class EnableReadsResponse(BaseModel):
+    """Response body for ``POST /api/v1/connectors/{id}/enable-reads`` (G0.25-T7 #1749).
+
+    The bulk read-class enable path returns ``200`` with a count
+    rather than ``204`` (the enable / disable transition shape) so the
+    operator and the generated Go client see how many ops the action
+    flipped — the AC requires the audit row carry a count, and echoing
+    it on the wire lets the CLI render ``enabled N read operation(s)``
+    without a follow-up review fetch.
+
+    ``connector_id`` echoes the targeted connector so a ``--json``
+    pipeline has a self-contained artifact. ``ops_enabled`` is the
+    number of read-class ops that flipped from ``is_enabled=false`` to
+    ``true``; it is ``0`` on the idempotent re-run (every read already
+    enabled), in which case no audit row was written. Both fields are
+    required (no default) so the OpenAPI schema marks them
+    always-present and the Go client gets plain value types.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    connector_id: str
+    ops_enabled: int
+
+
 #: Lifecycle of an async ingest job. Mirrors
 #: :data:`~meho_backplane.operations.ingest.jobs.IngestJobStatus` so
 #: the Pydantic projection and the internal dataclass share one

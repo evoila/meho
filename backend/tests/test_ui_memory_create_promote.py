@@ -726,6 +726,150 @@ def test_create_submit_real_modal_cookie_header_pair_returns_204() -> None:
     assert _count_documents(_TENANT_A, MemoryScope.USER) == 1
 
 
+def test_create_after_background_poll_keeps_modal_token_valid_returns_204() -> None:
+    """Modal render -> 60s poll -> create POST with the modal pair -> 204 (#1754).
+
+    Headline regression. The reproduction the hand-minted sibling tests
+    miss: open the create modal (which mints + Set-Cookies a token and
+    echoes the same value in the form's ``hx-headers``), then fire the
+    cards fragment's ``hx-trigger="every 60s"`` poll
+    (``GET /ui/memory`` with ``HX-Request: true``) *before* submitting.
+    Pre-fix, the poll re-minted + Set-Cookied a fresh ``meho_csrf``,
+    rotating the cookie out from under the modal's captured token, so
+    the create POST presented a header that no longer matched the cookie
+    and the chassis middleware returned ``403 csrf_token_invalid``.
+    Post-fix the poll leaves the cookie untouched, so the modal's
+    captured pair still validates -> 204.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        # 1. Open the modal: capture the cookie + the form's echoed token.
+        modal = client.get("/ui/memory/create", headers={"HX-Request": "true"})
+        assert modal.status_code == 200, modal.text
+        cookie_match = _CSRF_SETCOOKIE_RE.search(modal.headers.get("set-cookie", ""))
+        assert cookie_match, "modal render set no meho_csrf cookie"
+        modal_token = cookie_match.group(1)
+        header_tokens = _FORM_HX_HEADERS_RE.findall(modal.text)
+        assert header_tokens == [modal_token], (
+            "modal cookie + form hx-headers token must be the same minted value"
+        )
+        # The chassis cookie is ``Secure``, which the http-scheme
+        # TestClient jar drops, so seed it explicitly -- the browser
+        # round-trip that holds it across the poll + the create POST.
+        client.cookies.set(CSRF_COOKIE_NAME, modal_token, path="/ui")
+
+        # 2. The cards fragment's every-60s poll fires while the modal is
+        #    open. This must NOT rotate the cookie.
+        poll = client.get("/ui/memory?scope=all", headers={"HX-Request": "true"})
+        assert poll.status_code == 200, poll.text
+        poll_set_cookie = poll.headers.get_list("set-cookie")
+        assert not any(f"{CSRF_COOKIE_NAME}=" in h for h in poll_set_cookie), (
+            "the background poll rotated meho_csrf -- the #1754 root cause"
+        )
+
+        # 3. Submit the create using the modal's captured pair, exactly as
+        #    the browser would after the poll.
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "# survives the poll\n\nbody"},
+                headers=_csrf_headers(modal_token),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert response.headers.get("HX-Redirect") == "/ui/memory"
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 1
+
+
+def test_create_modal_renders_visible_error_handler() -> None:
+    """The create form wires a visible-error path for a failed submit (#1754).
+
+    The form posts with ``hx-swap="none"``, so a non-2xx response (the
+    CSRF middleware's silent 403, chiefly) is dropped unless the form
+    handles it. Assert the form carries an ``hx-on::response-error``
+    handler and the modal renders the error-banner element + the
+    ``window.memoryCreateShowError`` handler it calls, so a rejection
+    surfaces in the modal instead of failing silently.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        modal = client.get("/ui/memory/create", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert modal.status_code == 200, modal.text
+    body = modal.text
+    # The form handles the htmx error event (the chassis 403 included).
+    assert "hx-on::response-error" in body
+    # The banner the handler reveals + the handler it calls are present.
+    assert "data-create-error" in body
+    assert "window.memoryCreateShowError" in body
+
+
+def test_create_forged_header_still_rejected_after_poll_returns_403() -> None:
+    """No CSRF regression: a forged double-submit is still 403, poll or not (#1754).
+
+    Stopping the gratuitous cookie rotation must not weaken the
+    middleware: a create POST whose ``X-CSRF-Token`` header does not
+    match the cookie (the same-site forgery vector the double-submit
+    defends) is still rejected. Driven through the real modal + poll
+    sequence so the assertion lands on the post-fix code path.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        modal = client.get("/ui/memory/create", headers={"HX-Request": "true"})
+        cookie_match = _CSRF_SETCOOKIE_RE.search(modal.headers.get("set-cookie", ""))
+        assert cookie_match
+        modal_token = cookie_match.group(1)
+        client.cookies.set(CSRF_COOKIE_NAME, modal_token)
+        client.get("/ui/memory?scope=all", headers={"HX-Request": "true"})
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "forged attempt"},
+                # Cookie holds the real token; header presents a foreign one.
+                headers=_csrf_headers("forged-token-not-matching-cookie"),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "csrf_token_invalid"
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
+
+
 # ---------------------------------------------------------------------------
 # Create submit -- default-TTL injection (#1697, policy from G5.2-T2 #624)
 # ---------------------------------------------------------------------------

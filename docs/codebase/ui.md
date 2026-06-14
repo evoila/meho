@@ -1449,6 +1449,22 @@ silent no-op that audits worse).
   on every HTMX request from that page; the index page sets the
   same directive so future state-changing actions on the list (T3's
   bulk delete) inherit the token without per-element wiring.
+* `render_index` sets the `meho_csrf` cookie on the **full-page
+  render only**, never on the HTMX card-list fragment (#1754). The
+  `_cards.html` wrapper polls the same handler every 60s
+  (`hx-trigger="every 60s"`); minting + `Set-Cookie`-ing a fresh
+  token on each poll rotated the cookie out from under any open
+  create modal, whose render-time echo (#1693) then failed the
+  middleware's cookie/header match and 403'd the create POST. The
+  poll now **reuses** the token carried by the request's existing
+  `meho_csrf` cookie (validated via `verify_csrf_token`, so a
+  tampered value is never echoed back) and leaves the cookie
+  untouched, so the modal's token — and the cards fragment's own
+  bulk-action echo — stay valid across polls. A fragment fetched
+  with no prior cookie (defensive: no full-page load happened first)
+  falls back to a fresh mint + `Set-Cookie`. This mirrors the
+  inline-refresh path's zero-`Set-Cookie` posture (G0.25 #1694) that
+  keeps in-flight pages' CSRF tokens stable across a token rotation.
 
 ### Tests
 
@@ -1575,6 +1591,26 @@ before calling the service.
   (https://htmx.org/attributes/hx-headers/), so the form-level echo
   keeps the double-submit pair aligned — and the body textarea's
   debounced preview `hx-post` inherits the fresh token from the form.
+  (The cookie-rotation half of the same desync class — a background
+  list poll rotating the cookie *after* the modal renders — is fixed
+  separately in `render_index`; see the T1 "HTMX conventions" note on
+  #1754.)
+* The create form surfaces a failed submit instead of dropping it.
+  Because the form posts with `hx-swap="none"`, a non-2xx response —
+  most importantly the chassis CSRF middleware's
+  `403 {"detail":"csrf_token_invalid"}` — would otherwise be
+  swallowed silently (the operator clicks Create and nothing visibly
+  happens). The form carries
+  `hx-on::response-error="window.memoryCreateShowError(this, event)"`
+  (htmx 2.x double-colon shorthand for the `htmx:responseError`
+  event) which un-hides an `alert alert-error` banner above the form
+  fields with a status-tailored message read off
+  `event.detail.xhr.status` — a 403 reads as an expired session
+  token with a retry hint, a network error (`status === 0`) as a
+  connectivity message, any other status surfaces the server's
+  `detail` string. The form body is never swapped, so the operator's
+  input survives for an immediate retry; `hx-on::before-request`
+  hides the banner so a retry starts clean (#1754).
 * `hx-trigger="keyup changed delay:300ms"` on the create modal's
   body textarea drives the debounced server-side preview — see
   https://htmx.org/attributes/hx-trigger/. `delay:300ms` matches

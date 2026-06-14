@@ -49,7 +49,11 @@ from meho_backplane.memory import (
     PermissionDeniedError,
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
-from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.csrf import (
+    CSRF_COOKIE_NAME,
+    mint_csrf_token,
+    verify_csrf_token,
+)
 from meho_backplane.ui.routes.memory.bulk import (
     BULK_EXTEND_DURATIONS,
     format_countdown,
@@ -261,6 +265,41 @@ def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
     )
 
 
+def _resolve_list_csrf(request: Request, session_id: str, *, is_htmx: bool) -> tuple[str, bool]:
+    """Pick the CSRF token the list render echoes + whether to set the cookie.
+
+    Returns ``(token, set_cookie)``. The list page and its
+    ``hx-trigger="every 60s"`` cards fragment share one handler
+    (:func:`render_index`); the rule (#1754) is:
+
+    * **Full-page render** -- mint a fresh token, echo it, and set the
+      ``meho_csrf`` cookie so the double-submit pair is established for
+      the freshly loaded page.
+    * **HTMX fragment render (the poll)** -- *reuse* the token already
+      carried by the request's ``meho_csrf`` cookie and do **not** set
+      the cookie. A fresh mint + ``Set-Cookie`` on every poll rotates
+      the token out from under any open create modal (whose echoed
+      snapshot from #1693 then fails the middleware's cookie/header
+      match) and out from under the cards fragment's own bulk-action
+      ``hx-headers`` echo. Reusing the live cookie token keeps the
+      rendered echo aligned with the un-rotated cookie, so both the
+      modal create POST and the bulk POST still validate.
+
+    The reuse is gated on :func:`verify_csrf_token` so a tampered or
+    foreign cookie value never gets echoed back as the page's token; a
+    missing-or-invalid cookie on a fragment fetch (defensive -- e.g. a
+    direct fragment request with no prior full-page load) falls back to
+    a fresh mint + ``Set-Cookie`` so the fragment's own forms stay
+    functional.
+    """
+    if not is_htmx:
+        return mint_csrf_token(session_id), True
+    existing = request.cookies.get(CSRF_COOKIE_NAME)
+    if existing and verify_csrf_token(session_id, existing):
+        return existing, False
+    return mint_csrf_token(session_id), True
+
+
 def _common_template_context(
     session_ctx: UISessionContext,
     csrf_token: str,
@@ -355,12 +394,24 @@ async def render_index(
     ``hx-trigger="every 60s"`` on the cards fragment is what refreshes
     the countdown badges; the same handler responds to both the full
     page render and the HTMX poll.
+
+    The ``meho_csrf`` cookie is set on the full-page render **only**,
+    never on the HTMX fragment response (#1754). The cards fragment
+    polls this same handler every 60 seconds; setting the cookie on a
+    poll would rotate the double-submit token out from under any open
+    create modal, whose echoed token snapshot (#1693) would then fail
+    the middleware's cookie/header match and 403 the create POST. The
+    full-page load mints the cookie once; the open modal's token stays
+    valid across polls because the poll no longer touches the cookie.
+    This mirrors the inline-refresh path's zero-``Set-Cookie`` posture
+    (G0.25 #1694) that keeps in-flight pages' CSRF tokens stable.
     """
     scope_filter = resolve_scope_filter(scope)
     operator = build_read_operator(session_ctx)
     entries = await _list_for_render(operator, scope_filter, tag)
     active, recently_expired = partition_expired(entries)
-    csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    is_htmx = is_htmx_request(request)
+    csrf_token, set_csrf = _resolve_list_csrf(request, str(session_ctx.session_id), is_htmx=is_htmx)
     # The refresh URL preserves the active scope + tag so the HTMX
     # poll re-renders with the same filter state. T1's tabs already
     # encode the query string into the request URL; the fragment
@@ -379,9 +430,10 @@ async def render_index(
         "bulk_extend_durations": BULK_EXTEND_DURATIONS,
         "refresh_url": refresh_url,
     }
-    template_name = "memory/_cards.html" if is_htmx_request(request) else "memory/index.html"
+    template_name = "memory/_cards.html" if is_htmx else "memory/index.html"
     response = get_templates().TemplateResponse(request, template_name, context)
-    _set_csrf_cookie(response, csrf_token)
+    if set_csrf:
+        _set_csrf_cookie(response, csrf_token)
     return response
 
 

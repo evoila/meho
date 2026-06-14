@@ -100,6 +100,18 @@ connector-related release-notes line.
   default-deny. Tenant-scope-aware, idempotent, and audited as a
   single bulk-enable event with the count of ops enabled (#1749).
 
+### Fixed
+
+- Operator-console memory **create no longer 403s** under a background
+  list refresh. The memory list's 60-second card poll re-used the
+  page handler, which re-minted and `Set-Cookie`-d a fresh CSRF token
+  on every render — rotating the cookie out from under an open create
+  modal so the next submit failed the double-submit check with a
+  silent `csrf_token_invalid`. The handler now sets the CSRF cookie on
+  full-page loads only; polls reuse the live cookie token and leave it
+  untouched, and the create modal now renders a visible error banner
+  instead of swallowing a rejected submit (#1754).
+
 ## [0.15.0] - 2026-06-13
 
 ### Added

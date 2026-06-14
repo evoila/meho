@@ -100,6 +100,20 @@ connector-related release-notes line.
   default-deny. Tenant-scope-aware, idempotent, and audited as a
   single bulk-enable event with the count of ops enabled (#1749).
 
+### Fixed
+
+- `vault.kv.*` now returns an actionable path-shape hint instead of an
+  opaque `Forbidden` 403 when a caller passes a `path` that re-includes
+  the mount segment (`path="secret/meho/…"` with `mount="secret"`).
+  hvac addresses a secret as `v1/<mount>/data/<path>`, so the mount
+  prefix would double to `v1/secret/data/secret/meho/…` and fail the
+  Vault ACL indistinguishably from a real permission denial. All six KV
+  ops (read / list / put / patch / versions / delete) now reject the
+  mount-double-prefix before the Vault round-trip with a
+  `VaultPathShapeError` naming the mount-relative form to use
+  (e.g. `meho/test/federation`). A bare single-segment path equal to the
+  mount name is still forwarded unchanged (#1755).
+
 ## [0.15.0] - 2026-06-13
 
 ### Added

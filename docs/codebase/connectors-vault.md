@@ -291,6 +291,34 @@ degrades to a runtime `connector_error`; `[^/]+` rejects a
 slash-bearing value (`"secret/data"`) where hvac expects the bare
 mount handle.
 
+**Mount-included `path` guard (#1755).** All six handlers resolve their
+`(mount, path)` pair through the shared `_extract_mount_and_path(op_id,
+params)` helper, which applies the `mount` default + `.strip()` and adds
+a **path-shape pre-flight**: a `path` beginning with `"<mount>/"` raises
+`VaultPathShapeError` *before* the Vault round-trip (and before
+`enforce_tenant_scope`). hvac addresses a KV-v2 secret as
+`v1/<mount>/data/<path>`, so a caller that re-includes the mount in the
+`path` (`path="secret/meho/test/federation"` with the default
+`mount="secret"`) would double the mount segment to
+`v1/secret/data/secret/meho/test/federation` — a path the Vault ACL
+policy rejects with an opaque `Forbidden` 403 indistinguishable from a
+genuine permission denial. The `path` schema documents "no mount prefix"
+but cannot enforce it (the mount name is not known at schema-validation
+time), so this runtime guard names the mistake. The error message names
+the mount-relative form to use (e.g. `'meho/test/federation', not
+'secret/meho/test/federation'`) and echoes only the (non-secret)
+mount/path the caller already supplied — an actionable error over an
+opaque 403, per `docs/codebase/error-message-shape.md`. The guard
+**rejects** rather than silently stripping the prefix: an operator whose
+tenant layout legitimately starts a logical path with the mount name
+would be surprised by a silent rewrite. It fires only on the `"<mount>/"`
+*prefix* — a bare `path == mount` (a single-segment secret named after
+the mount) is forwarded unchanged. Tenant-scope denial (#1725) and this
+path-shape hint are distinct: the tenant guard's `VaultTenantScopeError`
+flags an out-of-namespace path, while `VaultPathShapeError` flags the
+mount-double-prefix typo specifically; the path-shape check runs first
+so its more specific message wins.
+
 **Two-phase failure model.** Login-side failures (Vault unreachable,
 role denied) raise `VaultClientError` subclasses; read/write-side
 failures (KV miss, malformed payload, CAS mismatch, permission
@@ -527,6 +555,16 @@ login-phase failure (any `VaultClientError` subclass:
 `VaultUnreachableError`, `VaultRoleDeniedError`) from read-phase
 failure (anything else). An unreachable or sealed Vault therefore never
 surfaces a raw traceback to the agent.
+
+Two pre-flight rejections raise **before** any Vault round-trip and so
+land as read-phase `connector_error`s with their own
+`extras["exception_class"]`, never a `VaultClientError`:
+`VaultTenantScopeError` (path outside the operator's tenant namespace,
+#1643/#1725) and `VaultPathShapeError` (the `path` re-includes the
+`"<mount>/"` segment, #1755 — see *Mount-included `path` guard* above).
+Both name only the non-secret mount/path the caller supplied, so an
+agent gets an actionable hint rather than the opaque `Forbidden` 403 the
+underlying mistake would otherwise produce.
 
 ## Dependencies
 

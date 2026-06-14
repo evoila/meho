@@ -427,7 +427,7 @@ async def test_execute_vault_kv_read_returns_secret_data(
     )
     result = await _dispatch_vault(
         "vault.kv.read",
-        {"path": "secret/meho/test/federation"},
+        {"path": "meho/test/federation"},
         jwt="op-jwt",
     )
 
@@ -441,9 +441,12 @@ async def test_execute_vault_kv_read_returns_secret_data(
         {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
     ]
     # Mount defaults to "secret" when the caller omits it — the
-    # path-only call site keeps working unchanged.
+    # path-only call site keeps working unchanged. The path is
+    # mount-relative ("meho/test/federation", not "secret/meho/…"); a
+    # mount-included path is rejected by the #1755 path-shape guard
+    # (test_execute_kv_op_mount_included_path_returns_path_shape_error).
     assert fake.secrets.kv.v2.read_calls == [
-        {"path": "secret/meho/test/federation", "mount_point": "secret"},
+        {"path": "meho/test/federation", "mount_point": "secret"},
     ]
     assert fake.auth.token.revoke_calls == 1
 
@@ -1007,6 +1010,120 @@ async def test_execute_vault_kv_list_malformed_payload_is_structured_error(
     assert result.status == "error"
     assert result.extras.get("error_code") == "connector_error"
     assert result.extras.get("exception_class") == "KeyError"
+
+
+# ---------------------------------------------------------------------------
+# Mount-included path-shape guard (#1755)
+# ---------------------------------------------------------------------------
+
+#: Each KV-v2 verb with a ``path`` that re-includes the default
+#: ``"secret/"`` mount segment — the mount-double-prefix mistake the
+#: guard rejects. One row per op so a regression on any single handler's
+#: extraction call surfaces independently.
+_MOUNT_PREFIXED_PATH_CASES: list[tuple[str, dict[str, Any]]] = [
+    ("vault.kv.read", {"path": "secret/meho/test/federation"}),
+    ("vault.kv.list", {"path": "secret/meho/test"}),
+    ("vault.kv.put", {"path": "secret/meho/test", "data": {"k": "v"}}),
+    ("vault.kv.patch", {"path": "secret/meho/test", "data": {"k": "v"}}),
+    ("vault.kv.versions", {"path": "secret/meho/test"}),
+    ("vault.kv.delete", {"path": "secret/meho/test", "versions": [1]}),
+]
+
+
+@pytest.mark.parametrize(
+    "op_id,params",
+    _MOUNT_PREFIXED_PATH_CASES,
+    ids=[op_id for op_id, _ in _MOUNT_PREFIXED_PATH_CASES],
+)
+async def test_execute_kv_op_mount_included_path_returns_path_shape_error(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A ``path`` re-including the mount segment → ``VaultPathShapeError``, no hvac call.
+
+    Regression for #1755: hvac addresses a KV-v2 secret as
+    ``v1/<mount>/data/<path>``, so a caller that passes
+    ``path="secret/meho/…"`` with the default ``mount="secret"`` doubles
+    the mount to ``v1/secret/data/secret/meho/…`` — an opaque ``Forbidden``
+    403 indistinguishable from a real permission denial. The shared
+    extractor rejects the mount-double-prefix *before* the Vault round-trip
+    (and before the tenant-scope guard), so the dispatcher surfaces a
+    structured ``connector_error`` with ``exception_class="VaultPathShapeError"``
+    rather than the doubled-path 403.
+    """
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "VaultPathShapeError"
+
+    # The message names the mistake (the mount segment) and the
+    # mount-relative form to use instead — an actionable error, not an
+    # opaque 403 (docs/codebase/error-message-shape.md).
+    message = result.extras.get("exception_message", "")
+    assert "secret/" in message
+    assert "mount-relative" in message
+
+    # hvac is never reached: no JWT/OIDC login, and the verb's own call
+    # log stays empty. The guard short-circuits ahead of every Vault call.
+    assert fake.auth.jwt.login_calls == []
+    kv = fake.secrets.kv.v2
+    assert kv.read_calls == []
+    assert kv.list_calls == []
+    assert kv.put_calls == []
+    assert kv.patch_calls == []
+    assert kv.versions_calls == []
+    assert kv.delete_calls == []
+
+
+async def test_execute_kv_op_mount_included_path_honors_explicit_non_default_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """The guard keys off the *supplied* mount, not the literal ``"secret"``.
+
+    A non-default ``mount="kv-prod"`` with ``path="kv-prod/team"`` is the
+    same doubled-prefix mistake and is rejected the same way; the message
+    names the supplied mount and the mount-relative remainder.
+    """
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(
+        "vault.kv.read",
+        {"mount": "kv-prod", "path": "kv-prod/team/api-key"},
+    )
+
+    assert result.status == "error"
+    assert result.extras.get("exception_class") == "VaultPathShapeError"
+    message = result.extras.get("exception_message", "")
+    assert "kv-prod/" in message
+    assert "'team/api-key'" in message
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+async def test_execute_kv_op_path_equal_to_mount_is_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A bare ``path == mount`` is a legitimate secret, not a doubled prefix.
+
+    The guard fires only on the ``"<mount>/"`` prefix; a single-segment
+    path that happens to equal the mount name (``path="secret"`` under
+    ``mount="secret"``) addresses ``v1/secret/data/secret`` and is forwarded
+    to hvac unchanged. Locks the boundary so the guard does not over-reject.
+    """
+    fake = install_fake_client(monkeypatch, secret={"k": "v"})
+    result = await _dispatch_vault("vault.kv.read", {"path": "secret"})
+
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.read_calls == [
+        {"path": "secret", "mount_point": "secret"},
+    ]
 
 
 @pytest.mark.parametrize(

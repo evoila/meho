@@ -46,6 +46,31 @@ walks that table to pick the right class for a given target.
 When two or more connectors advertise support for a target's
 `(product, version)` pair:
 
+### Step 0 — hand-rolled class beats auto-shim
+
+The [spec-ingestion pipeline](spec-ingestion.md) auto-registers a
+`GenericRestConnector` shim per ingested `(product, version, impl_id)`
+so a freshly ingested spec resolves before any per-product class
+exists. When a shipped hand-rolled `Connector` subclass and an
+auto-shim are both candidates for the same `(product, version)` label,
+the hand-rolled class wins and every `GenericRestConnector` candidate
+is dropped — *before* the specificity step below.
+
+Without this rung, a stray ingest under a novel `impl_id` shadows a
+shipped connector: the shim's
+[`derive_supported_version_range`](../../backend/src/meho_backplane/operations/ingest/connector_registration.py)
+pins a *narrower* range around the exact ingested version than a
+hand-rolled class's broad range, so the shim would win
+most-specific-version-match before the hand-rolled class's `priority`
+is ever read ([#1750](https://github.com/evoila/meho/issues/1750), a
+v0.15.0 dogfood signal). The invariant is unconditional: a hand-rolled
+class always outranks an auto-shim for the same label, independent of
+version-range span or `priority`.
+
+When only auto-shims exist for a label (a genuine catalog-first
+staging connector not yet replaced by a hand-rolled subclass), this
+rung is a no-op and the shim still resolves.
+
 ### Step 1 — most-specific-version-match wins
 
 Specificity is measured by the size of the bounded interval the

@@ -93,12 +93,18 @@ class _FakeReviewService:
         warnings=(),
     )
 
+    #: Canned :meth:`enable_reads` count — class attribute for the same
+    #: lazy-construction reason as ``edit_op_warnings``. Default mirrors
+    #: a clean run that flipped two read-class ops.
+    enable_reads_count: ClassVar[int] = 2
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
         self.edit_group_calls: list[dict[str, Any]] = []
         self.edit_op_calls: list[dict[str, Any]] = []
         self.enable_calls: list[str] = []
+        self.enable_reads_calls: list[dict[str, Any]] = []
         self.disable_calls: list[str] = []
         self.delete_calls: list[dict[str, Any]] = []
 
@@ -150,6 +156,10 @@ class _FakeReviewService:
 
     async def enable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.enable_calls.append(connector_id)
+
+    async def enable_reads(self, connector_id: str, **kwargs: Any) -> int:
+        self.enable_reads_calls.append({"connector_id": connector_id, **kwargs})
+        return self.enable_reads_count
 
     async def disable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.disable_calls.append(connector_id)
@@ -229,6 +239,7 @@ _ADMIN_TOOL_NAMES = {
     "meho.connector.edit_group",
     "meho.connector.edit_op",
     "meho.connector.enable",
+    "meho.connector.enable_reads",
     "meho.connector.disable",
     "meho.connector.delete",
 }
@@ -291,7 +302,7 @@ def test_admin_read_tools_visible_to_operator_role(
 def test_all_admin_tools_visible_to_tenant_admin_role(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A tenant_admin client sees all 7 admin tools."""
+    """A tenant_admin client sees all 8 admin tools."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -720,6 +731,83 @@ def test_call_meho_connector_enable_dispatches(
 
     [review] = stubbed_services["review"]
     assert review.enable_calls == ["vmware-rest-9.0"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_meho_connector_enable_reads_dispatches(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+) -> None:
+    """``enable_reads`` calls ReviewService.enable_reads and echoes the count.
+
+    Pins the #1699 tenant-scope contract on the new tool: an omitted
+    ``tenant_id`` forwards ``None`` (global / built-in) to
+    :meth:`ReviewService.enable_reads`, mirroring the other mutators.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.enable_reads",
+                "arguments": {"connector_id": "vmware-rest-9.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = _unwrap_text_content(response.json())
+    assert payload == {
+        "connector_id": "vmware-rest-9.0",
+        "ops_enabled": 2,
+        "ok": True,
+    }
+
+    [review] = stubbed_services["review"]
+    assert review.enable_reads_calls == [
+        {"connector_id": "vmware-rest-9.0", "tenant_id": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_meho_connector_enable_reads_rejected_for_operator_role(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+) -> None:
+    """An operator-role caller guessing the tool name gets a JSON-RPC error."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.enable_reads",
+                "arguments": {"connector_id": "vmware-rest-9.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    # JSON-RPC -32602 INVALID_PARAMS per the handlers.py "forbidden" mapping.
+    assert body["error"]["code"] == -32602
+    assert "forbidden" in body["error"]["message"].lower()
+    # The handler never ran — no service call was recorded.
+    assert not stubbed_services["review"], (
+        "operator role bypassed RBAC and reached the service layer"
+    )
 
 
 @pytest.mark.parametrize(

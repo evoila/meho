@@ -47,10 +47,13 @@ __all__ = [
     "OP_EDIT_OP",
     "OP_ENABLE_CONNECTOR",
     "OP_ENABLE_GROUP",
+    "OP_ENABLE_READS",
     "OP_LLM_GROUPING",
+    "READ_HTTP_METHODS",
     "VALID_SAFETY_LEVELS",
     "ConnectorScope",
     "apply_op_overrides",
+    "bulk_enable_read_ops",
     "cascade_is_enabled",
     "enable_time_auto_shim_warnings",
     "load_group",
@@ -72,10 +75,24 @@ AUDIT_METHOD: Final[str] = "SERVICE"
 OP_ENABLE_CONNECTOR: Final[str] = "meho.connector.enable"
 OP_DISABLE_CONNECTOR: Final[str] = "meho.connector.disable"
 OP_ENABLE_GROUP: Final[str] = "meho.connector.enable_group"
+OP_ENABLE_READS: Final[str] = "meho.connector.enable_reads"
 OP_EDIT_GROUP: Final[str] = "meho.connector.edit_group"
 OP_EDIT_OP: Final[str] = "meho.connector.edit_op"
 OP_DELETE_CONNECTOR: Final[str] = "meho.connector.delete"
 OP_LLM_GROUPING: Final[str] = "meho.connector.llm_grouping"
+
+#: HTTP methods that classify an ingested op as *read-class*. The
+#: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
+#: only on ingested ops whose ``method`` is one of these; every
+#: write-shaped verb (POST / PUT / PATCH / DELETE) stays default-deny.
+#: ``EndpointDescriptor`` carries no ``op_class`` column — the
+#: read/write taxonomy the MCP tool registry uses lives on
+#: :class:`~meho_backplane.mcp.registry.ToolDefinition`, not the
+#: descriptor row — so HTTP method is the per-row read-class signal
+#: for ingested operations (typed / composite ops have ``method``
+#: NULL and are never matched). Stored uppercase to compare against
+#: the verbatim spec verbs the ingest parser writes.
+READ_HTTP_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 
 #: Allowed values for :attr:`EndpointDescriptor.safety_level`. The
 #: same set is enforced by the DB CHECK constraint; the Python-side
@@ -400,6 +417,57 @@ async def cascade_is_enabled(
     # The cast is to CursorResult because AsyncSession.execute is
     # typed to return the generic Result whose rowcount mypy can't
     # see; at runtime an UPDATE produces a CursorResult that does.
+    result: CursorResult[Any] = await session.execute(stmt)  # type: ignore[assignment]
+    rowcount = result.rowcount if result.rowcount is not None else 0
+    return max(rowcount, 0)
+
+
+async def bulk_enable_read_ops(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> int:
+    """Flip ``is_enabled=True`` on every staged read-class ingested op in *scope*.
+
+    The bulk read-class enable path (G0.25-T7 #1749). Read-class is
+    HTTP method ∈ :data:`READ_HTTP_METHODS` (``GET`` / ``HEAD``) on an
+    ``source_kind='ingested'`` row; every write-shaped verb
+    (POST / PUT / PATCH / DELETE) and every typed / composite op
+    (``method`` NULL) is left untouched so writes stay default-deny.
+
+    Returns the number of rows actually changed. The
+    ``is_enabled != True`` guard is what makes the action idempotent:
+    re-running once the reads are enabled matches no rows and returns
+    ``0``, so the caller writes no audit row. The whole-connector
+    filter (no ``group_id`` predicate) is deliberate — the path
+    enables reads across the connector regardless of which groups
+    are staged vs. enabled, because read-class coverage is the goal,
+    not a group-level review transition.
+
+    Scope is honoured the same way every sibling helper honours it:
+    the ``(product, version, impl_id)`` triple plus the
+    ``tenant_id IS NULL`` / ``tenant_id = :tid`` split, so an
+    operator-tenant call never touches built-in rows and vice versa.
+    The ``CursorResult`` cast mirrors :func:`cascade_is_enabled` —
+    mypy can't see ``rowcount`` on the generic ``Result`` the async
+    ``execute`` is typed to return, but an ``UPDATE`` produces a
+    ``CursorResult`` at runtime.
+    """
+    stmt = (
+        update(EndpointDescriptor)
+        .where(
+            EndpointDescriptor.product == scope.product,
+            EndpointDescriptor.version == scope.version,
+            EndpointDescriptor.impl_id == scope.impl_id,
+            EndpointDescriptor.source_kind == "ingested",
+            EndpointDescriptor.method.in_(sorted(READ_HTTP_METHODS)),
+            EndpointDescriptor.is_enabled.is_(False),
+        )
+        .values(is_enabled=True)
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
     result: CursorResult[Any] = await session.execute(stmt)  # type: ignore[assignment]
     rowcount = result.rowcount if result.rowcount is not None else 0
     return max(rowcount, 0)

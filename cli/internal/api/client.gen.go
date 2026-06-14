@@ -2485,6 +2485,27 @@ type EditTemplateResponse struct {
 	Version    int       `json:"version"`
 }
 
+// EnableReadsResponse Response body for “POST /api/v1/connectors/{id}/enable-reads“ (G0.25-T7 #1749).
+//
+// The bulk read-class enable path returns “200“ with a count
+// rather than “204“ (the enable / disable transition shape) so the
+// operator and the generated Go client see how many ops the action
+// flipped — the AC requires the audit row carry a count, and echoing
+// it on the wire lets the CLI render “enabled N read operation(s)“
+// without a follow-up review fetch.
+//
+// “connector_id“ echoes the targeted connector so a “--json“
+// pipeline has a self-contained artifact. “ops_enabled“ is the
+// number of read-class ops that flipped from “is_enabled=false“ to
+// “true“; it is “0“ on the idempotent re-run (every read already
+// enabled), in which case no audit row was written. Both fields are
+// required (no default) so the OpenAPI schema marks them
+// always-present and the Go client gets plain value types.
+type EnableReadsResponse struct {
+	ConnectorId string `json:"connector_id"`
+	OpsEnabled  int    `json:"ops_enabled"`
+}
+
 // EvalRequest POST body for “/api/v1/retrieve/eval“.
 //
 // Frozen + extra=forbid so a typo (“surfaces“ instead of
@@ -5508,6 +5529,11 @@ type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
+type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams defines parameters for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch.
 type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7302,6 +7328,9 @@ type ClientInterface interface {
 	// EnableEndpointApiV1ConnectorsConnectorIdEnablePost request
 	EnableEndpointApiV1ConnectorsConnectorIdEnablePost(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost request
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost(ctx context.Context, connectorId string, params *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody request with any body
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8444,6 +8473,18 @@ func (c *Client) DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx contex
 
 func (c *Client) EnableEndpointApiV1ConnectorsConnectorIdEnablePost(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEnableEndpointApiV1ConnectorsConnectorIdEnablePostRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost(ctx context.Context, connectorId string, params *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostRequest(c.Server, connectorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -13153,6 +13194,55 @@ func NewEnableEndpointApiV1ConnectorsConnectorIdEnablePostRequest(server string,
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/connectors/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostRequest generates requests for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost
+func NewEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostRequest(server string, connectorId string, params *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/enable-reads", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -21412,6 +21502,9 @@ type ClientWithResponsesInterface interface {
 	// EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse request
 	EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse, error)
 
+	// EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse request
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse(ctx context.Context, connectorId string, params *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams, reqEditors ...RequestEditorFn) (*EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse, error)
+
 	// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse request with any body
 	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
 
@@ -22860,6 +22953,29 @@ func (r EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse) Status() str
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EnableReadsResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -26273,6 +26389,15 @@ func (c *ClientWithResponses) EnableEndpointApiV1ConnectorsConnectorIdEnablePost
 	return ParseEnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse(rsp)
 }
 
+// EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse request returning *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse
+func (c *ClientWithResponses) EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse(ctx context.Context, connectorId string, params *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams, reqEditors ...RequestEditorFn) (*EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse, error) {
+	rsp, err := c.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse(rsp)
+}
+
 // EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse request with arbitrary body returning *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
 func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
 	rsp, err := c.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx, connectorId, groupKey, params, contentType, body, reqEditors...)
@@ -29176,6 +29301,39 @@ func ParseEnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse(rsp *http.R
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse parses an HTTP response from a EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse call
+func ParseEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse(rsp *http.Response) (*EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EnableReadsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

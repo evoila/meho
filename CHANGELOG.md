@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Bulk read-class connector enable path across REST + MCP + CLI:
+  `POST /api/v1/connectors/{id}/enable-reads`, the
+  `meho.connector.enable_reads` MCP tool, and `meho connector
+  enable-reads <id>` flip every GET/HEAD ingested op to enabled in one
+  pass, leaving every write-shaped op (POST/PUT/PATCH/DELETE)
+  default-deny. Tenant-scope-aware, idempotent, and audited as a
+  single bulk-enable event with the count of ops enabled (#1749).
+
 ## [0.15.0] - 2026-06-13
 
 ### Added

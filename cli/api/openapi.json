@@ -3376,6 +3376,59 @@
         }
       }
     },
+    "/api/v1/connectors/{connector_id}/enable-reads": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Enable Reads Endpoint",
+        "description": "Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).\n\nFlips ``is_enabled=true`` on every ingested operation whose HTTP\nmethod is GET or HEAD in one pass, leaving every write-shaped verb\n(POST / PUT / PATCH / DELETE) and every typed / composite op\ndefault-deny \u2014 writes keep their per-op / composite curation by\ndesign. The point is broad governed *read* coverage on big\ningested surfaces without a per-op death-march; the governance\nboundary (writes route through a hand-authored composite or\ncommand-template) is untouched.\n\nReturns 200 with an :class:`EnableReadsResponse` carrying the\n``ops_enabled`` count (not the 204 the enable / disable\ntransitions return) so the operator and the generated Go client\nsee how many ops flipped. Idempotent: a re-call once the reads are\nenabled flips nothing, writes no audit row, and returns\n``ops_enabled=0``. Unlike ``enable``, this does not move any\ngroup's ``review_status`` \u2014 it is a per-op flip, so there is no\nstate-machine guard and no 409 path. Unknown / cross-tenant\nconnector \u2192 404 (the deliberate conflation). One\n``meho.connector.enable_reads`` audit row is written when at least\none op flips.\n\nTenant scoping (#1699 contract): no ``tenant_id`` parameter \u2014 the\nscope is always the calling operator's tenant from the JWT. The\nMCP sibling ``meho.connector.enable_reads`` accepts an optional\n``tenant_id`` for the built-in / global scope (tenant_admin only).",
+        "operationId": "enable_reads_endpoint_api_v1_connectors__connector_id__enable_reads_post",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnableReadsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/connectors/{connector_id}/disable": {
       "post": {
         "tags": [
@@ -13607,6 +13660,25 @@
         ],
         "title": "EditTemplateResponse",
         "description": "Response for ``meho.runbook.edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``."
+      },
+      "EnableReadsResponse": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "ops_enabled": {
+            "type": "integer",
+            "title": "Ops Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "ops_enabled"
+        ],
+        "title": "EnableReadsResponse",
+        "description": "Response body for ``POST /api/v1/connectors/{id}/enable-reads`` (G0.25-T7 #1749).\n\nThe bulk read-class enable path returns ``200`` with a count\nrather than ``204`` (the enable / disable transition shape) so the\noperator and the generated Go client see how many ops the action\nflipped \u2014 the AC requires the audit row carry a count, and echoing\nit on the wire lets the CLI render ``enabled N read operation(s)``\nwithout a follow-up review fetch.\n\n``connector_id`` echoes the targeted connector so a ``--json``\npipeline has a self-contained artifact. ``ops_enabled`` is the\nnumber of read-class ops that flipped from ``is_enabled=false`` to\n``true``; it is ``0`` on the idempotent re-run (every read already\nenabled), in which case no audit row was written. Both fields are\nrequired (no default) so the OpenAPI schema marks them\nalways-present and the Go client gets plain value types."
       },
       "EvalRequest": {
         "properties": {

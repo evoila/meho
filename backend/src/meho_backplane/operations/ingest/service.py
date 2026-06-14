@@ -88,8 +88,10 @@ from meho_backplane.operations.ingest._internals import (
     OP_EDIT_OP,
     OP_ENABLE_CONNECTOR,
     OP_ENABLE_GROUP,
+    OP_ENABLE_READS,
     ConnectorScope,
     apply_op_overrides,
+    bulk_enable_read_ops,
     cascade_is_enabled,
     enable_time_auto_shim_warnings,
     load_group,
@@ -501,6 +503,64 @@ class ReviewService:
             allowed_source=("staged", "disabled"),
             op_id=OP_ENABLE_CONNECTOR,
         )
+
+    async def enable_reads(
+        self,
+        connector_id: str,
+        *,
+        tenant_id: UUID | None,
+    ) -> int:
+        """Enable every read-class (GET/HEAD) ingested op in one pass (G0.25-T7 #1749).
+
+        Flips ``is_enabled=True`` on every ingested operation whose
+        HTTP method is ``GET`` or ``HEAD`` (:data:`READ_HTTP_METHODS`),
+        leaving every write-shaped verb (POST / PUT / PATCH / DELETE)
+        and every typed / composite op **default-deny**. The point is
+        broad governed *read* coverage on big ingested surfaces
+        (``vmware-rest-9.0`` is 3000+ ops, mostly staged GETs) without
+        a per-op death-march; writes keep their per-op / composite
+        curation by design — that's the governance boundary.
+
+        Returns the number of ops enabled. Unlike
+        :meth:`enable_connector`, this does **not** move any group's
+        ``review_status`` — it is purely a per-op ``is_enabled`` flip
+        (the dumb substrate the agent's ``search_operations`` /
+        dispatch path reads), so a connector can stay ``staged`` at the
+        group level while its reads are dispatchable, the same way
+        :meth:`edit_op` flips one op without a group transition.
+
+        Scope-aware and idempotent. The connector must exist in
+        *tenant_id*'s scope or :class:`ConnectorNotFoundError` is
+        raised (the same 404 conflation every other method uses).
+        Exactly **one** ``meho.connector.enable_reads`` audit row is
+        written, carrying ``ops_enabled_count``, and only when at least
+        one op actually flipped: a re-run once the reads are enabled
+        matches no rows, writes no audit row, and returns ``0``.
+        """
+        scope = self._resolve_scope(connector_id, tenant_id)
+        sessionmaker = self._sessionmaker()
+        async with sessionmaker() as session:
+            # Proves the connector exists in scope (else 404) before
+            # the blind bulk UPDATE — the UPDATE's rowcount alone
+            # can't tell "no read ops to flip" from "no such connector".
+            await load_groups(session, scope, connector_id)
+            ops_enabled = await bulk_enable_read_ops(session, scope)
+            if ops_enabled == 0:
+                # Idempotent no-op: nothing changed, so write no audit
+                # row (mirrors the enable/disable transition contract).
+                return 0
+            await write_audit_row(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                op_id=OP_ENABLE_READS,
+                payload={
+                    "connector_id": connector_id,
+                    "ops_enabled_count": ops_enabled,
+                },
+            )
+            await session.commit()
+        return ops_enabled
 
     async def disable_connector(
         self,

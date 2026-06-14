@@ -3,7 +3,7 @@
 
 """Admin MCP tools for the connector review + state-machine surface (G0.7-T7).
 
-Seven tools under the ``meho.connector.*`` namespace, deliberately
+Eight tools under the ``meho.connector.*`` namespace, deliberately
 separate from the agent-surface meta-tools
 (:mod:`~meho_backplane.mcp.tools.operations`):
 
@@ -12,6 +12,9 @@ separate from the agent-surface meta-tools
 * ``meho.connector.edit_group`` — edit one group. **tenant_admin**.
 * ``meho.connector.edit_op`` — edit one op override. **tenant_admin**.
 * ``meho.connector.enable`` — flip the connector to enabled. **tenant_admin**.
+* ``meho.connector.enable_reads`` — bulk-enable every read-class
+  (GET/HEAD) ingested op; writes stay default-deny (G0.25-T7 #1749).
+  **tenant_admin**.
 * ``meho.connector.disable`` — flip the connector to disabled. **tenant_admin**.
 * ``meho.connector.delete`` — delete the connector's rows + auto-shim
   registration (G0.25-T2 #1700). **tenant_admin**.
@@ -246,6 +249,31 @@ async def _enable_handler(
     service = ReviewService(operator)
     await service.enable_connector(connector_id, tenant_id=tenant_id)
     return {"connector_id": connector_id, "status": "enabled", "ok": True}
+
+
+async def _enable_reads_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).
+
+    Delegates to :meth:`ReviewService.enable_reads` — the same service
+    path ``POST /api/v1/connectors/{connector_id}/enable-reads`` drives.
+    ``ops_enabled`` echoes the count of ops flipped (``0`` on the
+    idempotent re-run). The ``tenant_id`` argument follows the #1699
+    contract this module's mutators share: omitted / null → the
+    built-in / global scope (tenant_admin only); an explicit UUID →
+    that tenant's curated rows.
+    """
+    connector_id: str = arguments["connector_id"]
+    tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    service = ReviewService(operator)
+    ops_enabled = await service.enable_reads(connector_id, tenant_id=tenant_id)
+    return {
+        "connector_id": connector_id,
+        "ops_enabled": ops_enabled,
+        "ok": True,
+    }
 
 
 async def _disable_handler(
@@ -509,6 +537,52 @@ register_mcp_tool(
         op_class=_OP_CLASS_WRITE,
     ),
     handler=_enable_handler,
+)
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.connector.enable_reads",
+        description=(
+            "Bulk-enable every read-class operation of a connector in "
+            "one pass (tenant_admin only). Flips is_enabled=true on "
+            "every ingested op whose HTTP method is GET or HEAD, "
+            "leaving every write-shaped verb (POST / PUT / PATCH / "
+            "DELETE) and every typed/composite op default-deny. Use to "
+            "stand up broad governed READ coverage on a large ingested "
+            "surface (e.g. a 3000-endpoint vCenter spec) without "
+            "editing each op individually — writes stay behind per-op "
+            "review / composite curation by design (the governance "
+            "boundary). Returns ops_enabled, the count flipped. "
+            "Idempotent: re-running once the reads are enabled flips "
+            "nothing and writes no audit row (ops_enabled=0). Pair with "
+            "meho.connector.review to inspect the surface first. Reach "
+            "for meho.connector.enable instead when you want the full "
+            "per-group state transition — this verb does NOT move any "
+            "group's review_status, so a connector can stay staged at "
+            "the group level while its reads become dispatchable. "
+            "Writes one meho.connector.enable_reads audit row when at "
+            "least one op flips. Omit tenant_id (or pass null) for "
+            "built-in / global connectors; pass the operator's own "
+            "tenant UUID for tenant-curated rows."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connector_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": _CONNECTOR_ID_DESCRIPTION,
+                },
+                "tenant_id": _TENANT_ID_PROPERTY,
+            },
+            "required": ["connector_id"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.TENANT_ADMIN,
+        op_class=_OP_CLASS_WRITE,
+    ),
+    handler=_enable_reads_handler,
 )
 
 

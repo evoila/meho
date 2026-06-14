@@ -425,6 +425,93 @@ def test_list_htmx_fragment_returns_cards_partial_only() -> None:
     assert "<title>" not in body
 
 
+def _sets_csrf_cookie(response: Any) -> bool:
+    """Return ``True`` iff the response carries a ``meho_csrf`` ``Set-Cookie``.
+
+    Reads every ``Set-Cookie`` header (``get_list`` -- a response can
+    carry more than one) rather than the comma-joined ``.get`` shape so
+    the assertion is robust if a sibling cookie ever rides the same
+    response.
+    """
+    return any(
+        f"{CSRF_COOKIE_NAME}=" in header for header in response.headers.get_list("set-cookie")
+    )
+
+
+def test_list_full_page_render_sets_fresh_csrf_cookie() -> None:
+    """A full-page ``GET /ui/memory`` mints + Set-Cookies a fresh ``meho_csrf`` (#1754)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/memory")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert _sets_csrf_cookie(response), (
+        "full-page list render must Set-Cookie meho_csrf so the page's "
+        "double-submit pair is established"
+    )
+
+
+def test_list_htmx_poll_does_not_rotate_csrf_cookie() -> None:
+    """The ``every 60s`` HTMX poll returns NO ``Set-Cookie: meho_csrf`` (#1754).
+
+    Root cause of the memory-create 403: ``render_index`` used to Set-
+    Cookie a freshly-minted ``meho_csrf`` on every render -- including
+    the cards fragment's 60-second poll. A poll firing while the create
+    modal is open rotated the cookie out from under the modal's echoed
+    token (#1693), so the next create POST failed the chassis double-
+    submit match with ``403 csrf_token_invalid``. The fix sets the
+    cookie on full-page renders only; a poll carrying a valid cookie
+    re-echoes that same token and leaves the cookie untouched.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        # The browser holds the cookie the full-page load set; replay it
+        # on the poll (the chassis cookie is ``Secure``, which the
+        # http-scheme TestClient jar drops, so seed it explicitly).
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        response = client.get("/ui/memory?scope=all", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert not _sets_csrf_cookie(response), (
+        "an HTMX poll carrying a live meho_csrf cookie must NOT rotate it -- "
+        "rotating mid-page-stay is exactly the #1754 create-403 regression"
+    )
+
+
+def test_list_htmx_fragment_mints_cookie_when_none_present() -> None:
+    """Defensive: an HTMX fragment fetch with no prior cookie still mints one (#1754).
+
+    The poll-no-rotation rule reuses the request's existing ``meho_csrf``
+    cookie. A fragment fetched without any prior full-page load (so no
+    cookie on the request) must still get a freshly-minted cookie set,
+    otherwise the fragment's own bulk-action form would carry an echoed
+    token with no matching cookie and 403 on submit.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        # No CSRF cookie seeded -- simulate a fragment hit with no prior
+        # full-page render on this client.
+        response = client.get("/ui/memory?scope=all", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert _sets_csrf_cookie(response), (
+        "a fragment fetched without a prior meho_csrf cookie must mint + "
+        "Set-Cookie one so its own forms validate"
+    )
+
+
 def test_list_scope_filter_narrows_to_one_scope() -> None:
     """``?scope=tenant`` returns only tenant-scoped memories."""
     _seed_tenant(_TENANT_A, "tenant-a")

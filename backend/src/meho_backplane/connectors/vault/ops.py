@@ -79,6 +79,7 @@ from meho_backplane.retrieval.embedding import EmbeddingService
 __all__ = [
     "VAULT_KV_READ_PARAMETER_SCHEMA",
     "VAULT_KV_WRITE_CAPABILITIES",
+    "VaultPathShapeError",
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
@@ -131,6 +132,74 @@ _PATH_PROPERTY: dict[str, Any] = {
         "'meho/test/federation'. No leading slash, no mount prefix."
     ),
 }
+
+
+class VaultPathShapeError(Exception):
+    """A ``vault.kv.*`` call passed a ``path`` that re-includes the mount segment.
+
+    Raised by :func:`_extract_mount_and_path` **before** the hvac call (and
+    before the tenant-scope guard) when the supplied ``path`` begins with
+    ``"<mount>/"``. hvac addresses a KV-v2 secret as
+    ``v1/<mount>/data/<path>``, so a caller that passes the mount as part of
+    the ``path`` (``path="secret/meho/test/federation"`` with the default
+    ``mount="secret"``) doubles the mount segment to
+    ``v1/secret/data/secret/meho/test/federation`` — a path that fails the
+    Vault ACL policy and returns an opaque ``Forbidden`` 403,
+    indistinguishable from a genuine permission denial. The ``path`` schema
+    documents "no mount prefix" (:data:`_PATH_PROPERTY`) but cannot enforce
+    it (the mount name is not known at schema-validation time), so this
+    runtime guard names the mistake.
+
+    The dispatcher's ``connector_error`` branch wraps the raised exception
+    into a structured
+    :class:`~meho_backplane.connectors.schemas.OperationResult` with
+    ``extras["exception_class"] == "VaultPathShapeError"`` — distinct from
+    the ``VaultClientError`` family (login-phase) and from a Vault-side
+    ``Forbidden`` (read-phase permission denial), so a caller can tell a
+    *local path-shape mistake* apart from a real authorization failure.
+
+    The guard **rejects** rather than silently stripping the prefix: an
+    operator whose tenant layout legitimately starts a logical path with the
+    mount name (a genuine ``secret/...`` key under a non-default mount)
+    would be surprised by a silent rewrite, and the doubled-path failure is
+    the common case worth a clear, actionable message. The message names the
+    mount-relative form to use; it echoes only the (non-secret) mount/path
+    the caller already supplied, never any secret material — following
+    ``docs/codebase/error-message-shape.md`` (actionable error over an
+    opaque 403).
+    """
+
+
+def _extract_mount_and_path(op_id: str, params: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the ``(mount, path)`` pair every KV-v2 handler forwards to hvac.
+
+    Centralises the ``mount`` defaulting + ``.strip()`` the six KV-v2
+    handlers (read / list / put / patch / versions / delete) each applied
+    inline, and adds a shared **path-shape pre-flight**: a ``path`` that
+    begins with ``"<mount>/"`` raises :class:`VaultPathShapeError` before any
+    Vault round-trip (and before :func:`enforce_tenant_scope`), so the
+    mount-double-prefix mistake surfaces as a clear, actionable error rather
+    than the opaque ``Forbidden`` 403 the doubled ``v1/<mount>/data/<mount>/…``
+    request would produce.
+
+    The check fires only on the ``"<mount>/"`` *prefix* — a bare
+    ``path == mount`` (a legitimate single-segment secret named after the
+    mount) is left untouched, matching hvac's ``v1/<mount>/data/<mount>``
+    address. ``mount`` is schema-constrained to a single slash-free segment
+    (:data:`_MOUNT_PROPERTY`), so ``mount + "/"`` is an unambiguous prefix.
+    """
+    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
+    path: str = str(params["path"]).strip()
+
+    if path.startswith(mount + "/"):
+        relative = path[len(mount) + 1 :]
+        raise VaultPathShapeError(
+            f"{op_id} path includes the mount segment '{mount}/'; pass the "
+            f"mount-relative path instead "
+            f"(e.g. {relative!r}, not {path!r})."
+        )
+
+    return mount, path
 
 
 #: JSON Schema 2020-12 for the ``vault.kv.read`` op's ``params`` argument.
@@ -288,12 +357,12 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     ``issubclass(...)`` on the class name -- the exception class name
     is the contract, not the hierarchy at runtime.
     """
-    # Schema-enforced: ``path`` is a non-empty non-whitespace string.
-    # We re-strip so trailing whitespace doesn't slip into the hvac
-    # call -- the schema permits ``"a "`` (one non-whitespace char) and
-    # we want the wire shape to match what the operator typed.
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Schema-enforced: ``path`` is a non-empty non-whitespace string. The
+    # shared extractor re-strips (the schema permits ``"a "`` — one
+    # non-whitespace char — and the wire shape should match what the
+    # operator typed) and raises ``VaultPathShapeError`` before any Vault
+    # round-trip if ``path`` re-includes the ``"<mount>/"`` segment (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.read", params)
 
     # Defense-in-depth tenant-scope check (#1643): deny a path outside the
     # operator's tenant namespace BEFORE the hvac call. No-op unless
@@ -396,8 +465,8 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     hvac payload so the dispatcher's ``connector_error`` branch surfaces
     a structured error rather than an unhandled exception.
     """
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Shared mount/path extraction + path-shape pre-flight (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.list", params)
 
     # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
@@ -501,8 +570,8 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
     malformed hvac payload so the dispatcher reports a structured
     ``connector_error``.
     """
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Shared mount/path extraction + path-shape pre-flight (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.put", params)
     secret: dict[str, Any] = params["data"]
     cas = params.get("cas")
 
@@ -666,8 +735,8 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     removal goes through :func:`vault_kv_put` (wholesale replace) or
     :func:`vault_kv_delete` (version soft-delete).
     """
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Shared mount/path extraction + path-shape pre-flight (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.patch", params)
     secret: dict[str, Any] = params["data"]
 
     # Tenant-scope guard (#1643) — see vault_kv_read. Mutating patch: the
@@ -745,8 +814,8 @@ async def vault_kv_versions(
     /v1/<mount>/metadata/<path>``). Returns only metadata — never the
     secret values — so it is NOT in the ``credential_read`` allowlist.
     """
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Shared mount/path extraction + path-shape pre-flight (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.versions", params)
 
     # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
@@ -839,8 +908,8 @@ async def vault_kv_delete(
     a JSON payload and instead echoes the requested versions for an
     actionable agent-facing result.
     """
-    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
-    path: str = str(params["path"]).strip()
+    # Shared mount/path extraction + path-shape pre-flight (#1755).
+    mount, path = _extract_mount_and_path("vault.kv.delete", params)
     versions: list[int] = list(params["versions"])
 
     # Tenant-scope guard (#1643) — see vault_kv_read. Mutating delete: the

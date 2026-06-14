@@ -73,15 +73,23 @@ tenant-curated `vmware` coexist (the resolver prefers the tenant row).
 
 ### `DocCollection` / `DocCollectionSummary` (`meho_backplane.docs_collections.schemas`)
 
-Frozen Pydantic-v2 read models. `DocCollection` maps 1:1 to the table
-columns. `DocCollectionSummary` is the short shape for the catalogue
-list — it carries the identification + routing-decision fields plus the
-operator-facing liveness fields but **omits `backend`** (the backend is
-resolved server-side and never appears in a catalogue response, the
-backend-agnostic contract from #1548) and `extras`.
+Pydantic-v2 models. The two read models are frozen: `DocCollection` maps
+1:1 to the table columns; `DocCollectionSummary` is the short shape for
+the catalogue list — it carries the identification + routing-decision
+fields plus the operator-facing liveness fields but **omits `backend`**
+(the backend is resolved server-side and never appears in a catalogue
+response, the backend-agnostic contract from #1548) and `extras`.
 
-There are no `Create` / `Update` write schemas — v1 collections are
-operator-managed seed. When an import API lands it adds them here.
+The write / response half: `DocCollectionCreate` (#1739) is the create
+request body (operator-set identity + routing fields only; `extra="forbid"`
+so a smuggled `tenant_id` is rejected), and `DocCollectionCreateResponse`
+(#1756) is the REST create reply — `DocCollection` plus a `next_step`
+string that names the `create → probe → ready` flow while the row is
+`provisioning` (see
+[The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)).
+`next_step` lives on the create-response model only, never on the shared
+`DocCollection` read shape. There is still no `Update` schema — PATCH /
+DELETE are a later follow-up.
 
 ### `project_doc_collection_to_summary(...)` (`meho_backplane.docs_collections.schemas`)
 
@@ -331,18 +339,55 @@ The service primitive
 Three fronts forward to the same primitive:
 
 - **REST** — `POST /api/v1/doc_collections` → `201` with the full
-  `DocCollection`, `tenant_admin`-gated (parity with the lifecycle
-  routes). The route maps the two service exceptions to `422` / `409`.
+  `DocCollection` read shape plus a `next_step` hint
+  (`DocCollectionCreateResponse`, #1756; see
+  [The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)),
+  `tenant_admin`-gated (parity with the lifecycle routes). The route maps
+  the two service exceptions to `422` / `409`.
 - **MCP** — the `create_doc_collections` write-class tool
   (`meho_backplane.mcp.tools.doc_collections_create`), `tenant_admin` +
   `required_capability="meho-docs"`. The exceptions map to JSON-RPC
-  `INVALID_PARAMS` with the structured detail in `error.data`.
+  `INVALID_PARAMS` with the structured detail in `error.data`. The tool's
+  description already names the probe-to-`ready` step, so it returns the
+  bare created collection (no `next_step` field — the REST hint is the
+  surface that lacked the cue).
 - **CLI** — `meho docs collections create <key> --vendor … --backend-type …
   --backend-ref '{…}'` (or `--from-file <path>`), in
   `cli/internal/cmd/docs/collections_create.go`.
 
+### The `create → probe → ready` flow (#1756)
+
+A created collection is `provisioning`, and the search-time access gate
+(`resolve_entitled_ready_collection`) rejects a non-`ready` collection with
+`CollectionNotReadyError`. There is no update API and create never
+self-probes (auto-promotion is out of scope — it couples to ingest cost),
+so **`create → probe → ready` is the only path to a searchable
+collection**:
+
+1. `POST /api/v1/doc_collections` registers the row at
+   `status=provisioning`.
+2. `POST /api/v1/doc_collections/{collection_key}/probe` reads the
+   backend's readiness and, on a built index, promotes the row to `ready`.
+3. `search_docs` / `ask_docs` now accept the collection.
+
+Before #1756 the create response carried the registry state but no cue
+that a probe was required, so an operator hit a confusing not-ready error
+on the first search. The REST create response now carries a `next_step`
+string (`DocCollectionCreateResponse.next_step`) naming the exact probe
+route + `collection_key` to call while the row is `provisioning`
+(`None` for any other create status — no path produces one today). The
+hint is **create-surface-only**: it lives on `DocCollectionCreateResponse`
+(built by `project_doc_collection_create_response`), not on the shared
+`DocCollection` read model, so every read surface that returns the bare
+read shape (the collection-scoped search path, the `list_doc_collections`
+catalogue, the MCP docs tools) is unchanged. The route's `201` OpenAPI
+`description` names the same flow.
+
 Out of scope (a later follow-up): PATCH / DELETE, cross-tenant sharing,
 and bulk import beyond the single-collection `--from-file` on-ramp.
+Auto-promotion / self-probe on create stays out of scope (#1756) — it is a
+behaviour change with ingest-cost implications; #1756 is discoverability
+only.
 
 ## Dependencies
 

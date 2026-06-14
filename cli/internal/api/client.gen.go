@@ -2202,36 +2202,6 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
-// DocCollection Full read shape — maps 1:1 to the “doc_collections“ table.
-//
-// Frozen so callers can stash instances in request state or structured
-// logs without fear of mutation. “products“ is “tuple[str, ...]“
-// and the JSON columns are “Mapping[str, Any]“ so a frozen instance
-// cannot be mutated in-place via “list.append“ / “dict.__setitem__“.
-//
-// “backend“ is the operator-set “{type, ref}“ routing record the
-// T2 (#1551) router resolves server-side. “status“ is the lifecycle
-// enum (“provisioning“ / “ready“ / “rebuilding“ / “disabled“);
-// “last_ingested_at“ / “doc_count“ / “readiness“ are
-// probe-written liveness (T6 #1555), “None“ until the first probe.
-type DocCollection struct {
-	Backend        map[string]interface{}  `json:"backend"`
-	CollectionKey  string                  `json:"collection_key"`
-	CreatedAt      time.Time               `json:"created_at"`
-	Description    *string                 `json:"description"`
-	DocCount       *int                    `json:"doc_count"`
-	Extras         map[string]interface{}  `json:"extras"`
-	Id             openapi_types.UUID      `json:"id"`
-	LastIngestedAt *time.Time              `json:"last_ingested_at"`
-	Products       []string                `json:"products"`
-	Readiness      *map[string]interface{} `json:"readiness"`
-	Status         string                  `json:"status"`
-	TenantId       *openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt      time.Time               `json:"updated_at"`
-	Vendor         string                  `json:"vendor"`
-	WhenToUse      *string                 `json:"when_to_use"`
-}
-
 // DocCollectionBackend The “{type, ref}“ backend routing record a create supplies.
 //
 // “type“ is the search-backend type the row routes to (validated at
@@ -2276,6 +2246,42 @@ type DocCollectionCreate struct {
 	Products      *[]string               `json:"products,omitempty"`
 	Vendor        string                  `json:"vendor"`
 	WhenToUse     *string                 `json:"when_to_use"`
+}
+
+// DocCollectionCreateResponse The create route's reply: the full read shape plus a “next_step“ hint.
+//
+// Extends :class:`DocCollection` with a single create-surface-only field,
+// “next_step“ (#1756). A create defaults “status“ to “provisioning“
+// and “search_docs“ rejects a non-“ready“ collection, so the operator
+// must run an explicit “POST /api/v1/doc_collections/{collection_key}/probe“
+// before the collection is searchable. “next_step“ carries that
+// instruction inline so the “create → probe → ready“ flow is
+// discoverable from the create response itself, not only from a confusing
+// not-ready error on the first search.
+//
+// “next_step“ is “None“ for any non-“provisioning“ create (no
+// behaviour today creates a collection in another state, but the field is
+// typed “str | None“ so the contract is honest if one ever does). The
+// field lives here, not on :class:`DocCollection`, so every read surface
+// that returns the bare read shape (the collection-scoped search path, the
+// “list_doc_collections“ catalogue, the MCP docs tools) is unaffected.
+type DocCollectionCreateResponse struct {
+	Backend        map[string]interface{}  `json:"backend"`
+	CollectionKey  string                  `json:"collection_key"`
+	CreatedAt      time.Time               `json:"created_at"`
+	Description    *string                 `json:"description"`
+	DocCount       *int                    `json:"doc_count"`
+	Extras         map[string]interface{}  `json:"extras"`
+	Id             openapi_types.UUID      `json:"id"`
+	LastIngestedAt *time.Time              `json:"last_ingested_at"`
+	NextStep       *string                 `json:"next_step"`
+	Products       []string                `json:"products"`
+	Readiness      *map[string]interface{} `json:"readiness"`
+	Status         string                  `json:"status"`
+	TenantId       *openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	Vendor         string                  `json:"vendor"`
+	WhenToUse      *string                 `json:"when_to_use"`
 }
 
 // DocCollectionSummary Short shape for the catalogue list (“list_doc_collections“, T4).
@@ -23213,7 +23219,7 @@ func (r ListDocCollectionsEndpointApiV1DocCollectionsGetResponse) StatusCode() i
 type CreateDocCollectionEndpointApiV1DocCollectionsPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *DocCollection
+	JSON201      *DocCollectionCreateResponse
 }
 
 // Status returns HTTPResponse.Status
@@ -29677,7 +29683,7 @@ func ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp *http.R
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest DocCollection
+		var dest DocCollectionCreateResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -70,14 +70,14 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import (
-    DocCollection,
     DocCollectionBackendTypeError,
     DocCollectionConflictError,
     DocCollectionCreate,
+    DocCollectionCreateResponse,
     DocCollectionSummary,
     create_doc_collection,
     probe_collection,
-    project_doc_collection,
+    project_doc_collection_create_response,
     project_doc_collection_to_summary,
     resolve_doc_collection,
     set_collection_enabled,
@@ -196,9 +196,19 @@ async def list_doc_collections_endpoint(
 
 @router.post(
     "",
-    response_model=DocCollection,
+    response_model=DocCollectionCreateResponse,
     status_code=status.HTTP_201_CREATED,
     responses={
+        201: {
+            "description": (
+                "Collection registered. It starts at ``status=provisioning`` "
+                "— the **create → probe → ready** flow: ``search_docs`` only "
+                "accepts a ``ready`` collection, so call "
+                "``POST /api/v1/doc_collections/{collection_key}/probe`` to "
+                "promote it before searching. The response carries that "
+                "instruction inline as ``next_step``."
+            ),
+        },
         409: {
             "description": (
                 "A collection with this ``collection_key`` already exists "
@@ -217,7 +227,7 @@ async def create_doc_collection_endpoint(
     body: DocCollectionCreate,
     operator: Operator = _require_admin,
     session: AsyncSession = Depends(get_session),
-) -> DocCollection:
+) -> DocCollectionCreateResponse:
     """Register a new doc collection in the requesting tenant.
 
     The create sibling of the lifecycle write routes — ``tenant_admin``-
@@ -230,6 +240,12 @@ async def create_doc_collection_endpoint(
     set, not a deferred 503), and a cross-scope ``collection_key`` collision
     → 409. The create binds ``op_id="meho.docs.collections.create"`` so the
     registration joins the ``op_id="meho.docs.*"`` who-touched trail.
+
+    Because a created collection is ``provisioning`` and ``search_docs``
+    rejects a non-``ready`` collection, the response carries a ``next_step``
+    hint pointing at the probe route (#1756) so the ``create → probe →
+    ready`` flow is discoverable from the create reply rather than only from
+    a confusing not-ready error on the first search.
     """
     try:
         row = await create_doc_collection(session, operator, body)
@@ -243,7 +259,7 @@ async def create_doc_collection_endpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    return project_doc_collection(row)
+    return project_doc_collection_create_response(row)
 
 
 @router.post(

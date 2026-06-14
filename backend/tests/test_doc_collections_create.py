@@ -8,7 +8,10 @@ covered in :mod:`tests.test_mcp_tools_doc_collections`), mirroring the
 ``create_target`` precedent's guardrails:
 
 * **201 + full body** — a valid create returns the full ``DocCollection``
-  with a server-generated ``id`` / timestamps and ``status="provisioning"``.
+  with a server-generated ``id`` / timestamps and ``status="provisioning"``,
+  plus a ``next_step`` hint pointing at the probe route so the
+  ``create → probe → ready`` flow is discoverable from the create response
+  (#1756).
 * **tenant_id from JWT, never the body** — a body that tries to smuggle a
   ``tenant_id`` is rejected by the schema (``extra="forbid"``); the created
   row's tenant is always the operator's.
@@ -171,6 +174,31 @@ def test_create_returns_201_with_full_collection(client: TestClient) -> None:
     assert body["doc_count"] is None
     # The backend record round-trips (it is part of the full read shape).
     assert body["backend"] == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+    # The create-surface-only next_step hint is present (asserted in depth in
+    # test_create_response_hints_probe_next_step).
+    assert "next_step" in body
+
+
+def test_create_response_hints_probe_next_step(client: TestClient) -> None:
+    """A provisioning create returns a ``next_step`` hint at the probe route (#1756).
+
+    A created collection is ``provisioning`` and ``search_docs`` rejects a
+    non-``ready`` collection, so the ``create → probe → ready`` flow is the
+    only path to a searchable collection. The create response advertises that
+    next step inline so an operator does not have to discover the probe route
+    after a confusing not-ready error.
+    """
+    key = make_rsa_keypair("kid-A")
+    resp = _post(client, key, _admin_token(key), _valid_body(collection_key="vmware"))
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["status"] == "provisioning"
+    next_step = body["next_step"]
+    assert next_step is not None
+    # The hint names the probe route for *this* collection_key so it is
+    # directly actionable, and the verb that promotes it to searchable.
+    assert "POST /api/v1/doc_collections/vmware/probe" in next_step
+    assert "searchable" in next_step
 
 
 @pytest.mark.asyncio

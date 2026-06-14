@@ -543,7 +543,7 @@
           "docs"
         ],
         "summary": "Create Doc Collection Endpoint",
-        "description": "Register a new doc collection in the requesting tenant.\n\nThe create sibling of the lifecycle write routes \u2014 ``tenant_admin``-\ngated, tenant-scoped (``tenant_id`` from the JWT, never the body), with\nthe validation + audit every other registry write gets. Mirrors\n``POST /api/v1/targets``: ``id`` / timestamps are generated server-side,\n``status`` defaults to ``provisioning`` (a follow-up ``probe`` promotes\nit to ``ready``), the ``backend.type`` is validated against the\nsearch-backend registry (an unregistered type \u2192 422 listing the valid\nset, not a deferred 503), and a cross-scope ``collection_key`` collision\n\u2192 409. The create binds ``op_id=\"meho.docs.collections.create\"`` so the\nregistration joins the ``op_id=\"meho.docs.*\"`` who-touched trail.",
+        "description": "Register a new doc collection in the requesting tenant.\n\nThe create sibling of the lifecycle write routes \u2014 ``tenant_admin``-\ngated, tenant-scoped (``tenant_id`` from the JWT, never the body), with\nthe validation + audit every other registry write gets. Mirrors\n``POST /api/v1/targets``: ``id`` / timestamps are generated server-side,\n``status`` defaults to ``provisioning`` (a follow-up ``probe`` promotes\nit to ``ready``), the ``backend.type`` is validated against the\nsearch-backend registry (an unregistered type \u2192 422 listing the valid\nset, not a deferred 503), and a cross-scope ``collection_key`` collision\n\u2192 409. The create binds ``op_id=\"meho.docs.collections.create\"`` so the\nregistration joins the ``op_id=\"meho.docs.*\"`` who-touched trail.\n\nBecause a created collection is ``provisioning`` and ``search_docs``\nrejects a non-``ready`` collection, the response carries a ``next_step``\nhint pointing at the probe route (#1756) so the ``create \u2192 probe \u2192\nready`` flow is discoverable from the create reply rather than only from\na confusing not-ready error on the first search.",
         "operationId": "create_doc_collection_endpoint_api_v1_doc_collections_post",
         "parameters": [
           {
@@ -569,11 +569,11 @@
         },
         "responses": {
           "201": {
-            "description": "Successful Response",
+            "description": "Collection registered. It starts at ``status=provisioning`` \u2014 the **create \u2192 probe \u2192 ready** flow: ``search_docs`` only accepts a ``ready`` collection, so call ``POST /api/v1/doc_collections/{collection_key}/probe`` to promote it before searching. The response carries that instruction inline as ``next_step``.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DocCollection"
+                  "$ref": "#/components/schemas/DocCollectionCreateResponse"
                 }
               }
             }
@@ -13187,7 +13187,80 @@
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``meho.runbook.deprecate_template`` -- the now-deprecated coordinates."
       },
-      "DocCollection": {
+      "DocCollectionBackend": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Type"
+          },
+          "ref": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "ref"
+        ],
+        "title": "DocCollectionBackend",
+        "description": "The ``{type, ref}`` backend routing record a create supplies.\n\n``type`` is the search-backend type the row routes to (validated at\nthe service layer against\n:func:`~meho_backplane.docs_search.backends.registry.all_backends` so\nan unroutable row is rejected at create time, not at probe time).\n``ref`` is the per-collection backend config the resolved adapter\nreads (e.g. ``{\"endpoint\": \"https://corpus/v1/search\"}`` for\n``corpus-http``); it is opaque to the create surface \u2014 the adapter\nowns its shape \u2014 so it is a free ``Mapping``."
+      },
+      "DocCollectionCreate": {
+        "properties": {
+          "collection_key": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Collection Key"
+          },
+          "vendor": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Vendor"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Products",
+            "default": []
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "when_to_use": {
+            "type": "string",
+            "nullable": true,
+            "title": "When To Use"
+          },
+          "backend": {
+            "$ref": "#/components/schemas/DocCollectionBackend"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "collection_key",
+          "vendor",
+          "backend"
+        ],
+        "title": "DocCollectionCreate",
+        "description": "Request body for creating a doc collection (#1739).\n\nCarries only the operator-set identity + routing fields. The\nserver derives ``id`` / ``tenant_id`` / ``created_at`` /\n``updated_at`` / ``status`` and leaves the probe-written liveness\n(``last_ingested_at`` / ``doc_count`` / ``readiness``) NULL until the\nfirst probe \u2014 so none of those appear here. ``tenant_id`` is taken\nfrom the JWT in every front, never the body; a body carrying one is\nnot modelled (``extra=\"forbid\"`` rejects it) so a writer cannot even\nattempt a cross-tenant create. Mirrors\n:class:`~meho_backplane.targets.schemas.TargetCreate`."
+      },
+      "DocCollectionCreateResponse": {
         "properties": {
           "id": {
             "type": "string",
@@ -13265,6 +13338,11 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "next_step": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Step"
           }
         },
         "type": "object",
@@ -13285,81 +13363,8 @@
           "created_at",
           "updated_at"
         ],
-        "title": "DocCollection",
-        "description": "Full read shape \u2014 maps 1:1 to the ``doc_collections`` table.\n\nFrozen so callers can stash instances in request state or structured\nlogs without fear of mutation. ``products`` is ``tuple[str, ...]``\nand the JSON columns are ``Mapping[str, Any]`` so a frozen instance\ncannot be mutated in-place via ``list.append`` / ``dict.__setitem__``.\n\n``backend`` is the operator-set ``{type, ref}`` routing record the\nT2 (#1551) router resolves server-side. ``status`` is the lifecycle\nenum (``provisioning`` / ``ready`` / ``rebuilding`` / ``disabled``);\n``last_ingested_at`` / ``doc_count`` / ``readiness`` are\nprobe-written liveness (T6 #1555), ``None`` until the first probe."
-      },
-      "DocCollectionBackend": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Type"
-          },
-          "ref": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Ref"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "type",
-          "ref"
-        ],
-        "title": "DocCollectionBackend",
-        "description": "The ``{type, ref}`` backend routing record a create supplies.\n\n``type`` is the search-backend type the row routes to (validated at\nthe service layer against\n:func:`~meho_backplane.docs_search.backends.registry.all_backends` so\nan unroutable row is rejected at create time, not at probe time).\n``ref`` is the per-collection backend config the resolved adapter\nreads (e.g. ``{\"endpoint\": \"https://corpus/v1/search\"}`` for\n``corpus-http``); it is opaque to the create surface \u2014 the adapter\nowns its shape \u2014 so it is a free ``Mapping``."
-      },
-      "DocCollectionCreate": {
-        "properties": {
-          "collection_key": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Collection Key"
-          },
-          "vendor": {
-            "type": "string",
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Vendor"
-          },
-          "products": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Products",
-            "default": []
-          },
-          "description": {
-            "type": "string",
-            "nullable": true,
-            "title": "Description"
-          },
-          "when_to_use": {
-            "type": "string",
-            "nullable": true,
-            "title": "When To Use"
-          },
-          "backend": {
-            "$ref": "#/components/schemas/DocCollectionBackend"
-          },
-          "extras": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Extras"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "collection_key",
-          "vendor",
-          "backend"
-        ],
-        "title": "DocCollectionCreate",
-        "description": "Request body for creating a doc collection (#1739).\n\nCarries only the operator-set identity + routing fields. The\nserver derives ``id`` / ``tenant_id`` / ``created_at`` /\n``updated_at`` / ``status`` and leaves the probe-written liveness\n(``last_ingested_at`` / ``doc_count`` / ``readiness``) NULL until the\nfirst probe \u2014 so none of those appear here. ``tenant_id`` is taken\nfrom the JWT in every front, never the body; a body carrying one is\nnot modelled (``extra=\"forbid\"`` rejects it) so a writer cannot even\nattempt a cross-tenant create. Mirrors\n:class:`~meho_backplane.targets.schemas.TargetCreate`."
+        "title": "DocCollectionCreateResponse",
+        "description": "The create route's reply: the full read shape plus a ``next_step`` hint.\n\nExtends :class:`DocCollection` with a single create-surface-only field,\n``next_step`` (#1756). A create defaults ``status`` to ``provisioning``\nand ``search_docs`` rejects a non-``ready`` collection, so the operator\nmust run an explicit ``POST /api/v1/doc_collections/{collection_key}/probe``\nbefore the collection is searchable. ``next_step`` carries that\ninstruction inline so the ``create \u2192 probe \u2192 ready`` flow is\ndiscoverable from the create response itself, not only from a confusing\nnot-ready error on the first search.\n\n``next_step`` is ``None`` for any non-``provisioning`` create (no\nbehaviour today creates a collection in another state, but the field is\ntyped ``str | None`` so the contract is honest if one ever does). The\nfield lives here, not on :class:`DocCollection`, so every read surface\nthat returns the bare read shape (the collection-scoped search path, the\n``list_doc_collections`` catalogue, the MCP docs tools) is unaffected."
       },
       "DocCollectionSummary": {
         "properties": {

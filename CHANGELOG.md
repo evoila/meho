@@ -100,6 +100,18 @@ connector-related release-notes line.
   default-deny. Tenant-scope-aware, idempotent, and audited as a
   single bulk-enable event with the count of ops enabled (#1749).
 
+### Changed
+
+- `POST /api/v1/doc_collections` now returns a `next_step` hint on its
+  `201` response pointing at
+  `POST /api/v1/doc_collections/{collection_key}/probe` while the new
+  collection is `provisioning`. A created collection is not searchable
+  until an explicit probe promotes it to `ready`, so the hint surfaces
+  the `create → probe → ready` flow inline instead of leaving operators
+  to discover the probe route after a confusing not-ready error on the
+  first `search_docs`. Discoverability only — create still does not
+  self-probe (#1756).
+
 ### Fixed
 
 - Operator-console memory **create no longer 403s** under a background

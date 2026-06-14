@@ -30,6 +30,19 @@ particular comes from the JWT, never the body (the ``create_target``
 precedent). There is still no ``DocCollectionUpdate`` here — PATCH /
 DELETE are a separate follow-up (out of scope per #1739).
 
+:class:`DocCollectionCreateResponse` is the create route's reply (#1756):
+the full :class:`DocCollection` read shape plus a ``next_step`` hint that
+names the ``create → probe → ready`` flow while the row is still
+``provisioning``. A freshly-created collection defaults to
+``provisioning`` and ``search_docs`` rejects a non-``ready`` collection,
+so the only path to a searchable collection is an explicit
+``POST /api/v1/doc_collections/{collection_key}/probe``; the hint points
+the operator straight at it instead of leaving them to discover the probe
+route after a confusing not-ready error. The hint is create-surface-only —
+it is deliberately **not** on :class:`DocCollection` so the read shape the
+collection-scoped search path and the MCP docs tools return stays a clean
+1:1 mirror of the table.
+
 :func:`project_doc_collection_to_summary` is the **single** ORM→wire
 projection, mirroring :func:`targets.schemas.project_target_to_summary`.
 Every surface that lists collections (the catalogue tool, the CLI
@@ -46,14 +59,18 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from meho_backplane.docs_collections.lifecycle import STATUS_PROVISIONING
+
 if TYPE_CHECKING:
     from meho_backplane.db.models import DocCollection as DocCollectionORM
 
 __all__ = [
     "DocCollection",
     "DocCollectionCreate",
+    "DocCollectionCreateResponse",
     "DocCollectionSummary",
     "project_doc_collection",
+    "project_doc_collection_create_response",
     "project_doc_collection_to_summary",
 ]
 
@@ -146,6 +163,29 @@ class DocCollection(BaseModel):
     updated_at: datetime
 
 
+class DocCollectionCreateResponse(DocCollection):
+    """The create route's reply: the full read shape plus a ``next_step`` hint.
+
+    Extends :class:`DocCollection` with a single create-surface-only field,
+    ``next_step`` (#1756). A create defaults ``status`` to ``provisioning``
+    and ``search_docs`` rejects a non-``ready`` collection, so the operator
+    must run an explicit ``POST /api/v1/doc_collections/{collection_key}/probe``
+    before the collection is searchable. ``next_step`` carries that
+    instruction inline so the ``create → probe → ready`` flow is
+    discoverable from the create response itself, not only from a confusing
+    not-ready error on the first search.
+
+    ``next_step`` is ``None`` for any non-``provisioning`` create (no
+    behaviour today creates a collection in another state, but the field is
+    typed ``str | None`` so the contract is honest if one ever does). The
+    field lives here, not on :class:`DocCollection`, so every read surface
+    that returns the bare read shape (the collection-scoped search path, the
+    ``list_doc_collections`` catalogue, the MCP docs tools) is unaffected.
+    """
+
+    next_step: str | None = None
+
+
 class DocCollectionSummary(BaseModel):
     """Short shape for the catalogue list (``list_doc_collections``, T4).
 
@@ -202,6 +242,42 @@ def project_doc_collection(c: DocCollectionORM) -> DocCollection:
         extras=c.extras,
         created_at=c.created_at,
         updated_at=c.updated_at,
+    )
+
+
+def _next_step_for_status(status: str, collection_key: str) -> str | None:
+    """Build the ``next_step`` create-response hint for *status* (#1756).
+
+    A freshly-created collection is ``provisioning`` and ``search_docs``
+    rejects a non-``ready`` collection, so the operator's next action is an
+    explicit probe — return the route + key to call. Any other status (no
+    create path produces one today) returns ``None``: there is no single
+    obvious next step to advertise, and a stale hint is worse than none.
+    """
+    if status == STATUS_PROVISIONING:
+        return (
+            f"POST /api/v1/doc_collections/{collection_key}/probe to make "
+            f"this collection searchable (it is provisioning until a probe "
+            f"confirms its index is ready)."
+        )
+    return None
+
+
+def project_doc_collection_create_response(
+    c: DocCollectionORM,
+) -> DocCollectionCreateResponse:
+    """Project a created :class:`DocCollectionORM` row to the create reply (#1756).
+
+    The create route's projection: the full :class:`DocCollection` read
+    shape plus the ``next_step`` hint that names the ``create → probe →
+    ready`` flow while the row is ``provisioning``. Reuses
+    :func:`project_doc_collection` for the shared fields so the read shape
+    never drifts between the two, then layers ``next_step`` on top.
+    """
+    base = project_doc_collection(c)
+    return DocCollectionCreateResponse(
+        **base.model_dump(),
+        next_step=_next_step_for_status(c.status, c.collection_key),
     )
 
 

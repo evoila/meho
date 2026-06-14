@@ -120,11 +120,13 @@ func TestRunCollectionCreateHappyPath(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(api.DocCollection{
+			nextStep := "POST /api/v1/doc_collections/vmware/probe to make this collection searchable"
+			_ = json.NewEncoder(w).Encode(api.DocCollectionCreateResponse{
 				CollectionKey: "vmware",
 				Vendor:        "VMware by Broadcom",
 				Status:        "provisioning",
 				Backend:       map[string]interface{}{"type": "corpus-http"},
+				NextStep:      &nextStep,
 			})
 		},
 	)

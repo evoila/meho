@@ -71,7 +71,31 @@
         data-target-scoped-values="{{ target_scoped_values | join(',') }}"
         class="space-y-3 py-2"
         aria-labelledby="memory-create-modal-title"
+        hx-on::before-request="this.querySelector('[data-create-error]').classList.add('hidden')"
+        hx-on::response-error="window.memoryCreateShowError(this, event)"
       >
+        {#- Visible error banner for a failed create submit (#1754). The
+            form posts with ``hx-swap="none"``, so a non-2xx response
+            (most importantly the chassis CSRF middleware's 403
+            ``{"detail":"csrf_token_invalid"}``) would otherwise be
+            dropped silently -- the operator clicks Create and nothing
+            happens, values still in the fields but no signal why. The
+            ``hx-on::response-error`` handler above un-hides this banner
+            and fills it with a status-appropriate message; the form
+            body is never swapped, so the operator's input survives for
+            an immediate retry (a CSRF 403 is recoverable: the page's
+            poll keeps the cookie live, so re-clicking Create with the
+            same field values succeeds once the modal re-echoes a
+            matching token on its next render). ``aria-live`` makes a
+            screen reader announce the message when it appears. -#}
+        <div
+          data-create-error
+          class="alert alert-error hidden"
+          role="alert"
+          aria-live="assertive"
+        >
+          <span data-create-error-message></span>
+        </div>
         <label class="form-control">
           <span class="label-text">Scope</span>
           <select
@@ -206,6 +230,52 @@ Markdown body. Bare URLs (https://example.com) are linkified."
     <button>close</button>
   </form>
 </dialog>
+
+{# Visible-error handler for the create submit (#1754). Defined on
+   ``window`` (idempotently, so repeated modal renders don't redefine
+   it) because the form's ``hx-on::response-error`` attribute resolves
+   the handler by name at event time. Translates the failed request's
+   HTTP status into an operator-facing message and reveals the banner
+   the form renders above its fields; the form's ``hx-swap="none"``
+   means the field values are never cleared, so the operator can fix
+   and retry without re-typing. The 403 branch is the headline case --
+   the chassis CSRF middleware rejects a stale double-submit token with
+   ``403 {"detail":"csrf_token_invalid"}`` and, before this handler,
+   htmx dropped that response on the floor. #}
+<script>
+  window.memoryCreateShowError = window.memoryCreateShowError || function (form, event) {
+    if (!form) return;
+    var banner = form.querySelector('[data-create-error]');
+    var message = form.querySelector('[data-create-error-message]');
+    if (!banner || !message) return;
+    var xhr = event && event.detail ? event.detail.xhr : null;
+    var status = xhr ? xhr.status : 0;
+    var text;
+    if (status === 403) {
+      text =
+        'Your session security token expired before the form was submitted. ' +
+        'No changes were saved. Click Create again to retry, or reload the ' +
+        'page if it keeps failing.';
+    } else if (status === 0) {
+      text =
+        'Could not reach the server. Check your connection and try Create ' +
+        'again. No changes were saved.';
+    } else {
+      var detail = '';
+      try {
+        detail = (JSON.parse(xhr.responseText) || {}).detail || '';
+      } catch (e) {
+        detail = '';
+      }
+      text =
+        'The memory could not be created (error ' + status + ').' +
+        (detail ? ' ' + detail : '') +
+        ' No changes were saved.';
+    }
+    message.textContent = text;
+    banner.classList.remove('hidden');
+  };
+</script>
 
 {# Tiny inline script: toggle the target_name row's visibility when
    the scope selector changes. Scoped to this modal -- the script

@@ -783,13 +783,27 @@ async def _run_branch_with_error_handling(
         # the REST routes, so this is a dict lookup.
         from meho_backplane.operations.ingest.connector_registration import (
             GenericRestConnector,
+            sibling_handrolled_impl_id,
         )
 
+        is_auto_shim = isinstance(connector_instance, GenericRestConnector)
         cause: Literal["unsupported_feature", "unreplaced_auto_shim"] = (
-            "unreplaced_auto_shim"
-            if isinstance(connector_instance, GenericRestConnector)
-            else "unsupported_feature"
+            "unreplaced_auto_shim" if is_auto_shim else "unsupported_feature"
         )
+        # G0.25-T2 (#1753): when a stray auto-shim is what dispatch
+        # landed on, check whether a hand-rolled class for the same
+        # (product, version) already ships under a different impl_id.
+        # If so, the remediation is "re-ingest under that sibling," not
+        # "write a subclass" -- one exists. The shim carries its own
+        # (product, version, impl_id) as class attrs; exclude its own
+        # impl_id so it cannot name itself.
+        sibling_impl_id: str | None = None
+        if is_auto_shim and connector_instance is not None:
+            sibling_impl_id = sibling_handrolled_impl_id(
+                product=connector_instance.product,
+                version=connector_instance.version,
+                exclude_impl_id=connector_instance.impl_id,
+            )
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
             audit_id=audit_id,
@@ -809,6 +823,7 @@ async def _run_branch_with_error_handling(
                 type(connector_instance).__name__ if connector_instance is not None else None
             ),
             duration_ms=duration_ms,
+            sibling_impl_id=sibling_impl_id,
         )
     except httpx.HTTPStatusError as http_exc:
         # G0.24-T4 (#1649): an upstream 403 or 422 carries actionable

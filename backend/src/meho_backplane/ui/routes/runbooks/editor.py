@@ -459,7 +459,6 @@ def build_editor_context(
         "operator_sub": session.operator_sub,
         "active_surface": "runbooks",
         "page_title": "New runbook" if mode == "new" else f"Edit {slug}",
-        "ready": False,
     }
 
 

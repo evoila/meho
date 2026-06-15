@@ -375,7 +375,6 @@ def _render_inline_error(
         request,
         "connectors/_import_preview.html",
         {
-            "ready": False,
             "csrf_token": csrf_token,
             "error": message,
             "rows": [],
@@ -417,7 +416,6 @@ async def render_import_page(
         {
             "page_title": "Connectors",
             "active_surface": "connectors",
-            "ready": False,
             "csrf_token": csrf_token,
         },
     )
@@ -458,7 +456,6 @@ async def render_preview(
         request,
         "connectors/_import_preview.html",
         {
-            "ready": False,
             "csrf_token": csrf_token,
             "error": None,
             "rows": rows,
@@ -536,7 +533,6 @@ async def submit_confirm(
         request,
         "connectors/_import_result.html",
         {
-            "ready": False,
             "csrf_token": csrf_token,
             "created": created,
             "updated": updated,

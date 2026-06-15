@@ -126,6 +126,18 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Operator-console **readiness pill now reflects real backend health on
+  every page**, not just the dashboard. The sidebar-footer pill was
+  stuck on yellow "starting" across all `/ui/*` surfaces because ~14
+  routes hardcoded `ready=False` in their template context; only the
+  dashboard computed it. The live verdict is now injected into every
+  render by the shared context processor, read from a short-TTL-cached
+  (`2 s`) readiness snapshot the session middleware computes from the
+  same probe registry `GET /ready` uses — so a non-dashboard page shows
+  green "ready" when the backend is healthy and "starting" when `/ready`
+  would 503, at negligible per-render cost. The per-route literals are
+  dropped; the dashboard's own fresh-probe behaviour is unchanged
+  (#1776).
 - Operator-console memory **create no longer 403s** under a background
   list refresh. The memory list's 60-second card poll re-used the
   page handler, which re-minted and `Set-Cookie`-d a fresh CSRF token

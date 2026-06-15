@@ -107,11 +107,6 @@ def _make_stub_handler(stub: _SurfaceStub) -> _StubHandler:
             # Highlights the matching sidebar link (base.html reads it;
             # the surface routes that replaced their stubs pass it too).
             "active_surface": stub.slug,
-            # ``base.html``'s sidebar status line reads ``ready`` to
-            # colour the readiness pill. Stubs do not poll readiness
-            # (the dashboard owns that surface) -- ship ``False`` so
-            # the ``StrictUndefined`` env does not raise on the read.
-            "ready": False,
         }
         response = get_templates().TemplateResponse(request, "_stub.html", context)
         response.set_cookie(

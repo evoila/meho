@@ -292,7 +292,6 @@ async def _render_index(
         "csrf_token": csrf_token,
         "active_surface": "runbooks",
         "page_title": "Runbooks",
-        "ready": False,
     }
     if request.headers.get("HX-Request") == "true":
         return get_templates().TemplateResponse(request, "runbooks/_list.html", context)
@@ -376,7 +375,6 @@ async def _render_detail(
         "csrf_token": csrf_token,
         "active_surface": "runbooks",
         "page_title": f"{detail.template.slug} · Runbooks",
-        "ready": False,
     }
     response = get_templates().TemplateResponse(request, "runbooks/detail.html", context)
     _set_csrf_cookie(response, csrf_token)

@@ -260,7 +260,6 @@ def _build_form_context(csrf_token: str, *, mode: str) -> dict[str, object]:
     return {
         "page_title": "Connectors",
         "active_surface": "connectors",
-        "ready": False,
         "csrf_token": csrf_token,
         "mode": mode,
         "product_options": _product_options(),
@@ -480,7 +479,6 @@ async def render_delete_modal(
     context: dict[str, object] = {
         "page_title": "Targets",
         "active_surface": "connectors",
-        "ready": False,
         "csrf_token": csrf_token,
         "target": {"name": target.name},
         "graph_node_refs": graph_node_refs,

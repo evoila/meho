@@ -278,11 +278,6 @@ async def _render_page(
         "operator_sub": session_ctx.operator_sub,
         "tenant_id": str(session_ctx.tenant_id),
         "csrf_token": csrf_token,
-        # ``base.html``'s footer reads ``ready`` to colour the readiness
-        # pill; the broadcast surface does not poll readiness (the
-        # dashboard owns that), so ship ``False`` so ``StrictUndefined``
-        # does not raise on the read.
-        "ready": False,
         **_feed_context(
             target_names=target_names,
             op_class=op_class,

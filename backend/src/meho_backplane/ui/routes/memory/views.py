@@ -308,7 +308,6 @@ def _common_template_context(
     return {
         "page_title": "Memory",
         "active_surface": "memory",
-        "ready": False,
         "operator_sub": session_ctx.operator_sub,
         "csrf_token": csrf_token,
     }

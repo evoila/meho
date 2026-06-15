@@ -110,7 +110,7 @@ def get_jinja_env() -> Environment:
 
 
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:
-    """Surface the active BFF session's tenant into every UI template.
+    """Surface the BFF session tenant + live readiness into every template.
 
     G0.15-T9 (#1217) — the operator-console header chip used to render a
     hard-coded "(sign in to choose)" placeholder regardless of whether
@@ -121,7 +121,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     auto-selected at session-create time, so by the time any UI route
     renders a page the tenant is already known.
 
-    The context processor exposes one variable to every Jinja render:
+    The context processor exposes two variables to every Jinja render:
 
     * ``session_tenant`` -- a ``dict`` carrying ``id`` / ``slug`` /
       ``name``, or ``None`` when the request hit a surface where the
@@ -130,24 +130,49 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
       definition not signed in there). ``base.html``'s header chip
       conditionally renders the tenant name when this dict is present
       and falls back to a neutral "Sign in" link otherwise.
+    * ``ready`` -- the live backplane readiness verdict that colours
+      ``base.html``'s sidebar-footer pill (green "ready" vs yellow
+      "starting"). Every ``/ui/*`` surface used to hardcode
+      ``ready=False`` in its own context dict, so the pill was stuck on
+      "starting" on every page but the dashboard (#1776). The verdict
+      now comes from ``request.state.ui_ready``, read once per
+      request by :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware`
+      from :func:`~meho_backplane.health.ui_readiness_verdict` -- the
+      stale-while-revalidate accessor that serves the cached verdict and
+      never runs a probe sweep on the request path.
+      Because Starlette runs context processors *after* the route's own
+      context dict and ``dict.update``\\ s their output over it
+      (``starlette.templating.Jinja2Templates.TemplateResponse``), this
+      value wins over any stray per-route literal -- so the surfaces drop
+      theirs. The dashboard writes its own freshly-probed verdict back
+      to ``request.state.ui_ready`` so the processor re-injects the same
+      value and the dashboard's behaviour is unchanged.
+
+      The default is ``False`` ("starting"), the correct fail-safe when
+      no verdict is bound: the auth/static surfaces (no session
+      middleware), or a bare ``Environment.render`` outside the request
+      path. ``base.html`` reads ``ready`` under ``StrictUndefined``, so
+      the key must always be present.
 
     Synchronous by Starlette contract: context processors execute
     inside the synchronous ``Jinja2Templates.TemplateResponse`` call;
     asynchronous processors are explicitly not supported (see
-    https://www.starlette.io/templates/). The lookup here is a pure
-    attribute read off ``request.state`` -- the middleware already
-    paid the DB round-trip on its way in, so the processor itself
-    issues zero IO.
+    https://www.starlette.io/templates/). Both lookups here are pure
+    attribute reads off ``request.state`` -- the middleware already
+    paid the DB round-trip and the (cached) probe sweep on its way in,
+    so the processor itself issues zero IO.
     """
+    ready = bool(getattr(request.state, "ui_ready", False))
     session_ctx = getattr(request.state, "ui_session", None)
     if session_ctx is None:
-        return {"session_tenant": None}
+        return {"session_tenant": None, "ready": ready}
     return {
         "session_tenant": {
             "id": str(session_ctx.tenant_id),
             "slug": session_ctx.tenant_slug,
             "name": session_ctx.tenant_name,
         },
+        "ready": ready,
     }
 
 

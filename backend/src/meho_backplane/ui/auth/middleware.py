@@ -90,6 +90,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
+from meho_backplane.health import ui_readiness_verdict
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
@@ -122,6 +123,18 @@ AUTH_PREFIX: Final[str] = "/ui/auth/"
 #: CSS load without authentication -- otherwise the operator would
 #: see an unstyled login page when their session expires.
 STATIC_PREFIX: Final[str] = "/ui/static/"
+#: Upper bound (seconds) handed to
+#: :func:`~meho_backplane.health.ui_readiness_verdict` for the bounded
+#: sweeps it runs *off* the request path — the cold-cache first-warm
+#: sweep and every single-flight background refresh. The per-request path
+#: itself never runs a sweep (it reads the cached verdict, stale-while-
+#: revalidate), so this bound only caps how long a *cold-start* render
+#: waits and how long a background refresh runs; it no longer gates a
+#: per-request sweep. Kept well under
+#: :data:`~meho_backplane.health.DEFAULT_READINESS_TTL_S` (2.0s) so a
+#: slow/unreachable probe degrades the footer pill to "starting" within a
+#: fraction of a second on the first paint rather than blocking it (#1776).
+_READINESS_TIMEOUT_S: Final[float] = 1.0
 
 
 @dataclass(frozen=True)
@@ -219,6 +232,45 @@ def _redirect_to_login(original_path_with_query: str) -> tuple[int, list[tuple[b
     ]
 
 
+async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> None:
+    """Stash the live backplane readiness verdict on the request scope.
+
+    The synchronous Jinja context processor
+    (:func:`~meho_backplane.ui.templating._ui_session_context_processor`)
+    colours ``base.html``'s sidebar-footer pill off ``request.state.ui_ready``
+    but cannot itself await the probe sweep. This middleware -- which
+    already runs once per ``/ui/*`` page render -- reads the verdict here
+    from :func:`~meho_backplane.health.ui_readiness_verdict`, the
+    *stale-while-revalidate* hot-path accessor.
+
+    Crucially, that accessor **does not run a probe sweep on the request
+    path**: it returns the cached verdict immediately (refreshing it in a
+    single-flight background task when stale) and only ever sweeps inline
+    on the very first request, to warm a cold cache. That decoupling is
+    the #1776 fix -- the earlier design awaited the sweep on every render,
+    so under a black-holed dependency each request hit the timeout bound,
+    serialised through the readiness single-flight lock, and orphaned a
+    probe thread; hundreds of ``/ui/*`` requests then overran the CI unit
+    lane's hard job timeout. With the accessor the per-request cost is a
+    dict read regardless of probe health.
+
+    A misbehaving probe must still not stall or 500 the page. The cold-
+    cache warm sweep the accessor runs is bounded by ``timeout_s`` (a hang
+    is not an exception, so the ``try``/``except`` below could not catch
+    one), and the ``except`` still catches any probe that raises. Either
+    way the pill falls back to "starting" -- the same fail-safe default
+    the processor uses when the key is unbound -- rather than letting the
+    failure propagate out of the render path.
+    """
+    try:
+        scope_state["ui_ready"] = await ui_readiness_verdict(timeout_s=_READINESS_TIMEOUT_S)
+    except Exception:  # pragma: no cover -- defensive
+        structlog.get_logger(__name__).warning(
+            "ui_readiness_snapshot_failed", path=path, exc_info=True
+        )
+        scope_state["ui_ready"] = False
+
+
 class UISessionMiddleware:
     """Pure-ASGI middleware: load operator identity from the session cookie.
 
@@ -231,6 +283,11 @@ class UISessionMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    # Pre-existing 132-line / C901-13 ASGI dispatch handler (cookie-parse →
+    # session-load → readiness-stash → passthrough, read top-to-bottom).
+    # #1776 only adds one call to the extracted `_stash_ui_readiness`
+    # helper; splitting the request lifecycle is out of scope for a
+    # readiness-pill fix. code-quality-allow: pre-existing oversize handler
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         # Non-HTTP scopes (websocket, lifespan) pass through. The BFF
         # has no websocket surface in v0.2 and the lifespan must not
@@ -349,6 +406,7 @@ class UISessionMiddleware:
         scope_state = scope.setdefault("state", {})
         if isinstance(scope_state, dict):
             scope_state["ui_session"] = session_context
+            await _stash_ui_readiness(scope_state, path=path)
 
         # G0.15-T7 (#1216): bind audit contextvars per-request happens
         # later, inside :func:`require_ui_session` (the FastAPI

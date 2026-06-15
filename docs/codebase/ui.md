@@ -43,7 +43,7 @@ Locked decisions:
 | Module | Purpose |
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
-| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
+| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217 -- and the live `ready` verdict for the footer pill, read from `request.state.ui_ready` (stashed by the session middleware from `health.ui_readiness_verdict`, the stale-while-revalidate hot-path accessor that never sweeps probes on the request path); G10.7-T1 #1776. Context processors run *after* the route context and `update` over it, so the injected `ready` wins over any per-route literal. |
 | `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
@@ -361,6 +361,127 @@ were a measurement artifact of the consumer running with seed data
 that didn't match the active tenant. The `test_ui_tenant_chip.py`
 suite pins the cascade contract (Memory and Broadcast surfaces both
 render against the session tenant) as a regression guard.
+
+### Readiness pill (G10.7-T1 #1776)
+
+`base.html`'s sidebar-footer pill colours `bg-success` / "ready" vs
+`bg-warning` / "starting" off a `ready` template variable. Originally
+only the dashboard computed it; every other `/ui/*` surface hardcoded
+`ready=False` in its own context dict (~14 routes, several with a "the
+dashboard owns readiness" comment), so the pill was stuck on yellow
+"starting" on every page but the dashboard regardless of actual backend
+health. The accurate `GET /ready` endpoint existed but the console
+never consumed it.
+
+The fix injects the live verdict into *every* render through the same
+`_ui_session_context_processor` that surfaces the tenant chip. The
+processor exposes a second variable, `ready`, read from
+`request.state.ui_ready`. That value is read once per request by
+`UISessionMiddleware` (`_stash_ui_readiness`) from
+[`ui_readiness_verdict`](../../backend/src/meho_backplane/health.py) — the
+*stale-while-revalidate* hot-path accessor over the same short-TTL
+(`DEFAULT_READINESS_TTL_S`, 2 s) cache `readiness_snapshot` maintains. The
+processor is synchronous (Starlette contract), so it cannot itself await a
+probe sweep — computing the verdict in the async middleware and reading it
+off `request.state` is the seam that bridges the two.
+
+The accessor keeps the page-render hot path at "negligible cost" by
+**never running a probe sweep on the request path**:
+
+* **Cache present (any age).** Return the cached `ready` verdict
+  immediately — stale is fine; the pill is an at-a-glance hint, not the
+  kubernetes readiness contract. If the entry is older than the TTL,
+  schedule a *single-flight* background refresh (`asyncio.create_task`,
+  guarded by the `_readiness_refresh_task` handle so at most one runs at a
+  time; the reference is retained on the module so the task isn't
+  GC'd mid-flight, and its `finally` clears the handle) and serve the
+  last-known value without awaiting it.
+* **Cache absent (first-ever call).** Do *one* bounded sweep to warm the
+  cache so a healthy backend renders green "ready" on first paint
+  (preserving the original acceptance criteria). Concurrent first callers
+  share that one sweep via the `_readiness_lock` single-flight. Unlike
+  `readiness_snapshot`, the warm path caches **even a timeout** verdict so
+  a cold-start black-holed probe can't make every subsequent request
+  re-sweep; the TTL makes it self-healing (the next render past the window
+  schedules a background refresh that picks up recovery).
+
+So under any probe health the per-request cost is a dict read plus, at
+most, scheduling one background task — never a serialised sweep.
+
+Two properties make this correct:
+
+* **Processor wins over route literals.** Starlette runs context
+  processors *after* the route's own context dict and `dict.update`s
+  their output over it
+  (`starlette.templating.Jinja2Templates.TemplateResponse`), so the
+  injected `ready` overrides any stray per-route value. The ~14
+  `ready=False` literals were therefore dropped (they were dead once the
+  processor owns the key); `StrictUndefined` still requires the key
+  present, and the processor's `False` default ("starting") is the
+  fail-safe for the auth/static surfaces where no session middleware
+  runs and for any bare `Environment.render`.
+* **Dashboard behaviour unchanged.** The dashboard still runs a *fresh*
+  probe sweep (`readiness_snapshot(max_age_s=0)`) for its detailed
+  readiness card, and writes that fresh verdict back to
+  `request.state.ui_ready` so the processor re-injects the dashboard's
+  own value rather than the (possibly staler) cached one — the footer
+  pill and the dashboard card stay in lock-step.
+
+**Why the decoupling, not just a bound (the #1776 CI-unit-lane overrun).**
+The first cut at this feature awaited the probe sweep *inline* in
+`_stash_ui_readiness` on every render, with a short `timeout_s`
+(`_READINESS_TIMEOUT_S`, 1 s) to keep a hung dependency from blocking the
+page. That stopped the event-loop *hang* but not the overrun. In CI the 5
+real network probes (`keycloak`, `vault`, `db`, `broadcast`,
+`docs_backends`, registered in `main.py`) leak into the process-global
+registry — `conftest.py` has no global probe isolation and several
+suites register them without clearing — and those endpoints are
+black-holed. `readiness_snapshot` deliberately **does not cache** a
+timed-out sweep (a transient stall must not pin "starting" on `/ready`
+for the whole TTL), so every `/ui/*` request re-swept, serialised through
+the readiness single-flight lock, orphaning a probe-worker thread each
+time. Hundreds of UI tests x ~1 s serialised + thread accumulation
+overran the unit lane's hard `timeout-minutes` job cap (it died at
+~15 min on every full run); locally the connects fail fast with
+`ECONNREFUSED`, which is why the local sweep passed. The accessor removes
+the sweep from the request path entirely (stale-while-revalidate, above),
+which is the actual fix; `test_ui_readiness_pill.py` pins it with a
+deterministic regression test (a blocking sync probe + N=30 sequential
+`/ui/memory` renders must stay well under N x the bound in wall-time and
+sweep the probe only a small constant number of times — it FAILS on the
+inline-sweep design at ≈ N x bound).
+
+The bounded sweeps the accessor *does* run (the cold-cache warm and each
+background refresh) go through `readiness_snapshot(max_age_s=0,
+timeout_s=…)`, which wraps the sweep in `asyncio.wait_for`. That bound
+only fires if the sweep yields to the loop: `wait_for` can cancel an
+*awaiting* coroutine but cannot interrupt a **synchronous** call blocking
+it — and several probes are `def` (the `docs_backends` probe, and the
+Keycloak/Vault sync-client probes). `run_probes_async` closes that gap by
+running sync probes via `asyncio.to_thread`, so the blocking call happens
+on a worker thread and the loop stays free for `wait_for` to fire. On
+timeout the orphaned thread is not killed — it drains harmlessly — and
+single-flight (`_readiness_refresh_task` for background refreshes,
+`_readiness_lock` for the cold warm) caps how many threads can ever be in
+flight at once: one, not one per request.
+
+`_stash_ui_readiness` still degrades to `False` ("starting") on any
+exception out of the accessor and logs `ui_readiness_snapshot_failed`,
+and an unbound `ui_ready` key falls back to "starting" in the processor —
+the same fail-safe default.
+
+`GET /ready` and the dashboard's fresh sweep (`max_age_s=0`,
+`timeout_s=None`) are deliberately **not** routed through the accessor —
+they call `readiness_snapshot` directly for a fresh, full-fidelity sweep
+on every hit (the kubernetes readiness contract), and `/ready` keeps its
+`features` block, which the UI verdict deliberately omits. The dashboard
+still writes its own fresh verdict back to `request.state.ui_ready` so
+the processor re-injects it, keeping the footer pill and the dashboard
+card in lock-step. The `test_ui_readiness_pill.py` suite also pins the
+cache semantics, the processor injection + fail-safe, and the end-to-end
+pill state on a non-dashboard surface (`/ui/memory`) — including that
+both a hung **async** probe and a blocking **sync** probe render
+"starting" promptly rather than blocking the render.
 
 ## Dependencies
 

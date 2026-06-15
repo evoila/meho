@@ -320,6 +320,10 @@ def _filename_to_slug(filename: str) -> str:
     return slug[:200]
 
 
+# Pre-existing 556-line / C901-29 router factory that registers every
+# `/ui/kb*` route as a closure over shared deps. #1776 only *removes* three
+# `ready=False` literals from it (net smaller); splitting the factory is a
+# sibling-surface refactor out of scope. code-quality-allow: pre-existing oversize factory
 def build_kb_router() -> APIRouter:
     """Construct the ``/ui/kb*`` :class:`APIRouter`.
 
@@ -380,7 +384,6 @@ def build_kb_router() -> APIRouter:
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
             "page_title": "Knowledge",
-            "ready": False,
         }
 
         if is_htmx:
@@ -470,7 +473,6 @@ def build_kb_router() -> APIRouter:
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
             "page_title": "Upload · Knowledge",
-            "ready": False,
         }
         response = get_templates().TemplateResponse(request, "kb/upload.html", context)
         response.set_cookie(
@@ -528,7 +530,6 @@ def build_kb_router() -> APIRouter:
             "csrf_token": csrf_token,
             "active_surface": "knowledge",
             "page_title": f"{slug} · Knowledge",
-            "ready": False,
         }
         response = get_templates().TemplateResponse(request, "kb/detail.html", context)
         response.set_cookie(

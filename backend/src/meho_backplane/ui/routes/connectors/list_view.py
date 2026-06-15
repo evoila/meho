@@ -387,11 +387,6 @@ async def _render(
         # transient JWT-validation hiccup -- the write routes remain the
         # security authority.
         "is_tenant_admin": is_tenant_admin,
-        # The footer in ``base.html`` reads ``ready`` to colour the
-        # readiness pill; the connectors surface doesn't poll readiness
-        # (the dashboard owns that), so ship ``False`` here so Jinja's
-        # ``StrictUndefined`` env does not raise on the read.
-        "ready": False,
     }
     template_name = (
         "connectors/_table_rows.html" if _is_htmx_request(request) else "connectors/list.html"

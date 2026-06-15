@@ -709,6 +709,56 @@ def _isolate_global_registries() -> Iterator[None]:
         set_default_reducer(default_reducer)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_readiness_state() -> Iterator[None]:
+    """Reset the readiness-probe registry + verdict cache around each test.
+
+    ``meho_backplane.health`` keeps two pieces of process-global mutable
+    state: the probe registry ``_probes`` (populated by
+    ``register_probe`` — the app lifespan in ``main.py`` registers the
+    real ``keycloak`` / ``vault`` / ``db`` / ``broadcast`` /
+    ``docs_backends`` probes there) and the ``_readiness_cache`` verdict
+    (plus its in-flight ``_readiness_refresh_task`` background handle).
+    Neither had a process-wide per-test reset, so any test that booted
+    the full app — directly or by importing ``meho_backplane.main`` —
+    left the real probes registered for whatever test the (xdist
+    ``--dist loadscope``) scheduler ran next on the same worker.
+
+    That cross-test leak is benign while readiness is only swept on an
+    explicit ``/ready`` hit, but #1776 made each ``/ui/*`` render schedule
+    a *background* readiness refresh (``ui_readiness_verdict`` ->
+    ``_schedule_readiness_refresh`` -> ``run_probes_async``). A leaked DB-
+    touching ``db`` probe then runs that sweep *concurrently* with a
+    later test's own SQLite writes, and aiosqlite reports
+    ``database is locked`` (it surfaced as a flake in
+    ``test_ui_runbooks_acceptance``). Pre-fix the sweep ran inline on the
+    request path, so a leaked probe merely slowed it rather than
+    contending.
+
+    Clearing (not snapshot/restoring like ``_isolate_global_registries``)
+    is correct here: probes are re-registered from scratch on every app
+    boot, so no test should depend on a probe registered by a *previous*
+    test — that would itself be a latent order-dependency bug.
+    ``clear_readiness_cache`` additionally cancels and detaches any
+    in-flight background refresh, so a sweep one test scheduled cannot
+    write into a sibling's cache or leak a pending task onto a
+    soon-to-close event loop. Reset both before *and* after so a test
+    that aborts mid-run cannot leak either. Redundant-but-harmless for
+    the handful of suites (``test_health``, ``test_alembic_probe``,
+    ``test_ui_readiness_pill``, ...) that already clear the registry
+    themselves.
+    """
+    from meho_backplane.health import clear_probes, clear_readiness_cache
+
+    clear_probes()
+    clear_readiness_cache()
+    try:
+        yield
+    finally:
+        clear_probes()
+        clear_readiness_cache()
+
+
 # ---------------------------------------------------------------------------
 # Shared JWT / JWKS helpers (lifted from tests/test_auth_jwt.py)
 # ---------------------------------------------------------------------------

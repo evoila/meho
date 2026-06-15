@@ -241,11 +241,6 @@ async def _render_table(
         # string represents "no selection" so Jinja's ``StrictUndefined``
         # env does not raise on a missing-key read in the template.
         "selected_id": str(selected_id) if selected_id is not None else "",
-        # The footer in ``base.html`` reads ``ready`` to colour the
-        # readiness pill; topology does not poll readiness itself
-        # (the dashboard owns that surface), so ship ``False`` so
-        # the ``StrictUndefined`` env does not raise on the read.
-        "ready": False,
     }
     template_name = (
         "topology/_table_rows.html" if _is_htmx_request(request) else "topology/table.html"

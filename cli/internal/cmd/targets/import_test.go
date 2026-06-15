@@ -175,6 +175,94 @@ func TestMapEntryPreferredImplIDIsTopLevel(t *testing.T) {
 	}
 }
 
+func TestMapEntryTLSTrustKeysAreTopLevel(t *testing.T) {
+	t.Parallel()
+	// Initiative #1774: verify_tls (#1780) and tls_ca_pin (#1784) are
+	// first-class per-target TLS-trust columns on TargetCreate /
+	// TargetUpdate. They must land in the body root, NOT spill into
+	// extras — spilling would leave the typed columns at their secure
+	// defaults and silently ignore an operator who set them in the
+	// descriptor.
+	body, warnings := mapEntry(map[string]any{
+		"name":       "vcf-logs-lab",
+		"product":    "vmware-rest",
+		"host":       "vrli.nested.lab",
+		"verify_tls": false,
+		"tls_ca_pin": "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+	})
+	if len(warnings) != 0 {
+		t.Errorf("warnings: got %v; want none", warnings)
+	}
+	if v, ok := body["verify_tls"]; !ok || v != false {
+		t.Errorf("verify_tls top-level: got %v (present=%t); want false", v, ok)
+	}
+	if v, ok := body["tls_ca_pin"]; !ok || v == "" {
+		t.Errorf("tls_ca_pin top-level: got %v (present=%t); want the PEM", v, ok)
+	}
+	// Neither key may leak into extras.
+	if extras, ok := body["extras"].(map[string]any); ok {
+		for _, k := range []string{"verify_tls", "tls_ca_pin"} {
+			if _, leaked := extras[k]; leaked {
+				t.Errorf("%q leaked into extras: %v", k, extras)
+			}
+		}
+	}
+}
+
+func TestEntryToUpdateBodyTLSTrustKeysAreTopLevel(t *testing.T) {
+	t.Parallel()
+	// `meho targets import --update` routes through entryToUpdateBody.
+	// The TLS-trust keys must reach the sparse PATCH body's top level
+	// (TargetUpdate carries verify_tls / tls_ca_pin), not extras, so a
+	// descriptor re-import flips the columns rather than the JSONB blob.
+	body, _ := entryToUpdateBody(map[string]any{
+		"name":       "vcf-logs-lab",
+		"verify_tls": true,
+		"tls_ca_pin": nil, // clearing the pin is an explicit-null PATCH
+	})
+	if v, ok := body["verify_tls"]; !ok || v != true {
+		t.Errorf("verify_tls top-level on update: got %v (present=%t); want true", v, ok)
+	}
+	if _, ok := body["tls_ca_pin"]; !ok {
+		t.Errorf("tls_ca_pin missing from update body; want top-level null: %v", body)
+	}
+	if extras, ok := body["extras"].(map[string]any); ok {
+		for _, k := range []string{"verify_tls", "tls_ca_pin"} {
+			if _, leaked := extras[k]; leaked {
+				t.Errorf("%q leaked into extras on update: %v", k, extras)
+			}
+		}
+	}
+}
+
+func TestMapEntryTLSTrustTopLevelStillSpillsUnknown(t *testing.T) {
+	t.Parallel()
+	// No-regression guard: adding the TLS-trust keys to knownTopLevel
+	// must not change the extras-spill behaviour for genuinely-unknown
+	// keys. verify_tls / tls_ca_pin go top-level; an unrelated unknown
+	// key alongside them still spills into extras.
+	body, _ := mapEntry(map[string]any{
+		"name":       "vcf-logs-lab",
+		"product":    "vmware-rest",
+		"host":       "vrli.nested.lab",
+		"verify_tls": false,
+		"sso_realm":  "evba.lab", // unknown → spill
+	})
+	if v, ok := body["verify_tls"]; !ok || v != false {
+		t.Errorf("verify_tls top-level: got %v (present=%t); want false", v, ok)
+	}
+	extras, ok := body["extras"].(map[string]any)
+	if !ok {
+		t.Fatalf("extras: got %T; want map[string]any (unknown key should spill)", body["extras"])
+	}
+	if extras["sso_realm"] != "evba.lab" {
+		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	}
+	if _, leaked := extras["verify_tls"]; leaked {
+		t.Errorf("verify_tls must not be in extras: %v", extras)
+	}
+}
+
 func TestMapEntryExplicitExtrasMergesWithSpilled(t *testing.T) {
 	t.Parallel()
 	body, _ := mapEntry(map[string]any{

@@ -189,6 +189,17 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **`meho targets import` now sets the per-target TLS-trust columns
+  `verify_tls` and `tls_ca_pin`** instead of silently spilling them into
+  the `extras` JSONB blob. Both keys were missing from the import
+  mapper's `knownTopLevel` allow-set, so a descriptor that set
+  `verify_tls: false` (or pinned a CA via `tls_ca_pin`) produced a target
+  that kept its secure column defaults and still verified against the
+  global bundle — a silent, security-relevant surprise. They are now
+  first-class descriptor keys on both create and `--update`; the server's
+  mutual-exclusivity / PEM-validation `422` surfaces through the import
+  path, and genuinely-unknown keys still spill to `extras`. Completes the
+  import-side wiring of per-target TLS trust (#1780 / #1784) (#1793).
 - Operator-console **readiness pill now reflects real backend health on
   every page**, not just the dashboard. The sidebar-footer pill was
   stuck on yellow "starting" across all `/ui/*` surfaces because ~14
@@ -233,12 +244,12 @@ connector-related release-notes line.
   trust-bundle CA-trust as the **secure** path (including the #572
   public-roots-clobber footgun), and per-target CA-pin (#1784) as the
   planned secure supersession; it documents setting `verify_tls` via the
-  REST API `POST` / `PATCH /api/v1/targets` (the only supported path —
-  `meho targets import` spills the key into `extras` and does not set the
-  column), references the `connector_tls_verify_failed` dispatch error
-  (#1782), and names the two out-of-pool connectors (k8s probe, GitHub
-  token-exchange) that do not honour the flag.
-  `docs/architecture/connectors.md` cross-links it (#1783).
+  REST API `POST` / `PATCH /api/v1/targets` (and, since #1793, via
+  `meho targets import` as a first-class descriptor key), references the
+  `connector_tls_verify_failed` dispatch error (#1782), and names the two
+  out-of-pool connectors (k8s probe, GitHub token-exchange) that do not
+  honour the flag. `docs/architecture/connectors.md` cross-links it
+  (#1783).
 
 ## [0.15.0] - 2026-06-13
 

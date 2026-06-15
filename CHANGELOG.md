@@ -101,6 +101,19 @@ connector-related release-notes line.
   (`tls_verification_disabled` + before/after) and a WARN log, closing
   the prior gap where a target PATCH wrote an empty audit payload
   (#1780).
+- Connector dispatch now **honors the per-target `verify_tls` flag**. A
+  target with `verify_tls=false` reaches a self-signed / internal-CA
+  appliance over an insecure TLS channel (a module-cached `SSLContext`
+  with `check_hostname` off + `CERT_NONE`), emitting a WARN at client
+  construction; a `verify_tls=true` target (the default) is built with
+  **no** `verify=` argument, so the global `SSL_CERT_FILE` / chart
+  trust-bundle path stays byte-identical to before. The pooled-client
+  key gains a `verify_tls` dimension — `(tenant_id, id, verify_tls)` — so
+  a PATCH that flips the flag is not served the stale client, while the
+  `(tenant_id, id)` cross-tenant isolation prefix is unchanged. `Harbor`
+  and `Gcloud` inherit the behaviour through `HttpConnector`; the
+  out-of-pool k8s reachability probe and GitHub App token-exchange are
+  unaffected (#1781).
 - Bulk read-class connector enable path across REST + MCP + CLI:
   `POST /api/v1/connectors/{id}/enable-reads`, the
   `meho.connector.enable_reads` MCP tool, and `meho connector

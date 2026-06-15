@@ -21,10 +21,26 @@ Coverage matrix (per Task #242 acceptance criteria):
   different tenants with different hosts get distinct host-bound clients,
   and a dispatch for one tenant never reaches the other tenant's host.
 * ``aclose()`` closes all pooled clients and empties the pool dict.
+
+Per-target TLS trust (evoila/meho#1774, #1781):
+
+* ``verify_tls=True`` (the default) builds the client with **no**
+  ``verify=`` argument, so httpx keeps verification on against the global
+  ``SSL_CERT_FILE`` / chart trust-bundle path — byte-identical to a target
+  with no TLS opt-out at all (asserted via construction-kwarg inspection
+  and the live transport ``SSLContext``).
+* ``verify_tls=False`` builds the client with the module-cached insecure
+  ``SSLContext`` (``check_hostname is False`` **and** ``verify_mode ==
+  ssl.CERT_NONE``, set in that field order).
+* Flipping ``verify_tls`` yields a different pool key and a freshly built
+  client — the stale client is never reused.
+* The ``(tenant_id, id)`` prefix is intact after the append, so same-named
+  targets in different tenants still get distinct clients.
 """
 
 from __future__ import annotations
 
+import ssl
 import types
 from typing import Any
 from unittest.mock import patch
@@ -67,13 +83,16 @@ def _make_target(
     *,
     target_id: str = "11111111-1111-1111-1111-111111111111",
     tenant_id: str = "00000000-0000-0000-0000-000000000000",
+    verify_tls: bool = True,
 ) -> Any:
     """Return a minimal duck-typed Target stub.
 
     Carries ``id`` and ``tenant_id`` because the pooled-client cache is
     keyed on ``target_cache_key`` (``(tenant_id, id)``); a double missing
     either field raises ``AttributeError`` the moment it reaches the pool
-    (evoila/meho#1682).
+    (evoila/meho#1682). ``verify_tls`` defaults to ``True`` — the
+    default-secure model value (T1 #1780) — so the pool-key suffix and the
+    no-``verify=`` construction path match a verifying target.
     """
     return types.SimpleNamespace(
         name=name,
@@ -82,7 +101,21 @@ def _make_target(
         id=target_id,
         tenant_id=tenant_id,
         auth_model="impersonation",
+        verify_tls=verify_tls,
     )
+
+
+def _client_ssl_context(client: httpx.AsyncClient) -> ssl.SSLContext:
+    """Return the live :class:`ssl.SSLContext` httpx built for *client*.
+
+    httpx consumes ``verify`` at construction into the transport's
+    ``httpcore`` connection pool; the resolved context is reachable at
+    ``client._transport._pool._ssl_context``. Reaching into the private
+    attribute is intentional — it is the only way to assert what the
+    transport will actually present on the wire (verification on vs off)
+    rather than what kwarg was passed in.
+    """
+    return client._transport._pool._ssl_context  # type: ignore[attr-defined,no-any-return]
 
 
 class _ConcreteHttpConnector(HttpConnector):
@@ -321,9 +354,10 @@ async def test_different_targets_get_different_clients() -> None:
     client_b = await conn._http_client(target_b)
 
     assert client_a is not client_b
-    # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
-    assert (target_a.tenant_id, target_a.id) in conn._clients
-    assert (target_b.tenant_id, target_b.id) in conn._clients
+    # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple plus the
+    # ``verify_tls`` dimension (stubs default to verify_tls=True).
+    assert conn._client_cache_key(target_a) in conn._clients
+    assert conn._client_cache_key(target_b) in conn._clients
     await conn.aclose()
 
 
@@ -414,3 +448,178 @@ async def test_aclose_idempotent_on_empty_pool() -> None:
     conn = _ConcreteHttpConnector()
     await conn.aclose()
     assert conn._clients == {}
+
+
+# ---------------------------------------------------------------------------
+# Per-target TLS trust — verify_tls wiring (evoila/meho#1774, #1781)
+# ---------------------------------------------------------------------------
+
+
+def test_insecure_ssl_context_field_ordering() -> None:
+    """The module insecure context disables check_hostname before CERT_NONE.
+
+    The acceptance criterion is the *field state*: ``check_hostname is
+    False`` AND ``verify_mode == ssl.CERT_NONE``. That state is only
+    reachable by setting ``check_hostname`` False first — assigning
+    ``CERT_NONE`` while ``check_hostname`` is still enabled raises
+    ``ValueError`` on Python 3.12, so a context that exhibits both is proof
+    the ordering held.
+    """
+    from meho_backplane.connectors.adapters.http import _insecure_ssl_context
+
+    ctx = _insecure_ssl_context()
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_NONE
+
+
+def test_insecure_ssl_context_is_cached_at_module_scope() -> None:
+    """Repeated calls return the same shared context (built once)."""
+    from meho_backplane.connectors.adapters.http import (
+        _INSECURE_SSL_CONTEXT,
+        _insecure_ssl_context,
+    )
+
+    assert _insecure_ssl_context() is _insecure_ssl_context()
+    assert _insecure_ssl_context() is _INSECURE_SSL_CONTEXT
+
+
+@pytest.mark.asyncio
+async def test_verify_tls_false_client_uses_insecure_context() -> None:
+    """A verify_tls=False target's client presents the insecure context.
+
+    Asserts on the live transport ``SSLContext`` (what goes on the wire):
+    ``check_hostname is False``, ``verify_mode == CERT_NONE``, and that it
+    is the module-cached instance — not a per-client rebuild.
+    """
+    from meho_backplane.connectors.adapters.http import _INSECURE_SSL_CONTEXT
+
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="self-signed-appliance", verify_tls=False)
+
+    client = await conn._http_client(target)
+    ctx = _client_ssl_context(client)
+
+    assert ctx.check_hostname is False
+    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx is _INSECURE_SSL_CONTEXT
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_verify_tls_true_client_passes_no_verify_arg() -> None:
+    """A verify_tls=True target builds the client with NO verify= kwarg.
+
+    The byte-identical-to-today guarantee (evoila/meho#209): when
+    verification is on we must not pass ``verify=`` at all, so httpx keeps
+    its default ``verify=True`` and honours ``SSL_CERT_FILE``. We assert on
+    the construction kwargs via a patched ``httpx.AsyncClient`` so the
+    proof is the *absence* of the argument, not merely an equivalent
+    context.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="verifying-target", verify_tls=True)
+
+    with patch(
+        "meho_backplane.connectors.adapters.http.httpx.AsyncClient",
+        wraps=httpx.AsyncClient,
+    ) as mock_client:
+        await conn._http_client(target)
+
+    assert mock_client.call_count == 1
+    _, kwargs = mock_client.call_args
+    assert "verify" not in kwargs
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_verify_tls_true_client_keeps_default_verification() -> None:
+    """The verify_tls=True transport context verifies (CERT_REQUIRED + SNI).
+
+    Complements the kwarg-absence assertion with the resulting wire state:
+    a default httpx client verifies (``check_hostname`` on, ``verify_mode
+    == CERT_REQUIRED``) — exactly the pre-#1781 behaviour.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="verifying-target", verify_tls=True)
+
+    client = await conn._http_client(target)
+    ctx = _client_ssl_context(client)
+
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_flipping_verify_tls_yields_distinct_client_not_served_stale() -> None:
+    """Toggling verify_tls produces a different pool key and a fresh client.
+
+    A PATCH that flips verify_tls must not be served the stale pooled
+    client built under the previous flag (a client's ``verify`` is fixed at
+    construction). Same target identity (tenant_id, id), different flag →
+    distinct keys, distinct clients.
+    """
+    conn = _ConcreteHttpConnector()
+    secure = _make_target(name="t", target_id="same-id", tenant_id="same-tenant", verify_tls=True)
+    insecure = _make_target(
+        name="t", target_id="same-id", tenant_id="same-tenant", verify_tls=False
+    )
+
+    client_secure = await conn._http_client(secure)
+    client_insecure = await conn._http_client(insecure)
+
+    assert client_secure is not client_insecure
+    # Distinct pool keys, sharing the (tenant_id, id) prefix.
+    key_secure = conn._client_cache_key(secure)
+    key_insecure = conn._client_cache_key(insecure)
+    assert key_secure != key_insecure
+    assert key_secure[:2] == key_insecure[:2] == ("same-tenant", "same-id")
+    # The insecure client really is insecure; the secure one really verifies.
+    assert _client_ssl_context(client_insecure).verify_mode == ssl.CERT_NONE
+    assert _client_ssl_context(client_secure).verify_mode == ssl.CERT_REQUIRED
+    # Re-fetching the secure target returns the original secure client,
+    # never the insecure one minted in between.
+    assert await conn._http_client(secure) is client_secure
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_id_different_tenant_distinct_clients_with_verify_tls() -> None:
+    """The (tenant_id, id) prefix still isolates tenants after the append.
+
+    Two targets sharing an ``id`` but owned by different tenants (and
+    pointing at different hosts) get distinct host-bound clients even when
+    both carry the same verify_tls value — the appended dimension never
+    collapses the tenant prefix (evoila/meho#1682/#1642).
+    """
+    conn = _ConcreteHttpConnector()
+    target_a = _make_target(
+        name="prod", host="a.example.com", target_id="shared-id", tenant_id="tenant-a"
+    )
+    target_b = _make_target(
+        name="prod", host="b.example.com", target_id="shared-id", tenant_id="tenant-b"
+    )
+
+    client_a = await conn._http_client(target_a)
+    client_b = await conn._http_client(target_b)
+
+    assert client_a is not client_b
+    assert str(client_a.base_url) == "https://a.example.com"
+    assert str(client_b.base_url) == "https://b.example.com"
+    assert conn._client_cache_key(target_a) != conn._client_cache_key(target_b)
+    await conn.aclose()
+
+
+def test_extra_cache_dimensions_defaults_to_verify_tls_true() -> None:
+    """A target missing verify_tls defaults to the secure (True) dimension.
+
+    Guards the ``getattr(target, "verify_tls", True)`` fallback so a
+    duck-typed double or a pre-migration row defaults to verification on,
+    never silently insecure.
+    """
+    conn = _ConcreteHttpConnector()
+    without_attr = types.SimpleNamespace(
+        name="legacy", host="h", port=443, id="i", tenant_id="t", auth_model="impersonation"
+    )
+    assert conn.extra_cache_dimensions(without_attr) == (True,)
+    assert conn._client_cache_key(without_attr) == ("t", "i", "True")

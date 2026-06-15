@@ -333,10 +333,11 @@ class NsxConnector(HttpConnector):
         async with self._session_lock:
             self._session_tokens.pop(cache_key, None)
             # The shared ``HttpConnector._clients`` pool is keyed on the
-            # same tenant-unique ``(tenant_id, id)`` tuple as the
-            # session-token cache (evoila/meho#1682), so the cookie jar we
-            # clear here belongs to exactly this tenant's host-bound client.
-            client = self._clients.get(cache_key)
+            # tenant-unique ``(tenant_id, id)`` prefix plus the
+            # ``verify_tls`` dimension (evoila/meho#1682/#1774), so build
+            # the full key the base would to index this tenant's
+            # host-bound client and clear exactly its cookie jar.
+            client = self._clients.get(self._client_cache_key(target))
             if client is not None:
                 client.cookies.clear()
 

@@ -619,12 +619,21 @@ class VmwareRestConnector(HttpConnector):
             self._session_tokens.clear()
             self._session_paths.clear()
         for cache_key, token in tokens.items():
-            # ``_session_tokens`` and the shared ``HttpConnector._clients``
-            # pool are now keyed on the same tenant-unique
-            # ``(tenant_id, target.id)`` tuple (evoila/meho#1682), so the
-            # cached token's key indexes its host-bound client directly —
-            # no name reverse-map needed.
-            client = self._clients.get(cache_key)
+            # ``_session_tokens`` is keyed on the tenant-unique
+            # ``(tenant_id, target.id)`` tuple, while the shared
+            # ``HttpConnector._clients`` pool keys that same prefix plus a
+            # ``verify_tls`` dimension (evoila/meho#1682/#1774). The token
+            # was minted against exactly one per-target client, so match
+            # the pool entry whose key starts with this token's
+            # ``(tenant_id, id)`` prefix — no name reverse-map needed.
+            client = next(
+                (
+                    pooled
+                    for client_key, pooled in self._clients.items()
+                    if client_key[: len(cache_key)] == cache_key
+                ),
+                None,
+            )
             if client is None:
                 # Theoretically unreachable — every cached token was
                 # established against a per-target client that was

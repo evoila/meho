@@ -406,14 +406,33 @@ Two properties make this correct:
   own value rather than the (possibly staler) cached one — the footer
   pill and the dashboard card stay in lock-step.
 
-A misbehaving probe must not 500 a page render: `_stash_ui_readiness`
-degrades to `False` ("starting") on any exception out of the sweep and
-logs `ui_readiness_snapshot_failed`. `GET /ready` itself is unchanged —
-it still computes fresh on every hit (the kubernetes readiness contract)
-and keeps its `features` block, which the UI verdict deliberately omits.
-The `test_ui_readiness_pill.py` suite pins the cache semantics, the
-processor injection + fail-safe, and the end-to-end pill state on a
-non-dashboard surface (`/ui/memory`).
+A misbehaving probe must not stall *or* 500 a page render.
+`_stash_ui_readiness` degrades to `False` ("starting") on any exception
+out of the sweep and logs `ui_readiness_snapshot_failed`. Crucially it
+also bounds the sweep with a short `timeout_s` (`_READINESS_TIMEOUT_S`,
+1 s — well under the 2 s TTL): the registry's real probes
+(`keycloak`, `vault`, `db`, `broadcast`, `docs_backends`) do live
+network I/O, run **sequentially**, and have no internal timeout of their
+own (the Keycloak probe documents its timeout as a deferred TODO), so an
+unreachable/black-holed dependency would otherwise hang every `/ui/*`
+render indefinitely — a hang is not an exception, so the `try`/`except`
+alone cannot catch it. With the bound, `readiness_snapshot` wraps the
+sweep in `asyncio.wait_for`; on timeout it returns a not-ready verdict
+(a synthetic `timeout` check) and deliberately **does not cache** it, so
+a transient stall degrades the pill to "starting" for that request
+without pinning a stale verdict for the rest of the window. (This was
+the #1776 CI-unit-lane hang: in CI those endpoints are black-holed, so
+the unbounded per-request sweep ballooned the unit run past its timeout
+budget; locally the connects fail fast with `ECONNREFUSED`, which is why
+it passed there.) `GET /ready` and the dashboard's fresh sweep
+(`max_age_s=0`) pass no bound (`timeout_s=None`), so their behaviour is
+unchanged — `/ready` still computes fresh on every hit (the kubernetes
+readiness contract) and keeps its `features` block, which the UI verdict
+deliberately omits. The `test_ui_readiness_pill.py` suite pins the cache
+semantics, the timeout degrade-and-don't-cache behaviour, the processor
+injection + fail-safe, and the end-to-end pill state on a non-dashboard
+surface (`/ui/memory`) — including that a hung probe renders "starting"
+promptly rather than blocking.
 
 ## Dependencies
 

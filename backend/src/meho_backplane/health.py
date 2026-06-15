@@ -225,7 +225,11 @@ def _build_readiness_snapshot(results: list[ProbeResult]) -> dict[str, object]:
     }
 
 
-async def readiness_snapshot(*, max_age_s: float = DEFAULT_READINESS_TTL_S) -> dict[str, object]:
+async def readiness_snapshot(
+    *,
+    max_age_s: float = DEFAULT_READINESS_TTL_S,
+    timeout_s: float | None = None,
+) -> dict[str, object]:
     """Return a short-TTL-cached readiness snapshot ``{ready, checks}``.
 
     Runs the full probe sweep (:func:`run_probes_async`, sync + async
@@ -240,6 +244,21 @@ async def readiness_snapshot(*, max_age_s: float = DEFAULT_READINESS_TTL_S) -> d
 
     The ``checks`` detail mirrors the ``/ready`` payload so a caller can
     surface the same per-probe breakdown without a second sweep.
+
+    *timeout_s* bounds the probe sweep. The registry's probes do live
+    network I/O (Keycloak/Vault/DB), run **sequentially**, and carry no
+    internal timeout of their own (see :func:`run_probes_async`), so a
+    slow or black-holed dependency would otherwise hang the caller
+    indefinitely. When *timeout_s* is set and a refresh is required, the
+    sweep is wrapped in :func:`asyncio.wait_for`; if it does not finish
+    in time the call degrades to a not-ready verdict carrying a single
+    synthetic ``timeout`` check and **does not** cache that verdict — a
+    transient stall must not pin a misleading result for the rest of the
+    TTL window, and the next caller retries a fresh sweep. ``None`` (the
+    default) leaves the sweep unbounded: ``GET /ready`` and the dashboard
+    (``max_age_s=0``) keep their existing fidelity, while the per-request
+    UI hot path passes a short bound (see
+    :func:`~meho_backplane.ui.auth.middleware._stash_ui_readiness`).
     """
     global _readiness_cache
     now = time.monotonic()
@@ -254,7 +273,30 @@ async def readiness_snapshot(*, max_age_s: float = DEFAULT_READINESS_TTL_S) -> d
         refreshed_now = time.monotonic()
         if cached is not None and max_age_s > 0 and (refreshed_now - cached[0]) < max_age_s:
             return cached[1]
-        snapshot = _build_readiness_snapshot(await run_probes_async())
+        if timeout_s is None:
+            results = await run_probes_async()
+        else:
+            try:
+                results = await asyncio.wait_for(run_probes_async(), timeout_s)
+            except TimeoutError:
+                # The sweep blew its budget (a probe is hung on network
+                # I/O). ``asyncio.wait_for`` has already cancelled the
+                # underlying coroutine. ``asyncio.CancelledError`` is a
+                # ``BaseException``, not an ``Exception``, so it is *not*
+                # caught here and continues to propagate on a genuine
+                # task cancellation. Return — but deliberately do NOT
+                # cache — a not-ready verdict so the next request retries.
+                return {
+                    "ready": False,
+                    "checks": [
+                        {
+                            "name": "timeout",
+                            "ok": False,
+                            "detail": f"readiness probe sweep exceeded {timeout_s}s",
+                        }
+                    ],
+                }
+        snapshot = _build_readiness_snapshot(results)
         _readiness_cache = (time.monotonic(), snapshot)
         return snapshot
 

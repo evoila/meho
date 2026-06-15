@@ -123,6 +123,14 @@ AUTH_PREFIX: Final[str] = "/ui/auth/"
 #: CSS load without authentication -- otherwise the operator would
 #: see an unstyled login page when their session expires.
 STATIC_PREFIX: Final[str] = "/ui/static/"
+#: Upper bound (seconds) on the per-request readiness sweep run from
+#: :func:`_stash_ui_readiness`. Kept well under
+#: :data:`~meho_backplane.health.DEFAULT_READINESS_TTL_S` (2.0s) so a
+#: slow/unreachable probe degrades the footer pill to "starting" within
+#: a fraction of a second rather than hanging the ``/ui/*`` render: the
+#: registry's probes do live network I/O, run sequentially, and have no
+#: internal timeout of their own (#1776).
+_READINESS_TIMEOUT_S: Final[float] = 1.0
 
 
 @dataclass(frozen=True)
@@ -232,13 +240,22 @@ async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> N
     the cost is at most one probe sweep per cache window across all
     concurrent page loads (#1776).
 
-    A misbehaving probe must not 500 the page: on any exception out of
-    the sweep, degrade to ``False`` ("starting" -- the same fail-safe
-    default the processor uses when the key is unbound) and log, rather
-    than letting it propagate out of the render path.
+    A misbehaving probe must not stall or 500 the page. The registry's
+    probes do live network I/O and run sequentially with no internal
+    timeout (the Keycloak probe in particular documents its timeout as a
+    deferred TODO), so an unreachable or black-holed dependency would
+    hang the render indefinitely on this hot path -- a hang is not an
+    exception, so the ``try``/``except`` below cannot catch it. We pass a
+    short ``timeout_s`` bound (well under
+    :data:`~meho_backplane.health.DEFAULT_READINESS_TTL_S`) so the sweep
+    degrades to not-ready ("starting") instead of blocking, and the
+    ``except`` still catches any probe that raises. Either way the pill
+    falls back to "starting" -- the same fail-safe default the processor
+    uses when the key is unbound -- rather than letting the failure
+    propagate out of the render path.
     """
     try:
-        snapshot = await readiness_snapshot()
+        snapshot = await readiness_snapshot(timeout_s=_READINESS_TIMEOUT_S)
         scope_state["ui_ready"] = bool(snapshot["ready"])
     except Exception:  # pragma: no cover -- defensive
         structlog.get_logger(__name__).warning(

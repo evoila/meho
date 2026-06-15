@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
@@ -260,6 +261,76 @@ async def test_snapshot_one_failing_probe_is_not_ready() -> None:
     assert snapshot["ready"] is False
 
 
+async def test_snapshot_timeout_degrades_to_not_ready_without_hanging() -> None:
+    """A probe slower than ``timeout_s`` degrades to not-ready, promptly.
+
+    The registry's real probes do live network I/O with no internal
+    timeout, so a blocked dependency would hang the per-request sweep
+    indefinitely (#1776 CI-unit-lane hang). ``timeout_s`` bounds it: the
+    call must return well inside the bound's slack with ``ready=False``
+    and a synthetic ``timeout`` check -- not raise, not block for the
+    probe's full sleep.
+    """
+
+    async def _slow_probe() -> ProbeResult:
+        await asyncio.sleep(5)  # >> the 0.1s bound below
+        return ProbeResult(name="slow", ok=True)
+
+    register_probe("slow", _slow_probe)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    snapshot = await readiness_snapshot(max_age_s=0, timeout_s=0.1)
+    elapsed = loop.time() - started
+
+    assert snapshot["ready"] is False
+    assert snapshot["checks"] == [
+        {"name": "timeout", "ok": False, "detail": "readiness probe sweep exceeded 0.1s"}
+    ]
+    # Returned on the timeout, not after the probe's 5s sleep.
+    assert elapsed < 2.0, f"sweep should bail at the bound, took {elapsed:.2f}s"
+
+
+async def test_snapshot_timeout_is_not_cached() -> None:
+    """A timed-out sweep must not pin a misleading verdict for the TTL.
+
+    Caching the not-ready timeout result would lock the pill to
+    "starting" for the whole window even after the dependency recovers.
+    The next caller must re-run the sweep; here a fast probe registered
+    after the timeout is seen immediately on a cached (``max_age_s>0``)
+    read, proving nothing was cached by the timed-out call.
+    """
+
+    async def _slow_probe() -> ProbeResult:
+        await asyncio.sleep(5)
+        return ProbeResult(name="slow", ok=True)
+
+    register_probe("slow", _slow_probe)
+    timed_out = await readiness_snapshot(max_age_s=60, timeout_s=0.1)
+    assert timed_out["ready"] is False
+
+    clear_probes()
+    register_probe("vault", lambda: ProbeResult(name="vault", ok=True))
+    # max_age_s=60 would serve a cached verdict had the timeout cached one;
+    # instead it runs a fresh sweep and sees the healthy probe.
+    after = await readiness_snapshot(max_age_s=60)
+    assert after["ready"] is True, "timed-out verdict must not have been cached"
+
+
+async def test_snapshot_unbounded_default_preserves_dashboard_path() -> None:
+    """``timeout_s=None`` (default) leaves the sweep unbounded.
+
+    ``GET /ready`` and the dashboard (``max_age_s=0``) rely on the
+    unbounded sweep; this guards that a fast probe set still produces a
+    cached verdict identical to the pre-#1776 behaviour when no bound is
+    passed.
+    """
+    register_probe("vault", lambda: ProbeResult(name="vault", ok=True))
+    register_probe("db", lambda: ProbeResult(name="db", ok=True))
+    snapshot = await readiness_snapshot(max_age_s=0)
+    assert snapshot["ready"] is True
+    assert [c["name"] for c in snapshot["checks"]] == ["vault", "db"]  # type: ignore[index,union-attr]
+
+
 async def test_snapshot_serves_cached_verdict_within_ttl() -> None:
     """A cached verdict younger than the window is served without re-probing.
 
@@ -371,6 +442,46 @@ def test_non_dashboard_pill_is_starting_with_empty_registry() -> None:
         mock.stop()
     assert response.status_code == 200, response.text
     assert _pill_state(response.text) == ("bg-warning", "starting")
+
+
+def test_non_dashboard_pill_is_starting_when_probe_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung probe degrades the render to "starting" instead of hanging it.
+
+    Regression for the #1776 CI-unit-lane hang: moving the readiness
+    sweep into the per-request middleware made every ``/ui/*`` render
+    block on a slow/black-holed probe (no internal timeout on the real
+    Keycloak/Vault/DB probes). The middleware now bounds the sweep, so a
+    probe that sleeps far longer than the bound must still let the page
+    render **promptly** with the fail-safe "starting" pill rather than
+    starving the request. The bound is shrunk here so the assertion runs
+    fast.
+    """
+    from meho_backplane.ui.auth import middleware as ui_middleware
+
+    monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", 0.1)
+
+    async def _hung_probe() -> ProbeResult:
+        await asyncio.sleep(10)  # >> the 0.1s bound; would hang the render pre-fix
+        return ProbeResult(name="keycloak", ok=True)
+
+    register_probe("keycloak", _hung_probe)
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_A)
+    client, mock = _authenticated_client(session_id)
+    loop_start = time.monotonic()
+    try:
+        response = client.get("/ui/memory")
+    finally:
+        mock.stop()
+    elapsed = time.monotonic() - loop_start
+
+    assert response.status_code == 200, response.text
+    assert "<title>Memory" in response.text
+    assert _pill_state(response.text) == ("bg-warning", "starting")
+    # The render returned on the readiness bound, not the probe's 10s sleep.
+    assert elapsed < 5.0, f"render should not block on the hung probe, took {elapsed:.2f}s"
 
 
 def test_dashboard_pill_follows_probe_state_unchanged() -> None:

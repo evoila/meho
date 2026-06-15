@@ -207,6 +207,24 @@ connector-related release-notes line.
   (e.g. `meho/test/federation`). A bare single-segment path equal to the
   mount name is still forwarded unchanged (#1755).
 
+### Documentation
+
+- Operator guidance for reaching **self-signed / internal-CA connector
+  targets**: `deploy/values-examples/README.md` gains a "Connector
+  dispatch against self-signed / internal-CA targets" section framing
+  the per-target `verify_tls=false` flag as the **last resort** (with the
+  MITM / credential-exposure caveat and the `govc -k` / kubectl
+  `insecure-skip-tls-verify` prior art), the `SSL_CERT_FILE` / chart
+  trust-bundle CA-trust as the **secure** path (including the #572
+  public-roots-clobber footgun), and per-target CA-pin (#1784) as the
+  planned secure supersession; it documents setting `verify_tls` via the
+  REST API `POST` / `PATCH /api/v1/targets` (the only supported path —
+  `meho targets import` spills the key into `extras` and does not set the
+  column), references the `connector_tls_verify_failed` dispatch error
+  (#1782), and names the two out-of-pool connectors (k8s probe, GitHub
+  token-exchange) that do not honour the flag.
+  `docs/architecture/connectors.md` cross-links it (#1783).
+
 ## [0.15.0] - 2026-06-13
 
 ### Added

@@ -101,6 +101,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "icon": "book-open",
     },
     {
+        "title": "Docs Corpus",
+        "summary": "Ask the attached vendor-document corpus; read cited chunks.",
+        "href": "/ui/corpus",
+        "icon": "library",
+    },
+    {
         "title": "Topology",
         "summary": "Targets, clusters, and dependencies.",
         "href": "/ui/topology",

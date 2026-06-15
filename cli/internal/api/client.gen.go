@@ -1117,6 +1117,12 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyCorpusSearchUiCorpusSearchPost defines model for Body_corpus_search_ui_corpus_search_post.
+type BodyCorpusSearchUiCorpusSearchPost struct {
+	Collection *string `json:"collection,omitempty"`
+	Q          *string `json:"q,omitempty"`
+}
+
 // BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
 type BodyKbEditorPreviewUiKbEditorPreviewPost struct {
 	Body *string `json:"body,omitempty"`
@@ -6297,6 +6303,9 @@ type UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody = UISessionCont
 // UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody defines body for UiConnectorsReprobeUiConnectorsNameProbePost for application/json ContentType.
 type UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody = UISessionContext
 
+// CorpusSearchUiCorpusSearchPostFormdataRequestBody defines body for CorpusSearchUiCorpusSearchPost for application/x-www-form-urlencoded ContentType.
+type CorpusSearchUiCorpusSearchPostFormdataRequestBody = BodyCorpusSearchUiCorpusSearchPost
+
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
 
@@ -7691,6 +7700,14 @@ type ClientInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CorpusIndexUiCorpusGet request
+	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CorpusSearchUiCorpusSearchPostWithBody request with any body
+	CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KbIndexUiKbGet request
 	KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10063,6 +10080,42 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx contex
 
 func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusSearchUiCorpusSearchPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19604,6 +19657,73 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewCorpusIndexUiCorpusGetRequest generates requests for CorpusIndexUiCorpusGet
+func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody calls the generic CorpusSearchUiCorpusSearchPost builder with application/x-www-form-urlencoded body
+func NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody(server string, body CorpusSearchUiCorpusSearchPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewCorpusSearchUiCorpusSearchPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewCorpusSearchUiCorpusSearchPostRequestWithBody generates requests for CorpusSearchUiCorpusSearchPost with any type of body
+func NewCorpusSearchUiCorpusSearchPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewKbIndexUiKbGetRequest generates requests for KbIndexUiKbGet
 func NewKbIndexUiKbGetRequest(server string, params *KbIndexUiKbGetParams) (*http.Request, error) {
 	var err error
@@ -21865,6 +21985,14 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// CorpusIndexUiCorpusGetWithResponse request
+	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
+
+	// CorpusSearchUiCorpusSearchPostWithBodyWithResponse request with any body
+	CorpusSearchUiCorpusSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
+
+	CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
 
 	// KbIndexUiKbGetWithResponse request
 	KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error)
@@ -25168,6 +25296,49 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
+type CorpusIndexUiCorpusGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r CorpusIndexUiCorpusGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CorpusIndexUiCorpusGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CorpusSearchUiCorpusSearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CorpusSearchUiCorpusSearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CorpusSearchUiCorpusSearchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type KbIndexUiKbGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -27543,6 +27714,32 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 		return nil, err
 	}
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// CorpusIndexUiCorpusGetWithResponse request returning *CorpusIndexUiCorpusGetResponse
+func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
+	rsp, err := c.CorpusIndexUiCorpusGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCorpusIndexUiCorpusGetResponse(rsp)
+}
+
+// CorpusSearchUiCorpusSearchPostWithBodyWithResponse request with arbitrary body returning *CorpusSearchUiCorpusSearchPostResponse
+func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error) {
+	rsp, err := c.CorpusSearchUiCorpusSearchPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error) {
+	rsp, err := c.CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
 }
 
 // KbIndexUiKbGetWithResponse request returning *KbIndexUiKbGetResponse
@@ -32242,6 +32439,48 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	}
 
 	response := &UiConnectorsReprobeUiConnectorsNameProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCorpusIndexUiCorpusGetResponse parses an HTTP response from a CorpusIndexUiCorpusGetWithResponse call
+func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorpusGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CorpusIndexUiCorpusGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseCorpusSearchUiCorpusSearchPostResponse parses an HTTP response from a CorpusSearchUiCorpusSearchPostWithResponse call
+func ParseCorpusSearchUiCorpusSearchPostResponse(rsp *http.Response) (*CorpusSearchUiCorpusSearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CorpusSearchUiCorpusSearchPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -9908,6 +9908,69 @@
         }
       }
     },
+    "/ui/corpus": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Corpus Index",
+        "description": "Render the docs-corpus page (delegates to :func:`_render_corpus_index`).",
+        "operationId": "corpus_index_ui_corpus_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/corpus/search": {
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Corpus Search",
+        "description": "Run the search fragment (delegates to :func:`_render_corpus_search`).",
+        "operationId": "corpus_search_ui_corpus_search_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_corpus_search_ui_corpus_search_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -11667,6 +11730,24 @@
         ],
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "Body_corpus_search_ui_corpus_search_post": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Collection",
+            "default": ""
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Q",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_corpus_search_ui_corpus_search_post"
       },
       "Body_kb_editor_preview_ui_kb_editor_preview_post": {
         "properties": {

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing builder-collection debt (>800
+# lines on main before #1782, which adds only the connector_tls_verify_failed
+# builder alongside its 403/422 siblings); a split into per-error modules is its
+# own refactor task, out of scope for the TLS-verify error-arm.
 
 """Structured :class:`OperationResult` builders for the G0.6 dispatcher.
 
@@ -13,7 +17,8 @@ Each builder owns one ``error_code`` from the contract documented in
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
-``connector_http_403`` / ``connector_http_422`` / ``connector_error``.
+``connector_http_403`` / ``connector_http_422`` /
+``connector_tls_verify_failed`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -38,6 +43,7 @@ __all__ = [
     "result_connector_error",
     "result_connector_http_403",
     "result_connector_http_422",
+    "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_denied",
     "result_handler_unreachable",
@@ -802,6 +808,90 @@ def result_connector_http_422(
         error=summary,
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+#: The two remediation clauses the ``connector_tls_verify_failed`` message
+#: names, in preference order. Kept as module constants so the builder body
+#: stays under the size budget and the operator-facing text is auditable in
+#: one place (the secure path is named first, deliberately).
+_TLS_REMEDIATION_SECURE: str = (
+    "Preferred: make meho trust the endpoint's certificate chain -- point "
+    "SSL_CERT_FILE at a CA bundle that includes the issuing CA, or inject the "
+    "internal-CA / self-signed cert into the chart trust-bundle, so "
+    "verification succeeds without weakening it."
+)
+_TLS_REMEDIATION_LAST_RESORT: str = (
+    "Last resort: set verify_tls=false on this target to skip TLS "
+    "verification for it alone (audited, per-target, never global). This "
+    "still forwards the target's resolved credential over the unverified "
+    "channel, exposing it to a man-in-the-middle -- use only against a "
+    "trusted-network appliance you cannot yet pin a CA for."
+)
+
+
+def result_connector_tls_verify_failed(
+    op_id: str,
+    exc: BaseException,
+    target: Any,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector dispatch failed TLS certificate verification.
+
+    T3 (#1782) of the per-target-TLS Initiative (#1774). A dispatch whose
+    transport opened the socket but failed cert-chain verification raises
+    an :exc:`httpx.ConnectError` whose ``__cause__`` is an
+    :exc:`ssl.SSLCertVerificationError` (the self-signed / internal-CA
+    appliance case). Such an error has no ``.response``, so it skips the
+    :exc:`httpx.HTTPStatusError` arm and used to fall through to the
+    generic :func:`result_connector_error` -- flattening it to an opaque
+    ``connector_error: ConnectError`` that discarded the SSL cause, so the
+    operator saw ``[SSL: CERTIFICATE_VERIFY_FAILED]`` with no guidance.
+
+    This builder names the **host** and **both** remediations: the secure
+    ``SSL_CERT_FILE`` / chart trust-bundle path (preferred -- verification
+    stays on), and ``verify_tls=false`` as the audited per-target last
+    resort (the opt-in T1 #1780 adds), with the MITM / credential-exposure
+    caveat. The raw ``[SSL: CERTIFICATE_VERIFY_FAILED]...`` string is
+    preserved in ``extras.exception_message`` (capped at
+    :data:`_EXC_MESSAGE_CAP`) so the operator can confirm the failure
+    shape without it being lost into the generic envelope.
+
+    The host is read from ``target.host`` -- a hostname the operator
+    configured themselves, so it is not an info-leak per
+    ``docs/codebase/error-message-shape.md`` (the same reasoning as the
+    gold-standard ``/ui/auth/login`` naming the operator's own env vars).
+    ``target`` is typed :class:`typing.Any` because the dispatcher threads
+    the live ORM/duck-typed target through; only ``.host`` is read, with a
+    ``getattr`` guard so a target shape without it degrades to a bare host
+    label rather than raising inside the never-raises error path.
+    """
+    msg = str(exc)
+    if len(msg) > _EXC_MESSAGE_CAP:
+        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    host = getattr(target, "host", None) or "the target host"
+    summary = (
+        f"connector_tls_verify_failed: TLS certificate verification failed "
+        f"for {host}. The socket opened and the host answered, but its "
+        f"certificate chain is not trusted (typically a self-signed or "
+        f"internal-CA appliance). {_TLS_REMEDIATION_SECURE} "
+        f"{_TLS_REMEDIATION_LAST_RESORT} See "
+        f"docs/codebase/error-message-shape.md for the dispatch error "
+        f"convention."
+    )
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_tls_verify_failed",
+            "host": host,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+            "remediation_secure": _TLS_REMEDIATION_SECURE,
+            "remediation_last_resort": _TLS_REMEDIATION_LAST_RESORT,
+        },
     )
 
 

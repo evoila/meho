@@ -135,6 +135,17 @@ connector-related release-notes line.
   is rejected 403); Deny stays allowed. Bell + modal are tenant-scoped.
   `approval.*` lifecycle events now classify as a dedicated `approval`
   broadcast class so the bell's SSE filter resolves (#1778).
+- A connector dispatch that fails **TLS certificate verification** (a
+  self-signed or internal-CA appliance) now returns a structured
+  `connector_tls_verify_failed` result naming the host and both
+  remediations — point `SSL_CERT_FILE` at a CA bundle / inject the cert
+  into the chart trust-bundle (preferred, keeps verification on), or set
+  `verify_tls=false` on that target as an audited per-target last resort
+  (with the man-in-the-middle / credential-exposure caveat) — instead of
+  the opaque `connector_error: ConnectError` that discarded the
+  `[SSL: CERTIFICATE_VERIFY_FAILED]` cause. Non-TLS connection failures
+  (DNS, connection-refused, timeout) are unchanged. No schema or CLI
+  change (#1782).
 
 ### Changed
 

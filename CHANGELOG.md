@@ -114,6 +114,21 @@ connector-related release-notes line.
   and `Gcloud` inherit the behaviour through `HttpConnector`; the
   out-of-pool k8s reachability probe and GitHub App token-exchange are
   unaffected (#1781).
+- Targets now carry a first-class **`tls_ca_pin`** field (nullable PEM) —
+  the **secure** supersession of `verify_tls=false`. Pin an appliance's
+  CA / cert and connector dispatch trusts that CA while **keeping**
+  `CERT_REQUIRED` + `check_hostname` on (`ssl.create_default_context()` +
+  `load_verify_locations(cadata=...)`, the govc-thumbprint pattern), so a
+  self-signed / internal-CA endpoint is reachable without weakening
+  verification or adding the CA to the global bundle. A CA-pin takes
+  precedence over `verify_tls=false` and the two are mutually exclusive
+  (a `422` rejects setting both). The pooled-client key gains a CA-pin
+  digest dimension — `(tenant_id, id, verify_tls, ca_pin_digest)` — so
+  rotating a pin builds a fresh client while the cross-tenant isolation
+  prefix is unchanged; the PEM is validated at the API boundary and
+  set/rotate/clear is audited (`tls_ca_pinned` + before/after digest,
+  never the PEM body). The `connector_tls_verify_failed` error and the
+  operator docs now name CA-pin as the preferred per-target fix (#1784).
 - Bulk read-class connector enable path across REST + MCP + CLI:
   `POST /api/v1/connectors/{id}/enable-reads`, the
   `meho.connector.enable_reads` MCP tool, and `meho connector

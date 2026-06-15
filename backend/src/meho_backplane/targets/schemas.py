@@ -44,12 +44,13 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from meho_backplane.connectors.schemas import AuthModel
 
@@ -63,7 +64,42 @@ __all__ = [
     "TargetSummary",
     "TargetUpdate",
     "project_target_to_summary",
+    "validate_ca_pin_pem",
 ]
+
+
+def validate_ca_pin_pem(value: str | None) -> str | None:
+    """Reject a ``tls_ca_pin`` that the stdlib SSL layer can't parse.
+
+    The pin is fed verbatim to
+    :meth:`ssl.SSLContext.load_verify_locations` ``(cadata=...)`` at
+    dispatch time (#1784). Validating it at the API boundary turns an
+    otherwise-runtime ``ssl.SSLError`` (raised inside the never-raises
+    connector path, where it would surface as an opaque dispatch failure)
+    into a 422 the operator sees the moment they POST/PATCH the target --
+    the typed-validation win that motivated a first-class column over an
+    unvalidated ``extras`` key.
+
+    ``None`` (no pin) and an all-whitespace string (treated as "clear the
+    pin", normalised to ``None``) pass through. A non-empty value must be
+    loadable as one or more PEM-encoded certificates;
+    :meth:`load_verify_locations` raises :exc:`ssl.SSLError` on malformed
+    PEM and requires at least one certificate, so a stray header or a
+    truncated block is rejected here rather than at dispatch.
+    """
+    if value is None:
+        return None
+    if not value.strip():
+        # An empty / all-whitespace pin is "no pin" -- normalise to NULL so
+        # the column never stores a meaningless blank string the connector
+        # would then try (and fail) to load as a certificate.
+        return None
+    ctx = ssl.create_default_context()
+    try:
+        ctx.load_verify_locations(cadata=value)
+    except ssl.SSLError as exc:
+        raise ValueError(f"tls_ca_pin is not a valid PEM certificate bundle: {exc}") from exc
+    return value
 
 
 class TargetSummary(BaseModel):
@@ -119,6 +155,13 @@ class TargetSummary(BaseModel):
     # hand-constructed instances stay valid; production projections go
     # through :func:`project_target_to_summary` which passes it through.
     verify_tls: bool = True
+    # T5 (#1784). Per-target CA-trust pin (PEM). Connection-routing, like
+    # ``verify_tls``, so it is listable per the same no-silent-masking
+    # rule (§5) -- the list response must not hide a connection-affecting
+    # field the detail endpoint exposes. ``None`` = no pin. Defaults to
+    # ``None`` for legacy hand-constructed instances; production
+    # projections pass it through :func:`project_target_to_summary`.
+    tls_ca_pin: str | None = None
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
     created_at: datetime
@@ -189,6 +232,13 @@ class Target(BaseModel):
     # passes the column through explicitly. The dispatch path that
     # consumes the flag lands in #1781.
     verify_tls: bool = True
+    # T5 (#1784). Per-target CA-trust pin (PEM). ``None`` = no pin (verify
+    # against the global bundle only). When set, dispatch trusts this CA
+    # while keeping ``CERT_REQUIRED`` + hostname verification on -- the
+    # secure supersession of ``verify_tls=false``. Defaults to ``None`` so
+    # legacy hand-constructed instances stay valid; production read paths
+    # go through :func:`_to_full`.
+    tls_ca_pin: str | None = None
     extras: Mapping[str, Any]
     notes: str | None
     fingerprint: Mapping[str, Any] | None
@@ -250,9 +300,42 @@ class TargetCreate(BaseModel):
     # route handler audits (durable ``audit_log`` row + WARN log). The
     # dispatch path that consumes the flag lands in #1781.
     verify_tls: bool = True
+    # T5 (#1784). Per-target CA-trust pin (PEM). When set, dispatch trusts
+    # this CA while keeping ``CERT_REQUIRED`` + hostname verification on
+    # (the secure govc-thumbprint path), so it is the secure supersession
+    # of ``verify_tls=false`` and **mutually exclusive** with it (see the
+    # model validator below). ``None`` (the default) = no pin. The PEM is
+    # validated at this boundary (see :func:`validate_ca_pin_pem`) so a
+    # malformed bundle is a 422 here, not an opaque dispatch failure.
+    tls_ca_pin: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+
+    @field_validator("tls_ca_pin")
+    @classmethod
+    def _validate_ca_pin(cls, value: str | None) -> str | None:
+        return validate_ca_pin_pem(value)
+
+    @model_validator(mode="after")
+    def _ca_pin_excludes_insecure(self) -> TargetCreate:
+        """Reject a target that both pins a CA *and* disables verification.
+
+        The two are contradictory: a CA-pin is the *secure* way to reach a
+        self-signed appliance (verification stays on, against the pinned
+        CA), so combining it with ``verify_tls=false`` (verification off)
+        is an operator error -- the insecure flag would silently win at
+        dispatch and throw away the pin's protection. Fail closed at the
+        API boundary so the contradiction never reaches the connector.
+        """
+        if self.tls_ca_pin is not None and not self.verify_tls:
+            raise ValueError(
+                "tls_ca_pin and verify_tls=false are mutually exclusive: a "
+                "CA-pin already reaches a self-signed / internal-CA endpoint "
+                "securely (verification stays on against the pinned CA), so "
+                "disabling verification as well is contradictory. Drop one."
+            )
+        return self
 
 
 class TargetUpdate(BaseModel):
@@ -314,9 +397,44 @@ class TargetUpdate(BaseModel):
     # "clear to null" state -- the value is always one of ``True`` /
     # ``False`` once present.
     verify_tls: bool | None = None
+    # T5 (#1784). Patchable per-target CA-trust pin (PEM). Standard
+    # PATCH-field semantics: ``None`` is the absent-marker ("client did
+    # not send this field"), so a PATCH that does not mention
+    # ``tls_ca_pin`` leaves the column untouched. Unlike ``verify_tls``
+    # the column is nullable, so an explicit ``{"tls_ca_pin": null}``
+    # clears the pin (same as clearing ``secret_ref`` / ``fqdn``). A
+    # non-null value is PEM-validated here, and combining it with
+    # ``verify_tls=false`` in the *same* body is rejected (the merged
+    # state across the persisted row is enforced in the route handler).
+    tls_ca_pin: str | None = None
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+
+    @field_validator("tls_ca_pin")
+    @classmethod
+    def _validate_ca_pin(cls, value: str | None) -> str | None:
+        return validate_ca_pin_pem(value)
+
+    @model_validator(mode="after")
+    def _ca_pin_excludes_insecure(self) -> TargetUpdate:
+        """Reject a PATCH body that pins a CA *and* disables verification.
+
+        Same contradiction as on :class:`TargetCreate`, but scoped to the
+        body: only fires when **both** ``tls_ca_pin`` (non-null) and
+        ``verify_tls=false`` are sent in the one request. The cross-row
+        merged check (e.g. PATCH sets a pin on a row already at
+        ``verify_tls=false``) is the route handler's job -- the schema
+        only sees the request body.
+        """
+        if self.tls_ca_pin is not None and self.verify_tls is False:
+            raise ValueError(
+                "tls_ca_pin and verify_tls=false are mutually exclusive: a "
+                "CA-pin already reaches a self-signed / internal-CA endpoint "
+                "securely, so disabling verification as well is contradictory. "
+                "Send only one."
+            )
+        return self
 
 
 def project_target_to_summary(t: TargetORM) -> TargetSummary:
@@ -358,6 +476,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
+        tls_ca_pin=t.tls_ca_pin,
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
         created_at=t.created_at,

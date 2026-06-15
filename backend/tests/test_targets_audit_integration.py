@@ -414,3 +414,188 @@ async def test_create_target_verify_tls_false_writes_tls_audit_payload(
     assert payload["target_id"] == str(created_id)
     assert payload["verify_tls_before"] is True
     assert payload["verify_tls_after"] is False
+
+
+# ---------------------------------------------------------------------------
+# T5 (#1784) — tls_ca_pin set/change/clear folds into the audit_log payload
+# ---------------------------------------------------------------------------
+
+
+def _audit_ca_pem() -> str:
+    """A valid self-signed CA PEM for the CA-pin audit tests."""
+    import datetime as _dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "audit-test-ca")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=1))
+        .not_valid_after(_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_create_target_with_ca_pin_writes_ca_pin_audit_payload(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST with ``tls_ca_pin`` → audit payload records the pin (digest only)."""
+    from meho_backplane.api.v1.targets import _ca_pin_digest
+
+    pem = _audit_ca_pem()
+    key = make_rsa_keypair("kid-T5-create")
+    token = mint_token(key, sub="adm-t5-create", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={"name": "kappa", "product": "vmware-rest", "host": "vrli.lab", "tls_ca_pin": pem},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 201
+    created_id = uuid.UUID(response.json()["id"])
+    assert response.json()["tls_ca_pin"] == pem
+
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["tls_ca_pinned"] is True
+    assert payload["target_id"] == str(created_id)
+    # No prior pin → empty-string "before" marker (not None, which the
+    # audit fold-in would drop).
+    assert payload["tls_ca_pin_before"] == ""
+    assert payload["tls_ca_pin_after"] == _ca_pin_digest(pem)
+    # The PEM body is never put in the audit payload — only a digest.
+    assert "BEGIN CERTIFICATE" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_patch_set_ca_pin_writes_ca_pin_audit_payload(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATCH that adds a pin → audit payload records before=None, after=digest."""
+    from meho_backplane.api.v1.targets import _ca_pin_digest
+
+    pem = _audit_ca_pem()
+    t = await _insert_target(name="lambda", tls_ca_pin=None)
+    key = make_rsa_keypair("kid-T5-patch-set")
+    token = mint_token(key, sub="adm-t5-set", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"tls_ca_pin": pem},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["tls_ca_pinned"] is True
+    assert payload["tls_ca_pin_before"] == ""
+    assert payload["tls_ca_pin_after"] == _ca_pin_digest(pem)
+
+
+@pytest.mark.asyncio
+async def test_patch_clear_ca_pin_writes_ca_pin_audit_payload(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATCH ``{"tls_ca_pin": null}`` → audit records before=digest, after=None."""
+    from meho_backplane.api.v1.targets import _ca_pin_digest
+
+    pem = _audit_ca_pem()
+    t = await _insert_target(name="mu", tls_ca_pin=pem)
+    key = make_rsa_keypair("kid-T5-patch-clear")
+    token = mint_token(key, sub="adm-t5-clear", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"tls_ca_pin": None},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tls_ca_pin"] is None
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["tls_ca_pinned"] is False
+    assert payload["tls_ca_pin_before"] == _ca_pin_digest(pem)
+    # Pin cleared → empty-string "after" marker.
+    assert payload["tls_ca_pin_after"] == ""
+
+
+@pytest.mark.asyncio
+async def test_patch_without_ca_pin_binds_no_ca_pin_audit_keys(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATCH that does not touch ``tls_ca_pin`` binds no CA-pin audit keys."""
+    pem = _audit_ca_pem()
+    t = await _insert_target(name="nu", tls_ca_pin=pem)
+    key = make_rsa_keypair("kid-T5-patch-noop")
+    token = mint_token(key, sub="adm-t5-noop", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"notes": "ticket-7"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert "tls_ca_pinned" not in payload
+    assert "tls_ca_pin_before" not in payload
+    assert "tls_ca_pin_after" not in payload
+
+
+@pytest.mark.asyncio
+async def test_patch_pin_on_insecure_target_rejected_422(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATCH adding a pin to a verify_tls=false row is rejected (merged 422).
+
+    The schema validator only sees the request body, so the cross-row
+    contradiction (set a pin on a row already at verify_tls=false) is
+    enforced by the route handler.
+    """
+    pem = _audit_ca_pem()
+    t = await _insert_target(name="xi", verify_tls=False, tls_ca_pin=None)
+    key = make_rsa_keypair("kid-T5-merged")
+    token = mint_token(key, sub="adm-t5-merged", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"tls_ca_pin": pem},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 422
+    assert "mutually exclusive" in str(response.json())

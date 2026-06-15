@@ -40,7 +40,10 @@ Per-target TLS trust (evoila/meho#1774, #1781):
 
 from __future__ import annotations
 
+import datetime as _dt
+import socket as _socket
 import ssl
+import threading as _threading
 import types
 from typing import Any
 from unittest.mock import patch
@@ -49,10 +52,18 @@ from uuid import UUID
 import httpx
 import pytest
 import respx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnectorDirect
+from meho_backplane.connectors.adapters.http import (
+    _build_ca_pinned_ssl_context,
+    _ca_pin_digest,
+)
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -84,6 +95,7 @@ def _make_target(
     target_id: str = "11111111-1111-1111-1111-111111111111",
     tenant_id: str = "00000000-0000-0000-0000-000000000000",
     verify_tls: bool = True,
+    tls_ca_pin: str | None = None,
 ) -> Any:
     """Return a minimal duck-typed Target stub.
 
@@ -91,8 +103,9 @@ def _make_target(
     keyed on ``target_cache_key`` (``(tenant_id, id)``); a double missing
     either field raises ``AttributeError`` the moment it reaches the pool
     (evoila/meho#1682). ``verify_tls`` defaults to ``True`` — the
-    default-secure model value (T1 #1780) — so the pool-key suffix and the
-    no-``verify=`` construction path match a verifying target.
+    default-secure model value (T1 #1780) — and ``tls_ca_pin`` to ``None``
+    (no pin, T5 #1784), so the pool-key suffix and the no-``verify=``
+    construction path match a verifying, unpinned target.
     """
     return types.SimpleNamespace(
         name=name,
@@ -102,6 +115,7 @@ def _make_target(
         tenant_id=tenant_id,
         auth_model="impersonation",
         verify_tls=verify_tls,
+        tls_ca_pin=tls_ca_pin,
     )
 
 
@@ -610,16 +624,323 @@ async def test_same_id_different_tenant_distinct_clients_with_verify_tls() -> No
     await conn.aclose()
 
 
-def test_extra_cache_dimensions_defaults_to_verify_tls_true() -> None:
-    """A target missing verify_tls defaults to the secure (True) dimension.
+def test_extra_cache_dimensions_defaults_to_verify_tls_true_unpinned() -> None:
+    """A target missing verify_tls/tls_ca_pin defaults to ``(True, "")``.
 
-    Guards the ``getattr(target, "verify_tls", True)`` fallback so a
-    duck-typed double or a pre-migration row defaults to verification on,
-    never silently insecure.
+    Guards the ``getattr`` fallbacks so a duck-typed double or a
+    pre-migration row defaults to verification on and no pin — never
+    silently insecure, never a spurious pin. The pin slot is the empty
+    string when unpinned, so the key matches the pre-#1784 shape in its
+    first two extra slots plus a trailing ``""``.
     """
     conn = _ConcreteHttpConnector()
     without_attr = types.SimpleNamespace(
         name="legacy", host="h", port=443, id="i", tenant_id="t", auth_model="impersonation"
     )
-    assert conn.extra_cache_dimensions(without_attr) == (True,)
-    assert conn._client_cache_key(without_attr) == ("t", "i", "True")
+    assert conn.extra_cache_dimensions(without_attr) == (True, "")
+    assert conn._client_cache_key(without_attr) == ("t", "i", "True", "")
+
+
+# ---------------------------------------------------------------------------
+# Per-target CA-pin — tls_ca_pin secure supersession (evoila/meho#1784)
+# ---------------------------------------------------------------------------
+#
+# The CA-pin is the *secure* path: it must trust the pinned CA while
+# KEEPING CERT_REQUIRED + check_hostname (vs verify_tls=false, which drops
+# both). These tests prove that property three ways: (1) the built context's
+# field state, (2) a real in-memory TLS handshake that succeeds against a
+# cert chaining to the pin and FAILS CLOSED against one that does not / a
+# hostname mismatch, and (3) precedence + cache-key wiring.
+
+
+def _gen_ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
+    """Generate a self-signed CA keypair + certificate."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "meho-test-ca")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=1))
+        .not_valid_after(_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return key, cert
+
+
+def _gen_leaf(
+    ca_key: rsa.RSAPrivateKey,
+    ca_cert: x509.Certificate,
+    hostname: str,
+) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
+    """Generate a leaf cert for *hostname* signed by the given CA."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=1))
+        .not_valid_after(_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    return key, cert
+
+
+def _pem(cert: x509.Certificate) -> str:
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def _key_pem(key: rsa.RSAPrivateKey) -> bytes:
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+
+
+def _tls_handshake_error(
+    client_ctx: ssl.SSLContext,
+    server_cert: x509.Certificate,
+    server_key: rsa.RSAPrivateKey,
+    server_hostname: str,
+) -> ssl.SSLError | None:
+    """Run one in-memory TLS handshake; return the client-side error or None.
+
+    Drives a real client/server TLS handshake over a connected socketpair:
+    the server presents *server_cert*, the client verifies using
+    *client_ctx* with ``server_hostname`` as the SNI / hostname-check name.
+    Returns the :exc:`ssl.SSLError` the client raised, or ``None`` when the
+    handshake completed (i.e. the cert was trusted and the hostname
+    matched). Files the server cert/key into a tmp via in-memory PEM so the
+    stdlib server context can load them.
+    """
+    import tempfile
+
+    csock, ssock = _socket.socketpair()
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    with tempfile.NamedTemporaryFile("wb", suffix=".pem", delete=False) as cf:
+        cf.write(server_cert.public_bytes(serialization.Encoding.PEM))
+        cf.write(_key_pem(server_key))
+        chain_path = cf.name
+    server_ctx.load_cert_chain(chain_path)
+
+    client_err: list[ssl.SSLError] = []
+
+    def _serve() -> None:
+        try:
+            with server_ctx.wrap_socket(ssock, server_side=True) as tls:
+                tls.recv(16)
+        except (ssl.SSLError, OSError):
+            pass
+
+    t = _threading.Thread(target=_serve, daemon=True)
+    t.start()
+    try:
+        with client_ctx.wrap_socket(csock, server_hostname=server_hostname) as tls:
+            tls.send(b"ok")
+    except ssl.SSLError as exc:
+        client_err.append(exc)
+    finally:
+        t.join(timeout=5)
+        csock.close()
+    return client_err[0] if client_err else None
+
+
+def test_ca_pinned_context_keeps_cert_required_and_check_hostname() -> None:
+    """The CA-pin context trusts the pin but KEEPS CERT_REQUIRED + hostname.
+
+    This is the whole point vs verify_tls=false: load_verify_locations
+    does not touch check_hostname or verify_mode, so the secure defaults
+    of create_default_context survive — verification stays ON, now also
+    trusting the pinned CA.
+    """
+    _ca_key, ca_cert = _gen_ca()
+    ctx = _build_ca_pinned_ssl_context(_pem(ca_cert))
+
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    # The pinned CA is actually in the context's trust store.
+    loaded_subjects = {tuple(sorted(d["subject"][0])) for d in ctx.get_ca_certs()}
+    assert ("commonName", "meho-test-ca") in {s for subj in loaded_subjects for s in subj}
+
+
+def test_ca_pinned_context_trusts_chaining_cert() -> None:
+    """A cert chaining to the pinned CA + matching hostname handshakes OK."""
+    ca_key, ca_cert = _gen_ca()
+    leaf_key, leaf_cert = _gen_leaf(ca_key, ca_cert, "appliance.lab.internal")
+    ctx = _build_ca_pinned_ssl_context(_pem(ca_cert))
+
+    err = _tls_handshake_error(ctx, leaf_cert, leaf_key, "appliance.lab.internal")
+    assert err is None, f"expected trust, got {err!r}"
+
+
+def test_ca_pinned_context_fails_closed_on_non_chaining_cert() -> None:
+    """A cert NOT chaining to the pinned CA fails verification (fail closed).
+
+    Acceptance criterion: the pin trusts exactly its CA — an unrelated
+    self-signed cert (a MITM presenting any cert) is rejected, because
+    CERT_REQUIRED is kept.
+    """
+    _ca_key, ca_cert = _gen_ca()
+    ctx = _build_ca_pinned_ssl_context(_pem(ca_cert))
+    # A different CA's leaf — does not chain to the pinned CA.
+    other_ca_key, other_ca_cert = _gen_ca()
+    rogue_key, rogue_cert = _gen_leaf(other_ca_key, other_ca_cert, "appliance.lab.internal")
+
+    err = _tls_handshake_error(ctx, rogue_cert, rogue_key, "appliance.lab.internal")
+    assert err is not None
+    assert "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+def test_ca_pinned_context_fails_closed_on_hostname_mismatch() -> None:
+    """A cert that chains to the pin but for the WRONG hostname fails closed.
+
+    Acceptance criterion: check_hostname stays ON, so a cert legitimately
+    signed by the pinned CA but issued for a different name is still
+    rejected — the pin does not turn hostname checking off.
+    """
+    ca_key, ca_cert = _gen_ca()
+    # Leaf is for "real.lab.internal" but we connect expecting "evil.lab.internal".
+    leaf_key, leaf_cert = _gen_leaf(ca_key, ca_cert, "real.lab.internal")
+    ctx = _build_ca_pinned_ssl_context(_pem(ca_cert))
+
+    err = _tls_handshake_error(ctx, leaf_cert, leaf_key, "evil.lab.internal")
+    assert err is not None
+    # Hostname-mismatch surfaces as a CertificateError (a subclass of SSLError).
+    assert "hostname" in str(err).lower() or "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+@pytest.mark.asyncio
+async def test_ca_pin_takes_precedence_over_verify_tls_false() -> None:
+    """CA-pin wins over verify_tls=false: the client verifies (secure path).
+
+    The connector should never silently honour verify_tls=false when a pin
+    is set (the API rejects that combo, but the connector defends in depth):
+    a target carrying both builds the CA-pinned, verifying context — NOT
+    the insecure one.
+    """
+    from meho_backplane.connectors.adapters.http import _INSECURE_SSL_CONTEXT
+
+    _ca_key, ca_cert = _gen_ca()
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="pinned-and-insecure", verify_tls=False, tls_ca_pin=_pem(ca_cert))
+
+    client = await conn._http_client(target)
+    ctx = _client_ssl_context(client)
+
+    assert ctx is not _INSECURE_SSL_CONTEXT
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ca_pin_client_uses_verifying_context() -> None:
+    """A pinned target's pooled client presents a verifying context."""
+    _ca_key, ca_cert = _gen_ca()
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="pinned", tls_ca_pin=_pem(ca_cert))
+
+    client = await conn._http_client(target)
+    ctx = _client_ssl_context(client)
+
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    await conn.aclose()
+
+
+def test_ca_pin_digest_is_stable_and_distinguishes_pins() -> None:
+    """The pin digest is deterministic, empty for no-pin, and pin-specific."""
+    _ca_key_a, ca_a = _gen_ca()
+    _ca_key_b, ca_b = _gen_ca()
+    pem_a, pem_b = _pem(ca_a), _pem(ca_b)
+
+    assert _ca_pin_digest(None) == ""
+    assert _ca_pin_digest("") == ""
+    assert _ca_pin_digest(pem_a) == _ca_pin_digest(pem_a)
+    assert _ca_pin_digest(pem_a) != _ca_pin_digest(pem_b)
+
+
+@pytest.mark.asyncio
+async def test_changing_ca_pin_yields_distinct_client_not_served_stale() -> None:
+    """Rotating the pin produces a different pool key and a fresh client.
+
+    A PATCH that rotates tls_ca_pin must not be served the stale pooled
+    client built against the previous pin (a client's verify context is
+    fixed at construction). Same target identity, different pin → distinct
+    keys, distinct clients, with the (tenant_id, id) prefix preserved.
+    """
+    _ka, ca_a = _gen_ca()
+    _kb, ca_b = _gen_ca()
+    conn = _ConcreteHttpConnector()
+    pin_a = _make_target(name="t", target_id="id", tenant_id="ten", tls_ca_pin=_pem(ca_a))
+    pin_b = _make_target(name="t", target_id="id", tenant_id="ten", tls_ca_pin=_pem(ca_b))
+
+    client_a = await conn._http_client(pin_a)
+    client_b = await conn._http_client(pin_b)
+
+    assert client_a is not client_b
+    key_a = conn._client_cache_key(pin_a)
+    key_b = conn._client_cache_key(pin_b)
+    assert key_a != key_b
+    assert key_a[:2] == key_b[:2] == ("ten", "id")
+    # Re-fetching the first pin returns the original client, not the second.
+    assert await conn._http_client(pin_a) is client_a
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_pin_different_tenant_distinct_clients() -> None:
+    """The (tenant_id, id) prefix still isolates tenants with the same pin.
+
+    Two targets sharing an id and the SAME pinned CA but owned by different
+    tenants (pointing at different hosts) get distinct host-bound clients —
+    the pin dimension never collapses the tenant prefix (#1682/#1642).
+    """
+    _ka, ca = _gen_ca()
+    pin = _pem(ca)
+    conn = _ConcreteHttpConnector()
+    target_a = _make_target(
+        name="prod", host="a.example.com", target_id="shared", tenant_id="ten-a", tls_ca_pin=pin
+    )
+    target_b = _make_target(
+        name="prod", host="b.example.com", target_id="shared", tenant_id="ten-b", tls_ca_pin=pin
+    )
+
+    client_a = await conn._http_client(target_a)
+    client_b = await conn._http_client(target_b)
+
+    assert client_a is not client_b
+    assert str(client_a.base_url) == "https://a.example.com"
+    assert str(client_b.base_url) == "https://b.example.com"
+    assert conn._client_cache_key(target_a) != conn._client_cache_key(target_b)
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
+    """An unpinned verify_tls=True target still builds with NO verify= kwarg.
+
+    The #1784 pin dimension must not regress the #209 byte-identical
+    guarantee: with no pin and verification on, no verify= argument is
+    passed, so httpx keeps its default and honours SSL_CERT_FILE.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(name="plain", verify_tls=True, tls_ca_pin=None)
+
+    with patch(
+        "meho_backplane.connectors.adapters.http.httpx.AsyncClient",
+        wraps=httpx.AsyncClient,
+    ) as mock_client:
+        await conn._http_client(target)
+
+    assert mock_client.call_count == 1
+    _, kwargs = mock_client.call_args
+    assert "verify" not in kwargs
+    await conn.aclose()

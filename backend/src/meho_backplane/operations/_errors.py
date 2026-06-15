@@ -811,22 +811,36 @@ def result_connector_http_422(
     )
 
 
-#: The two remediation clauses the ``connector_tls_verify_failed`` message
-#: names, in preference order. Kept as module constants so the builder body
-#: stays under the size budget and the operator-facing text is auditable in
-#: one place (the secure path is named first, deliberately).
+#: The three remediation clauses the ``connector_tls_verify_failed``
+#: message names, in preference order (most secure first). Kept as module
+#: constants so the builder body stays under the size budget and the
+#: operator-facing text is auditable in one place.
 _TLS_REMEDIATION_SECURE: str = (
-    "Preferred: make meho trust the endpoint's certificate chain -- point "
-    "SSL_CERT_FILE at a CA bundle that includes the issuing CA, or inject the "
-    "internal-CA / self-signed cert into the chart trust-bundle, so "
-    "verification succeeds without weakening it."
+    "Preferred (global): make meho trust the endpoint's certificate chain -- "
+    "point SSL_CERT_FILE at a CA bundle that includes the issuing CA, or "
+    "inject the internal-CA / self-signed cert into the chart trust-bundle, "
+    "so verification succeeds without weakening it."
+)
+#: T5 (#1784). The secure per-target supersession of ``verify_tls=false``:
+#: pin the appliance's CA on the target itself. Keeps CERT_REQUIRED +
+#: hostname verification on (the govc-thumbprint pattern), so -- unlike the
+#: last resort below -- the channel stays authenticated against a MITM.
+#: Named ahead of ``verify_tls=false`` because it is the preferred fix when
+#: the global bundle can't be changed.
+_TLS_REMEDIATION_CA_PIN: str = (
+    "Preferred (per-target): pin this appliance's CA on the target itself -- "
+    "set tls_ca_pin to its CA/cert PEM. meho then trusts that specific CA "
+    "while keeping certificate-chain AND hostname verification on, so the "
+    "channel stays protected against a man-in-the-middle. Use this when you "
+    "can't add the CA to the global bundle above."
 )
 _TLS_REMEDIATION_LAST_RESORT: str = (
     "Last resort: set verify_tls=false on this target to skip TLS "
     "verification for it alone (audited, per-target, never global). This "
     "still forwards the target's resolved credential over the unverified "
     "channel, exposing it to a man-in-the-middle -- use only against a "
-    "trusted-network appliance you cannot yet pin a CA for."
+    "trusted-network appliance you cannot yet pin a CA for, and prefer "
+    "tls_ca_pin above."
 )
 
 
@@ -848,14 +862,17 @@ def result_connector_tls_verify_failed(
     ``connector_error: ConnectError`` that discarded the SSL cause, so the
     operator saw ``[SSL: CERTIFICATE_VERIFY_FAILED]`` with no guidance.
 
-    This builder names the **host** and **both** remediations: the secure
-    ``SSL_CERT_FILE`` / chart trust-bundle path (preferred -- verification
-    stays on), and ``verify_tls=false`` as the audited per-target last
-    resort (the opt-in T1 #1780 adds), with the MITM / credential-exposure
-    caveat. The raw ``[SSL: CERTIFICATE_VERIFY_FAILED]...`` string is
-    preserved in ``extras.exception_message`` (capped at
-    :data:`_EXC_MESSAGE_CAP`) so the operator can confirm the failure
-    shape without it being lost into the generic envelope.
+    This builder names the **host** and **three** remediations in
+    preference order (most secure first): the global ``SSL_CERT_FILE`` /
+    chart trust-bundle path (verification stays on); the per-target
+    ``tls_ca_pin`` CA-pin (T5 #1784 -- the secure supersession, keeps
+    ``CERT_REQUIRED`` + hostname on against the pinned CA); and
+    ``verify_tls=false`` as the audited per-target last resort (the opt-in
+    T1 #1780 adds), with the MITM / credential-exposure caveat. The raw
+    ``[SSL: CERTIFICATE_VERIFY_FAILED]...`` string is preserved in
+    ``extras.exception_message`` (capped at :data:`_EXC_MESSAGE_CAP`) so
+    the operator can confirm the failure shape without it being lost into
+    the generic envelope.
 
     The host is read from ``target.host`` -- a hostname the operator
     configured themselves, so it is not an info-leak per
@@ -875,7 +892,7 @@ def result_connector_tls_verify_failed(
         f"for {host}. The socket opened and the host answered, but its "
         f"certificate chain is not trusted (typically a self-signed or "
         f"internal-CA appliance). {_TLS_REMEDIATION_SECURE} "
-        f"{_TLS_REMEDIATION_LAST_RESORT} See "
+        f"{_TLS_REMEDIATION_CA_PIN} {_TLS_REMEDIATION_LAST_RESORT} See "
         f"docs/codebase/error-message-shape.md for the dispatch error "
         f"convention."
     )
@@ -890,6 +907,7 @@ def result_connector_tls_verify_failed(
             "exception_class": type(exc).__name__,
             "exception_message": msg,
             "remediation_secure": _TLS_REMEDIATION_SECURE,
+            "remediation_ca_pin": _TLS_REMEDIATION_CA_PIN,
             "remediation_last_resort": _TLS_REMEDIATION_LAST_RESORT,
         },
     )

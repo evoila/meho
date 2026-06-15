@@ -408,3 +408,116 @@ def test_target_full_schema_includes_deleted_at() -> None:
         deleted_at=now,
     )
     assert deleted.deleted_at == now
+
+
+# ---------------------------------------------------------------------------
+# T5 (#1784) — tls_ca_pin: PEM validation + verify_tls mutual exclusion
+# ---------------------------------------------------------------------------
+
+
+def _make_ca_pem() -> str:
+    """Return a valid self-signed CA PEM for tls_ca_pin tests."""
+    import datetime as _dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "schema-test-ca")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=1))
+        .not_valid_after(_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+_VALID_CA_PEM = _make_ca_pem()
+
+
+def test_target_create_accepts_valid_ca_pin() -> None:
+    """A valid PEM is accepted on TargetCreate (verify_tls stays the default)."""
+    t = TargetCreate(name="pinned", product="ssh", host="10.0.0.1", tls_ca_pin=_VALID_CA_PEM)
+    assert t.tls_ca_pin == _VALID_CA_PEM
+    assert t.verify_tls is True
+
+
+def test_target_create_default_ca_pin_is_none() -> None:
+    """An omitted tls_ca_pin lands None (no pin)."""
+    t = TargetCreate(name="plain", product="ssh", host="10.0.0.1")
+    assert t.tls_ca_pin is None
+
+
+def test_target_create_rejects_malformed_ca_pin() -> None:
+    """A non-PEM tls_ca_pin is rejected with a validation error (→ 422)."""
+    with pytest.raises(ValidationError) as exc_info:
+        TargetCreate(name="bad", product="ssh", host="10.0.0.1", tls_ca_pin="not a certificate")
+    errors = exc_info.value.errors()
+    assert any(e["loc"] == ("tls_ca_pin",) for e in errors)
+
+
+def test_target_create_blank_ca_pin_normalises_to_none() -> None:
+    """An all-whitespace tls_ca_pin is treated as 'no pin' (normalised None)."""
+    t = TargetCreate(name="blank", product="ssh", host="10.0.0.1", tls_ca_pin="   \n  ")
+    assert t.tls_ca_pin is None
+
+
+def test_target_create_rejects_ca_pin_with_verify_tls_false() -> None:
+    """tls_ca_pin + verify_tls=false on create is mutually exclusive (→ 422)."""
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        TargetCreate(
+            name="both",
+            product="ssh",
+            host="10.0.0.1",
+            tls_ca_pin=_VALID_CA_PEM,
+            verify_tls=False,
+        )
+
+
+def test_target_create_ca_pin_with_verify_tls_true_ok() -> None:
+    """tls_ca_pin with the default verify_tls=true is the secure, valid combo."""
+    t = TargetCreate(
+        name="ok", product="ssh", host="10.0.0.1", tls_ca_pin=_VALID_CA_PEM, verify_tls=True
+    )
+    assert t.tls_ca_pin == _VALID_CA_PEM
+    assert t.verify_tls is True
+
+
+def test_target_update_ca_pin_patchable_and_clearable() -> None:
+    """tls_ca_pin is sendable via PATCH; absent stays None; explicit null clears."""
+    assert "tls_ca_pin" in TargetUpdate.model_fields
+    assert TargetUpdate(tls_ca_pin=_VALID_CA_PEM).tls_ca_pin == _VALID_CA_PEM
+    # Absent vs sent distinguished by exclude_unset (the route's audit gate).
+    assert "tls_ca_pin" not in TargetUpdate(host="h").model_dump(exclude_unset=True)
+    assert "tls_ca_pin" in TargetUpdate(tls_ca_pin=None).model_dump(exclude_unset=True)
+
+
+def test_target_update_rejects_malformed_ca_pin() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        TargetUpdate(tls_ca_pin="-----BEGIN CERTIFICATE-----\ngarbage\n-----END CERTIFICATE-----")
+    assert any(e["loc"] == ("tls_ca_pin",) for e in exc_info.value.errors())
+
+
+def test_target_update_rejects_ca_pin_with_verify_tls_false_in_one_body() -> None:
+    """Sending both tls_ca_pin and verify_tls=false in one PATCH body is rejected."""
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        TargetUpdate(tls_ca_pin=_VALID_CA_PEM, verify_tls=False)
+
+
+def test_target_full_round_trip_with_ca_pin() -> None:
+    """Target read shape round-trips a tls_ca_pin losslessly."""
+    t = _make_target(tls_ca_pin=_VALID_CA_PEM, verify_tls=True)
+    assert Target.model_validate(t.model_dump()).tls_ca_pin == _VALID_CA_PEM
+
+
+def test_target_summary_exposes_ca_pin() -> None:
+    """tls_ca_pin is on the summary projection (no-silent-masking, §5)."""
+    assert "tls_ca_pin" in TargetSummary.model_fields

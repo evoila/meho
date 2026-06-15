@@ -166,6 +166,15 @@ Schema decisions for :class:`Target`:
   consumes it lands in #1781). Added by migration ``0044`` with
   ``server_default=true`` so pre-#1780 rows backfill to the secure
   state.
+* ``tls_ca_pin`` — Text, nullable. Per-target CA-trust pin: a PEM
+  string carrying the CA / cert the connector must trust for this
+  target while keeping ``CERT_REQUIRED`` + hostname verification ON
+  (``ssl.SSLContext.load_verify_locations(cadata=...)``, the secure
+  govc-thumbprint pattern). ``NULL`` (the default) means "no pin".
+  The secure supersession of ``verify_tls=false`` and mutually
+  exclusive with it (enforced at the API layer). Added by migration
+  ``0045``; nullable, so the add-column is safe on a populated table
+  with no backfill. The dispatch path that consumes it lands in #1784.
 * ``extras`` — JSON NOT NULL DEFAULT ``{}``. JSONB on PostgreSQL
   (binary, GIN-friendly), generic JSON on SQLite. Escape hatch for
   per-product structured data without DDL changes.
@@ -898,6 +907,21 @@ class Target(Base):
         default=True,
         server_default=sa.true(),
     )
+    # Per-target CA-trust pin: a PEM string carrying the CA / cert the
+    # connector must trust for *this* target, on top of the global
+    # ``SSL_CERT_FILE`` bundle. ``NULL`` (the default) means "no pin --
+    # verify against the global bundle only". When set, dispatch builds a
+    # context with ``ssl.SSLContext.load_verify_locations(cadata=<pem>)``
+    # which keeps ``CERT_REQUIRED`` + ``check_hostname`` ON (the secure
+    # govc-thumbprint pattern, #1784), so the chain + hostname are still
+    # enforced -- against the pinned CA. This is the secure supersession
+    # of ``verify_tls=false``: the two are mutually exclusive (a pin makes
+    # the insecure opt-out unnecessary), enforced at the API layer. Added
+    # by migration ``0045``; nullable, so the add-column is safe on a
+    # populated table with no backfill (existing rows read back ``NULL`` =
+    # unpinned). The dispatch path that consumes it lives in
+    # :mod:`meho_backplane.connectors.adapters.http`.
+    tls_ca_pin: Mapped[str | None] = mapped_column(Text, nullable=True)
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,

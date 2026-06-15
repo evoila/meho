@@ -128,9 +128,10 @@ Detail payloads land in ``extras``. Codes:
   is not trusted (a self-signed / internal-CA appliance). Initiative
   #1774 T3 (#1782), extending the #1627/#1649 dispatch structured-cause
   pattern to the connect-error sibling. The ``error`` names the ``host``
-  + both remediations (the secure ``SSL_CERT_FILE`` / trust-bundle path
-  and the ``verify_tls=false`` audited last resort); ``extras`` carries
-  ``host``, the raw SSL string in ``exception_message``, and the two
+  + three remediations (the global ``SSL_CERT_FILE`` / trust-bundle path,
+  the per-target ``tls_ca_pin`` CA-pin secure supersession (T5 #1784), and
+  the ``verify_tls=false`` audited last resort); ``extras`` carries
+  ``host``, the raw SSL string in ``exception_message``, and the three
   ``remediation_*`` clauses. Only TLS-verify failures are siphoned here;
   every other ``ConnectError`` (DNS, connection-refused, timeout) falls
   through to ``connector_error``.

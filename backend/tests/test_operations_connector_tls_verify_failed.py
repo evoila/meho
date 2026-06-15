@@ -327,7 +327,7 @@ async def _insert_ingested_descriptor(
 
 
 def test_result_connector_tls_verify_failed_shape() -> None:
-    """Code, host, both remediations, raw SSL string, doc reference."""
+    """Code, host, all three remediations, raw SSL string, doc reference."""
     exc = _make_tls_verify_connect_error()
     out = result_connector_tls_verify_failed(
         "GET:/version", exc, _FakeTarget(host="vrli.lab.internal"), duration_ms=1.0
@@ -338,11 +338,16 @@ def test_result_connector_tls_verify_failed_shape() -> None:
     assert out.error.startswith("connector_tls_verify_failed:")
     # Names the host.
     assert "vrli.lab.internal" in out.error
-    # Names BOTH remediations: the secure path (preferred) and the
-    # verify_tls=false last resort with the MITM caveat.
+    # Names ALL THREE remediations: the global secure path, the per-target
+    # CA-pin (T5 #1784, the secure supersession), and the verify_tls=false
+    # last resort with the MITM caveat.
     assert "SSL_CERT_FILE" in out.error
+    assert "tls_ca_pin" in out.error
     assert "verify_tls=false" in out.error
     assert "man-in-the-middle" in out.error
+    # The CA-pin is named *ahead of* the verify_tls=false last resort --
+    # operators should reach for the secure pin before the insecure flag.
+    assert out.error.index("tls_ca_pin") < out.error.index("verify_tls=false")
     # Doc reference.
     assert "docs/codebase/error-message-shape.md" in out.error
 
@@ -354,6 +359,7 @@ def test_result_connector_tls_verify_failed_shape() -> None:
     assert extras["exception_message"] == _SSL_VERIFY_MESSAGE
     assert "CERTIFICATE_VERIFY_FAILED" in extras["exception_message"]
     assert "SSL_CERT_FILE" in extras["remediation_secure"]
+    assert "tls_ca_pin" in extras["remediation_ca_pin"]
     assert "verify_tls=false" in extras["remediation_last_resort"]
 
 

@@ -41,7 +41,37 @@
   ("connectors", "/ui/connectors", "plug", "Connectors"),
   ("memory", "/ui/memory", "brain", "Memory"),
   ("runbooks", "/ui/runbooks", "scroll", "Runbooks"),
+  ("approvals", "/ui/approvals", "bell", "Approvals"),
 ] %}
+{#- Notifications bell macro (G10.7-T3 #1778). Rendered in both chrome
+    locations (mobile top bar + desktop sidebar account row); ``id_prefix``
+    keeps the badge swap targets unique across the two instances. The badge
+    span ``hx-get``s ``/ui/approvals/badge`` on ``load`` (authoritative
+    first paint) and again on the ``meho:approval-bump`` event the
+    ``approvals-bell.js`` controller dispatches on <body> when an
+    ``approval.*`` SSE frame arrives or a decision completes -- so the
+    count is always the server's tenant-scoped truth. Clicking the bell
+    loads the pending-requests panel into the shared
+    ``#meho-approvals-modal`` container. -#}
+{% macro approvals_bell(id_prefix) -%}
+<button
+  type="button"
+  class="btn btn-ghost btn-square btn-sm relative text-base-content/70"
+  aria-label="Open approvals"
+  hx-get="/ui/approvals"
+  hx-target="#meho-approvals-modal-container"
+  hx-swap="innerHTML"
+>
+  {{ icon("bell", class="size-4") }}
+  <span
+    id="{{ id_prefix }}-approvals-badge"
+    hx-get="/ui/approvals/badge"
+    hx-trigger="load, meho:approval-bump from:body"
+    hx-target="this"
+    hx-swap="innerHTML"
+  ></span>
+</button>
+{%- endmacro %}
 {#- ``session_tenant`` is injected by the
     :func:`_ui_session_context_processor` chassis context processor on
     every UI template render -- it carries the active BFF session's
@@ -57,6 +87,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block page_title %}MEHO Operator Console{% endblock %}</title>
+    {#- App-shell approvals-bell controller (G10.7-T3 #1778). Loaded
+       OUTSIDE the overridable ``component_scripts`` block so it ships on
+       EVERY console page (a surface that overrides that block must not be
+       able to drop the app-shell bell), and BEFORE ``_head_assets.html``
+       so it runs ahead of ``vendor/alpine.min.js`` -- it registers the
+       ``approvalsBell`` component on ``alpine:init``, which Alpine fires
+       from a microtask at the end of its own script task, so a later
+       script would register too late (#1692). -#}
+    <script src="/ui/static/src/app/approvals-bell.js" defer></script>
     {#- Alpine component-registration scripts. This block MUST render
        BEFORE the _head_assets.html include: every script here and in
        the include is ``defer``red, and deferred scripts execute in
@@ -136,6 +175,8 @@
               <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
               <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
             </button>
+            {# Notifications bell — after the theme toggle (#1778). #}
+            {{ approvals_bell("mobile") }}
           </div>
         </header>
 
@@ -238,17 +279,21 @@
                     </li>
                   </ul>
                 </div>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-square btn-sm text-base-content/60"
-                  aria-label="Toggle color theme"
-                  x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
-                  x-on:click="theme = window.mehoToggleTheme()"
-                  x-on:meho-theme-changed.window="theme = $event.detail.theme"
-                >
-                  <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
-                  <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
-                </button>
+                <div class="flex items-center gap-1">
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-square btn-sm text-base-content/60"
+                    aria-label="Toggle color theme"
+                    x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
+                    x-on:click="theme = window.mehoToggleTheme()"
+                    x-on:meho-theme-changed.window="theme = $event.detail.theme"
+                  >
+                    <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
+                    <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
+                  </button>
+                  {# Notifications bell — after the theme toggle (#1778). #}
+                  {{ approvals_bell("sidebar") }}
+                </div>
               </div>
 
               {# Status line. ``app_version`` is the deployed-build
@@ -274,6 +319,40 @@
         </nav>
       </aside>
     </div>
+
+    {# ---------- Approvals notifications wiring (app-shell, #1778) ----------
+       One ``approvalsBell`` Alpine root for the whole shell: it hosts the
+       hidden SSE sink subscribed to the session-gated bridge filtered to
+       ``op_class=approval`` and routes each ``approval.*`` frame into a
+       badge re-fetch (``onSseMessage`` -> ``meho:approval-bump`` on <body>),
+       and listens for the ``meho:approval-decided`` HX-Trigger the decision
+       POSTs fire to close the modal + re-fetch the count. The shared
+       ``#meho-approvals-modal`` container is the swap target both bells'
+       ``hx-get /ui/approvals`` and the panel's "Review" buttons render into.
+       Frames are consumed through the hidden-sink + ``x-on:htmx:sse-*``
+       pattern (same as ``dashboard-feed.js``) so event fields never reach
+       the DOM as live markup -- the bell only ever reads ``op_id``. #}
+    <div
+      x-data="approvalsBell()"
+      x-on:htmx:sse-before-message="onSseMessage($event)"
+      x-on:meho:approval-decided.window="onDecided()"
+    >
+      <div
+        hx-ext="sse"
+        sse-connect="/ui/broadcast/stream?op_class=approval"
+        sse-swap="broadcast"
+        class="hidden"
+        aria-hidden="true"
+      ></div>
+      {# Stable modal container -- never replaced. The bell / panel / detail
+         fragments swap their own ``<dialog id="meho-approvals-modal"
+         class="modal modal-open">`` into this via ``hx-swap="innerHTML"``,
+         the same container pattern the memory create modal uses. The
+         fragment is a native ``<dialog>`` so its ``.close()`` calls resolve
+         and DaisyUI's ``modal-open`` shows it immediately on swap. #}
+      <div id="meho-approvals-modal-container"></div>
+    </div>
+
     {# Per-surface deferred JS that does NOT register Alpine
        components -- plain-JS page scripts (topology) and heavy vendor
        bundles (Cytoscape, CodeMirror). External src, not inline, so a

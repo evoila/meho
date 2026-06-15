@@ -1,0 +1,77 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Pending-approvals panel fragment (G10.7-T3 #1778).
+
+  The modal body the app-shell bell opens (``hx-get /ui/approvals`` swapped
+  into ``#meho-approvals-modal``). Lists this tenant's pending requests
+  newest-first; each row's "Review" button swaps the same modal container
+  with the request-detail + approve/deny fragment (``hx-get
+  /ui/approvals/{id}``). A GET-only surface -- no CSRF token here (the
+  decision POSTs carry it on the detail modal's own form).
+
+  Context:
+    requests -- list[dict]: projected pending requests
+                (id / op_id / connector_id / principal_sub /
+                 proposed_effect / created_at)
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="meho-approvals-modal" class="modal modal-open" aria-label="Pending approvals">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="text-lg font-semibold" id="meho-approvals-panel-title">
+        Pending approvals
+      </h3>
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost btn-square"
+        aria-label="Close approvals"
+        onclick="document.getElementById('meho-approvals-modal').close()"
+      >
+        {{ icon("x", class="size-4") }}
+      </button>
+    </div>
+
+    {% if requests %}
+      <ul
+        class="mt-4 divide-y divide-base-content/8"
+        role="list"
+        aria-labelledby="meho-approvals-panel-title"
+      >
+        {% for req in requests %}
+          <li class="flex items-center justify-between gap-3 py-3">
+            <div class="min-w-0">
+              <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
+              <p class="truncate text-xs text-base-content/55">
+                <span>{{ req.connector_id }}</span>
+                <span aria-hidden="true">&middot;</span>
+                <span>requested by {{ req.principal_sub }}</span>
+              </p>
+            </div>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary shrink-0"
+              hx-get="/ui/approvals/{{ req.id }}"
+              hx-target="#meho-approvals-modal-container"
+              hx-swap="innerHTML"
+              aria-label="Review approval request for {{ req.op_id }}"
+            >
+              Review
+            </button>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="py-10 text-center">
+        <p class="text-base text-base-content/55">No pending approvals</p>
+        <p class="mt-1 text-sm text-base-content/40">
+          New requests appear here the moment an agent action needs your sign-off.
+        </p>
+      </div>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="button" onclick="document.getElementById('meho-approvals-modal').close()">close</button>
+  </form>
+</dialog>

@@ -29,10 +29,15 @@ ships the umbrella :func:`build_router` that aggregates:
   ``GET /ui/runbooks/list`` (HTMX filter partial),
   ``GET /ui/runbooks/<slug>`` -- runbooks read surface, catalog +
   opacity-floor-aware template detail (G10.6-T1 #1382).
-* :mod:`~meho_backplane.ui.routes.stubs` -- now empty. All six
+* :mod:`~meho_backplane.ui.routes.approvals` -- ``GET /ui/approvals/badge``,
+  ``GET /ui/approvals``, ``GET /ui/approvals/<id>``,
+  ``POST /ui/approvals/<id>/approve`` + ``.../reject`` -- the approvals
+  bell/badge + approve/deny modal over a session BFF that calls the
+  ``approval_queue`` service in-process (G10.7-T3 #1778).
+* :mod:`~meho_backplane.ui.routes.stubs` -- now empty. All seven
   surfaces (broadcast #867, topology #880, memory #877, connectors
-  #873, kb #870, runbooks #1382) ship real routers; no ``/ui/{slug}``
-  placeholder remains.
+  #873, kb #870, runbooks #1382, approvals #1778) ship real routers;
+  no ``/ui/{slug}`` placeholder remains.
 
 Auth surfaces (``/ui/auth/login``, ``/ui/auth/callback``,
 ``/ui/auth/logout``) live under
@@ -52,6 +57,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
@@ -63,6 +69,7 @@ from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
 __all__ = [
+    "build_approvals_router",
     "build_broadcast_router",
     "build_connectors_router",
     "build_corpus_router",
@@ -92,9 +99,11 @@ def build_router() -> APIRouter:
     ``/ui/runbooks`` + ``/ui/runbooks/list`` + ``/ui/runbooks/{slug}``
     -- each owning its path. ``/ui/runbooks/list`` is registered before
     ``/ui/runbooks/{slug}`` inside that router so the literal segment is
-    not bound as a slug. All six surfaces now ship real routers, so the
-    stubs aggregate is empty; it is still included for symmetry and to
-    keep the retirement pattern's seam in place.
+    not bound as a slug; approvals applies the same discipline with
+    ``/ui/approvals/badge`` ahead of ``/ui/approvals/{request_id}``. All
+    seven surfaces now ship real routers, so the stubs aggregate is empty;
+    it is still included for symmetry and to keep the retirement pattern's
+    seam in place.
     """
     router = APIRouter()
     router.include_router(build_dashboard_router())
@@ -107,5 +116,6 @@ def build_router() -> APIRouter:
     router.include_router(build_kb_router())
     router.include_router(build_corpus_router())
     router.include_router(build_runbooks_router())
+    router.include_router(build_approvals_router())
     router.include_router(build_stubs_router())
     return router

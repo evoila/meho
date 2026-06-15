@@ -1,0 +1,55 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approval decision-outcome fragment (G10.7-T3 #1778).
+
+  Swapped into ``#meho-approvals-modal`` after a successful approve / deny.
+  The decision POST also sets the ``HX-Trigger: meho:approval-decided``
+  response header, which the app-shell bell listens for to re-fetch the
+  authoritative badge count (so the badge decrements without a reload) and
+  close the dialog. This fragment is the brief in-modal confirmation; it
+  auto-dismisses so the operator lands back on whatever page they were on.
+
+  Context:
+    decision -- str: "approved" | "rejected"
+    request  -- dict: id / op_id / connector_id / principal_sub / ...
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="meho-approvals-modal" class="modal modal-open" aria-label="Decision recorded">
+  <div class="modal-box max-w-md">
+    <div class="flex flex-col items-center gap-3 py-6 text-center" role="status" aria-live="polite">
+      {% if decision == "approved" %}
+        <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
+          {{ icon("check", class="size-6") }}
+        </span>
+        <h3 class="text-lg font-semibold">Request approved</h3>
+        <p class="text-sm text-base-content/60">
+          The operation for <span class="font-mono">{{ request.op_id }}</span>
+          was approved and re-dispatched.
+        </p>
+      {% else %}
+        <span class="grid size-12 place-items-center rounded-full bg-error/15 text-error">
+          {{ icon("ban", class="size-6") }}
+        </span>
+        <h3 class="text-lg font-semibold">Request denied</h3>
+        <p class="text-sm text-base-content/60">
+          The operation for <span class="font-mono">{{ request.op_id }}</span>
+          was denied and will not run.
+        </p>
+      {% endif %}
+    </div>
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-sm"
+        onclick="document.getElementById('meho-approvals-modal').close()"
+      >
+        Close
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="button" onclick="document.getElementById('meho-approvals-modal').close()">close</button>
+  </form>
+</dialog>

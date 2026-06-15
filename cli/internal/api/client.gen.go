@@ -1117,6 +1117,16 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyApprovalApproveUiApprovalsRequestIdApprovePost defines model for Body_approval_approve_ui_approvals__request_id__approve_post.
+type BodyApprovalApproveUiApprovalsRequestIdApprovePost struct {
+	Reason *string `json:"reason,omitempty"`
+}
+
+// BodyApprovalRejectUiApprovalsRequestIdRejectPost defines model for Body_approval_reject_ui_approvals__request_id__reject_post.
+type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
+	Reason *string `json:"reason,omitempty"`
+}
+
 // BodyCorpusSearchUiCorpusSearchPost defines model for Body_corpus_search_ui_corpus_search_post.
 type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
@@ -6267,6 +6277,12 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
 
+// ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody defines body for ApprovalApproveUiApprovalsRequestIdApprovePost for application/x-www-form-urlencoded ContentType.
+type ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody = BodyApprovalApproveUiApprovalsRequestIdApprovePost
+
+// ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody defines body for ApprovalRejectUiApprovalsRequestIdRejectPost for application/x-www-form-urlencoded ContentType.
+type ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody = BodyApprovalRejectUiApprovalsRequestIdRejectPost
+
 // UiConnectorsListUiConnectorsGetJSONRequestBody defines body for UiConnectorsListUiConnectorsGet for application/json ContentType.
 type UiConnectorsListUiConnectorsGetJSONRequestBody = UISessionContext
 
@@ -7620,6 +7636,25 @@ type ClientInterface interface {
 
 	// UiDashboardUiGet request
 	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsPanelUiApprovalsGet request
+	ApprovalsPanelUiApprovalsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsBadgeUiApprovalsBadgeGet request
+	ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalDetailUiApprovalsRequestIdGet request
+	ApprovalDetailUiApprovalsRequestIdGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalApproveUiApprovalsRequestIdApprovePostWithBody request with any body
+	ApprovalApproveUiApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalRejectUiApprovalsRequestIdRejectPostWithBody request with any body
+	ApprovalRejectUiApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
 	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9720,6 +9755,90 @@ func (c *Client) ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorF
 
 func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiDashboardUiGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsPanelUiApprovalsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsPanelUiApprovalsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsBadgeUiApprovalsBadgeGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalDetailUiApprovalsRequestIdGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalDetailUiApprovalsRequestIdGetRequest(c.Server, requestId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalApproveUiApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithBody(c.Server, requestId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithFormdataBody(c.Server, requestId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalRejectUiApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithBody(c.Server, requestId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBody(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithFormdataBody(c.Server, requestId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18518,6 +18637,188 @@ func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewApprovalsPanelUiApprovalsGetRequest generates requests for ApprovalsPanelUiApprovalsGet
+func NewApprovalsPanelUiApprovalsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalsBadgeUiApprovalsBadgeGetRequest generates requests for ApprovalsBadgeUiApprovalsBadgeGet
+func NewApprovalsBadgeUiApprovalsBadgeGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/badge")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalDetailUiApprovalsRequestIdGetRequest generates requests for ApprovalDetailUiApprovalsRequestIdGet
+func NewApprovalDetailUiApprovalsRequestIdGetRequest(server string, requestId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithFormdataBody calls the generic ApprovalApproveUiApprovalsRequestIdApprovePost builder with application/x-www-form-urlencoded body
+func NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithFormdataBody(server string, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithBody(server, requestId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithBody generates requests for ApprovalApproveUiApprovalsRequestIdApprovePost with any type of body
+func NewApprovalApproveUiApprovalsRequestIdApprovePostRequestWithBody(server string, requestId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/approve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithFormdataBody calls the generic ApprovalRejectUiApprovalsRequestIdRejectPost builder with application/x-www-form-urlencoded body
+func NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithFormdataBody(server string, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithBody(server, requestId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithBody generates requests for ApprovalRejectUiApprovalsRequestIdRejectPost with any type of body
+func NewApprovalRejectUiApprovalsRequestIdRejectPostRequestWithBody(server string, requestId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/%s/reject", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAuthCallbackUiAuthCallbackGetRequest generates requests for UiAuthCallbackUiAuthCallbackGet
 func NewUiAuthCallbackUiAuthCallbackGetRequest(server string, params *UiAuthCallbackUiAuthCallbackGetParams) (*http.Request, error) {
 	var err error
@@ -21906,6 +22207,25 @@ type ClientWithResponsesInterface interface {
 	// UiDashboardUiGetWithResponse request
 	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
 
+	// ApprovalsPanelUiApprovalsGetWithResponse request
+	ApprovalsPanelUiApprovalsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsPanelUiApprovalsGetResponse, error)
+
+	// ApprovalsBadgeUiApprovalsBadgeGetWithResponse request
+	ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error)
+
+	// ApprovalDetailUiApprovalsRequestIdGetWithResponse request
+	ApprovalDetailUiApprovalsRequestIdGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalDetailUiApprovalsRequestIdGetResponse, error)
+
+	// ApprovalApproveUiApprovalsRequestIdApprovePostWithBodyWithResponse request with any body
+	ApprovalApproveUiApprovalsRequestIdApprovePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error)
+
+	ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error)
+
+	// ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse request with any body
+	ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error)
+
+	ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error)
+
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
 	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
 
@@ -24858,6 +25178,114 @@ func (r UiDashboardUiGetResponse) StatusCode() int {
 	return 0
 }
 
+type ApprovalsPanelUiApprovalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsPanelUiApprovalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsPanelUiApprovalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalsBadgeUiApprovalsBadgeGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalDetailUiApprovalsRequestIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalDetailUiApprovalsRequestIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalDetailUiApprovalsRequestIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalApproveUiApprovalsRequestIdApprovePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalApproveUiApprovalsRequestIdApprovePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalApproveUiApprovalsRequestIdApprovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalRejectUiApprovalsRequestIdRejectPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalRejectUiApprovalsRequestIdRejectPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalRejectUiApprovalsRequestIdRejectPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAuthCallbackUiAuthCallbackGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -27454,6 +27882,67 @@ func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseUiDashboardUiGetResponse(rsp)
+}
+
+// ApprovalsPanelUiApprovalsGetWithResponse request returning *ApprovalsPanelUiApprovalsGetResponse
+func (c *ClientWithResponses) ApprovalsPanelUiApprovalsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsPanelUiApprovalsGetResponse, error) {
+	rsp, err := c.ApprovalsPanelUiApprovalsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsPanelUiApprovalsGetResponse(rsp)
+}
+
+// ApprovalsBadgeUiApprovalsBadgeGetWithResponse request returning *ApprovalsBadgeUiApprovalsBadgeGetResponse
+func (c *ClientWithResponses) ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error) {
+	rsp, err := c.ApprovalsBadgeUiApprovalsBadgeGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp)
+}
+
+// ApprovalDetailUiApprovalsRequestIdGetWithResponse request returning *ApprovalDetailUiApprovalsRequestIdGetResponse
+func (c *ClientWithResponses) ApprovalDetailUiApprovalsRequestIdGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalDetailUiApprovalsRequestIdGetResponse, error) {
+	rsp, err := c.ApprovalDetailUiApprovalsRequestIdGet(ctx, requestId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalDetailUiApprovalsRequestIdGetResponse(rsp)
+}
+
+// ApprovalApproveUiApprovalsRequestIdApprovePostWithBodyWithResponse request with arbitrary body returning *ApprovalApproveUiApprovalsRequestIdApprovePostResponse
+func (c *ClientWithResponses) ApprovalApproveUiApprovalsRequestIdApprovePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error) {
+	rsp, err := c.ApprovalApproveUiApprovalsRequestIdApprovePostWithBody(ctx, requestId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error) {
+	rsp, err := c.ApprovalApproveUiApprovalsRequestIdApprovePostWithFormdataBody(ctx, requestId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse(rsp)
+}
+
+// ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse request with arbitrary body returning *ApprovalRejectUiApprovalsRequestIdRejectPostResponse
+func (c *ClientWithResponses) ApprovalRejectUiApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error) {
+	rsp, err := c.ApprovalRejectUiApprovalsRequestIdRejectPostWithBody(ctx, requestId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, body ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error) {
+	rsp, err := c.ApprovalRejectUiApprovalsRequestIdRejectPostWithFormdataBody(ctx, requestId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse(rsp)
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
@@ -31951,6 +32440,116 @@ func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetRespons
 	response := &UiDashboardUiGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsPanelUiApprovalsGetResponse parses an HTTP response from a ApprovalsPanelUiApprovalsGetWithResponse call
+func ParseApprovalsPanelUiApprovalsGetResponse(rsp *http.Response) (*ApprovalsPanelUiApprovalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsPanelUiApprovalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsBadgeUiApprovalsBadgeGetResponse parses an HTTP response from a ApprovalsBadgeUiApprovalsBadgeGetWithResponse call
+func ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp *http.Response) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsBadgeUiApprovalsBadgeGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseApprovalDetailUiApprovalsRequestIdGetResponse parses an HTTP response from a ApprovalDetailUiApprovalsRequestIdGetWithResponse call
+func ParseApprovalDetailUiApprovalsRequestIdGetResponse(rsp *http.Response) (*ApprovalDetailUiApprovalsRequestIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalDetailUiApprovalsRequestIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse parses an HTTP response from a ApprovalApproveUiApprovalsRequestIdApprovePostWithResponse call
+func ParseApprovalApproveUiApprovalsRequestIdApprovePostResponse(rsp *http.Response) (*ApprovalApproveUiApprovalsRequestIdApprovePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalApproveUiApprovalsRequestIdApprovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse parses an HTTP response from a ApprovalRejectUiApprovalsRequestIdRejectPostWithResponse call
+func ParseApprovalRejectUiApprovalsRequestIdRejectPostResponse(rsp *http.Response) (*ApprovalRejectUiApprovalsRequestIdRejectPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalRejectUiApprovalsRequestIdRejectPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

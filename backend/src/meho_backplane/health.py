@@ -50,6 +50,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import cast
 
+import structlog
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -67,6 +68,7 @@ __all__ = [
     "router",
     "run_probes",
     "run_probes_async",
+    "ui_readiness_verdict",
 ]
 
 
@@ -232,6 +234,15 @@ def clear_probes() -> None:
 #: ``max_age_s=0`` to force a fresh sweep so its behaviour is unchanged.
 DEFAULT_READINESS_TTL_S: float = 2.0
 
+#: Upper bound (seconds) on the bounded sweeps :func:`ui_readiness_verdict`
+#: runs — the cold-cache first-warm sweep and every background refresh it
+#: schedules. Kept well under :data:`DEFAULT_READINESS_TTL_S` so a
+#: black-holed dependency degrades the warm sweep to a not-ready verdict
+#: in a fraction of a second instead of pinning the cold-start render. The
+#: UI middleware can pass its own bound; this is the default the hot-path
+#: accessor uses when none is given.
+_READINESS_HOT_PATH_TIMEOUT_S: float = 1.0
+
 
 #: Monotonic-clock-stamped cache for :func:`readiness_snapshot`:
 #: ``(captured_at_monotonic, snapshot)`` or ``None`` before the first
@@ -240,6 +251,21 @@ DEFAULT_READINESS_TTL_S: float = 2.0
 #: thundering herd of probe sweeps.
 _readiness_cache: tuple[float, dict[str, object]] | None = None
 _readiness_lock = asyncio.Lock()
+
+#: Handle on the single in-flight background refresh spawned by
+#: :func:`ui_readiness_verdict`. ``None`` when no refresh is running. The
+#: reference is kept alive here (not just on the event loop) so the task
+#: is not garbage-collected mid-flight — a fire-and-forget
+#: :func:`asyncio.create_task` whose only reference is a local would be a
+#: candidate for collection before it completes (a documented asyncio
+#: footgun). The task clears this handle in its own ``finally`` so a new
+#: refresh can be scheduled once the previous one finishes. This is the
+#: single-flight guard for the *stale-while-revalidate* hot path:
+#: ``ui_readiness_verdict`` only spawns a refresh when this is ``None``,
+#: so a burst of ``/ui/*`` requests against a stale cache triggers at
+#: most one background sweep — and therefore at most one probe-worker
+#: thread — rather than one per request (the #1776 CI-unit-lane overrun).
+_readiness_refresh_task: asyncio.Task[None] | None = None
 
 
 def _build_readiness_snapshot(results: list[ProbeResult]) -> dict[str, object]:
@@ -336,6 +362,135 @@ async def readiness_snapshot(
         return snapshot
 
 
+async def _refresh_readiness_cache(timeout_s: float) -> None:
+    """Background single-flight refresh of the readiness cache.
+
+    Runs one bounded sweep via :func:`readiness_snapshot` (which offloads
+    sync probes to a worker thread and caches a successful result on its
+    normal path). A sweep that times out is *not* cached by
+    ``readiness_snapshot`` — which is exactly right for stale-while-
+    revalidate: the cache keeps its last-known verdict and the hot path
+    keeps serving it, rather than flipping the pill to "starting" on a
+    transient stall. Spawned (and singled-flighted) by
+    :func:`ui_readiness_verdict`; never awaited by a request.
+    """
+    try:
+        await readiness_snapshot(max_age_s=0, timeout_s=timeout_s)
+    except Exception:  # pragma: no cover — defensive
+        # A probe raised (vs. merely timing out). Swallow it here so the
+        # fire-and-forget task does not surface a "Task exception was
+        # never retrieved" warning; the cache simply keeps its prior
+        # value and the next refresh retries. ``asyncio.CancelledError``
+        # is a ``BaseException`` — not caught here — so a genuine
+        # cancellation (test teardown) still propagates and clears the
+        # handle via ``finally``.
+        structlog.get_logger(__name__).warning(
+            "ui_readiness_background_refresh_failed", exc_info=True
+        )
+    finally:
+        # Release the single-flight slot so the next stale read can
+        # schedule a fresh refresh — but only if the handle still points
+        # at *this* task. ``clear_readiness_cache`` (test teardown) may
+        # have already detached us and a successor may have been
+        # scheduled; clearing unconditionally would clobber that handle.
+        global _readiness_refresh_task
+        if _readiness_refresh_task is asyncio.current_task():
+            _readiness_refresh_task = None
+
+
+def _schedule_readiness_refresh(timeout_s: float) -> None:
+    """Start a background readiness refresh unless one is already running.
+
+    The single-flight guard is :data:`_readiness_refresh_task`: a non-
+    ``None`` handle means a refresh is in flight, so we skip. The new
+    task's reference is retained on the module global (not just the event
+    loop) so it cannot be garbage-collected before it completes.
+    """
+    global _readiness_refresh_task
+    if _readiness_refresh_task is not None:
+        return
+    _readiness_refresh_task = asyncio.create_task(_refresh_readiness_cache(timeout_s))
+
+
+async def ui_readiness_verdict(*, timeout_s: float = _READINESS_HOT_PATH_TIMEOUT_S) -> bool:
+    """Non-blocking readiness verdict for the per-request UI hot path.
+
+    This is the *stale-while-revalidate* accessor the
+    :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware` reads
+    on every ``/ui/*`` render to colour the footer pill. Unlike
+    :func:`readiness_snapshot` it **never blocks the request on a probe
+    sweep** — the whole point of #1776's "inject ``ready`` at negligible
+    cost" intent, and the fix for the CI-unit-lane overrun caused by the
+    earlier inline-sweep design (every request hitting the 1 s timeout,
+    serialised through the single-flight lock, orphaning a probe thread
+    each time):
+
+    * **Cache present (any age).** Return the cached verdict immediately
+      — stale is fine; the pill is an at-a-glance hint, not the
+      kubernetes readiness contract. If the entry is older than
+      :data:`DEFAULT_READINESS_TTL_S`, schedule a single-flight
+      background refresh (:func:`_schedule_readiness_refresh`) so the
+      next render sees a fresh value, but do **not** await it.
+    * **Cache absent (first-ever call).** Do one bounded sweep to warm
+      the cache so a healthy backend renders "ready" on first paint
+      (preserving the existing acceptance criteria + tests). The sweep is
+      bounded by *timeout_s*, and — unlike :func:`readiness_snapshot` —
+      the result is cached **even on timeout**, so a cold-start blocking
+      probe cannot make every subsequent request re-sweep. Concurrent
+      first callers share the one warm sweep via the single-flight
+      :data:`_readiness_lock`.
+
+    Returns the boolean ``ready`` verdict (the only field the pill needs);
+    the middleware's caller maps a missing verdict to ``False``
+    ("starting"). ``GET /ready`` and the dashboard deliberately do **not**
+    route through here — they call :func:`readiness_snapshot` with
+    ``max_age_s=0`` for a fresh, full-fidelity sweep.
+    """
+    global _readiness_cache
+    cached = _readiness_cache
+    if cached is not None:
+        captured_at, snapshot = cached
+        if (time.monotonic() - captured_at) >= DEFAULT_READINESS_TTL_S:
+            # Stale: kick off a background refresh (single-flight) and
+            # serve the last-known verdict without waiting for it.
+            _schedule_readiness_refresh(timeout_s)
+        return bool(snapshot["ready"])
+
+    # Cold cache: warm it with one bounded sweep, single-flighted through
+    # the readiness lock so concurrent first callers don't each sweep.
+    async with _readiness_lock:
+        cached = _readiness_cache
+        if cached is not None:
+            # A peer warmed the cache while we waited for the lock.
+            return bool(cached[1]["ready"])
+        try:
+            results = await asyncio.wait_for(run_probes_async(), timeout_s)
+            snapshot = _build_readiness_snapshot(results)
+        except TimeoutError:
+            # Cold-start blocking probe. ``asyncio.wait_for`` cancelled
+            # the sweep; the orphaned worker thread drains in the
+            # background. Cache the not-ready verdict (unlike
+            # ``readiness_snapshot``, which deliberately does not cache a
+            # transient timeout for ``/ready``): on the hot path the
+            # alternative is re-sweeping on *every* request while the
+            # probe stays black-holed — the exact CI overrun #1776 fixes.
+            # The TTL makes this self-healing: the next render past the
+            # window schedules a background refresh that picks up
+            # recovery.
+            snapshot = {
+                "ready": False,
+                "checks": [
+                    {
+                        "name": "timeout",
+                        "ok": False,
+                        "detail": f"readiness probe sweep exceeded {timeout_s}s",
+                    }
+                ],
+            }
+        _readiness_cache = (time.monotonic(), snapshot)
+        return bool(snapshot["ready"])
+
+
 def clear_readiness_cache() -> None:
     """Drop the cached readiness snapshot. Test-only.
 
@@ -343,9 +498,22 @@ def clear_readiness_cache() -> None:
     is the only refresh trigger. Tests that register a fresh probe set
     call this so a snapshot cached by an earlier test (potentially on
     the same xdist worker) cannot leak a stale verdict.
+
+    Also cancels any in-flight background refresh spawned by
+    :func:`ui_readiness_verdict` and detaches its handle, so a refresh
+    started by one test cannot (a) write a verdict into a sibling test's
+    cache or (b) surface a "Task was destroyed but it is pending!"
+    warning when the test's event loop is torn down. The cancel is
+    fire-and-forget — the task's own ``finally`` clears the module
+    handle; we drop our reference here so a pending task on a
+    soon-to-close loop is not kept alive by this module.
     """
-    global _readiness_cache
+    global _readiness_cache, _readiness_refresh_task
     _readiness_cache = None
+    task = _readiness_refresh_task
+    _readiness_refresh_task = None
+    if task is not None and not task.done():
+        task.cancel()
 
 
 router = APIRouter(tags=["health"])

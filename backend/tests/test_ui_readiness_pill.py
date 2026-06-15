@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -632,3 +633,119 @@ def test_dashboard_pill_follows_probe_state_unchanged() -> None:
         mock.stop()
     assert response.status_code == 200, response.text
     assert _pill_state(response.text) == ("bg-success", "ready")
+
+
+async def test_sequential_ui_requests_do_not_serialise_on_a_blocking_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N ``/ui/*`` renders stay fast + sweep a bounded number of times.
+
+    This is the load-bearing regression for the #1776 CI-unit-lane
+    overrun. The earlier design awaited the probe sweep **inline** on
+    every ``/ui/*`` render. Under a black-holed dependency each sweep hit
+    the timeout bound, the timeout verdict was **not** cached, so every
+    subsequent request re-swept — serialised through the readiness
+    single-flight lock and orphaning a probe-worker thread each time.
+    Hundreds of UI tests x ~1 s serialised + thread accumulation overran
+    the unit lane's hard job-timeout cap (it died at ~15 min on every
+    run; the local sweep passed only because ``ECONNREFUSED`` fails fast).
+
+    The fix decouples the request path from probe execution
+    (stale-while-revalidate): the hot-path accessor
+    (:func:`~meho_backplane.health.ui_readiness_verdict`) returns the
+    cached verdict immediately and refreshes it in a single-flight
+    background task; only the first-ever request warms a cold cache with
+    one bounded sweep. So N sequential requests against a blocking probe
+    must (a) complete in well under N x the bound — they don't serialise —
+    and (b) invoke the probe only a small constant number of times
+    (warm + at most one background refresh in flight), not once per
+    request.
+
+    Driven through ``httpx.ASGITransport`` on this test's persistent event
+    loop rather than ``TestClient`` — ``TestClient``'s blocking portal
+    joins the orphaned ``asyncio.to_thread`` future before returning,
+    which would inflate the test's wall-clock to the probe's full sleep
+    (a harness artifact, not a property of the production hot path).
+
+    On the pre-fix head (``fb725e5d``) this FAILS: with the timeout
+    verdict never cached, all N renders re-sweep and the wall-time
+    balloons to ≈ N x the bound (blowing the time assertion) while the
+    probe is invoked once per request (blowing the invocation assertion).
+    """
+    from meho_backplane.ui.auth import middleware as ui_middleware
+
+    # Shrink the per-sweep bound so the test runs fast; on the pre-fix
+    # head N renders each pay this bound serially.
+    bound = 0.1
+    monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", bound)
+
+    invocations = 0
+    invocations_lock = threading.Lock()
+
+    def _blocking_sync_probe() -> ProbeResult:
+        # The probe runs on a worker thread (``asyncio.to_thread``); guard
+        # the counter so concurrent sweeps can't race the increment.
+        nonlocal invocations
+        with invocations_lock:
+            invocations += 1
+        time.sleep(10)  # >> the bound and the TTL: a black-holed dependency
+        return ProbeResult(name="docs_backends", ok=True)
+
+    register_probe("docs_backends", _blocking_sync_probe)
+
+    # Seed inline with ``await`` (this test runs on the pytest-asyncio
+    # loop; ``asyncio.run`` cannot be re-entered from a running loop).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(Tenant(id=_TENANT_A, slug="tenant-a", name="Tenant tenant-a"))
+    async with sessionmaker() as session, session.begin():
+        decrypted = await create_session(
+            session,
+            operator_sub=_OP_A,
+            tenant_id=_TENANT_A,
+            access_token="access-token-plaintext",
+            refresh_token="refresh-token-plaintext",
+            lifetime=timedelta(hours=1),
+        )
+        session_id = decrypted.id
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    _mock_discovery_and_jwks(mock, _jwks())
+    transport = httpx.ASGITransport(app=_build_app())
+    n_requests = 30
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=_BACKPLANE_URL,
+            cookies={SESSION_COOKIE_NAME: str(session_id)},
+            follow_redirects=False,
+        ) as client:
+            for _ in range(n_requests):
+                response = await client.get("/ui/memory")
+                assert response.status_code == 200, response.text
+                # Every render is a valid pill state; a blocking probe
+                # never resolves, so the verdict is "starting".
+                assert _pill_state(response.text) == ("bg-warning", "starting")
+    finally:
+        mock.stop()
+    elapsed = loop.time() - started
+
+    # (a) The N renders did NOT serialise on the sweep. Pre-fix this is
+    # ≈ N x bound (= 3.0 s here); the cached-verdict hot path keeps it to
+    # a small constant (one cold-warm sweep + cheap dict reads).
+    assert elapsed < 2.0, (
+        f"{n_requests} renders should not serialise on the blocking probe; "
+        f"took {elapsed:.2f}s (≈Nxbound={n_requests * bound:.1f}s would mean inline re-sweeps)"
+    )
+    # (b) Single-flight + caching bound the probe invocations to a small
+    # constant — NOT once per request. Pre-fix the probe runs ~N times
+    # (one inline sweep per render). Allow a little slack for the cold
+    # warm plus at most a couple of background refreshes that may start
+    # before the cache is consulted again.
+    assert invocations <= 4, (
+        f"probe should be swept a small constant number of times "
+        f"(single-flight + cache), got {invocations} for {n_requests} requests"
+    )

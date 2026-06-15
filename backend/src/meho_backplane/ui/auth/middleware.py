@@ -90,7 +90,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
-from meho_backplane.health import readiness_snapshot
+from meho_backplane.health import ui_readiness_verdict
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
@@ -123,13 +123,17 @@ AUTH_PREFIX: Final[str] = "/ui/auth/"
 #: CSS load without authentication -- otherwise the operator would
 #: see an unstyled login page when their session expires.
 STATIC_PREFIX: Final[str] = "/ui/static/"
-#: Upper bound (seconds) on the per-request readiness sweep run from
-#: :func:`_stash_ui_readiness`. Kept well under
+#: Upper bound (seconds) handed to
+#: :func:`~meho_backplane.health.ui_readiness_verdict` for the bounded
+#: sweeps it runs *off* the request path — the cold-cache first-warm
+#: sweep and every single-flight background refresh. The per-request path
+#: itself never runs a sweep (it reads the cached verdict, stale-while-
+#: revalidate), so this bound only caps how long a *cold-start* render
+#: waits and how long a background refresh runs; it no longer gates a
+#: per-request sweep. Kept well under
 #: :data:`~meho_backplane.health.DEFAULT_READINESS_TTL_S` (2.0s) so a
-#: slow/unreachable probe degrades the footer pill to "starting" within
-#: a fraction of a second rather than hanging the ``/ui/*`` render: the
-#: registry's probes do live network I/O, run sequentially, and have no
-#: internal timeout of their own (#1776).
+#: slow/unreachable probe degrades the footer pill to "starting" within a
+#: fraction of a second on the first paint rather than blocking it (#1776).
 _READINESS_TIMEOUT_S: Final[float] = 1.0
 
 
@@ -235,28 +239,31 @@ async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> N
     (:func:`~meho_backplane.ui.templating._ui_session_context_processor`)
     colours ``base.html``'s sidebar-footer pill off ``request.state.ui_ready``
     but cannot itself await the probe sweep. This middleware -- which
-    already runs once per ``/ui/*`` page render -- computes it here from a
-    short-TTL-cached :func:`~meho_backplane.health.readiness_snapshot`, so
-    the cost is at most one probe sweep per cache window across all
-    concurrent page loads (#1776).
+    already runs once per ``/ui/*`` page render -- reads the verdict here
+    from :func:`~meho_backplane.health.ui_readiness_verdict`, the
+    *stale-while-revalidate* hot-path accessor.
 
-    A misbehaving probe must not stall or 500 the page. The registry's
-    probes do live network I/O and run sequentially with no internal
-    timeout (the Keycloak probe in particular documents its timeout as a
-    deferred TODO), so an unreachable or black-holed dependency would
-    hang the render indefinitely on this hot path -- a hang is not an
-    exception, so the ``try``/``except`` below cannot catch it. We pass a
-    short ``timeout_s`` bound (well under
-    :data:`~meho_backplane.health.DEFAULT_READINESS_TTL_S`) so the sweep
-    degrades to not-ready ("starting") instead of blocking, and the
-    ``except`` still catches any probe that raises. Either way the pill
-    falls back to "starting" -- the same fail-safe default the processor
-    uses when the key is unbound -- rather than letting the failure
-    propagate out of the render path.
+    Crucially, that accessor **does not run a probe sweep on the request
+    path**: it returns the cached verdict immediately (refreshing it in a
+    single-flight background task when stale) and only ever sweeps inline
+    on the very first request, to warm a cold cache. That decoupling is
+    the #1776 fix -- the earlier design awaited the sweep on every render,
+    so under a black-holed dependency each request hit the timeout bound,
+    serialised through the readiness single-flight lock, and orphaned a
+    probe thread; hundreds of ``/ui/*`` requests then overran the CI unit
+    lane's hard job timeout. With the accessor the per-request cost is a
+    dict read regardless of probe health.
+
+    A misbehaving probe must still not stall or 500 the page. The cold-
+    cache warm sweep the accessor runs is bounded by ``timeout_s`` (a hang
+    is not an exception, so the ``try``/``except`` below could not catch
+    one), and the ``except`` still catches any probe that raises. Either
+    way the pill falls back to "starting" -- the same fail-safe default
+    the processor uses when the key is unbound -- rather than letting the
+    failure propagate out of the render path.
     """
     try:
-        snapshot = await readiness_snapshot(timeout_s=_READINESS_TIMEOUT_S)
-        scope_state["ui_ready"] = bool(snapshot["ready"])
+        scope_state["ui_ready"] = await ui_readiness_verdict(timeout_s=_READINESS_TIMEOUT_S)
     except Exception:  # pragma: no cover -- defensive
         structlog.get_logger(__name__).warning(
             "ui_readiness_snapshot_failed", path=path, exc_info=True

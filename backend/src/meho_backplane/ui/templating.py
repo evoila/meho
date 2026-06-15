@@ -135,9 +135,11 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
       "starting"). Every ``/ui/*`` surface used to hardcode
       ``ready=False`` in its own context dict, so the pill was stuck on
       "starting" on every page but the dashboard (#1776). The verdict
-      now comes from ``request.state.ui_ready``, computed once per
+      now comes from ``request.state.ui_ready``, read once per
       request by :class:`~meho_backplane.ui.auth.middleware.UISessionMiddleware`
-      from a short-TTL-cached :func:`~meho_backplane.health.readiness_snapshot`.
+      from :func:`~meho_backplane.health.ui_readiness_verdict` -- the
+      stale-while-revalidate accessor that serves the cached verdict and
+      never runs a probe sweep on the request path.
       Because Starlette runs context processors *after* the route's own
       context dict and ``dict.update``\\ s their output over it
       (``starlette.templating.Jinja2Templates.TemplateResponse``), this

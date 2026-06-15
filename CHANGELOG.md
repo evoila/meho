@@ -111,6 +111,21 @@ connector-related release-notes line.
   sub-ops; ordinary ops and fully-backed composites never carry it.
   `gh.composite.pr_status_summary` is wired; the registry generalises to
   future composites (#1757).
+- Operator-console **approvals surface**: a notifications **bell + count
+  badge** in the app-shell (live, fed by the session-gated SSE feed
+  filtered to `op_class=approval`) opens a **modal** listing pending
+  approval requests; reviewing one shows its op id, connector, proposed
+  effect, requester, and created-at with **Approve / Deny** actions. The
+  decisions POST to a new session-gated, CSRF-protected `/ui/approvals`
+  BFF that calls the existing approval-queue service in-process
+  (`list_pending` / `approve_request` / `reject_request`) — not the
+  Bearer `/api/v1/approvals` routes, which a session cookie cannot
+  authenticate. The self-approval invariant (#1401) is enforced both in
+  the UI (Approve disabled when the reviewer is the requester unless
+  `APPROVAL_ALLOW_SELF_APPROVAL`) and server-side (a forced self-approve
+  is rejected 403); Deny stays allowed. Bell + modal are tenant-scoped.
+  `approval.*` lifecycle events now classify as a dedicated `approval`
+  broadcast class so the bell's SSE filter resolves (#1778).
 
 ### Changed
 

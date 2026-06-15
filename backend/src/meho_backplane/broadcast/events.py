@@ -330,6 +330,21 @@ def classify_op(op_id: str) -> str:
        the tool name verbatim, so without this arm the replay tool
        would fall through to ``other`` and broadcast its full
        ``ReplayNode`` payload instead of the aggregate-only view.
+    4b. ``approval`` — every op-id with the ``approval.`` prefix
+       (``approval.pending`` / ``.approved`` / ``.rejected`` /
+       ``.expired``, emitted by
+       :func:`~meho_backplane.operations.approval_queue.publish_approval_event`)
+       classifies as the dedicated ``approval`` class. The approvals
+       console surface (G10.7-T3 #1778) subscribes its notifications
+       bell to ``/ui/broadcast/stream?op_class=approval`` -- an
+       exact-match server-side filter on this class -- so the lifecycle
+       events need their own class rather than falling through to
+       ``other`` (which would mix them with every unclassified op and
+       defeat the filter). The class is **not** sensitive
+       (``approval.*`` payloads carry only ``connector_id`` / ``op_id`` /
+       ``decision`` / the request id, never secret material), so it
+       stays full-detail like ``other`` did -- see
+       :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
     5. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
@@ -368,6 +383,10 @@ def classify_op(op_id: str) -> str:
     'audit_query'
     >>> classify_op("meho.audit.replay")
     'audit_query'
+    >>> classify_op("approval.pending")
+    'approval'
+    >>> classify_op("approval.approved")
+    'approval'
     >>> classify_op("GET:/api/v2.0/systeminfo")
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
@@ -387,6 +406,12 @@ def classify_op(op_id: str) -> str:
         return "credential_write"
     if op_id.startswith(("audit.", "meho.audit.")):
         return "audit_query"
+    # Approval-queue lifecycle events (approval.pending / .approved /
+    # .rejected / .expired). Their own class so the approvals console
+    # bell can filter the SSE bridge to op_class=approval (#1778);
+    # not sensitive, so it stays full-detail like the `other` fall-through.
+    if op_id.startswith("approval."):
+        return "approval"
     # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
     # GET/HEAD are safe reads by HTTP semantics; all mutation methods are writes.
     # Checked after the explicit allowlists so credential_mint pins still win.

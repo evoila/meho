@@ -266,6 +266,40 @@ class TestClassifyOp:
         assert classify_op("meho.broadcast.overrides.set") == "other"
 
     @pytest.mark.parametrize(
+        "op_id",
+        [
+            "approval.pending",
+            "approval.approved",
+            "approval.rejected",
+            "approval.expired",
+        ],
+    )
+    def test_approval_prefix_maps_to_approval(self, op_id: str) -> None:
+        """``approval.*`` lifecycle events classify as the dedicated ``approval`` class.
+
+        :func:`~meho_backplane.operations.approval_queue.publish_approval_event`
+        emits these with ``op_id="approval.<decision>"``. The approvals
+        console bell (G10.7-T3 #1778) subscribes to
+        ``/ui/broadcast/stream?op_class=approval`` — an exact-match
+        server-side filter — so the events need their own class rather
+        than falling through to ``other`` (which would defeat the filter).
+        """
+        assert classify_op(op_id) == "approval"
+
+    def test_approval_class_is_not_sensitive(self) -> None:
+        """The ``approval`` class broadcasts full detail (not aggregate-only).
+
+        Approval-lifecycle payloads carry only ``connector_id`` / ``op_id`` /
+        ``decision`` / the request id — never secret material — so moving
+        them off the ``other`` fall-through must not flip them to
+        aggregate-only redaction. Pins the class out of
+        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
+        """
+        from meho_backplane.broadcast.overrides import _SENSITIVE_OP_CLASSES
+
+        assert "approval" not in _SENSITIVE_OP_CLASSES
+
+    @pytest.mark.parametrize(
         ("op_id", "expected"),
         [
             ("vsphere.vm.list", "read"),

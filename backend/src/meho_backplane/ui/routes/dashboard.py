@@ -130,6 +130,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "href": "/ui/runbooks",
         "icon": "scroll",
     },
+    {
+        "title": "Approvals",
+        "summary": "Review + approve or deny pending agent actions.",
+        "href": "/ui/approvals",
+        "icon": "bell",
+    },
 )
 
 

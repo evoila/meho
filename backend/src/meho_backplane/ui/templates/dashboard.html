@@ -72,14 +72,16 @@
   </header>
 
   {# -------- Bento surface grid --------
-     Span rhythm: 5-4-3 / 3-4-5 across two lg rows. The map is keyed
-     by loop.index0; the Broadcast hero additionally gets the
+     Span rhythm: 5-4-3 / 3-4-5 / 6-6 across three lg rows. The map is
+     keyed by loop.index0; the Broadcast hero additionally gets the
      signal-washed card face. -#}
   {#- One span per surface tile (``loop.index0`` indexes this list), tuned
      so each lg row sums to 12 across the 12-col bento grid: row 1 = 5+4+3,
-     row 2 = 3+4+5, row 3 = 6 (the 7th tile) + the 6-wide deploy cell below.
-     Keep the entry count in lock-step with ``_SURFACE_TILES`` in
-     ``dashboard.py`` -- a tile without a span trips ``StrictUndefined``. -#}
+     row 2 = 3+4+5, row 3 = 6+6 (the 7th + 8th tiles -- Runbooks +
+     Approvals). The deploy cell drops to its own full-width row below.
+     #1777 grew this to 7 entries; #1778 adds the 8th (Approvals). Keep the
+     entry count in lock-step with ``_SURFACE_TILES`` in ``dashboard.py``
+     -- a tile without a span trips ``StrictUndefined``. -#}
   {% set tile_spans = [
     "md:col-span-6 lg:col-span-5",
     "md:col-span-6 lg:col-span-4",
@@ -87,6 +89,7 @@
     "md:col-span-6 lg:col-span-3",
     "md:col-span-6 lg:col-span-4",
     "md:col-span-6 lg:col-span-5",
+    "md:col-span-6 lg:col-span-6",
     "md:col-span-6 lg:col-span-6",
   ] %}
   <div
@@ -115,9 +118,11 @@
       </a>
     {% endfor %}
 
-    {# Deploy cell: shares the final bento row with the 7th surface tile
-       (6 + 6 = 12 on lg). #}
-    <article class="meho-card meho-reveal col-span-1 md:col-span-6 lg:col-span-6">
+    {# Deploy cell: its own full-width row below the surface grid. The 7th
+       + 8th tiles (Runbooks + Approvals) now fill the final 6+6 surface
+       row, so the deploy cell spans all 12 columns rather than sharing a
+       half-row (#1778). #}
+    <article class="meho-card meho-reveal col-span-1 md:col-span-12 lg:col-span-12">
       <div class="flex h-full flex-col gap-3 p-5">
         <div class="flex items-center justify-between">
           <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-base-content/80 ring-1 ring-base-content/10">

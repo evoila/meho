@@ -1,0 +1,31 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Notifications-bell count badge fragment (G10.7-T3 #1778).
+
+  Swapped into the app-shell bell's ``#meho-approvals-badge`` target. The
+  bell ``hx-get``s this on ``load`` (authoritative first paint) and again
+  whenever an ``approval.*`` SSE frame arrives or a decision completes --
+  so the count is always the server's tenant-scoped truth, never a
+  client-side counter that could drift (the live "without reload" behaviour
+  comes from the SSE-triggered re-fetch, not a JS increment).
+
+  This fragment is swapped into the bell's badge container (a prefixed,
+  per-bell-instance ``id``) via ``hx-swap="innerHTML"``, so it carries no
+  ``id`` of its own (two bells would otherwise collide). ``data-pending-count``
+  lets tests + the bell read the numeric value without scraping the rendered
+  glyph. The badge bubble is hidden at zero so a quiet tenant shows a bare
+  bell.
+
+  Context:
+    pending_count -- int: number of pending approval requests for the tenant
+-#}
+<span data-pending-count="{{ pending_count }}" aria-live="polite">
+  {% if pending_count > 0 %}
+    <span
+      class="badge badge-error badge-xs absolute -top-0.5 -right-0.5 grid min-h-4 min-w-4 place-items-center px-1 font-mono text-[0.6rem] leading-none"
+      aria-label="{{ pending_count }} pending approval request{% if pending_count != 1 %}s{% endif %}"
+    >{{ pending_count if pending_count < 100 else "99+" }}</span>
+  {% endif %}
+</span>

@@ -1,0 +1,161 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approval request-detail + approve/deny modal fragment (G10.7-T3 #1778).
+
+  Swapped into ``#meho-approvals-modal`` by the bell / the panel's "Review"
+  button (``hx-get /ui/approvals/{id}``). Shows the operator-relevant
+  request detail (op_id / connector_id / proposed_effect / requester
+  principal_sub / created_at) and the Approve + Deny actions.
+
+  Self-approval invariant (#1401)
+    The **Approve** button is disabled (read-only) when the operator is the
+    requester and the audited break-glass is off
+    (``self_approval_blocked``); its ``aria-label`` names the
+    ``APPROVAL_ALLOW_SELF_APPROVAL`` flag so the operator learns the lever.
+    **Deny** stays enabled (withdrawing your own request is not an
+    escalation). The button state is UX only -- the BFF re-checks
+    server-side and 403s a forged self-approve, surfaced via ``error_*``.
+
+  CSRF (#1693 / #1754)
+    Each decision is its own ``<form>`` carrying its OWN ``hx-headers``
+    ``X-CSRF-Token`` -- HTMX does NOT inherit ``hx-headers`` to child
+    elements, so the token must ride the form that issues the POST, not a
+    wrapping element. The route minted a fresh token for THIS render and
+    re-set the matching ``meho_csrf`` cookie on the same response, so the
+    double-submit pair lines up after the modal swap rotated it.
+
+  Context:
+    request               -- dict: id / op_id / connector_id / principal_sub /
+                             proposed_effect / created_at
+    self_approval_blocked -- bool: disable the Approve button
+    self_approval_setting -- str: the break-glass env-var name to name in the label
+    operator_sub          -- str: the reviewing operator's subject
+    csrf_token            -- str: minted double-submit token
+    error_status          -- int | None: a failed-decision HTTP status
+    error_message         -- str | None: a failed-decision human detail
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="meho-approvals-modal" class="modal modal-open" aria-label="Review approval request">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="text-lg font-semibold" id="meho-approval-detail-title">
+        Review approval request
+      </h3>
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost btn-square"
+        aria-label="Close approval"
+        onclick="document.getElementById('meho-approvals-modal').close()"
+      >
+        {{ icon("x", class="size-4") }}
+      </button>
+    </div>
+
+    {% if error_status %}
+      {# A recoverable decision failure (self-approval 403, already-decided
+         409, role 403) re-rendered this modal with the typed banner. #}
+      <div class="alert alert-error mt-4" role="alert" aria-live="assertive">
+        <div>
+          <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
+          <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+        </div>
+      </div>
+    {% endif %}
+
+    <dl
+      class="mt-4 space-y-2 text-sm"
+      aria-labelledby="meho-approval-detail-title"
+    >
+      <div class="flex items-baseline justify-between gap-4">
+        <dt class="shrink-0 text-base-content/55">Operation</dt>
+        <dd class="font-mono">{{ request.op_id }}</dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-4">
+        <dt class="shrink-0 text-base-content/55">Connector</dt>
+        <dd class="font-mono">{{ request.connector_id }}</dd>
+      </div>
+      <div class="flex items-baseline justify-between gap-4">
+        <dt class="shrink-0 text-base-content/55">Requested by</dt>
+        <dd class="font-mono">{{ request.principal_sub }}</dd>
+      </div>
+      {% if request.created_at %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Requested at</dt>
+          <dd><time datetime="{{ request.created_at }}" class="font-mono text-xs">{{ request.created_at }}</time></dd>
+        </div>
+      {% endif %}
+    </dl>
+
+    <div class="mt-3">
+      <p class="text-base-content/55 text-sm">Proposed effect</p>
+      <pre class="mt-1 max-h-48 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap" aria-label="Proposed effect">{{ request.proposed_effect | tojson(indent=2) }}</pre>
+    </div>
+
+    {% if self_approval_blocked %}
+      <p class="mt-3 text-xs text-base-content/55" role="note">
+        You requested this action, so you cannot approve it
+        (requester and approver must differ). Another operator must approve,
+        or a deployment admin can enable <code>{{ self_approval_setting }}</code>
+        for an audited single-operator break-glass. You may still deny it.
+      </p>
+    {% endif %}
+
+    <div class="modal-action mt-5 items-end gap-2">
+      <label class="form-control mr-auto w-full max-w-xs">
+        <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
+        {# Single shared reason input; each decision form pulls it via
+           hx-include so the operator types it once. #}
+        <input
+          type="text"
+          id="meho-approval-reason"
+          name="reason"
+          maxlength="2000"
+          class="input input-bordered input-sm"
+          placeholder="Recorded on the decision audit row"
+          aria-label="Decision reason"
+        />
+      </label>
+
+      {# Deny -- always enabled. Its own form carries the CSRF header echo. #}
+      <form
+        hx-post="/ui/approvals/{{ request.id }}/reject"
+        hx-target="#meho-approvals-modal-container"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-include="#meho-approval-reason"
+        hx-disabled-elt="find button"
+      >
+        <button type="submit" class="btn btn-sm btn-error btn-outline gap-1" data-action="reject">
+          {{ icon("ban", class="size-4") }}
+          Deny
+        </button>
+      </form>
+
+      {# Approve -- disabled on a self-approval (#1401). Its own form
+         carries the CSRF header echo. #}
+      <form
+        hx-post="/ui/approvals/{{ request.id }}/approve"
+        hx-target="#meho-approvals-modal-container"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-include="#meho-approval-reason"
+        hx-disabled-elt="find button"
+      >
+        <button
+          type="submit"
+          class="btn btn-sm btn-primary gap-1"
+          data-action="approve"
+          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% endif %}
+        >
+          {{ icon("check", class="size-4") }}
+          Approve
+        </button>
+      </form>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="button" onclick="document.getElementById('meho-approvals-modal').close()">close</button>
+  </form>
+</dialog>

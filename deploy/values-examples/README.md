@@ -502,24 +502,61 @@ does not mention `verify_tls` leaves it (and the TLS audit trail)
 untouched; only an explicit `{"verify_tls": false}` / `{"verify_tls": true}`
 flips the column and writes the audit row.
 
-> **`meho targets import` does NOT set `verify_tls` or `tls_ca_pin` (use
-> the REST API above).** The bulk-import path
-> ([`cli/internal/cmd/targets/import.go`](../../cli/internal/cmd/targets/import.go))
-> maps a fixed set of known top-level YAML keys onto the create/update
-> body and **spills every other key into the `extras` JSONB column**.
-> Neither `verify_tls` nor `tls_ca_pin` is in that known-key set, so a
-> `verify_tls: false` or `tls_ca_pin: ...` line in the descriptor file
-> silently lands in `extras` instead of the first-class column — the
-> `verify_tls` column keeps its secure default (`true`) and the target
-> stays unpinned. Setting either from the import file would give you a
-> target you *think* is opted out / pinned but that still verifies against
-> the global bundle. There is also no `meho targets create` / `meho
-> targets update` verb (the CLI's only write path is `import`; direct
-> write verbs are out of scope for v0.2 — see
-> [`cli/internal/cmd/targets/targets.go`](../../cli/internal/cmd/targets/targets.go)).
-> Until the import path learns the keys, the **REST API
-> `POST` / `PATCH /api/v1/targets`** shown above is the only supported
-> way to set `verify_tls` and `tls_ca_pin`.
+#### Setting `verify_tls` / `tls_ca_pin` from a `targets.yaml`
+
+`meho targets import` **does** set `verify_tls` and `tls_ca_pin` as
+first-class fields (#1793). The bulk-import path
+([`cli/internal/cmd/targets/import.go`](../../cli/internal/cmd/targets/import.go))
+maps a fixed set of known top-level YAML keys onto the create/update
+body and spills every other key into the `extras` JSONB column; both
+TLS-trust keys are in that known-key set, so a `verify_tls:` or
+`tls_ca_pin:` line in the descriptor reaches the typed column (it does
+**not** spill into `extras`). This covers both `meho targets import`
+(create) and `meho targets import --update` (PATCH). There is still no
+`meho targets create` / `meho targets update` verb — `import` is the
+CLI's only write path (direct write verbs are out of scope for v0.2;
+see [`cli/internal/cmd/targets/targets.go`](../../cli/internal/cmd/targets/targets.go))
+— so the REST `POST` / `PATCH /api/v1/targets` calls above and the
+descriptor below are the two supported ways to set these.
+
+```yaml
+# targets.yaml — imported with `meho targets import targets.yaml`
+# (add --update to PATCH targets that already exist).
+targets:
+  # Secure path: pin the appliance CA. Verification stays ON (chain +
+  # hostname) against the pinned CA. Prefer this over verify_tls: false.
+  - name: vcf-logs-lab
+    product: vmware-rest
+    host: vrli.nested.lab
+    auth_model: shared_service_account
+    tls_ca_pin: |
+      -----BEGIN CERTIFICATE-----
+      MIIB...appliance CA PEM...
+      -----END CERTIFICATE-----
+
+  # Last resort: verification OFF for this one target. Read the MITM /
+  # credential-exposure caveat above before setting this.
+  - name: legacy-appliance
+    product: vmware-rest
+    host: appliance.nested.lab
+    auth_model: shared_service_account
+    verify_tls: false
+```
+
+> **Security framing carries over to import.** `verify_tls: false` is
+> the same insecure last resort the section above describes — it
+> disables chain + hostname verification for that target, so a forwarded
+> credential is exposed to a man-in-the-middle. Prefer `tls_ca_pin`,
+> which keeps verification on against the pinned CA. The server enforces
+> the precedence and **mutual exclusion** noted above: a descriptor entry
+> that sets **both** `verify_tls: false` and `tls_ca_pin` on the same
+> target is rejected with a `422` (they are mutually exclusive), and a
+> malformed PEM is likewise rejected with a `422` — the import surfaces
+> the server's error rather than silently picking one or applying a bad
+> pin. Omitting both keys lands the secure default (`verify_tls: true`,
+> no pin), and on `--update` an omitted key follows the same sparse-PATCH
+> semantics as the REST `PATCH` (the column and its TLS audit trail are
+> left untouched).
 
 ### Coverage gap: two out-of-pool connectors do not honour `verify_tls`
 

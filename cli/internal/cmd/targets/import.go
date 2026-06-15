@@ -58,6 +58,16 @@ type importDoc struct {
 // verb is the only writer; the API rejects any value via
 // `extra='forbid'`); see skipSilent below for the corresponding
 // skip rule.
+//
+// Initiative #1774 amendment: `verify_tls` (#1780) and `tls_ca_pin`
+// (#1784) are first-class per-target TLS-trust columns on both
+// TargetCreate and TargetUpdate. They must map to the top-level body
+// — spilling them into `extras` would leave the typed columns at
+// their secure defaults (`verify_tls NOT NULL DEFAULT true`,
+// `tls_ca_pin NULL`), silently ignoring an operator who set them in
+// the descriptor. The server enforces their mutual exclusivity
+// (`verify_tls=false` ⊕ `tls_ca_pin`) and PEM validation with a 422,
+// which the import path surfaces via the existing error handling.
 var knownTopLevel = map[string]struct{}{
 	"aliases":           {},
 	"auth_model":        {},
@@ -70,6 +80,8 @@ var knownTopLevel = map[string]struct{}{
 	"preferred_impl_id": {},
 	"product":           {},
 	"secret_ref":        {},
+	"tls_ca_pin":        {},
+	"verify_tls":        {},
 	"vpn_required":      {},
 }
 
@@ -167,10 +179,10 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id. Any other field is spilled into the " +
-			"`extras` JSONB column. `fingerprint` is server-managed and " +
-			"skipped with a warning if present in the YAML (the probe verb " +
-			"is the only legitimate writer).\n\n" +
+			"notes, preferred_impl_id, verify_tls, tls_ca_pin. Any other field " +
+			"is spilled into the `extras` JSONB column. `fingerprint` is " +
+			"server-managed and skipped with a warning if present in the YAML " +
+			"(the probe verb is the only legitimate writer).\n\n" +
 			"Idempotency. Default mode aborts the whole import if any entry's " +
 			"`name` already exists in the tenant (no partial write — the plan " +
 			"is built before any API call fires). `--update` PATCHes existing " +

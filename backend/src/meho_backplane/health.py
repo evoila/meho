@@ -43,7 +43,9 @@ Usage::
     register_probe("vault", vault_probe)
 """
 
+import asyncio
 import inspect
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 
@@ -54,9 +56,12 @@ from meho_backplane.features import build_features_block
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "DEFAULT_READINESS_TTL_S",
     "ProbeFn",
     "ProbeResult",
     "clear_probes",
+    "clear_readiness_cache",
+    "readiness_snapshot",
     "register_probe",
     "router",
     "run_probes",
@@ -177,6 +182,93 @@ async def run_probes_async() -> list[ProbeResult]:
 def clear_probes() -> None:
     """Empty the registry. Test-only — never call from production code."""
     _probes.clear()
+
+
+#: Default freshness window for :func:`readiness_snapshot`. The UI
+#: chassis injects the readiness verdict into every ``/ui/*`` page
+#: render via a synchronous Jinja context processor that cannot itself
+#: await the probe sweep; the snapshot is computed in the async session
+#: middleware and read from ``request.state`` by the processor. Caching
+#: the verdict for a short window keeps that hot path at "negligible
+#: cost" (issue #1776) — at most one probe sweep per window across all
+#: concurrent page loads, rather than a fresh sweep per render — while
+#: still surfacing a 503→200 (or 200→503) transition within ~2s. The
+#: dashboard, which owns the detailed readiness card, passes
+#: ``max_age_s=0`` to force a fresh sweep so its behaviour is unchanged.
+DEFAULT_READINESS_TTL_S: float = 2.0
+
+
+#: Monotonic-clock-stamped cache for :func:`readiness_snapshot`:
+#: ``(captured_at_monotonic, snapshot)`` or ``None`` before the first
+#: sweep. Guarded by :data:`_readiness_lock` so a burst of concurrent
+#: requests triggers a single refresh (single-flight) rather than a
+#: thundering herd of probe sweeps.
+_readiness_cache: tuple[float, dict[str, object]] | None = None
+_readiness_lock = asyncio.Lock()
+
+
+def _build_readiness_snapshot(results: list[ProbeResult]) -> dict[str, object]:
+    """Project probe *results* into the ``{ready, checks}`` snapshot shape.
+
+    The shape mirrors the ``/ready`` payload (minus the ``features``
+    block, which is a deploy-config concern orthogonal to the live
+    readiness verdict) so the UI footer pill, the dashboard readiness
+    card, and ``/ready`` all read one contract. ``ready`` is ``False``
+    for an empty registry because ``all([])`` is vacuously ``True`` —
+    the chassis must fail closed until concrete probes are wired (see
+    the module docstring and :func:`ready`).
+    """
+    ready_ok = bool(results) and all(r.ok for r in results)
+    return {
+        "ready": ready_ok,
+        "checks": [{"name": r.name, "ok": r.ok, "detail": r.detail or ""} for r in results],
+    }
+
+
+async def readiness_snapshot(*, max_age_s: float = DEFAULT_READINESS_TTL_S) -> dict[str, object]:
+    """Return a short-TTL-cached readiness snapshot ``{ready, checks}``.
+
+    Runs the full probe sweep (:func:`run_probes_async`, sync + async
+    probes alike) at most once per *max_age_s* window and caches the
+    result. A cached entry younger than *max_age_s* is returned without
+    re-running probes; otherwise the cache is refreshed under a
+    single-flight lock so concurrent callers share one sweep.
+
+    Pass ``max_age_s=0`` to force a fresh sweep (and refresh the cache)
+    — the dashboard does this so its readiness card stays live while
+    every other surface reads the cheap cached verdict.
+
+    The ``checks`` detail mirrors the ``/ready`` payload so a caller can
+    surface the same per-probe breakdown without a second sweep.
+    """
+    global _readiness_cache
+    now = time.monotonic()
+    cached = _readiness_cache
+    if cached is not None and max_age_s > 0 and (now - cached[0]) < max_age_s:
+        return cached[1]
+
+    async with _readiness_lock:
+        # Re-check under the lock: a peer may have refreshed while we
+        # waited to acquire it, so we avoid a redundant second sweep.
+        cached = _readiness_cache
+        refreshed_now = time.monotonic()
+        if cached is not None and max_age_s > 0 and (refreshed_now - cached[0]) < max_age_s:
+            return cached[1]
+        snapshot = _build_readiness_snapshot(await run_probes_async())
+        _readiness_cache = (time.monotonic(), snapshot)
+        return snapshot
+
+
+def clear_readiness_cache() -> None:
+    """Drop the cached readiness snapshot. Test-only.
+
+    Production never invalidates the cache out-of-band; the TTL window
+    is the only refresh trigger. Tests that register a fresh probe set
+    call this so a snapshot cached by an earlier test (potentially on
+    the same xdist worker) cannot leak a stale verdict.
+    """
+    global _readiness_cache
+    _readiness_cache = None
 
 
 router = APIRouter(tags=["health"])

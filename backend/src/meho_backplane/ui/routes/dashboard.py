@@ -72,7 +72,7 @@ from typing import Final
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.health import run_probes_async
+from meho_backplane.health import readiness_snapshot
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import get_templates
@@ -153,16 +153,17 @@ async def _readiness_snapshot() -> dict[str, object]:
     """Project the chassis readiness-probe results into the dashboard shape.
 
     Returns ``{"ready": bool, "checks": [{"name": ..., "ok": ..., "detail": ...}, ...]}``.
-    The shape mirrors the ``/ready`` endpoint payload so a future
-    "expanded readiness card" surface Initiative reuses the same
+    The shape mirrors the ``/ready`` endpoint payload so the dashboard's
+    detailed readiness card and the chassis footer pill read one
     contract.
+
+    Delegates to :func:`~meho_backplane.health.readiness_snapshot` with
+    ``max_age_s=0`` so the dashboard always runs a *fresh* probe sweep
+    (its pre-#1776 behaviour), rather than reading the short-TTL cache
+    the other surfaces share via the session middleware. The dashboard
+    owns the live readiness card, so freshness is the right trade here.
     """
-    results = await run_probes_async()
-    ready_ok = bool(results) and all(r.ok for r in results)
-    return {
-        "ready": ready_ok,
-        "checks": [{"name": r.name, "ok": r.ok, "detail": r.detail or ""} for r in results],
-    }
+    return await readiness_snapshot(max_age_s=0)
 
 
 async def _render_dashboard(
@@ -181,6 +182,15 @@ async def _render_dashboard(
     double-submit check.
     """
     readiness = await _readiness_snapshot()
+    # The chassis context processor injects ``ready`` into every render
+    # from ``request.state.ui_ready`` (the middleware's short-TTL-cached
+    # verdict) and -- because Starlette runs context processors after
+    # the route context -- it wins over the ``ready`` in ``context``
+    # below. Write the dashboard's own *fresh* verdict back to
+    # ``request.state.ui_ready`` so the processor re-injects that exact
+    # value: the footer pill and the dashboard's readiness card stay in
+    # lock-step, and the dashboard's behaviour is unchanged (#1776).
+    request.state.ui_ready = bool(readiness["ready"])
     csrf_token = mint_csrf_token(str(session.session_id))
     context = {
         "page_title": "Dashboard",

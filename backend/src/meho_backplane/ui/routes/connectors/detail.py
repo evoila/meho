@@ -537,11 +537,6 @@ async def _render_detail(
         # affordance only surfaces to operators with the privilege.
         "is_tenant_admin": role_probe.is_tenant_admin,
         "csrf_token": csrf_token,
-        # The footer in ``base.html`` reads ``ready`` to colour the
-        # readiness pill; the connectors surface doesn't poll readiness
-        # itself, so ship ``False`` here so Jinja's ``StrictUndefined``
-        # env does not raise on the read.
-        "ready": False,
     }
     response = get_templates().TemplateResponse(request, "connectors/detail.html", context)
     response.set_cookie(

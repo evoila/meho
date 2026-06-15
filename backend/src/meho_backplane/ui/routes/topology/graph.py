@@ -379,10 +379,6 @@ def _build_template_context(
         # ``None`` surfaces to the template as an empty string --
         # Jinja's ``StrictUndefined`` env requires the key present.
         "selected_id": str(selected_id) if selected_id is not None else "",
-        # ``ready=False`` so ``base.html``'s footer pill stays the
-        # same colour as the table surface (the dashboard owns the
-        # readiness signal).
-        "ready": False,
     }
 
 
@@ -513,7 +509,6 @@ def _build_overlay_template_context(
         # so Jinja's ``StrictUndefined`` env does not raise on the
         # template read.
         "selected_id": "",
-        "ready": False,
         # Overlay-specific bindings the template renders only when
         # ``overlay_mode`` is set.
         "overlay_mode": overlay_mode,
@@ -842,7 +837,6 @@ def _render_overlay_error(
         "csrf_token": csrf_token,
         "error_status": status_code,
         "error_message": message,
-        "ready": False,
     }
     response = get_templates().TemplateResponse(
         request,

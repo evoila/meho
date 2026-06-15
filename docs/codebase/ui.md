@@ -43,7 +43,7 @@ Locked decisions:
 | Module | Purpose |
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
-| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
+| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217 -- and the live `ready` verdict for the footer pill, read from `request.state.ui_ready` (stashed by the session middleware from a short-TTL-cached `health.readiness_snapshot`); G10.7-T1 #1776. Context processors run *after* the route context and `update` over it, so the injected `ready` wins over any per-route literal. |
 | `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
@@ -361,6 +361,59 @@ were a measurement artifact of the consumer running with seed data
 that didn't match the active tenant. The `test_ui_tenant_chip.py`
 suite pins the cascade contract (Memory and Broadcast surfaces both
 render against the session tenant) as a regression guard.
+
+### Readiness pill (G10.7-T1 #1776)
+
+`base.html`'s sidebar-footer pill colours `bg-success` / "ready" vs
+`bg-warning` / "starting" off a `ready` template variable. Originally
+only the dashboard computed it; every other `/ui/*` surface hardcoded
+`ready=False` in its own context dict (~14 routes, several with a "the
+dashboard owns readiness" comment), so the pill was stuck on yellow
+"starting" on every page but the dashboard regardless of actual backend
+health. The accurate `GET /ready` endpoint existed but the console
+never consumed it.
+
+The fix injects the live verdict into *every* render through the same
+`_ui_session_context_processor` that surfaces the tenant chip. The
+processor exposes a second variable, `ready`, read from
+`request.state.ui_ready`. That value is computed once per request by
+`UISessionMiddleware` (`_stash_ui_readiness`) from
+[`readiness_snapshot`](../../backend/src/meho_backplane/health.py) — a
+short-TTL-cached (`DEFAULT_READINESS_TTL_S`, 2 s) projection of the
+probe registry into the same `{ready, checks}` shape `/ready` returns.
+Caching keeps the page-render hot path at "negligible cost": at most one
+probe sweep per cache window across all concurrent loads, not a sweep
+per render. The processor is synchronous (Starlette contract), so it
+cannot itself await the sweep — computing it in the async middleware and
+reading it off `request.state` is the seam that bridges the two.
+
+Two properties make this correct:
+
+* **Processor wins over route literals.** Starlette runs context
+  processors *after* the route's own context dict and `dict.update`s
+  their output over it
+  (`starlette.templating.Jinja2Templates.TemplateResponse`), so the
+  injected `ready` overrides any stray per-route value. The ~14
+  `ready=False` literals were therefore dropped (they were dead once the
+  processor owns the key); `StrictUndefined` still requires the key
+  present, and the processor's `False` default ("starting") is the
+  fail-safe for the auth/static surfaces where no session middleware
+  runs and for any bare `Environment.render`.
+* **Dashboard behaviour unchanged.** The dashboard still runs a *fresh*
+  probe sweep (`readiness_snapshot(max_age_s=0)`) for its detailed
+  readiness card, and writes that fresh verdict back to
+  `request.state.ui_ready` so the processor re-injects the dashboard's
+  own value rather than the (possibly staler) cached one — the footer
+  pill and the dashboard card stay in lock-step.
+
+A misbehaving probe must not 500 a page render: `_stash_ui_readiness`
+degrades to `False` ("starting") on any exception out of the sweep and
+logs `ui_readiness_snapshot_failed`. `GET /ready` itself is unchanged —
+it still computes fresh on every hit (the kubernetes readiness contract)
+and keeps its `features` block, which the UI verdict deliberately omits.
+The `test_ui_readiness_pill.py` suite pins the cache semantics, the
+processor injection + fail-safe, and the end-to-end pill state on a
+non-dashboard surface (`/ui/memory`).
 
 ## Dependencies
 

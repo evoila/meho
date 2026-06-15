@@ -90,6 +90,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
+from meho_backplane.health import readiness_snapshot
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
@@ -219,6 +220,33 @@ def _redirect_to_login(original_path_with_query: str) -> tuple[int, list[tuple[b
     ]
 
 
+async def _stash_ui_readiness(scope_state: dict[str, object], *, path: str) -> None:
+    """Stash the live backplane readiness verdict on the request scope.
+
+    The synchronous Jinja context processor
+    (:func:`~meho_backplane.ui.templating._ui_session_context_processor`)
+    colours ``base.html``'s sidebar-footer pill off ``request.state.ui_ready``
+    but cannot itself await the probe sweep. This middleware -- which
+    already runs once per ``/ui/*`` page render -- computes it here from a
+    short-TTL-cached :func:`~meho_backplane.health.readiness_snapshot`, so
+    the cost is at most one probe sweep per cache window across all
+    concurrent page loads (#1776).
+
+    A misbehaving probe must not 500 the page: on any exception out of
+    the sweep, degrade to ``False`` ("starting" -- the same fail-safe
+    default the processor uses when the key is unbound) and log, rather
+    than letting it propagate out of the render path.
+    """
+    try:
+        snapshot = await readiness_snapshot()
+        scope_state["ui_ready"] = bool(snapshot["ready"])
+    except Exception:  # pragma: no cover -- defensive
+        structlog.get_logger(__name__).warning(
+            "ui_readiness_snapshot_failed", path=path, exc_info=True
+        )
+        scope_state["ui_ready"] = False
+
+
 class UISessionMiddleware:
     """Pure-ASGI middleware: load operator identity from the session cookie.
 
@@ -231,6 +259,11 @@ class UISessionMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    # Pre-existing 132-line / C901-13 ASGI dispatch handler (cookie-parse →
+    # session-load → readiness-stash → passthrough, read top-to-bottom).
+    # #1776 only adds one call to the extracted `_stash_ui_readiness`
+    # helper; splitting the request lifecycle is out of scope for a
+    # readiness-pill fix. code-quality-allow: pre-existing oversize handler
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         # Non-HTTP scopes (websocket, lifespan) pass through. The BFF
         # has no websocket surface in v0.2 and the lifespan must not
@@ -349,6 +382,7 @@ class UISessionMiddleware:
         scope_state = scope.setdefault("state", {})
         if isinstance(scope_state, dict):
             scope_state["ui_session"] = session_context
+            await _stash_ui_readiness(scope_state, path=path)
 
         # G0.15-T7 (#1216): bind audit contextvars per-request happens
         # later, inside :func:`require_ui_session` (the FastAPI

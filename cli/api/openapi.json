@@ -16865,6 +16865,11 @@
             "title": "Verify Tls",
             "default": true
           },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -17011,6 +17016,11 @@
             "title": "Verify Tls",
             "default": true
           },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -17100,6 +17110,11 @@
             "type": "boolean",
             "title": "Verify Tls",
             "default": true
+          },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
           },
           "fingerprint": {
             "additionalProperties": true,
@@ -17209,6 +17224,11 @@
             "type": "boolean",
             "nullable": true,
             "title": "Verify Tls"
+          },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
           },
           "extras": {
             "additionalProperties": true,

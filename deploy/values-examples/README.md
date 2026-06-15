@@ -403,22 +403,72 @@ where a target PATCH wrote an empty audit payload.)
 > the per-target client pool (`(tenant_id, id, verify_tls)`), so a PATCH
 > that flips the flag is not served a stale verifying/non-verifying client.
 
-### The secure supersession: per-target CA-pin ([#1784](https://github.com/evoila/meho/issues/1784), planned)
+### The secure supersession (preferred per-target fix): CA-pin ([#1784](https://github.com/evoila/meho/issues/1784))
 
-`verify_tls=false` trades away MITM protection. The planned follow-up
-that gives back the security without requiring a CA in the global bundle
-is a **per-target CA-pin** (Initiative
+`verify_tls=false` trades away MITM protection. The follow-up that gives
+back the security **without** requiring a CA in the global bundle is the
+**per-target CA-pin** (Initiative
 [#1774](https://github.com/evoila/meho/issues/1774) T5,
-[#1784](https://github.com/evoila/meho/issues/1784)): pin the
-appliance's expected CA certificate on the target itself
-(`ssl.SSLContext.load_verify_locations(cadata=…)`), which keeps
-`CERT_REQUIRED` + `check_hostname` **on** and verifies against the
-pinned CA only. This is the same shape as the govc **thumbprint** flow
-(`govc -thumbprint`) — trust *this specific* appliance's certificate
-without trusting the wider world or disabling verification. Once it
-lands, CA-pin is the **preferred** fix for a self-signed appliance you
-can't add to the global bundle, and `verify_tls=false` reverts to the
+[#1784](https://github.com/evoila/meho/issues/1784)): pin the appliance's
+expected CA / cert PEM on the target itself via the `tls_ca_pin` field.
+At dispatch the connector builds
+`ssl.create_default_context()` then
+`ctx.load_verify_locations(cadata=<your PEM>)`, which **keeps**
+`CERT_REQUIRED` **and** `check_hostname` **on** — so the certificate
+chain and the hostname are both still verified, now additionally trusting
+the pinned CA. This is the same shape as the govc **thumbprint** flow
+(`govc -thumbprint`): trust *this specific* appliance's self-signed /
+internal-CA certificate without trusting the wider world and without
+disabling verification.
+
+CA-pin is the **preferred** fix for a self-signed / internal-CA appliance
+you can't add to the global bundle, because the channel stays
+authenticated against a man-in-the-middle. `verify_tls=false` is the
 genuine last resort it is framed as here.
+
+> **Precedence + mutual exclusion.** A target's TLS trust resolves in
+> this order: **(1)** `tls_ca_pin` set → trust the pinned CA, verification
+> stays on (secure); **(2)** else `verify_tls=false` → verification off
+> (insecure last resort); **(3)** else the global `SSL_CERT_FILE` bundle.
+> Because the pin is the secure way to reach a self-signed endpoint,
+> setting **both** `tls_ca_pin` and `verify_tls=false` on the same target
+> is rejected with a `422` at create/update time — they are mutually
+> exclusive. The pin is added *on top of* the global bundle, so a pinned
+> target still trusts public CAs too.
+
+```bash
+# Create a target that trusts a specific appliance CA — verification
+# stays ON (chain + hostname), against the pinned CA. PEM goes in the
+# tls_ca_pin field; --rawfile keeps the multi-line cert intact as a JSON
+# string.
+jq -n --rawfile pin /path/to/appliance-ca.pem \
+  '{name:"vcf-logs-lab", product:"vmware-rest", host:"vrli.nested.lab",
+    auth_model:"shared_service_account", tls_ca_pin:$pin}' \
+| curl -sf -X POST https://meho.example.com/api/v1/targets \
+    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H 'Content-Type: application/json' -d @-
+
+# Rotate the pin (e.g. the appliance cert was re-issued): PATCH the new
+# PEM. The pooled client is rebuilt — the pin digest is part of the
+# client-pool cache key, so the old client is never reused.
+jq -n --rawfile pin /path/to/new-appliance-ca.pem '{tls_ca_pin:$pin}' \
+| curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H 'Content-Type: application/json' -d @-
+
+# Clear the pin (the CA is now in the global bundle, say): send null.
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"tls_ca_pin": null}'
+```
+
+A malformed PEM is rejected with a `422` at create/update time (the field
+is validated against the stdlib SSL loader before it is persisted), so a
+bad pin surfaces immediately rather than as an opaque dispatch failure.
+Setting / rotating / clearing the pin writes a durable `audit_log` row
+(`tls_ca_pinned` + a digest of the before/after PEM — never the PEM body)
+and a WARN log line, exactly like the `verify_tls` toggle.
 
 ### Setting `verify_tls` on a target
 
@@ -452,23 +502,24 @@ does not mention `verify_tls` leaves it (and the TLS audit trail)
 untouched; only an explicit `{"verify_tls": false}` / `{"verify_tls": true}`
 flips the column and writes the audit row.
 
-> **`meho targets import` does NOT set `verify_tls` (use the REST API
-> above).** The bulk-import path
+> **`meho targets import` does NOT set `verify_tls` or `tls_ca_pin` (use
+> the REST API above).** The bulk-import path
 > ([`cli/internal/cmd/targets/import.go`](../../cli/internal/cmd/targets/import.go))
 > maps a fixed set of known top-level YAML keys onto the create/update
 > body and **spills every other key into the `extras` JSONB column**.
-> `verify_tls` is **not** in that known-key set, so a `verify_tls: false`
-> line in the descriptor file silently lands in `extras` instead of the
-> first-class `verify_tls` column — the column keeps its secure default
-> (`true`) and verification is **not** disabled. Setting it from the
-> import file would give you a target you *think* is opted out but that
-> still verifies. There is also no `meho targets create` / `meho targets
-> update` verb (the CLI's only write path is `import`; direct write verbs
-> are out of scope for v0.2 — see
+> Neither `verify_tls` nor `tls_ca_pin` is in that known-key set, so a
+> `verify_tls: false` or `tls_ca_pin: ...` line in the descriptor file
+> silently lands in `extras` instead of the first-class column — the
+> `verify_tls` column keeps its secure default (`true`) and the target
+> stays unpinned. Setting either from the import file would give you a
+> target you *think* is opted out / pinned but that still verifies against
+> the global bundle. There is also no `meho targets create` / `meho
+> targets update` verb (the CLI's only write path is `import`; direct
+> write verbs are out of scope for v0.2 — see
 > [`cli/internal/cmd/targets/targets.go`](../../cli/internal/cmd/targets/targets.go)).
-> Until the import path learns the key, the **REST API
+> Until the import path learns the keys, the **REST API
 > `POST` / `PATCH /api/v1/targets`** shown above is the only supported
-> way to set `verify_tls`.
+> way to set `verify_tls` and `tls_ca_pin`.
 
 ### Coverage gap: two out-of-pool connectors do not honour `verify_tls`
 

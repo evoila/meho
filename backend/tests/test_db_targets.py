@@ -745,3 +745,147 @@ def test_migration_0044_backfills_verify_tls_true_and_is_reversible(
             assert "verify_tls" in cols_reupgraded
     finally:
         sync_eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_target_round_trip_with_tls_ca_pin() -> None:
+    """T5 (#1784): a tls_ca_pin PEM persists and reads back; default is NULL."""
+    sessionmaker = get_sessionmaker()
+    pinned_id = uuid.uuid4()
+    plain_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    pem = "-----BEGIN CERTIFICATE-----\nMIIBpem\n-----END CERTIFICATE-----\n"
+
+    async with sessionmaker() as session:
+        session.add(
+            Target(
+                id=pinned_id,
+                tenant_id=tenant_id,
+                name="pinned-target",
+                product="vmware-rest",
+                host="vrli.lab",
+                tls_ca_pin=pem,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            Target(
+                id=plain_id,
+                tenant_id=tenant_id,
+                name="plain-target",
+                product="ssh",
+                host="10.0.0.2",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        pinned = (await session.execute(select(Target).where(Target.id == pinned_id))).scalar_one()
+        plain = (await session.execute(select(Target).where(Target.id == plain_id))).scalar_one()
+
+    assert pinned.tls_ca_pin == pem
+    # Unset column defaults to NULL (no pin) — never a blank string.
+    assert plain.tls_ca_pin is None
+
+
+def test_migration_0045_adds_tls_ca_pin_nullable_and_is_reversible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """T5 (#1784): ``0045`` adds nullable ``tls_ca_pin``, reversibly.
+
+    * A row that exists **before** ``0045`` (inserted at ``0044``) reads
+      back ``tls_ca_pin = NULL`` after ``upgrade head`` — the nullable
+      ADD COLUMN is safe on a populated table with no backfill.
+    * ``downgrade 0044`` drops the column cleanly and ``upgrade head``
+      restores it — ``0045`` is fully reversible and leaves a single head.
+    """
+    from alembic import command
+
+    from meho_backplane.db.migrations import alembic_config
+
+    db_path = tmp_path / "tls_ca_pin.db"
+    async_url = f"sqlite+aiosqlite:///{db_path}"
+    sync_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", async_url)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    reset_engine_for_testing()
+
+    cfg = alembic_config()
+    cfg.set_main_option("sqlalchemy.url", async_url)
+
+    # Migrate to the revision *before* 0045 so the row predates the column.
+    command.upgrade(cfg, "0044")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.connect() as conn:
+            cols_at_0044 = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+        assert "tls_ca_pin" not in cols_at_0044
+
+        legacy_id = str(uuid.uuid4())
+        legacy_tenant = str(uuid.uuid4())
+        now_iso = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        with sync_eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO targets "
+                    "(id, tenant_id, name, aliases, product, host, "
+                    " auth_model, vpn_required, verify_tls, extras, "
+                    " created_at, updated_at) "
+                    "VALUES "
+                    "(:id, :tenant_id, :name, '[]', :product, :host, "
+                    " 'shared_service_account', 0, 1, '{}', :now, :now)"
+                ),
+                {
+                    "id": legacy_id,
+                    "tenant_id": legacy_tenant,
+                    "name": "legacy-target",
+                    "product": "ssh",
+                    "host": "10.0.0.9",
+                    "now": now_iso,
+                },
+            )
+
+        # Apply 0045.
+        command.upgrade(cfg, "head")
+        with sync_eng.connect() as conn:
+            cols_at_head = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "tls_ca_pin" in cols_at_head
+            # The pre-existing row reads back NULL (no backfill, no pin).
+            pin = conn.execute(
+                text("SELECT tls_ca_pin FROM targets WHERE id = :id"),
+                {"id": legacy_id},
+            ).scalar_one()
+            assert pin is None
+            # The column is nullable.
+            col = next(
+                c for c in sa_inspect(conn).get_columns("targets") if c["name"] == "tls_ca_pin"
+            )
+            assert col["nullable"] is True
+
+        # Downgrade exactly one revision (head -> 0044): column must go.
+        command.downgrade(cfg, "0044")
+        with sync_eng.connect() as conn:
+            cols_after = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "tls_ca_pin" not in cols_after
+            surviving = conn.execute(
+                text("SELECT name FROM targets WHERE id = :id"),
+                {"id": legacy_id},
+            ).scalar_one()
+            assert surviving == "legacy-target"
+
+        # Re-upgrade is idempotent and restores the column.
+        command.upgrade(cfg, "head")
+        with sync_eng.connect() as conn:
+            cols_reupgraded = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "tls_ca_pin" in cols_reupgraded
+    finally:
+        sync_eng.dispose()

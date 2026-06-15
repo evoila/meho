@@ -127,6 +127,7 @@ available is the strongest answer.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -385,6 +386,7 @@ def _to_full(t: TargetORM) -> Target:
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
+        tls_ca_pin=t.tls_ca_pin,
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -448,6 +450,142 @@ def _bind_tls_audit(
         verify_tls_after=after,
         tls_verification_disabled=(after is False),
     )
+
+
+def _ca_pin_digest(pem: str | None) -> str | None:
+    """Return a short SHA-256 hex digest of *pem*, or ``None`` when unset.
+
+    The audit trail records *which* CA was pinned without storing the PEM
+    body in the ``audit_log`` payload (the full certificate is neither a
+    secret nor a useful audit field; a stable digest is the queryable
+    identity -- "the pin changed from X to Y"). The same digest seeds the
+    client-pool cache key in
+    :meth:`~meho_backplane.connectors.adapters.http.HttpConnector.extra_cache_dimensions`,
+    so the audit log and the pool agree on what counts as "a different
+    pin".
+    """
+    if pem is None:
+        return None
+    return hashlib.sha256(pem.encode("utf-8")).hexdigest()[:16]
+
+
+def _bind_ca_pin_audit(
+    *,
+    target_id: uuid.UUID,
+    name: str,
+    tenant_id: uuid.UUID,
+    before: str | None,
+    after: str | None,
+) -> None:
+    """Record a ``tls_ca_pin`` set / change / clear on the audit row + WARN.
+
+    T5 (#1784). Pinning (or re-pinning / un-pinning) a target's trusted CA
+    changes *what the connector trusts on the wire*, so -- like the
+    ``verify_tls`` toggle (:func:`_bind_tls_audit`) -- it must leave a
+    durable, queryable trail rather than a silent config write. Both write
+    routes call this whenever the persisted pin actually changed:
+
+    * ``create_target`` -- when a target lands with a non-null pin.
+    * ``update_target`` -- when the PATCH body sent ``tls_ca_pin`` and the
+      value differs from the persisted one (set, rotate, or clear).
+
+    The ``audit_*`` prefix folds the keys into this request's
+    ``audit_log.payload``. The PEM body is **not** bound -- only the short
+    :func:`_ca_pin_digest` of before/after and a ``tls_ca_pinned`` boolean
+    tracking the resulting state -- so the audit row stays small and an
+    operator can query "which targets have a CA pinned" off one boolean
+    and "did the pin change" off the digest pair.
+
+    The before/after digests are coerced to the empty string when there is
+    no pin (rather than ``None``), because
+    :func:`~meho_backplane.audit._resolve_audit_payload` **drops** ``None``
+    contextvars from the persisted payload -- so a ``None`` "before" on a
+    fresh-set, or a ``None`` "after" on a clear, would silently vanish from
+    the audit row, defeating the never-silent goal. ``""`` is the explicit
+    "unpinned" marker, and the ``tls_ca_pinned`` boolean is the primary
+    queryable signal regardless.
+    """
+    before_digest = _ca_pin_digest(before) or ""
+    after_digest = _ca_pin_digest(after) or ""
+    structlog.contextvars.bind_contextvars(
+        audit_tls_ca_pinned=(after is not None),
+        audit_target_id=str(target_id),
+        audit_tls_ca_pin_before=before_digest,
+        audit_tls_ca_pin_after=after_digest,
+    )
+    _log.warning(
+        "target_tls_ca_pin_changed",
+        target_id=str(target_id),
+        name=name,
+        tenant_id=str(tenant_id),
+        tls_ca_pin_before=before_digest,
+        tls_ca_pin_after=after_digest,
+        tls_ca_pinned=(after is not None),
+    )
+
+
+def _enforce_tls_trust_exclusion(ca_pin: str | None, verify_tls: bool) -> None:
+    """Reject the contradictory ``tls_ca_pin`` + ``verify_tls=false`` combo.
+
+    T5 (#1784). A CA-pin is the *secure* way to reach a self-signed /
+    internal-CA endpoint (verification stays on against the pinned CA), so
+    pairing it with ``verify_tls=false`` (verification off) is an operator
+    error -- the insecure flag would silently win at dispatch and throw
+    away the pin's protection. Called by both write routes with the
+    *effective* (merged) post-write values, since the schema-level
+    validator only sees one request body and can't reason about the
+    persisted row. Raises a structured 422; a no-op otherwise.
+    """
+    if ca_pin is not None and verify_tls is False:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "tls_ca_pin and verify_tls=false are mutually exclusive: a "
+                "CA-pin already reaches a self-signed / internal-CA endpoint "
+                "securely (verification stays on against the pinned CA), so "
+                "disabling verification as well is contradictory. Clear one "
+                "of the two."
+            ),
+        )
+
+
+def _audit_target_tls_writes(
+    *,
+    t: TargetORM,
+    tenant_id: uuid.UUID,
+    verify_tls_changed: bool,
+    verify_tls_before: bool,
+    ca_pin_changed: bool,
+    ca_pin_before: str | None,
+) -> None:
+    """Fold any ``verify_tls`` / ``tls_ca_pin`` change into the audit row.
+
+    Shared by ``create_target`` and ``update_target`` (T1 #1780 / T5
+    #1784): security-relevant TLS-trust changes must leave a durable,
+    queryable trail rather than a silent config write. The caller decides
+    *whether* each field changed (create: "landed non-default"; update:
+    "sent and differs from the persisted value") and passes the
+    pre-change values; this helper binds the matching ``audit_*``
+    contextvars (which :class:`~meho_backplane.audit.AuditMiddleware` folds
+    into the payload) + emits the WARN, gated so an unchanged field binds
+    nothing -- no audit noise on the common path.
+    """
+    if verify_tls_changed:
+        _bind_tls_audit(
+            target_id=t.id,
+            name=t.name,
+            tenant_id=tenant_id,
+            before=verify_tls_before,
+            after=t.verify_tls,
+        )
+    if ca_pin_changed:
+        _bind_ca_pin_audit(
+            target_id=t.id,
+            name=t.name,
+            tenant_id=tenant_id,
+            before=ca_pin_before,
+            after=t.tls_ca_pin,
+        )
 
 
 def _registered_products() -> set[str]:
@@ -1024,22 +1162,20 @@ async def create_target(
         name=t.name,
         tenant_id=str(operator.tenant_id),
     )
-    # T1 (#1780). A target created with TLS verification *off* is a
-    # security-relevant config choice that must leave a durable,
-    # queryable trail. Bind the ``audit_*`` contextvars so
-    # ``AuditMiddleware`` folds them into this request's ``audit_log``
-    # payload, and emit a WARN. ``before`` is the secure default the
-    # column would otherwise carry; ``after`` is the operator's choice.
-    # A create with ``verify_tls`` left at the secure default binds
-    # nothing (no audit noise for the common path).
-    if t.verify_tls is False:
-        _bind_tls_audit(
-            target_id=t.id,
-            name=t.name,
-            tenant_id=operator.tenant_id,
-            before=True,
-            after=False,
-        )
+    # T1 (#1780) / T5 (#1784). A target created with TLS verification *off*
+    # or with a CA-pin is a security-relevant config choice that must leave
+    # a durable, queryable trail. A fresh row has no prior pin (``before``
+    # = ``None``) and would otherwise carry the secure ``verify_tls=True``
+    # default; a create that lands at the default + unpinned binds nothing
+    # (no audit noise on the common path). See :func:`_audit_target_tls_writes`.
+    _audit_target_tls_writes(
+        t=t,
+        tenant_id=operator.tenant_id,
+        verify_tls_changed=t.verify_tls is False,
+        verify_tls_before=True,
+        ca_pin_changed=t.tls_ca_pin is not None,
+        ca_pin_before=None,
+    )
     return _to_full(t)
 
 
@@ -1073,6 +1209,19 @@ async def update_target(
     # none.
     verify_tls_sent = "verify_tls" in updates
     verify_tls_before = t.verify_tls
+    # T5 (#1784). Snapshot the pre-patch CA-pin the same way, and enforce
+    # the CA-pin / verify_tls=false mutual exclusion across the *merged*
+    # post-patch state (the schema validator only sees the request body, so
+    # it catches "both sent in one body" but not "PATCH sets a pin on a row
+    # already at verify_tls=false", nor the reverse). Compute the effective
+    # post-patch values from the body where sent, falling back to the
+    # persisted row, and reject the contradiction with a 422 before the
+    # ``setattr`` loop mutates anything.
+    ca_pin_sent = "tls_ca_pin" in updates
+    ca_pin_before = t.tls_ca_pin
+    effective_ca_pin = updates["tls_ca_pin"] if ca_pin_sent else ca_pin_before
+    effective_verify_tls = updates["verify_tls"] if verify_tls_sent else verify_tls_before
+    _enforce_tls_trust_exclusion(effective_ca_pin, effective_verify_tls)
     # G0.14-T4 (#1145) / G0.18-T2 (#1355). Validate + canonicalise the
     # patched ``product`` (rejecting ``{"product": null}``) and resolve
     # the effective product for the impl-id scope below. See
@@ -1106,22 +1255,22 @@ async def update_target(
         tenant_id=str(operator.tenant_id),
         fields=list(updates.keys()),
     )
-    # T1 (#1780). When the PATCH touched ``verify_tls``, fold the
-    # transition into this request's ``audit_log`` payload via the
-    # ``audit_*`` contextvars and emit a WARN. This closes the
-    # never-silent gap the initiative flagged: a target PATCH wrote an
-    # *empty* audit payload today, so flipping a security-relevant
-    # control left no durable record. The bind is gated on the field
-    # being sent (``verify_tls_sent``), so a PATCH that does not touch
-    # ``verify_tls`` binds no TLS audit keys.
-    if verify_tls_sent:
-        _bind_tls_audit(
-            target_id=t.id,
-            name=t.name,
-            tenant_id=operator.tenant_id,
-            before=verify_tls_before,
-            after=t.verify_tls,
-        )
+    # T1 (#1780) / T5 (#1784). Fold any TLS-trust change into this
+    # request's ``audit_log`` payload via ``audit_*`` contextvars + a WARN.
+    # This closes the never-silent gap the initiative flagged: a target
+    # PATCH wrote an *empty* audit payload today, so flipping a
+    # security-relevant control left no durable record. ``verify_tls`` is
+    # gated on the field being sent; ``tls_ca_pin`` additionally on a real
+    # value change so a no-op re-send of the same pin doesn't spam the
+    # audit log. See :func:`_audit_target_tls_writes`.
+    _audit_target_tls_writes(
+        t=t,
+        tenant_id=operator.tenant_id,
+        verify_tls_changed=verify_tls_sent,
+        verify_tls_before=verify_tls_before,
+        ca_pin_changed=ca_pin_sent and t.tls_ca_pin != ca_pin_before,
+        ca_pin_before=ca_pin_before,
+    )
     return _to_full(t)
 
 

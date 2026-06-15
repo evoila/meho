@@ -24,28 +24,45 @@ client is host-bound via ``base_url``, the collision would route one
 tenant's request to the other tenant's host and leak credentials across
 the tenant boundary (evoila/meho#1682).
 
-**Cert-bundle support:** httpx honours ``SSL_CERT_FILE`` natively. When a
-target verifies TLS (the default, ``verify_tls=True``) the client is built
-with **no** ``verify=`` argument, so the global ``SSL_CERT_FILE`` /
-chart-trust-bundle path (evoila/meho#209) is in effect unchanged. When a
-target opts out (``verify_tls=False``) the client is built with an explicit
-insecure :class:`ssl.SSLContext` (``check_hostname`` off, ``CERT_NONE``) so
-it can reach a self-signed / internal-CA appliance (evoila/meho#1774). The
-opt-out is per-target, never global, and loud — see
-:func:`_insecure_ssl_context` and the WARN emitted at client construction.
+**Cert-bundle / TLS-trust support:** httpx honours ``SSL_CERT_FILE``
+natively. The per-target TLS trust has three states, in precedence order:
+
+1. **CA-pin** (``tls_ca_pin`` set, evoila/meho#1784) — the secure path.
+   The client is built with a context from
+   :func:`_build_ca_pinned_ssl_context`:
+   :func:`ssl.create_default_context` plus
+   :meth:`~ssl.SSLContext.load_verify_locations` ``(cadata=<pem>)``, which
+   **keeps** ``CERT_REQUIRED`` + ``check_hostname`` ON, so chain and
+   hostname are still enforced — now also trusting the pinned CA (the
+   govc-``-thumbprint`` pattern). Takes precedence over
+   ``verify_tls=False`` (the two are mutually exclusive at the API layer).
+2. **Insecure opt-out** (``verify_tls=False``, evoila/meho#1774) — the
+   audited last resort. The client is built with an explicit insecure
+   :class:`ssl.SSLContext` (``check_hostname`` off, ``CERT_NONE``) so it
+   can reach a self-signed / internal-CA appliance with no pin. Per-target,
+   never global, and loud — see :func:`_insecure_ssl_context` and the WARN
+   emitted at client construction.
+3. **Default** (``verify_tls=True``, no pin) — the client is built with
+   **no** ``verify=`` argument, so the global ``SSL_CERT_FILE`` /
+   chart-trust-bundle path (evoila/meho#209) is in effect unchanged.
 
 **Client pool key:** the pool is keyed on
 :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
 (``(tenant_id, id)``) **plus** :meth:`HttpConnector.extra_cache_dimensions`
-(``(verify_tls,)``), i.e. ``(tenant_id, id, verify_tls)``. Appending
-``verify_tls`` keeps the ``(tenant_id, id)`` tenant-isolation prefix intact
-(evoila/meho#1682/#1642) while ensuring a PATCH that flips ``verify_tls`` is
-not served the stale pooled client built under the previous flag.
+(``(verify_tls, ca_pin_digest)``), i.e.
+``(tenant_id, id, verify_tls, ca_pin_digest)``. Appending the two
+TLS-trust dimensions keeps the ``(tenant_id, id)`` tenant-isolation prefix
+intact (evoila/meho#1682/#1642) while ensuring a PATCH that flips
+``verify_tls`` **or** rotates ``tls_ca_pin`` is not served the stale
+pooled client built under the previous trust material. The pin digest is
+the empty string when unpinned, so an unpinned target's key is unchanged
+in its pin slot from the #1781 shape.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ssl
 from typing import Any
 
@@ -96,6 +113,56 @@ def _insecure_ssl_context() -> ssl.SSLContext:
     return _INSECURE_SSL_CONTEXT
 
 
+def _build_ca_pinned_ssl_context(ca_pem: str) -> ssl.SSLContext:
+    """Return a context that trusts *ca_pem* while keeping verification ON.
+
+    The **secure** supersession of the insecure context (evoila/meho#1784):
+    start from :func:`ssl.create_default_context` -- which leaves
+    ``check_hostname=True`` and ``verify_mode=CERT_REQUIRED`` -- and
+    :meth:`~ssl.SSLContext.load_verify_locations` the per-target CA/cert
+    PEM into its trust store via the ``cadata`` parameter. Crucially,
+    ``load_verify_locations`` does **not** touch ``check_hostname`` or
+    ``verify_mode`` (verified against the installed CPython 3.12 ``ssl``),
+    so the returned context still enforces chain **and** hostname -- now
+    additionally trusting the pinned CA. This is the govc-``-thumbprint``
+    pattern: trust *this specific* appliance's self-signed / internal-CA
+    cert without weakening verification (contrast ``verify_tls=false``,
+    which drops both).
+
+    The pin is added *on top of* the default system trust store (the
+    context starts from ``create_default_context``), so a pinned target
+    still trusts public CAs too -- the pin is additive, not a replacement.
+
+    The PEM is validated at the API boundary
+    (:func:`meho_backplane.targets.schemas.validate_ca_pin_pem`) before it
+    is ever persisted, so by the time it reaches here it loads cleanly; a
+    malformed pin would have been a 422 at create/update time, never an
+    opaque dispatch failure.
+    """
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cadata=ca_pem)
+    return ctx
+
+
+def _ca_pin_digest(ca_pem: str | None) -> str:
+    """Return a stable pool-key token identifying *ca_pem* (or ``""``).
+
+    A short SHA-256 hex digest of the PEM, or the empty string when there
+    is no pin. Seeds the client-pool cache key
+    (:meth:`HttpConnector.extra_cache_dimensions`) so a target whose pinned
+    CA *changes* (rotation) is not served the stale client built against
+    the previous pin -- the same staleness guarantee ``verify_tls`` already
+    gets, extended to the pin material. A digest (not the raw PEM) keeps
+    the key compact and avoids carrying certificate bytes around as dict
+    keys. It deliberately matches the digest the audit trail records
+    (:func:`meho_backplane.api.v1.targets._ca_pin_digest`) so "a different
+    pin" means the same thing to the pool and the audit log.
+    """
+    if not ca_pem:
+        return ""
+    return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
+
+
 def _retryable(exc: BaseException) -> bool:
     """Retry on connection errors and 5xx; never on 4xx."""
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError)):
@@ -115,57 +182,106 @@ class HttpConnector(Connector):
     def __init__(self) -> None:
         # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
         # (``target_cache_key``) plus ``extra_cache_dimensions`` (the
-        # ``(verify_tls,)`` flag), not ``target.name``: each pooled client
-        # is host-bound via ``base_url``, and two tenants may legitimately
-        # own same-named targets pointing at different hosts. Name-keying
-        # would route the second tenant's request to the first tenant's
-        # host and leak credentials across the boundary (evoila/meho#1682).
-        # The ``verify_tls`` suffix keeps a PATCH that flips the flag from
-        # being served the stale client built under the old value.
+        # ``(verify_tls, ca_pin_digest)`` TLS-trust dimensions), not
+        # ``target.name``: each pooled client is host-bound via
+        # ``base_url``, and two tenants may legitimately own same-named
+        # targets pointing at different hosts. Name-keying would route the
+        # second tenant's request to the first tenant's host and leak
+        # credentials across the boundary (evoila/meho#1682). The TLS-trust
+        # suffix keeps a PATCH that flips ``verify_tls`` or rotates the
+        # ``tls_ca_pin`` from being served the stale client built under the
+        # old trust material.
         self._clients: dict[tuple[str, ...], httpx.AsyncClient] = {}
         self._lock = asyncio.Lock()
 
     def extra_cache_dimensions(self, target: Target) -> tuple[object, ...]:
         """Return extra pool-key dimensions appended to ``target_cache_key``.
 
-        The base appends the resolved ``verify_tls`` flag so a target that
-        toggles TLS verification (e.g. via PATCH) gets a freshly built
-        client rather than the stale one cached under the previous value —
-        a client's ``verify`` is fixed at construction. The append preserves
-        the ``(tenant_id, id)`` prefix, so the cross-tenant isolation
-        guarantee (evoila/meho#1682/#1642) is unaffected. Subclasses that
-        reach into :attr:`_clients` directly MUST build their lookup key the
-        same way (``target_cache_key(target) + self.extra_cache_dimensions(target)``)
+        The base appends two TLS-trust dimensions so a target whose TLS
+        trust *changes* (via PATCH) gets a freshly built client rather than
+        the stale one cached under the previous trust material — a client's
+        ``verify`` context is fixed at construction:
+
+        1. the resolved ``verify_tls`` flag (evoila/meho#1781), and
+        2. a digest of the per-target ``tls_ca_pin`` CA material
+           (evoila/meho#1784) — empty string when unpinned, so an
+           unpinned target's key is unchanged from the #1781 shape in its
+           pin slot.
+
+        The append preserves the ``(tenant_id, id)`` prefix, so the
+        cross-tenant isolation guarantee (evoila/meho#1682/#1642) is
+        unaffected. Subclasses that reach into :attr:`_clients` directly
+        MUST build their lookup key the same way
+        (``target_cache_key(target) + self.extra_cache_dimensions(target)``)
         so they index the same entry the base created.
         """
-        return (bool(getattr(target, "verify_tls", True)),)
+        return (
+            bool(getattr(target, "verify_tls", True)),
+            _ca_pin_digest(getattr(target, "tls_ca_pin", None)),
+        )
 
     def _client_cache_key(self, target: Target) -> tuple[str, ...]:
         """Return the full pooled-client key for *target*.
 
         ``target_cache_key`` (``(tenant_id, id)``) plus
-        :meth:`extra_cache_dimensions` (``(verify_tls,)``). Stringified into
-        a flat ``tuple[str, ...]`` so the key is hashable and a subclass that
-        derives it the same way produces an identical tuple.
+        :meth:`extra_cache_dimensions` (``(verify_tls, ca_pin_digest)``).
+        Stringified into a flat ``tuple[str, ...]`` so the key is hashable
+        and a subclass that derives it the same way produces an identical
+        tuple.
         """
         return target_cache_key(target) + tuple(
             str(dim) for dim in self.extra_cache_dimensions(target)
         )
 
     async def _http_client(self, target: Target) -> httpx.AsyncClient:
-        """Return the per-target pooled client, creating it on first use."""
+        """Return the per-target pooled client, creating it on first use.
+
+        TLS-trust precedence, highest first:
+
+        1. **CA-pin** (``tls_ca_pin`` set, evoila/meho#1784) — the secure
+           path. Build a context that trusts the pinned CA while keeping
+           ``CERT_REQUIRED`` + ``check_hostname`` ON. Takes precedence over
+           ``verify_tls=false`` (and the API rejects the two together), so
+           a pin can never be silently undone by a stray insecure flag.
+        2. **Insecure opt-out** (``verify_tls=false``, evoila/meho#1781) —
+           the audited last resort: an explicit insecure context (no chain,
+           no hostname).
+        3. **Default** (``verify_tls=true``, no pin) — pass **no**
+           ``verify=`` argument so httpx keeps its default ``verify=True``
+           and the global ``SSL_CERT_FILE`` / chart-trust-bundle path
+           (evoila/meho#209) stays byte-identical to a connector with no
+           TLS config at all.
+        """
         cache_key = self._client_cache_key(target)
         verify_tls = bool(getattr(target, "verify_tls", True))
+        ca_pin = getattr(target, "tls_ca_pin", None)
         async with self._lock:
             if cache_key not in self._clients:
-                # Pass ``verify=`` ONLY when the target opts out of
-                # verification. When ``verify_tls`` is True we omit the
-                # kwarg entirely so the client defaults to httpx's
-                # ``verify=True``, keeping the global ``SSL_CERT_FILE`` /
-                # chart-trust-bundle path (evoila/meho#209) byte-identical
-                # to a connector with no TLS opt-out at all.
+                # Pass ``verify=`` only when the target pins a CA (secure)
+                # or opts out of verification (insecure). With neither we
+                # omit the kwarg so the client defaults to httpx's
+                # ``verify=True``, keeping the global ``SSL_CERT_FILE`` path
+                # (evoila/meho#209) byte-identical to a connector with no
+                # TLS config at all.
                 verify_kwargs: dict[str, Any] = {}
-                if not verify_tls:
+                if ca_pin:
+                    # Secure supersession (evoila/meho#1784): trust the
+                    # pinned CA while keeping CERT_REQUIRED + hostname
+                    # verification on. Built per pool entry (not module-
+                    # cached like the insecure context) because the PEM is
+                    # per-target; the pool key carries the pin digest so the
+                    # context is rebuilt only when the pin actually changes,
+                    # not per request. Logged at INFO (not WARN): unlike the
+                    # insecure opt-out, a CA-pin keeps the channel verified,
+                    # so it is the recommended state, not a footgun.
+                    logger.info(
+                        "connector_tls_ca_pinned",
+                        target=getattr(target, "name", None),
+                        host=getattr(target, "host", None),
+                        ca_pin_digest=_ca_pin_digest(ca_pin),
+                    )
+                    verify_kwargs["verify"] = _build_ca_pinned_ssl_context(ca_pin)
+                elif not verify_tls:
                     # Per-target, audited last resort (evoila/meho#1774):
                     # the dispatch forwards a Vault-resolved credential over
                     # an unverified channel, so make it loud and queryable.

@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-15
+
 ### Added
 
 - Targets now carry a first-class **`verify_tls`** flag
@@ -174,6 +176,15 @@ connector-related release-notes line.
   `[SSL: CERTIFICATE_VERIFY_FAILED]` cause. Non-TLS connection failures
   (DNS, connection-refused, timeout) are unchanged. No schema or CLI
   change (#1782).
+- Operator-console **docs-corpus page** (`/ui/corpus`): pick an entitled
+  doc collection (default-selected when only one is entitled), query the
+  corpus, and read back the answer with its **cited chunks**. It reuses
+  `POST /api/v1/search_docs` + `GET /api/v1/doc_collections` in-process
+  (no new API endpoint), following the kb sibling `build_*_router()`
+  pattern, with CSRF double-submit on the search POST (reusing the live
+  cookie token so the un-swapped form stays in sync). Adds the sidebar
+  nav entry and a dashboard surface tile (bento grid rebalanced 6→7)
+  (#1777).
 
 ### Changed
 
@@ -232,6 +243,30 @@ connector-related release-notes line.
   `VaultPathShapeError` naming the mount-relative form to use
   (e.g. `meho/test/federation`). A bare single-segment path equal to the
   mount name is still forwarded unchanged (#1755).
+- Connector resolution now **ranks a hand-rolled class over an auto-shim**
+  for the same `(product, version)` label. A stray ingest could register
+  a `GenericRestConnector` auto-shim under a novel `impl_id` whose
+  narrower derived version-range won the most-specific-version-match rung
+  before a shipped hand-rolled connector's `priority` was ever consulted,
+  shadowing it for the whole label. A new `hand_rolled_over_shim` tie-break
+  rung — applied **before** the version-match step — drops every
+  `GenericRestConnector` candidate whenever any non-shim candidate exists,
+  so a hand-rolled class always outranks an auto-shim independent of
+  version-range span or `priority`. No behaviour change when only auto-shims
+  exist for a label (#1750).
+- Connector ingest now **warns on a near-miss `impl_id`** instead of
+  silently scaffolding a non-dispatchable shim. The covered-class check
+  filtered on exact `(product, impl_id)`, so ingesting `nsx-rest-probe`
+  when a hand-rolled `NsxConnector` already covered the same
+  `(product, version)` under `nsx-rest` info-logged
+  `connector_ingest_orphaned_class` and proceeded — the broken shim
+  surfaced only ~7 min later at dispatch. The no-candidates branch now
+  consults a hand-rolled sibling and, when one exists, emits a structured
+  `connector_ingest_near_miss_impl_id` **warning** naming it ("did you
+  mean nsx-rest?"); the reactive `unreplaced_auto_shim` dispatch error
+  likewise threads and names the sibling with a re-ingest remediation. A
+  genuinely novel `(product, version)` is unchanged (still info-logs and
+  proceeds) (#1753).
 
 ### Documentation
 
@@ -250,6 +285,13 @@ connector-related release-notes line.
   out-of-pool connectors (k8s probe, GitHub token-exchange) that do not
   honour the flag. `docs/architecture/connectors.md` cross-links it
   (#1783).
+- Vault tenant-scoping upgrade guidance now **names the empty-prefix
+  action for custom KV layouts**: operators whose secret paths do not
+  match the default `secret/tenants/{tenant_id}/` mount-pinned prefix
+  must set `VAULT_KV_TENANT_SCOPE_PREFIX` empty (or to their own mount
+  layout) on the v0.15.0 default-on guard, else every per-tenant
+  `vault.kv.*` call is denied. Spells out the explicit opt-out for
+  custom layouts alongside the per-tenant migration path (#1758).
 
 ## [0.15.0] - 2026-06-13
 

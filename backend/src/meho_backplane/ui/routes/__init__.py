@@ -21,6 +21,10 @@ ships the umbrella :func:`build_router` that aggregates:
 * :mod:`~meho_backplane.ui.routes.kb` -- ``GET /ui/kb``,
   ``POST /ui/kb/search``, ``GET /ui/kb/<slug>``,
   ``GET /ui/kb/<slug>/preview`` -- KB read surface (G10.2-T1 #870).
+* :mod:`~meho_backplane.ui.routes.corpus` -- ``GET /ui/corpus``,
+  ``POST /ui/corpus/search`` -- docs-corpus page: collection picker
+  (default-if-one) + ask-the-corpus + cited chunks, reusing the
+  ``search_docs`` + ``doc_collections`` backends (G10.7-T1 #1777).
 * :mod:`~meho_backplane.ui.routes.runbooks` -- ``GET /ui/runbooks``,
   ``GET /ui/runbooks/list`` (HTMX filter partial),
   ``GET /ui/runbooks/<slug>`` -- runbooks read surface, catalog +
@@ -50,6 +54,7 @@ from fastapi import APIRouter
 
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
+from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
@@ -60,6 +65,7 @@ from meho_backplane.ui.routes.topology import build_router as build_topology_rou
 __all__ = [
     "build_broadcast_router",
     "build_connectors_router",
+    "build_corpus_router",
     "build_dashboard_router",
     "build_kb_router",
     "build_memory_router",
@@ -99,6 +105,7 @@ def build_router() -> APIRouter:
     router.include_router(build_memory_router())
     router.include_router(build_connectors_router())
     router.include_router(build_kb_router())
+    router.include_router(build_corpus_router())
     router.include_router(build_runbooks_router())
     router.include_router(build_stubs_router())
     return router

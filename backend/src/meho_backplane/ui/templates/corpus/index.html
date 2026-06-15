@@ -1,0 +1,132 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs-corpus page: a collection picker + ask-the-corpus query box +
+  cited-chunk results region.
+
+  Initiative #1775 (G10.7 Docs-corpus console surface), Task #1777.
+
+  HTMX wiring:
+    * The search form (``#corpus-search-form``) declares its OWN
+      ``hx-headers`` ``X-CSRF-Token`` -- HTMX does NOT propagate
+      ``hx-headers`` from an ancestor to a descendant form (#1693), so
+      the token must ride the form element that issues the request, not
+      a wrapping ``<section>``.
+    * Submit fires ``POST /ui/corpus/search`` with the selected
+      ``collection`` + the ``q`` value and swaps ``#corpus-results``
+      (``hx-target`` + ``hx-swap="outerHTML"``).
+    * Results are rendered server-side into ``corpus/_results.html``; the
+      same partial is included here for the initial (empty) render so both
+      paths share identical markup.
+
+  Context variables:
+    collections          -- list[DocCollectionSummary]: entitled, tenant-scoped
+    selected_collection  -- str: pre-selected key ("" when not single-entitled)
+    query                -- str: current query (empty on first render)
+    chunks               -- list[DocsChunk]: empty on first render
+    searched             -- bool: False on first render
+    csrf_token           -- str: minted double-submit token
+
+  Note: ``ready`` is NOT passed here -- the chassis context processor
+  injects it globally from the session middleware's cached verdict (#1776);
+  a route literal would shadow the live value.
+-#}
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Docs Corpus &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Docs Corpus</h1>
+      <p class="text-sm opacity-70">
+        Ask the attached vendor-document corpus and read the cited chunks.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Collection picker + query form ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body py-4">
+      {% if collections %}
+        <form
+          id="corpus-search-form"
+          hx-post="/ui/corpus/search"
+          hx-target="#corpus-results"
+          hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="flex flex-col gap-3 sm:flex-row sm:items-end"
+          role="search"
+          aria-label="Search the docs corpus"
+        >
+          <label class="form-control w-full sm:w-64">
+            <div class="label">
+              <span class="label-text">Collection</span>
+            </div>
+            <select
+              name="collection"
+              class="select select-bordered w-full"
+              aria-label="Doc collection to search"
+              required
+            >
+              {# Default-if-one: when exactly one collection is entitled the
+                 handler passes its key as ``selected_collection`` so the
+                 sole option is pre-selected. With many, the operator picks. #}
+              {% if collections | length != 1 %}
+                <option value="" disabled{% if not selected_collection %} selected{% endif %}>
+                  Select a collection&hellip;
+                </option>
+              {% endif %}
+              {% for collection in collections %}
+                <option
+                  value="{{ collection.collection_key }}"
+                  {% if collection.collection_key == selected_collection %}selected{% endif %}
+                >
+                  {{ collection.collection_key }}{% if collection.vendor %} ({{ collection.vendor }}){% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="form-control w-full flex-1">
+            <div class="label">
+              <span class="label-text">Query</span>
+            </div>
+            <input
+              type="search"
+              name="q"
+              value="{{ query }}"
+              placeholder="Ask the corpus&hellip;"
+              class="input input-bordered w-full"
+              autofocus
+              aria-label="Docs corpus query"
+              autocomplete="off"
+              required
+            />
+          </label>
+          <button type="submit" class="btn btn-primary gap-1" aria-label="Search the corpus">
+            {{ icon("search") }}
+            Search
+          </button>
+        </form>
+      {% else %}
+        {# No entitled collections -- the tenant is unprovisioned for any
+           docs corpus. This is the not-yet-entitled empty state, distinct
+           from a zero-results search. #}
+        <div class="text-center py-8">
+          <p class="text-lg opacity-60">No doc collections available</p>
+          <p class="text-sm opacity-40">
+            This tenant is not entitled to any docs corpus yet. Ask an
+            administrator to register and entitle a collection.
+          </p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ---------- Results region ---------- #}
+  {% include "corpus/_results.html" %}
+</section>
+{% endblock %}

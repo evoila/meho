@@ -389,16 +389,19 @@ the before/after values) and emits a WARN log line, so the opt-out is
 queryable after the fact rather than silent. (This closes the prior gap
 where a target PATCH wrote an empty audit payload.)
 
-> **Behaviour note (as of this writing).** The `verify_tls` column, its
-> API surface, and the audit/WARN trail are shipped
-> ([#1780](https://github.com/evoila/meho/issues/1780)). The **dispatch
-> wiring** that makes the HTTP connector actually honour `verify_tls=false`
-> lands in the immediate follow-up
-> ([#1781](https://github.com/evoila/meho/issues/1781), Initiative
-> T2). Until that merges, setting the flag is recorded and audited but
-> the dispatch client still verifies against the global bundle — the
-> secure path (option 1) is the only one that changes dispatch behaviour
-> today.
+> **Behaviour note.** This is fully shipped end to end. The `verify_tls`
+> column, its API surface, and the audit/WARN trail
+> ([#1780](https://github.com/evoila/meho/issues/1780)) and the **dispatch
+> wiring** that makes the pooled HTTP connector actually honour the flag
+> ([#1781](https://github.com/evoila/meho/issues/1781), Initiative T2) are
+> both merged. Setting `verify_tls=false` now genuinely reaches a
+> self-signed / internal-CA endpoint: the connector builds its
+> `httpx.AsyncClient` with an insecure `SSLContext` (`check_hostname` off,
+> `CERT_NONE`) for that target only, while a `verify_tls=true` target is
+> built with no `verify=` argument so the global `SSL_CERT_FILE` /
+> trust-bundle path is byte-identical to before. The opt-out is keyed into
+> the per-target client pool (`(tenant_id, id, verify_tls)`), so a PATCH
+> that flips the flag is not served a stale verifying/non-verifying client.
 
 ### The secure supersession: per-target CA-pin ([#1784](https://github.com/evoila/meho/issues/1784), planned)
 
@@ -449,18 +452,23 @@ does not mention `verify_tls` leaves it (and the TLS audit trail)
 untouched; only an explicit `{"verify_tls": false}` / `{"verify_tls": true}`
 flips the column and writes the audit row.
 
-The same field is set declaratively through `meho targets import` — add
-`verify_tls: false` to the target's entry in the descriptor file and the
-import passes it straight through to the create/update body:
-
-```yaml
-targets:
-  - name: vcf-logs-lab
-    product: vmware-rest
-    host: vrli.nested.lab
-    auth_model: shared_service_account
-    verify_tls: false        # per-target last resort — see caveat above
-```
+> **`meho targets import` does NOT set `verify_tls` (use the REST API
+> above).** The bulk-import path
+> ([`cli/internal/cmd/targets/import.go`](../../cli/internal/cmd/targets/import.go))
+> maps a fixed set of known top-level YAML keys onto the create/update
+> body and **spills every other key into the `extras` JSONB column**.
+> `verify_tls` is **not** in that known-key set, so a `verify_tls: false`
+> line in the descriptor file silently lands in `extras` instead of the
+> first-class `verify_tls` column — the column keeps its secure default
+> (`true`) and verification is **not** disabled. Setting it from the
+> import file would give you a target you *think* is opted out but that
+> still verifies. There is also no `meho targets create` / `meho targets
+> update` verb (the CLI's only write path is `import`; direct write verbs
+> are out of scope for v0.2 — see
+> [`cli/internal/cmd/targets/targets.go`](../../cli/internal/cmd/targets/targets.go)).
+> Until the import path learns the key, the **REST API
+> `POST` / `PATCH /api/v1/targets`** shown above is the only supported
+> way to set `verify_tls`.
 
 ### Coverage gap: two out-of-pool connectors do not honour `verify_tls`
 

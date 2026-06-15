@@ -301,6 +301,185 @@ If `/ready` still reports `ssl_error` after the mount lands, check the
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).
 
+## Connector dispatch against self-signed / internal-CA targets
+
+The trust-bundle section above covers the backplane's **own**
+infrastructure dependencies — Vault, Keycloak, PostgreSQL. The same TLS
+problem reappears one layer out, on the **connector dispatch** path: the
+governed targets a `meho operation call` reaches (a vCenter, an NSX
+manager, a vRLI / VCF Operations for Logs appliance, a Harbor registry)
+routinely present **self-signed or internal-CA** certificates —
+freshly-deployed appliances before cert replacement, nested labs, and
+anything Fleet-managed with its own locker CA. The backplane's HTTP
+connector verifies every dispatch against the same global trust store
+(`SSL_CERT_FILE` / the chart trust-bundle — see above), so a target
+whose certificate chain isn't in that bundle fails dispatch with a TLS
+verification error.
+
+When that happens, the dispatch result is the structured
+`connector_tls_verify_failed` error (Initiative
+[#1774](https://github.com/evoila/meho/issues/1774) T3,
+[#1782](https://github.com/evoila/meho/issues/1782)). It names the
+**host** and **both** remediations below, in preference order, so an
+operator who hits `[SSL: CERTIFICATE_VERIFY_FAILED]` gets pointed at the
+fix instead of an opaque `connector_error: ConnectError`. The two
+remediations:
+
+### 1. Secure path (preferred): trust the appliance's CA
+
+Make the backplane **trust the target's certificate chain** — exactly
+the trust-bundle mechanism documented above, extended to cover the
+appliance's issuing CA. Add the internal-CA / self-signed-appliance cert
+to the CA bundle `SSL_CERT_FILE` points at (or inject it into the chart
+trust-bundle ConfigMap), and verification succeeds against the real
+chain without weakening it. This is the **recommended** fix: TLS
+verification stays on, so the dispatch channel — which forwards the
+target's Vault-resolved credential — stays authenticated against a
+man-in-the-middle.
+
+> **Scope the bundle correctly (the [#572](https://github.com/evoila/meho/issues/572)
+> footgun).** A naïve "mount only the internal CA at `SSL_CERT_FILE`"
+> **clobbers** the public root store: `SSL_CERT_FILE` *replaces* the
+> default CA set rather than appending to it, so a bundle containing
+> only the internal CA breaks every public-CA TLS connection the Pod
+> also makes (the HuggingFace model download in #572 was the first
+> casualty). The bundle you mount must be the **union** of the public
+> roots and your internal CA — the [trust-manager](https://cert-manager.io/docs/trust/trust-manager/)
+> `Bundle` resource is built for exactly this (it can include
+> `useDefaultCAs: true` alongside your CA), which is why it is the
+> recommended source for the ConfigMap above.
+
+### 2. Last resort (per-target, never global): `verify_tls=false`
+
+When you genuinely cannot trust the chain yet — a Fleet-managed
+appliance whose cert is wiped on the next lab rebuild, a nested lab with
+no stable CA — meho exposes a **per-target** TLS-verification opt-out:
+the `verify_tls` flag on a target
+([#1774](https://github.com/evoila/meho/issues/1774) T1,
+[#1780](https://github.com/evoila/meho/issues/1780)). It is
+**default-secure** (`NOT NULL DEFAULT true`): a target verifies its
+certificate chain unless an operator explicitly turns verification off
+for **that target alone**.
+
+> **MITM / credential-exposure caveat (load-bearing — read before
+> setting this).** A target with `verify_tls=false` still forwards its
+> **Vault-resolved credential** over the now-unverified channel on every
+> dispatch. With verification off, meho can no longer tell the real
+> appliance apart from a man-in-the-middle presenting any certificate —
+> so the credential is exposed to interception. Use `verify_tls=false`
+> **only** against a **trusted-network** appliance you cannot yet pin a
+> CA for, and treat it as temporary until the secure path or the CA-pin
+> follow-up (below) lands.
+
+This deliberately mirrors the escape hatches operators already know,
+and inherits their discipline — **never global, per-target, loud,
+audited**:
+
+- **`govc -k` / `GOVC_INSECURE`** ([govmomi](https://github.com/vmware/govmomi/tree/main/govc#usage))
+  — vSphere CLI per-invocation insecure flag, not a daemon-wide setting.
+- **`kubectl` per-cluster `insecure-skip-tls-verify`**
+  ([kubeconfig reference](https://kubernetes.io/docs/reference/config-api/kubeconfig.v1/))
+  — set on **one** cluster entry in a kubeconfig, never as a global
+  client default.
+
+`verify_tls=false` is the meho equivalent: scoped to a single target,
+written through a `tenant_admin`-only API, and **audited** — flipping it
+off writes a durable `audit_log` row (`tls_verification_disabled`, with
+the before/after values) and emits a WARN log line, so the opt-out is
+queryable after the fact rather than silent. (This closes the prior gap
+where a target PATCH wrote an empty audit payload.)
+
+> **Behaviour note (as of this writing).** The `verify_tls` column, its
+> API surface, and the audit/WARN trail are shipped
+> ([#1780](https://github.com/evoila/meho/issues/1780)). The **dispatch
+> wiring** that makes the HTTP connector actually honour `verify_tls=false`
+> lands in the immediate follow-up
+> ([#1781](https://github.com/evoila/meho/issues/1781), Initiative
+> T2). Until that merges, setting the flag is recorded and audited but
+> the dispatch client still verifies against the global bundle — the
+> secure path (option 1) is the only one that changes dispatch behaviour
+> today.
+
+### The secure supersession: per-target CA-pin ([#1784](https://github.com/evoila/meho/issues/1784), planned)
+
+`verify_tls=false` trades away MITM protection. The planned follow-up
+that gives back the security without requiring a CA in the global bundle
+is a **per-target CA-pin** (Initiative
+[#1774](https://github.com/evoila/meho/issues/1774) T5,
+[#1784](https://github.com/evoila/meho/issues/1784)): pin the
+appliance's expected CA certificate on the target itself
+(`ssl.SSLContext.load_verify_locations(cadata=…)`), which keeps
+`CERT_REQUIRED` + `check_hostname` **on** and verifies against the
+pinned CA only. This is the same shape as the govc **thumbprint** flow
+(`govc -thumbprint`) — trust *this specific* appliance's certificate
+without trusting the wider world or disabling verification. Once it
+lands, CA-pin is the **preferred** fix for a self-signed appliance you
+can't add to the global bundle, and `verify_tls=false` reverts to the
+genuine last resort it is framed as here.
+
+### Setting `verify_tls` on a target
+
+`verify_tls` is a first-class field on the targets API
+([`/api/v1/targets`](../../backend/src/meho_backplane/api/v1/targets.py)),
+settable on both create and update (the route is `tenant_admin`-only):
+
+```bash
+# Create a target with verification off (self-signed lab appliance).
+curl -sf -X POST https://meho.example.com/api/v1/targets \
+  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "name": "vcf-logs-lab",
+        "product": "vmware-rest",
+        "host": "vrli.nested.lab",
+        "auth_model": "shared_service_account",
+        "verify_tls": false
+      }'
+
+# Flip an existing target back to secure once its CA is in the bundle.
+curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
+  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"verify_tls": true}'
+```
+
+Omitting `verify_tls` on create lands the secure default (`true`). On
+PATCH, the field follows standard partial-update semantics — a body that
+does not mention `verify_tls` leaves it (and the TLS audit trail)
+untouched; only an explicit `{"verify_tls": false}` / `{"verify_tls": true}`
+flips the column and writes the audit row.
+
+The same field is set declaratively through `meho targets import` — add
+`verify_tls: false` to the target's entry in the descriptor file and the
+import passes it straight through to the create/update body:
+
+```yaml
+targets:
+  - name: vcf-logs-lab
+    product: vmware-rest
+    host: vrli.nested.lab
+    auth_model: shared_service_account
+    verify_tls: false        # per-target last resort — see caveat above
+```
+
+### Coverage gap: two out-of-pool connectors do not honour `verify_tls`
+
+`verify_tls` governs the **pooled HTTP connector** dispatch path only.
+Two dispatch clients live **outside** that pool and are **not** affected
+by the flag — named here so adopters don't assume coverage:
+
+- **The Kubernetes reachability probe**
+  ([`connectors/kubernetes/connector.py`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py))
+  already hardcodes `verify=False` for its kubeconfig-free reachability
+  check, so `verify_tls` has nothing to toggle there.
+- **The GitHub App token-exchange**
+  ([`connectors/github/session.py`](../../backend/src/meho_backplane/connectors/github/session.py))
+  authenticates against public-cert `api.github.com`, which is in the
+  public root store — there is no self-signed case for it to handle.
+
+Both are moot for the self-signed-appliance scenario this section
+addresses.
+
 ## Auth onramp recipe (CLI + MCP)
 
 > First-login auth-onramp for both `meho login` (CLI device-code) and

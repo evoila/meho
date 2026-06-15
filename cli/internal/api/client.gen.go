@@ -4443,6 +4443,7 @@ type Target struct {
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	UpdatedAt       time.Time               `json:"updated_at"`
+	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 	VpnRequired     bool                    `json:"vpn_required"`
 }
@@ -4484,6 +4485,7 @@ type TargetCreate struct {
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
 	Product     TargetCreateProduct `json:"product"`
 	SecretRef   *string             `json:"secret_ref"`
+	VerifyTls   *bool               `json:"verify_tls,omitempty"`
 	Version     *string             `json:"version"`
 	VpnRequired *bool               `json:"vpn_required,omitempty"`
 }
@@ -4538,6 +4540,7 @@ type TargetSummary struct {
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	UpdatedAt       time.Time               `json:"updated_at"`
+	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
 	VpnRequired     bool                    `json:"vpn_required"`
 }
@@ -4589,6 +4592,7 @@ type TargetUpdate struct {
 	PreferredImplId *string                 `json:"preferred_impl_id"`
 	Product         *string                 `json:"product"`
 	SecretRef       *string                 `json:"secret_ref"`
+	VerifyTls       *bool                   `json:"verify_tls"`
 	Version         *string                 `json:"version"`
 	VpnRequired     *bool                   `json:"vpn_required"`
 }

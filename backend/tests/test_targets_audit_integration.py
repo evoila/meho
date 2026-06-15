@@ -295,3 +295,122 @@ async def test_describe_nonexistent_target_audit_row_has_null_target_id(
     rows = await _fetch_audit_rows(isolated_engine)
     assert len(rows) == 1
     assert rows[0].target_id is None
+
+
+# ---------------------------------------------------------------------------
+# T1 (#1780) — verify_tls change folds into the audit_log payload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_verify_tls_false_writes_tls_audit_payload(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PATCH ``{"verify_tls": false}`` → audit_log.payload records the change.
+
+    T1 (#1780). Disabling TLS verification is a security-relevant
+    config change that must leave a durable, queryable trail. The route
+    binds ``audit_*`` contextvars that
+    :func:`~meho_backplane.audit._resolve_audit_payload` folds into the
+    request's audit row, so the payload carries
+    ``tls_verification_disabled`` + ``target_id`` + before/after. The
+    soft-FK ``audit_log.target_id`` **column** is also populated (the
+    resolver bind), distinct from the ``target_id`` payload key.
+    """
+    t = await _insert_target(name="zeta", verify_tls=True)
+    key = make_rsa_keypair("kid-T1-patch-tls")
+    token = mint_token(key, sub="adm-t1-tls", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"verify_tls": False},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["verify_tls"] is False
+
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["tls_verification_disabled"] is True
+    assert payload["target_id"] == str(t.id)
+    assert payload["verify_tls_before"] is True
+    assert payload["verify_tls_after"] is False
+    # The soft-FK column is populated too (resolve_target bind).
+    assert rows[0].target_id == t.id
+
+
+@pytest.mark.asyncio
+async def test_patch_without_verify_tls_binds_no_tls_audit_keys(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATCH that does not touch ``verify_tls`` binds **no** TLS audit keys.
+
+    T1 (#1780). The audit fold-in is gated on the field actually being
+    sent (``exclude_unset``), so an unrelated PATCH (here: ``notes``)
+    leaves the TLS keys out of the payload entirely — no audit noise on
+    the common path.
+    """
+    t = await _insert_target(name="eta", verify_tls=False)
+    key = make_rsa_keypair("kid-T1-patch-notls")
+    token = mint_token(key, sub="adm-t1-notls", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.patch(
+            f"/api/v1/targets/{t.name}",
+            json={"notes": "ticket-42"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert "tls_verification_disabled" not in payload
+    assert "verify_tls_before" not in payload
+    assert "verify_tls_after" not in payload
+
+
+@pytest.mark.asyncio
+async def test_create_target_verify_tls_false_writes_tls_audit_payload(
+    isolated_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST with ``verify_tls=false`` → audit_log.payload records the opt-out.
+
+    T1 (#1780). A target *created* with TLS verification off is audited
+    the same way a PATCH that disables it is, with ``before=True`` (the
+    secure default the column would otherwise carry).
+    """
+    key = make_rsa_keypair("kid-T1-create-tls")
+    token = mint_token(key, sub="adm-t1-create-tls", tenant_role="tenant_admin")
+    client = TestClient(_build_app())
+    with respx.mock as mr:
+        mock_discovery_and_jwks(mr, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "theta",
+                "product": "rke2",
+                "host": "10.0.0.7",
+                "verify_tls": False,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 201
+    created_id = uuid.UUID(response.json()["id"])
+
+    rows = await _fetch_audit_rows(isolated_engine)
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["tls_verification_disabled"] is True
+    assert payload["target_id"] == str(created_id)
+    assert payload["verify_tls_before"] is True
+    assert payload["verify_tls_after"] is False

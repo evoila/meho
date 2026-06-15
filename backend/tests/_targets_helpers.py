@@ -106,6 +106,7 @@ async def _insert_target(**kwargs: Any) -> TargetORM:
         "secret_ref": None,
         "auth_model": "shared_service_account",
         "vpn_required": False,
+        "verify_tls": True,
         "extras": {},
         "notes": None,
         "created_at": datetime.now(UTC),

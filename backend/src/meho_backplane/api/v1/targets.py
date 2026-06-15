@@ -129,7 +129,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -384,6 +384,7 @@ def _to_full(t: TargetORM) -> Target:
         secret_ref=t.secret_ref,
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
+        verify_tls=t.verify_tls,
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -391,6 +392,61 @@ def _to_full(t: TargetORM) -> Target:
         created_at=t.created_at,
         updated_at=t.updated_at,
         deleted_at=t.deleted_at,
+    )
+
+
+def _bind_tls_audit(
+    *,
+    target_id: uuid.UUID,
+    name: str,
+    tenant_id: uuid.UUID,
+    before: bool,
+    after: bool,
+) -> None:
+    """Record a ``verify_tls`` change on the request's audit row + log a WARN.
+
+    T1 (#1780). Setting a target's TLS verification off (or toggling it
+    at all) is a security-relevant config change that must leave a
+    durable, queryable trail. Both write routes call this after applying
+    the change:
+
+    * ``create_target`` -- only when the new target lands with
+      ``verify_tls=False`` (``before=True``, the secure default the
+      column would otherwise carry).
+    * ``update_target`` -- whenever the PATCH body sent ``verify_tls``,
+      with the real before/after transition.
+
+    The ``audit_*`` prefix is load-bearing:
+    :func:`~meho_backplane.audit._resolve_audit_payload` reads every
+    ``audit_*`` contextvar at audit-write time, strips the prefix, and
+    merges the result into ``audit_log.payload`` -- so the bound keys
+    land as ``tls_verification_disabled`` / ``target_id`` /
+    ``verify_tls_before`` / ``verify_tls_after`` in the payload. The
+    payload ``target_id`` is intentionally distinct from the bare
+    ``target_id`` contextvar the middleware reads into the
+    ``audit_log.target_id`` **column** (the soft-FK
+    :func:`~meho_backplane.audit._resolve_target_id` consults) -- both
+    coexist. ``tls_verification_disabled`` tracks the *resulting* state
+    (``after is False``) so an audit query for disabled-TLS targets
+    keys off a single boolean.
+
+    The WARN log mirrors the payload so the same signal is visible in
+    the structured log stream without a DB query.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_tls_verification_disabled=(after is False),
+        audit_target_id=str(target_id),
+        audit_verify_tls_before=before,
+        audit_verify_tls_after=after,
+    )
+    _log.warning(
+        "target_tls_verification_changed",
+        target_id=str(target_id),
+        name=name,
+        tenant_id=str(tenant_id),
+        verify_tls_before=before,
+        verify_tls_after=after,
+        tls_verification_disabled=(after is False),
     )
 
 
@@ -519,6 +575,86 @@ def _build_unknown_preferred_impl_detail(
             f"versioned-vs-base impl-id discipline."
         ),
     }
+
+
+def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> None:
+    """Reject a ``preferred_impl_id`` not registered for ``product`` with a 422.
+
+    G0.15-T6 (#1215). Surfaces the resolver-silently-ignores-unknown-id
+    foot-gun at write time. ``None`` is the absent / cleared state and is
+    always valid; a non-``None`` value must match an impl_id registered in
+    the v2 connector registry **for the target's product** (G0.16-T6
+    review-iter-1 B1 #1312 -- a cross-product allowlist let a ``k8s``
+    target pin ``vmware-rest-9.0`` and the resolver would silently ignore
+    it at dispatch). ``valid_impl_ids`` is empty when no connector is
+    registered for the product (test isolation / pre-lifespan state, or a
+    not-yet-registered product); validation is skipped in that case for
+    parity with the ``product`` validator -- the operator already saw a
+    structured 422 from the product check if their product is unknown.
+
+    Shared by ``create_target`` and ``update_target`` so the two write
+    paths cannot drift on the impl-id contract. Callers pass the
+    canonical product token so an ``sddc``-aliased write resolves the
+    SDDC impl set.
+    """
+    if preferred_impl_id is None:
+        return
+    valid_impl_ids = sorted(_registered_impl_ids(product))
+    if valid_impl_ids and preferred_impl_id not in valid_impl_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_build_unknown_preferred_impl_detail(preferred_impl_id, valid_impl_ids),
+        )
+
+
+def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
+    """Validate + canonicalise a PATCH's ``product`` field; return the effective product.
+
+    G0.14-T4 (#1145) / G0.18-T2 (#1355). The PATCH ``product`` handling
+    for ``update_target``, extracted so the handler stays under the
+    function-size budget. Three steps:
+
+    1. Reject ``{"product": null}`` with a T11-compliant ``invalid_null``
+       422. ``Field(default=None)`` on ``TargetUpdate.product`` is the
+       absent-marker for "client did not send this field"; without this
+       guard the ``setattr`` loop would assign ``None`` to the NOT NULL
+       column and surface an opaque 500.
+    2. Canonicalise the supplied token in place (``updates["product"]``)
+       so a value copied from ``meho connector list`` (e.g. ``"sddc"``)
+       lands the registry spelling (``"sddc-manager"``).
+    3. Validate against the registered products **only when the value
+       actually changes** -- a same-value PATCH short-circuits (pinned by
+       ``test_patch_product_same_value_passes_without_validator``).
+
+    Returns the effective product for the post-update row -- the new
+    canonical token when the PATCH changes ``product``, else the row's
+    current product -- which scopes the ``preferred_impl_id`` validator.
+    """
+    if "product" in updates and updates["product"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "kind": "invalid_null",
+                "field": "product",
+                "message": (
+                    "product cannot be null; targets.product is NOT NULL. "
+                    "Omit the field to leave it unchanged, or pass a "
+                    "valid product token instead. "
+                    "See docs/codebase/error-message-shape.md for the "
+                    "convention."
+                ),
+            },
+        )
+    raw_new_product = updates.get("product")
+    new_product = canonical_product_token(raw_new_product) if raw_new_product is not None else None
+    if new_product is not None:
+        updates["product"] = new_product
+    if new_product is not None and new_product != current_product:
+        # raw_new_product is the operator's literal input; pass it
+        # through so the 422 detail echoes what they typed.
+        assert raw_new_product is not None  # guarded by the outer if
+        _canonicalise_and_validate_product(raw_new_product)
+    return new_product if new_product is not None else current_product
 
 
 @router.get("")
@@ -845,32 +981,10 @@ async def create_target(
     # the registry's spelling regardless of which alias the operator
     # typed.
     product = _canonicalise_and_validate_product(body.product)
-    # G0.15-T6 (#1215). Validate ``preferred_impl_id`` against the
-    # registered impl set so the resolver-silently-ignores-unknown-id
-    # foot-gun surfaces at write time. ``None`` is the absent / cleared
-    # state and is always valid; a non-``None`` value must match an
-    # impl_id registered in the v2 connector registry **for the
-    # target's product** (G0.16-T6 review-iter-1 B1 #1312 -- a
-    # cross-product allowlist let a ``k8s`` target pin
-    # ``vmware-rest-9.0`` and the resolver would silently ignore it
-    # at dispatch). The scope uses the canonical product token so an
-    # ``sddc``-aliased create still resolves the SDDC impl set.
-    # ``valid_impl_ids`` is empty when no connector is registered for
-    # the product (test isolation / pre-lifespan state, or a
-    # not-yet-registered product); we skip validation in that case for
-    # parity with the ``product`` validator above -- the operator
-    # already saw a structured 422 from the product check if their
-    # product is unknown to the registry.
-    valid_impl_ids = sorted(_registered_impl_ids(product))
-    if (
-        body.preferred_impl_id is not None
-        and valid_impl_ids
-        and body.preferred_impl_id not in valid_impl_ids
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=_build_unknown_preferred_impl_detail(body.preferred_impl_id, valid_impl_ids),
-        )
+    # G0.15-T6 (#1215). Reject an unknown ``preferred_impl_id`` at write
+    # time (the canonical product token scopes the valid set). See
+    # :func:`_validate_preferred_impl_id`.
+    _validate_preferred_impl_id(body.preferred_impl_id, product)
     now = datetime.now(UTC)
     create_fields = body.model_dump()
     # Persist the canonical product token, not the alias the operator
@@ -910,6 +1024,22 @@ async def create_target(
         name=t.name,
         tenant_id=str(operator.tenant_id),
     )
+    # T1 (#1780). A target created with TLS verification *off* is a
+    # security-relevant config choice that must leave a durable,
+    # queryable trail. Bind the ``audit_*`` contextvars so
+    # ``AuditMiddleware`` folds them into this request's ``audit_log``
+    # payload, and emit a WARN. ``before`` is the secure default the
+    # column would otherwise carry; ``after`` is the operator's choice.
+    # A create with ``verify_tls`` left at the secure default binds
+    # nothing (no audit noise for the common path).
+    if t.verify_tls is False:
+        _bind_tls_audit(
+            target_id=t.id,
+            name=t.name,
+            tenant_id=operator.tenant_id,
+            before=True,
+            after=False,
+        )
     return _to_full(t)
 
 
@@ -934,69 +1064,26 @@ async def update_target(
     """
     t = await resolve_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
-    # Reject ``{"product": null}`` explicitly. ``Field(default=None)`` on
-    # ``TargetUpdate.product`` is the absent-marker for "client did not
-    # send this field" -- the only legal way to keep the field optional
-    # while supporting PATCH semantics in v1. Without this guard the
-    # ``setattr`` loop below assigns ``None`` to ``Target.product`` (NOT
-    # NULL) and SQLAlchemy / the database raises an IntegrityError that
-    # FastAPI maps to a 500 -- bypassing the T11 error-message-shape
-    # contract callers branch on. Mirror the ``unknown_product`` 422
-    # shape so the diagnostic stays uniform: a snake_case ``kind``, a
-    # human ``message`` naming the offending value + the remediation,
-    # and a pointer to the convention doc.
-    if "product" in updates and updates["product"] is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail={
-                "kind": "invalid_null",
-                "field": "product",
-                "message": (
-                    "product cannot be null; targets.product is NOT NULL. "
-                    "Omit the field to leave it unchanged, or pass a "
-                    "valid product token instead. "
-                    "See docs/codebase/error-message-shape.md for the "
-                    "convention."
-                ),
-            },
-        )
-    # G0.18-T2 (#1355). Canonicalise + validate the patched product
-    # token the same way ``create_target`` does so a PATCH that copies
-    # ``product`` out of ``meho connector list`` (e.g. ``"sddc"``)
-    # lands the canonical registry token (``"sddc-manager"``) rather
-    # than 422-ing or storing the alias. The shared helper raises a
-    # T11-compliant 422 on unknown products; we only invoke it when
-    # the operator actually changes ``product`` so a same-value PATCH
-    # short-circuits (matches the pre-T2 behaviour pinned by
-    # ``test_patch_product_same_value_passes_without_validator``).
-    raw_new_product = updates.get("product")
-    new_product = canonical_product_token(raw_new_product) if raw_new_product is not None else None
-    if new_product is not None:
-        updates["product"] = new_product
-    if new_product is not None and new_product != t.product:
-        # raw_new_product is the operator's literal input; pass it
-        # through so the 422 detail echoes what they typed.
-        assert raw_new_product is not None  # guarded by the outer if
-        _canonicalise_and_validate_product(raw_new_product)
-    # G0.15-T6 (#1215). Same impl_id rejection as on POST. ``None`` is
-    # the explicit-clear state and is always valid (operator wants to
-    # remove the override); a non-``None`` value must match a
-    # registered impl_id **for the target's product** (G0.16-T6
-    # review-iter-1 B1 #1312). When the PATCH also changes ``product``,
-    # the new product is the relevant scope -- the validator must
-    # agree with the post-update row state, otherwise a single PATCH
-    # could land an impl_id that the resolver will silently ignore at
-    # the next dispatch. Skip when no connector is registered for the
-    # effective product (test isolation / pre-lifespan).
-    new_preferred = updates.get("preferred_impl_id")
-    if new_preferred is not None:
-        effective_product = new_product if new_product is not None else t.product
-        valid_impl_ids = sorted(_registered_impl_ids(effective_product))
-        if valid_impl_ids and new_preferred not in valid_impl_ids:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=_build_unknown_preferred_impl_detail(new_preferred, valid_impl_ids),
-            )
+    # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
+    # the ``setattr`` loop below mutates the row, so the audit fold-in
+    # can record the before/after transition. ``exclude_unset=True``
+    # means ``"verify_tls" in updates`` is true only when the client
+    # actually sent the field, which is the gate for binding any TLS
+    # audit keys -- a PATCH that does not touch ``verify_tls`` binds
+    # none.
+    verify_tls_sent = "verify_tls" in updates
+    verify_tls_before = t.verify_tls
+    # G0.14-T4 (#1145) / G0.18-T2 (#1355). Validate + canonicalise the
+    # patched ``product`` (rejecting ``{"product": null}``) and resolve
+    # the effective product for the impl-id scope below. See
+    # :func:`_apply_product_patch`.
+    effective_product = _apply_product_patch(updates, t.product)
+    # G0.15-T6 (#1215). Same impl_id rejection as on POST. When the PATCH
+    # also changes ``product``, the new product is the relevant scope --
+    # the validator must agree with the post-update row state, otherwise a
+    # single PATCH could land an impl_id the resolver silently ignores at
+    # the next dispatch. See :func:`_validate_preferred_impl_id`.
+    _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     for k, v in updates.items():
         setattr(t, k, v)
     # #1723: home an as-yet-unconfigured target onto the per-tenant shared
@@ -1019,6 +1106,22 @@ async def update_target(
         tenant_id=str(operator.tenant_id),
         fields=list(updates.keys()),
     )
+    # T1 (#1780). When the PATCH touched ``verify_tls``, fold the
+    # transition into this request's ``audit_log`` payload via the
+    # ``audit_*`` contextvars and emit a WARN. This closes the
+    # never-silent gap the initiative flagged: a target PATCH wrote an
+    # *empty* audit payload today, so flipping a security-relevant
+    # control left no durable record. The bind is gated on the field
+    # being sent (``verify_tls_sent``), so a PATCH that does not touch
+    # ``verify_tls`` binds no TLS audit keys.
+    if verify_tls_sent:
+        _bind_tls_audit(
+            target_id=t.id,
+            name=t.name,
+            tenant_id=operator.tenant_id,
+            before=verify_tls_before,
+            after=t.verify_tls,
+        )
     return _to_full(t)
 
 

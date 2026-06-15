@@ -159,6 +159,13 @@ Schema decisions for :class:`Target`:
   values; the default covers the v0.2 SSA pattern.
 * ``vpn_required`` — Boolean NOT NULL DEFAULT ``false``. Whether the
   agent must establish a VPN tunnel before connecting.
+* ``verify_tls`` — Boolean NOT NULL DEFAULT ``true``. Whether connector
+  dispatch verifies the target's TLS certificate chain. Default-secure;
+  setting it ``false`` is the audited per-target opt-out for
+  self-signed / internal-CA appliances (the dispatch wiring that
+  consumes it lands in #1781). Added by migration ``0044`` with
+  ``server_default=true`` so pre-#1780 rows backfill to the secure
+  state.
 * ``extras`` — JSON NOT NULL DEFAULT ``{}``. JSONB on PostgreSQL
   (binary, GIN-friendly), generic JSON on SQLite. Escape hatch for
   per-product structured data without DDL changes.
@@ -876,6 +883,20 @@ class Target(Base):
         sa.Boolean(),
         nullable=False,
         default=False,
+    )
+    # Whether connector dispatch verifies the target's TLS certificate
+    # chain. Default-secure (``True``); ``False`` is the audited
+    # per-target opt-out for self-signed / internal-CA appliances. This
+    # column only *stores* the flag -- the dispatch path that reads it
+    # (passing ``verify=<insecure SSLContext>`` to the pooled httpx
+    # client) lands in #1781. ``server_default=true`` in migration
+    # ``0044`` backfills pre-#1780 rows to the secure state so the
+    # ``NOT NULL`` add-column is safe on a populated table.
+    verify_tls: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=True,
+        server_default=sa.true(),
     )
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,

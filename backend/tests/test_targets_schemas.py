@@ -111,6 +111,7 @@ def _make_summary(**overrides: Any) -> TargetSummary:
         "secret_ref": None,
         "auth_model": AuthModel.SHARED_SERVICE_ACCOUNT,
         "vpn_required": False,
+        "verify_tls": True,
         "fingerprint": None,
         "preferred_impl_id": None,
         "created_at": datetime.now(UTC),
@@ -139,6 +140,7 @@ def _make_target(**overrides: Any) -> Target:
         "secret_ref": "secret/meho/vcenter",
         "auth_model": AuthModel.SHARED_SERVICE_ACCOUNT,
         "vpn_required": True,
+        "verify_tls": False,
         "extras": {"datacenter": "fra1"},
         "notes": "Production vCenter",
         "fingerprint": None,
@@ -243,12 +245,20 @@ def test_target_create_defaults() -> None:
     t = TargetCreate(name="minimal", product="ssh", host="10.0.0.1")
     assert t.auth_model == AuthModel.SHARED_SERVICE_ACCOUNT
     assert t.vpn_required is False
+    # T1 (#1780): default-secure -- an omitted ``verify_tls`` lands True.
+    assert t.verify_tls is True
     assert t.extras == {}
     assert t.aliases == []
     assert t.port is None
     assert t.fqdn is None
     assert t.secret_ref is None
     assert t.notes is None
+
+
+def test_target_create_accepts_verify_tls_false() -> None:
+    """T1 (#1780): an operator can opt a fresh target out of TLS verify."""
+    t = TargetCreate(name="lab", product="ssh", host="10.0.0.1", verify_tls=False)
+    assert t.verify_tls is False
 
 
 def test_target_create_all_fields() -> None:
@@ -262,12 +272,14 @@ def test_target_create_all_fields() -> None:
         secret_ref="secret/meho/vcenter",
         auth_model=AuthModel.IMPERSONATION,
         vpn_required=True,
+        verify_tls=False,
         extras={"dc": "fra1"},
         notes="Production vCenter",
     )
     assert t.name == "rdc-vcenter"
     assert t.auth_model == AuthModel.IMPERSONATION
     assert t.vpn_required is True
+    assert t.verify_tls is False
 
 
 def test_target_create_rejects_invalid_auth_model() -> None:
@@ -298,6 +310,24 @@ def test_target_update_partial_fields() -> None:
     assert u.host == "new-host.corp.internal"
     assert u.vpn_required is True
     assert u.port is None  # untouched
+    # T1 (#1780): ``verify_tls`` is None (absent-marker) when not sent.
+    assert u.verify_tls is None
+
+
+def test_target_update_verify_tls_patchable() -> None:
+    """T1 (#1780): ``verify_tls`` is sendable via PATCH; absent stays None.
+
+    The ``None`` default is the absent-marker the route handler uses to
+    gate the audit fold-in (a PATCH that does not touch ``verify_tls``
+    binds no TLS audit keys); an explicit ``False`` / ``True`` flips the
+    column.
+    """
+    assert "verify_tls" in TargetUpdate.model_fields
+    assert TargetUpdate(verify_tls=False).verify_tls is False
+    assert TargetUpdate(verify_tls=True).verify_tls is True
+    # exclude_unset distinguishes "sent" from "defaulted to None".
+    assert "verify_tls" in TargetUpdate(verify_tls=False).model_dump(exclude_unset=True)
+    assert "verify_tls" not in TargetUpdate(host="h").model_dump(exclude_unset=True)
 
 
 def test_target_update_rejects_port_out_of_range() -> None:

@@ -53,7 +53,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine as sa_create_engine
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, Target
@@ -113,6 +113,7 @@ async def test_target_round_trip_persists_every_field() -> None:
                 secret_ref="secret/meho/targets/prod-k8s",
                 auth_model="shared_service_account",
                 vpn_required=True,
+                verify_tls=False,
                 extras={"cluster_version": "1.29"},
                 notes="Production Kubernetes cluster",
                 created_at=now,
@@ -136,6 +137,7 @@ async def test_target_round_trip_persists_every_field() -> None:
     assert row.secret_ref == "secret/meho/targets/prod-k8s"
     assert row.auth_model == "shared_service_account"
     assert row.vpn_required is True
+    assert row.verify_tls is False
     assert row.extras == {"cluster_version": "1.29"}
     assert row.notes == "Production Kubernetes cluster"
     # SQLite strips tzinfo — compare wall-clock parts only.
@@ -182,6 +184,8 @@ async def test_target_round_trip_with_nullable_fields_omitted() -> None:
     # ORM defaults should have fired.
     assert row.auth_model == "shared_service_account"
     assert row.vpn_required is False
+    # T1 (#1780): default-secure -- an unset ``verify_tls`` lands True.
+    assert row.verify_tls is True
     assert row.extras == {}
     # G0.14-T4 #1145: deleted_at column defaults to NULL for live rows.
     assert row.deleted_at is None
@@ -546,6 +550,7 @@ def test_migration_installs_targets_table_and_indexes(
                 "secret_ref",
                 "auth_model",
                 "vpn_required",
+                "verify_tls",
                 "extras",
                 "notes",
                 "created_at",
@@ -630,5 +635,113 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             inspector = sa_inspect(conn)
             assert "targets" in inspector.get_table_names()
             assert "target_id" in {col["name"] for col in inspector.get_columns("audit_log")}
+    finally:
+        sync_eng.dispose()
+
+
+def test_migration_0044_backfills_verify_tls_true_and_is_reversible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """T1 (#1780): ``0044`` adds ``verify_tls`` NOT NULL DEFAULT true, reversibly.
+
+    Proves the two ``verify_tls`` migration acceptance criteria against
+    a fresh SQLite DB:
+
+    * A row that exists **before** ``0044`` (inserted at revision
+      ``0043``, when the column does not yet exist) reads back
+      ``verify_tls = 1`` (true) after ``upgrade head`` -- the
+      ``server_default=sa.true()`` backfills existing rows so the
+      ``NOT NULL`` add-column is safe on a populated table.
+    * ``downgrade 0043`` drops the column cleanly and ``upgrade head``
+      restores it -- ``0044`` is fully reversible and leaves a single
+      head (asserted implicitly: ``upgrade head`` would raise on
+      multiple heads).
+    """
+    from alembic import command
+
+    from meho_backplane.db.migrations import alembic_config
+
+    db_path = tmp_path / "verify_tls.db"
+    async_url = f"sqlite+aiosqlite:///{db_path}"
+    sync_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", async_url)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    reset_engine_for_testing()
+
+    cfg = alembic_config()
+    cfg.set_main_option("sqlalchemy.url", async_url)
+
+    # Migrate to the revision *before* 0044 so the row predates the column.
+    command.upgrade(cfg, "0043")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        # The column must not exist yet at 0043.
+        with sync_eng.connect() as conn:
+            cols_at_0043 = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+        assert "verify_tls" not in cols_at_0043
+
+        # Insert a legacy row via raw SQL (the ORM model knows about the
+        # not-yet-applied column, so a raw INSERT is the only way to
+        # simulate a pre-#1780 row). ``aliases`` / ``extras`` are JSON
+        # text on SQLite; an empty array / object is a valid value.
+        legacy_id = str(uuid.uuid4())
+        legacy_tenant = str(uuid.uuid4())
+        now_iso = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        with sync_eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO targets "
+                    "(id, tenant_id, name, aliases, product, host, "
+                    " auth_model, vpn_required, extras, created_at, updated_at) "
+                    "VALUES "
+                    "(:id, :tenant_id, :name, '[]', :product, :host, "
+                    " 'shared_service_account', 0, '{}', :now, :now)"
+                ),
+                {
+                    "id": legacy_id,
+                    "tenant_id": legacy_tenant,
+                    "name": "legacy-target",
+                    "product": "ssh",
+                    "host": "10.0.0.9",
+                    "now": now_iso,
+                },
+            )
+
+        # Apply 0044.
+        command.upgrade(cfg, "head")
+
+        with sync_eng.connect() as conn:
+            cols_at_head = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "verify_tls" in cols_at_head
+            # The pre-existing row backfilled to the secure default.
+            backfilled = conn.execute(
+                text("SELECT verify_tls FROM targets WHERE id = :id"),
+                {"id": legacy_id},
+            ).scalar_one()
+            # SQLite stores the boolean as 1/0.
+            assert bool(backfilled) is True
+
+        # Downgrade exactly one revision (head -> 0043): column must go.
+        command.downgrade(cfg, "0043")
+        with sync_eng.connect() as conn:
+            cols_after_downgrade = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "verify_tls" not in cols_after_downgrade
+            # The row itself survives the column drop.
+            surviving = conn.execute(
+                text("SELECT name FROM targets WHERE id = :id"),
+                {"id": legacy_id},
+            ).scalar_one()
+            assert surviving == "legacy-target"
+
+        # Re-upgrade is idempotent and restores the column.
+        command.upgrade(cfg, "head")
+        with sync_eng.connect() as conn:
+            cols_reupgraded = {col["name"] for col in sa_inspect(conn).get_columns("targets")}
+            assert "verify_tls" in cols_reupgraded
     finally:
         sync_eng.dispose()

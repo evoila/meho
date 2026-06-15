@@ -112,6 +112,13 @@ class TargetSummary(BaseModel):
     secret_ref: str | None
     auth_model: AuthModel
     vpn_required: bool
+    # T1 (#1780). Per-target TLS-verification flag. Connection-routing
+    # (the dispatch client honours it in #1781), so it MUST be listable
+    # in the summary per the api-shape-conventions §5 no-silent-masking
+    # rule the class docstring cites. Defaults to ``True`` so legacy
+    # hand-constructed instances stay valid; production projections go
+    # through :func:`project_target_to_summary` which passes it through.
+    verify_tls: bool = True
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
     created_at: datetime
@@ -172,6 +179,16 @@ class Target(BaseModel):
     secret_ref: str | None
     auth_model: AuthModel
     vpn_required: bool
+    # T1 (#1780). Whether connector dispatch verifies the target's TLS
+    # certificate chain. Default-secure (``True``); ``False`` is the
+    # audited per-target opt-out for self-signed / internal-CA
+    # appliances. Defaults to ``True`` so call sites that have not yet
+    # been updated to populate the field (test helpers, historical
+    # fixtures, legacy code constructing :class:`Target` by hand) keep
+    # working; production read paths go through :func:`_to_full` which
+    # passes the column through explicitly. The dispatch path that
+    # consumes the flag lands in #1781.
+    verify_tls: bool = True
     extras: Mapping[str, Any]
     notes: str | None
     fingerprint: Mapping[str, Any] | None
@@ -225,6 +242,14 @@ class TargetCreate(BaseModel):
     secret_ref: str | None = None
     auth_model: AuthModel = AuthModel.SHARED_SERVICE_ACCOUNT
     vpn_required: bool = False
+    # T1 (#1780). Per-target TLS-verification opt-out. Default-secure:
+    # an omitted ``verify_tls`` lands ``True`` so a fresh target verifies
+    # the cert chain against the global ``SSL_CERT_FILE`` bundle (today's
+    # behaviour, byte-identical). An operator targeting a self-signed /
+    # internal-CA appliance passes ``false`` explicitly -- which the
+    # route handler audits (durable ``audit_log`` row + WARN log). The
+    # dispatch path that consumes the flag lands in #1781.
+    verify_tls: bool = True
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -278,6 +303,17 @@ class TargetUpdate(BaseModel):
     secret_ref: str | None = None
     auth_model: AuthModel | None = None
     vpn_required: bool | None = None
+    # T1 (#1780). Patchable per-target TLS-verification flag. ``None`` is
+    # the absent-marker ("client did not send this field", the standard
+    # PATCH-field semantics every field here uses), so a PATCH that does
+    # not touch ``verify_tls`` binds **no** TLS audit keys. An explicit
+    # ``{"verify_tls": false}`` flips the column and is audited by the
+    # route handler (durable ``audit_log`` row + WARN log); ``true``
+    # re-enables verification. Unlike the nullable string columns,
+    # ``verify_tls`` is ``NOT NULL`` at the DB layer, so there is no
+    # "clear to null" state -- the value is always one of ``True`` /
+    # ``False`` once present.
+    verify_tls: bool | None = None
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -321,6 +357,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         secret_ref=t.secret_ref,
         auth_model=AuthModel(t.auth_model),
         vpn_required=t.vpn_required,
+        verify_tls=t.verify_tls,
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
         created_at=t.created_at,

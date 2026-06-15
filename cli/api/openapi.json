@@ -16860,6 +16860,11 @@
             "type": "boolean",
             "title": "Vpn Required"
           },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -17001,6 +17006,11 @@
             "title": "Vpn Required",
             "default": false
           },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -17085,6 +17095,11 @@
           "vpn_required": {
             "type": "boolean",
             "title": "Vpn Required"
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
           },
           "fingerprint": {
             "additionalProperties": true,
@@ -17189,6 +17204,11 @@
             "type": "boolean",
             "nullable": true,
             "title": "Vpn Required"
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Verify Tls"
           },
           "extras": {
             "additionalProperties": true,

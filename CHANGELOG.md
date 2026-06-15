@@ -92,6 +92,15 @@ connector-related release-notes line.
 
 ### Added
 
+- Targets now carry a first-class **`verify_tls`** flag
+  (`NOT NULL DEFAULT true`, default-secure) on create / update / read
+  across `POST` / `PATCH` / `GET /api/v1/targets` and the list
+  projection. It is the storage + API + audit surface for a per-target
+  TLS-verification opt-out (the dispatch wiring that consumes it lands
+  in a follow-up); setting it `false` writes a durable `audit_log` row
+  (`tls_verification_disabled` + before/after) and a WARN log, closing
+  the prior gap where a target PATCH wrote an empty audit payload
+  (#1780).
 - Bulk read-class connector enable path across REST + MCP + CLI:
   `POST /api/v1/connectors/{id}/enable-reads`, the
   `meho.connector.enable_reads` MCP tool, and `meho connector

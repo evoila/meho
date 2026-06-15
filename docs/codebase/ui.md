@@ -424,15 +424,31 @@ without pinning a stale verdict for the rest of the window. (This was
 the #1776 CI-unit-lane hang: in CI those endpoints are black-holed, so
 the unbounded per-request sweep ballooned the unit run past its timeout
 budget; locally the connects fail fast with `ECONNREFUSED`, which is why
-it passed there.) `GET /ready` and the dashboard's fresh sweep
+it passed there.)
+
+The bound only fires, though, if the sweep actually yields to the event
+loop. `asyncio.wait_for` can cancel an *awaiting* coroutine but cannot
+interrupt a **synchronous** call that is blocking the loop — and several
+probes are `def` (the `docs_backends` probe, and the Keycloak/Vault
+probes wrap sync clients). A blocking sync probe would therefore sail
+past `wait_for` and hang the render even with the bound in place (the
+residual #1776 hang). `run_probes_async` closes this: async probes are
+awaited directly, but sync probes run via `asyncio.to_thread` so the
+blocking call happens on a worker thread and the loop stays free for
+`wait_for` to fire. On timeout the orphaned thread is not killed — it
+drains harmlessly in the background — and the TTL cache + single-flight
+lock cap how often a fresh sweep (and thus a fresh thread) is spawned.
+This also keeps `/ready` and the dashboard's fresh sweep from blocking
+the loop on a slow sync probe (behaviour-preserving on results). `GET /ready` and the dashboard's fresh sweep
 (`max_age_s=0`) pass no bound (`timeout_s=None`), so their behaviour is
 unchanged — `/ready` still computes fresh on every hit (the kubernetes
 readiness contract) and keeps its `features` block, which the UI verdict
 deliberately omits. The `test_ui_readiness_pill.py` suite pins the cache
 semantics, the timeout degrade-and-don't-cache behaviour, the processor
 injection + fail-safe, and the end-to-end pill state on a non-dashboard
-surface (`/ui/memory`) — including that a hung probe renders "starting"
-promptly rather than blocking.
+surface (`/ui/memory`) — including that both a hung **async** probe and a
+blocking **sync** probe render "starting" promptly rather than blocking
+the render.
 
 ## Dependencies
 

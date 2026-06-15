@@ -59,8 +59,11 @@ PROBE_NAME = "docs_backends"
 def docs_backends_readiness_probe() -> ProbeResult:
     """Report which search backends are configured — never failing readiness.
 
-    Synchronous (no I/O — :meth:`is_configured` is a config read), so the
-    health registry calls it inline. Registered ≠ configured (#1606): the
+    Synchronous (no I/O — :meth:`is_configured` is a config read). The
+    async health sweep (:func:`~meho_backplane.health.run_probes_async`)
+    runs sync probes on a worker thread so a blocking probe can't stall
+    the event loop; this one returns immediately either way. Registered ≠
+    configured (#1606): the
     registry holds every backend that self-registered at import, while
     only the subset whose :meth:`is_configured` is true is actually wired
     on this deploy. Unconfigured backends are **skipped** — the docs

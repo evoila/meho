@@ -39,6 +39,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -290,6 +291,45 @@ async def test_snapshot_timeout_degrades_to_not_ready_without_hanging() -> None:
     assert elapsed < 2.0, f"sweep should bail at the bound, took {elapsed:.2f}s"
 
 
+async def test_snapshot_timeout_bounds_a_blocking_sync_probe() -> None:
+    """A **synchronous** probe that blocks is bounded by ``timeout_s`` too.
+
+    Regression for the #1776 CI-unit-lane hang's true root cause: the
+    first fix bounded the sweep with :func:`asyncio.wait_for`, but
+    ``wait_for`` can only cancel an *awaiting* coroutine -- it cannot
+    interrupt a synchronous call blocking the event loop. The
+    docs-backends probe (and the Keycloak/Vault sync probes) are ``def``;
+    a slow/black-holed sync probe therefore defeated the bound and hung
+    every ``/ui/*`` render, starving the CI runner. The sweep now runs
+    sync probes on a worker thread (:func:`asyncio.to_thread`), so the
+    bound fires for them as well: this must return well inside the bound
+    with ``ready=False`` and the synthetic ``timeout`` check, NOT block
+    for the probe's full sleep.
+
+    This test FAILS on the pre-thread fix (the ``time.sleep`` blocks the
+    loop for its full duration, so ``elapsed`` >> the bound) and PASSES
+    once sync probes are off-loaded to a thread.
+    """
+
+    def _slow_sync_probe() -> ProbeResult:
+        time.sleep(3)  # blocking I/O surrogate; >> the 0.2s bound below
+        return ProbeResult(name="slow_sync", ok=True)
+
+    register_probe("slow_sync", _slow_sync_probe)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    snapshot = await readiness_snapshot(max_age_s=0, timeout_s=0.2)
+    elapsed = loop.time() - started
+
+    assert snapshot["ready"] is False
+    assert snapshot["checks"] == [
+        {"name": "timeout", "ok": False, "detail": "readiness probe sweep exceeded 0.2s"}
+    ]
+    # Returned on the timeout bound, not after the sync probe's 3s sleep.
+    # The whole point: a blocking sync probe must not stall the loop.
+    assert elapsed < 1.0, f"blocking sync probe should bail at the bound, took {elapsed:.2f}s"
+
+
 async def test_snapshot_timeout_is_not_cached() -> None:
     """A timed-out sweep must not pin a misleading verdict for the TTL.
 
@@ -482,6 +522,94 @@ def test_non_dashboard_pill_is_starting_when_probe_hangs(
     assert _pill_state(response.text) == ("bg-warning", "starting")
     # The render returned on the readiness bound, not the probe's 10s sleep.
     assert elapsed < 5.0, f"render should not block on the hung probe, took {elapsed:.2f}s"
+
+
+async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking **synchronous** probe degrades the render to "starting".
+
+    The true #1776 CI-hang regression. ``asyncio.wait_for`` (the first
+    fix's bound) can only cancel an *awaiting* coroutine -- it cannot
+    interrupt a synchronous call blocking the event loop. So a
+    slow/black-holed **sync** probe -- the shape the docs-backends and
+    Keycloak/Vault probes actually use -- still hung every ``/ui/*``
+    render and starved the CI runner, even with the bound in place. The
+    sweep now runs sync probes on a worker thread
+    (:func:`asyncio.to_thread`), so the bound fires for them too: the
+    render returns **promptly** with the fail-safe "starting" pill while
+    the orphaned probe thread finishes harmlessly in the background.
+
+    Driven through ``httpx.ASGITransport`` on the test's own (persistent)
+    event loop rather than the synchronous ``TestClient``. ``TestClient``
+    runs the app via an ``anyio`` blocking portal that joins outstanding
+    loop work -- including the orphaned ``asyncio.to_thread`` future --
+    before returning to the calling thread, so a long sync sleep would
+    inflate the *test's* wall-clock to the full sleep even though the
+    HTTP response was produced at the bound. A persistent loop (the
+    production uvicorn shape) delivers the response at the bound and lets
+    the thread drain afterwards, which is exactly the property under
+    test.
+
+    Discriminator against the pre-thread fix: with the loop blocked by
+    the sync ``time.sleep``, ``wait_for`` never gets to fire, so the
+    probe runs to completion and reports ``ok=True`` -- the pill would
+    render green **"ready"**. Post-fix the bound fires and the verdict is
+    not-ready -- yellow **"starting"**. The wall-clock assertion adds the
+    "promptly" guarantee on top. The bound is shrunk here so the test
+    runs fast.
+    """
+    from meho_backplane.ui.auth import middleware as ui_middleware
+
+    monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", 0.1)
+
+    def _blocking_sync_probe() -> ProbeResult:
+        time.sleep(10)  # >> the 0.1s bound; blocks the loop pre-fix
+        return ProbeResult(name="docs_backends", ok=True)
+
+    register_probe("docs_backends", _blocking_sync_probe)
+
+    # Seed inline with ``await`` rather than the ``asyncio.run``-based
+    # ``_seed_*`` sync helpers: this test runs on the pytest-asyncio loop,
+    # and ``asyncio.run`` cannot be called from a running loop.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(Tenant(id=_TENANT_A, slug="tenant-a", name="Tenant tenant-a"))
+    async with sessionmaker() as session, session.begin():
+        decrypted = await create_session(
+            session,
+            operator_sub=_OP_A,
+            tenant_id=_TENANT_A,
+            access_token="access-token-plaintext",
+            refresh_token="refresh-token-plaintext",
+            lifetime=timedelta(hours=1),
+        )
+        session_id = decrypted.id
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    _mock_discovery_and_jwks(mock, _jwks())
+    transport = httpx.ASGITransport(app=_build_app())
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=_BACKPLANE_URL,
+            cookies={SESSION_COOKIE_NAME: str(session_id)},
+            follow_redirects=False,
+        ) as client:
+            response = await client.get("/ui/memory")
+    finally:
+        mock.stop()
+    elapsed = loop.time() - started
+
+    assert response.status_code == 200, response.text
+    assert "<title>Memory" in response.text
+    assert _pill_state(response.text) == ("bg-warning", "starting")
+    # The render returned on the readiness bound, not the sync probe's 10s
+    # sleep: a blocking sync probe must not stall the /ui/* hot path.
+    assert elapsed < 5.0, f"render should not block on the blocking sync probe, took {elapsed:.2f}s"
 
 
 def test_dashboard_pill_follows_probe_state_unchanged() -> None:

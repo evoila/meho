@@ -48,6 +48,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from typing import cast
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -96,8 +97,10 @@ class ProbeResult:
 #: + ``httpx`` sync clients wrapped where needed) or an ``async def``
 #: coroutine returning the same (the DB-migration-state probe — the
 #: SQLAlchemy 2.x async engine forces the I/O onto the event loop).
-#: The registry stores both shapes; the ``/ready`` handler awaits
-#: coroutine-returning probes and calls sync probes inline.
+#: The registry stores both shapes; :func:`run_probes_async` awaits
+#: coroutine-returning probes directly and runs sync probes on a worker
+#: thread (via :func:`asyncio.to_thread`) so a blocking probe cannot
+#: stall the event loop or defeat the caller's timeout bound.
 ProbeFn = Callable[[], ProbeResult] | Callable[[], Awaitable[ProbeResult]]
 
 
@@ -157,25 +160,57 @@ def run_probes() -> list[ProbeResult]:
 async def run_probes_async() -> list[ProbeResult]:
     """Evaluate every registered probe — sync and async alike.
 
-    Async probes are awaited; sync probes are called inline. Probes
-    run sequentially in registration order (parallelising readiness
-    checks across dependencies is a v0.2 optimisation; v0.1 favours
-    deterministic ordering for readable ``/ready`` payloads and
-    audit logs).
+    Async probes are awaited directly; **synchronous** probes are run
+    via :func:`asyncio.to_thread` so a probe that does blocking I/O
+    cannot stall the event loop. Probes run sequentially in
+    registration order (parallelising readiness checks across
+    dependencies is a v0.2 optimisation; v0.1 favours deterministic
+    ordering for readable ``/ready`` payloads and audit logs), and the
+    returned list preserves that order.
+
+    Why off-load sync probes to a thread (the #1776 CI-hang root cause):
+    :func:`readiness_snapshot` wraps this sweep in
+    :func:`asyncio.wait_for` when called with ``timeout_s`` set (the
+    per-request UI hot path passes a short bound). ``wait_for`` can only
+    cancel an *awaiting* coroutine — it cannot interrupt a synchronous
+    call blocking the loop. A sync probe doing blocking network I/O
+    (the docs-backends probe is ``def``) would therefore defeat the
+    bound and hang every ``/ui/*`` render, which is exactly what
+    starved the CI unit-lane runner. Running the sync call on a worker
+    thread keeps the loop free, so ``wait_for`` fires for sync probes
+    too. On timeout ``wait_for`` cancels this coroutine; the orphaned
+    worker thread is not killed but finishes harmlessly in the
+    background, and the TTL cache + single-flight lock in
+    :func:`readiness_snapshot` cap how often a fresh sweep (and thus a
+    fresh thread) is spawned.
+
+    This also keeps ``/ready`` and the dashboard's fresh sweep from
+    blocking the loop on a slow sync probe — behaviour-preserving on
+    results, just non-loop-blocking.
     """
     results: list[ProbeResult] = []
     for _name, fn in _probes:
         if inspect.iscoroutinefunction(fn):
             results.append(await fn())
+            continue
+        # Synchronous probe: run the (possibly blocking) call on a
+        # worker thread so it cannot stall the event loop. ``fn`` is the
+        # ``ProbeFn`` union; ``iscoroutinefunction`` above excluded the
+        # ``async def`` arm, but mypy can't infer ``asyncio.to_thread``'s
+        # generic return type across a *union* of callables (it falls
+        # back to ``object``), so we cast to the sync arm — widened to
+        # also admit the defensive "mis-annotated probe returns an
+        # awaitable" case handled just below.
+        sync_fn = cast("Callable[[], ProbeResult | Awaitable[ProbeResult]]", fn)
+        value = await asyncio.to_thread(sync_fn)
+        # Defensive: a sync-typed callable that returned an awaitable
+        # (mis-annotated probe) gets awaited on the loop rather than
+        # silently dropped on the floor. The sync ``fn()`` ran in the
+        # thread; only the returned awaitable is awaited here.
+        if inspect.isawaitable(value):  # pragma: no cover — defensive
+            results.append(await value)
         else:
-            value = fn()
-            # Defensive: a sync-typed callable that returned an
-            # awaitable (mis-annotated probe) gets awaited rather
-            # than silently dropped on the floor.
-            if inspect.isawaitable(value):  # pragma: no cover — defensive
-                results.append(await value)
-            else:
-                results.append(value)
+            results.append(value)
     return results
 
 

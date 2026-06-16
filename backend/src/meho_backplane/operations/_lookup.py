@@ -104,12 +104,13 @@ def dispatch_product(*, product: str, version: str, impl_id: str) -> str:
     first hyphen-segment of ``impl_id`` (``"vrli-rest-9.0" -> "vrli"``).
 
     For most connectors the supplied ``product`` already equals the
-    parser-derived one (``vmware`` / ``vmware-rest``), so this is a
-    no-op. For the VCF-family long↔short splits the two diverge — the
+    parser-derived one (``vmware`` / ``vmware-rest``; and, since
+    G0.26-T4 #1798, ``vrli`` / ``vrli-rest``), so this is a no-op. For
+    the remaining VCF-family long↔short splits the two diverge — the
     connector class registers under the long form
-    (``product="vcf-logs"``) while the dispatcher derives the short form
-    (``"vrli"``) from ``impl_id="vrli-rest"``. Rows persisted under the
-    long form are then invisible to every ``connector_exists`` /
+    (``product="vcf-automation"``) while the dispatcher derives the
+    short form (``"vcfa"``) from ``impl_id="vcfa-rest"``. Rows persisted
+    under the long form are then invisible to every ``connector_exists`` /
     ``search_operations`` / ``list_operation_groups`` probe (which key on
     the short, parser-derived form), so the catalog reports the connector
     ``registered, 0 ops`` even though the rows exist (the listing's

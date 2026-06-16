@@ -74,6 +74,7 @@ __all__ = [
     "check_version_covered_by_registered_class",
     "derive_supported_version_range",
     "ensure_connector_class_registered",
+    "handrolled_class_for_impl_id",
     "resolved_auto_shim_class",
     "sibling_handrolled_impl_id",
 ]
@@ -309,6 +310,47 @@ def _synthesise_shim_class(
     )
 
 
+def handrolled_class_for_impl_id(
+    *,
+    version: str,
+    impl_id: str,
+) -> type[Connector] | None:
+    """Return a hand-rolled connector class registered for ``(version, impl_id)``.
+
+    G0.26-T4 (#1798). Scans the v2 registry for a **hand-rolled** class
+    (one that is *not* a :class:`GenericRestConnector` auto-shim)
+    registered under the given ``(version, impl_id)`` regardless of the
+    ``product`` it registered under. Returns the first such class, or
+    ``None`` when none exists.
+
+    This is the ingest guard's lookup: a hand-coded connector's
+    ``impl_id`` is its stable, product-independent identity (vRLI is
+    ``vrli-rest`` whether it registers under the dispatch-canonical
+    ``product="vrli"`` or the historical ``"vcf-logs"``). An ingest that
+    supplies a *divergent* product token for that same ``impl_id`` —
+    ``--product vcf-logs`` for ``vrli-rest`` after the realignment, say —
+    must defer to the hand-coded class rather than scaffold a
+    :class:`GenericRestConnector` shim under the divergent key, which
+    would be non-dispatchable and could shadow the real connector. The
+    match is on ``impl_id`` (not the parser-derived product) precisely so
+    a product-namespace divergence does not let the shim slip past.
+
+    The ``GenericRestConnector`` import is function-local to keep the
+    ``operations.ingest`` -> (its own) module graph free of an
+    import-time edge; mirrors the pattern :func:`sibling_handrolled_impl_id`
+    already uses.
+    """
+    from meho_backplane.connectors.registry import all_connectors_v2
+
+    for (_entry_product, entry_version, entry_impl_id), cls in all_connectors_v2().items():
+        if entry_version != version or entry_impl_id != impl_id:
+            continue
+        if issubclass(cls, GenericRestConnector):
+            continue
+        return cls
+    return None
+
+
 def ensure_connector_class_registered(
     *,
     product: str,
@@ -320,11 +362,28 @@ def ensure_connector_class_registered(
 
     Returns ``True`` when a new shim class was synthesised and
     registered; ``False`` when an entry already exists for the
-    ``(product, version, impl_id)`` key in the v2 registry. The
-    return value drives the ``connector_registered`` flag on
+    ``(product, version, impl_id)`` key in the v2 registry, **or** when a
+    hand-coded connector already covers the ``(version, impl_id)`` under a
+    divergent product token (the ingest guard — see below). The return
+    value drives the ``connector_registered`` flag on
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`
     so the CLI can report "first ingest registered the connector"
     vs "subsequent ingest reused the existing connector".
+
+    Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to
+    any hand-coded connector already registered for the same
+    ``(version, impl_id)`` — even when that class registered under a
+    *different* ``product``. Without this, ingesting a spec under a
+    divergent product token (``--product vcf-logs`` for ``vrli-rest``,
+    after the realignment moved ``VcfLogsConnector``
+    to ``product="vrli"``) would scaffold a non-dispatchable
+    ``GenericRestConnector`` shim under ``(vcf-logs, …, vrli-rest)`` that
+    shadows the real connector. The guard keys on ``impl_id`` (the
+    connector's product-independent identity), so a product-namespace
+    divergence cannot route around it. The persisted rows still reconcile
+    to the dispatch-canonical product
+    (:func:`~meho_backplane.operations.ingest.register_ingested._reconciled_row_product`),
+    so the ingested ops resolve through the hand-coded connector.
 
     Idempotency note: the v2 registry rejects duplicate
     registration with :class:`RuntimeError`, so checking presence
@@ -343,6 +402,26 @@ def ensure_connector_class_registered(
             version=version,
             impl_id=impl_id,
             existing_cls=existing[(product, version, impl_id)].__name__,
+        )
+        return False
+
+    handrolled = handrolled_class_for_impl_id(version=version, impl_id=impl_id)
+    if handrolled is not None and handrolled.product != product:
+        _log.info(
+            "connector_auto_register_deferred_to_handrolled",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            handrolled_cls=handrolled.__name__,
+            handrolled_product=handrolled.product,
+            message=(
+                f"not scaffolding a GenericRestConnector shim for "
+                f"({product!r}, {version!r}, {impl_id!r}): hand-coded "
+                f"{handrolled.__name__} already covers impl_id {impl_id!r} "
+                f"under product {handrolled.product!r}. Ingested rows "
+                f"reconcile to the dispatch-canonical product and dispatch "
+                f"through the hand-coded connector."
+            ),
         )
         return False
 

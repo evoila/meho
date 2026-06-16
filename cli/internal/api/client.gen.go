@@ -295,9 +295,9 @@ const (
 	Vault         TargetCreateProduct = "vault"
 	VcfAutomation TargetCreateProduct = "vcf-automation"
 	VcfFleet      TargetCreateProduct = "vcf-fleet"
-	VcfLogs       TargetCreateProduct = "vcf-logs"
 	VcfOperations TargetCreateProduct = "vcf-operations"
 	Vmware        TargetCreateProduct = "vmware"
+	Vrli          TargetCreateProduct = "vrli"
 )
 
 // Defines values for TemplateSummaryStatus.

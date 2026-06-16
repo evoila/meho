@@ -145,7 +145,10 @@ def _make_connector() -> VcfLogsConnector:
 def test_vrli_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(VcfLogsConnector, HttpConnector)
-    assert VcfLogsConnector.product == "vcf-logs"
+    # Aligned to the dispatch-canonical token in G0.26-T4 (#1798): the
+    # registered product equals what parse_connector_id derives from the
+    # vrli-rest impl_id, so the registration round-trips.
+    assert VcfLogsConnector.product == "vrli"
     assert VcfLogsConnector.version == "9.0"
     assert VcfLogsConnector.impl_id == "vrli-rest"
     assert VcfLogsConnector.supported_version_range == ">=9.0,<10.0"
@@ -158,7 +161,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("vcf-logs", "9.0", "vrli-rest")
+    key = ("vrli", "9.0", "vrli-rest")
     assert key in registry
     assert registry[key] is VcfLogsConnector
 
@@ -607,7 +610,7 @@ async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "vcf-logs"
+    assert fp.product == "vrli"
     assert fp.version == "9.0.0"
     assert fp.build == "21761695"
     assert fp.reachable is True
@@ -633,7 +636,7 @@ async def test_fingerprint_unreachable_returns_reachable_false_with_error() -> N
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "vcf-logs"
+    assert fp.product == "vrli"
     assert fp.reachable is False
     assert fp.probe_method == "GET /api/v2/version"
     # Structured error: ``"<ExcType>: <message>"``.

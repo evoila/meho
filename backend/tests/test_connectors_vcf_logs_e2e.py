@@ -167,9 +167,12 @@ async def _seed_target() -> Any:
             name=_E2E_TARGET_NAME,
             aliases=[],
             # ``Target.product`` binds via the resolver to the v2 registry
-            # triple ``(VcfLogsConnector.product, "9.0", "vrli-rest")`` —
-            # NOT ``VRLI_PRODUCT`` (``"vrli"``, the ingest-row product
-            # key). Same shape SDDC Manager uses.
+            # triple ``(VcfLogsConnector.product, "9.0", "vrli-rest")``.
+            # Since G0.26-T4 (#1798) aligned the connector to the
+            # dispatch-canonical token, ``VcfLogsConnector.product`` now
+            # EQUALS ``VRLI_PRODUCT`` (both ``"vrli"``) — the target, the
+            # ingested rows, and the registration all share one product
+            # namespace, which is the fix for the v0.16.0 SEV-2.
             product=VcfLogsConnector.product,
             host=VRLI_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
@@ -192,13 +195,13 @@ def _resolve_connector() -> VcfLogsConnector:
     """Resolve + cache the VcfLogsConnector instance with the stub loader.
 
     Looks up the v2 registry under the **connector class metadata**
-    triple ``(VcfLogsConnector.product, version, impl_id)`` — which is
-    ``("vcf-logs", "9.0", "vrli-rest")``. This is intentionally NOT
-    ``VRLI_PRODUCT`` (``"vrli"``); the latter is the spec-ingestion
-    product key that ``parse_connector_id`` reads off the
-    ``connector_id`` slug (``"vrli-rest-9.0"`` → ``product="vrli"``).
-    Same shape SDDC Manager hits — see VRLI_PRODUCT's docstring in
-    core_ops.py for the discrepancy rationale.
+    triple ``(VcfLogsConnector.product, version, impl_id)`` — which,
+    after the G0.26-T4 (#1798) alignment, is
+    ``("vrli", "9.0", "vrli-rest")``. ``VcfLogsConnector.product`` now
+    equals ``VRLI_PRODUCT`` (``"vrli"``) and equals the product
+    ``parse_connector_id`` reads off the ``connector_id`` slug
+    (``"vrli-rest-9.0"`` → ``product="vrli"``): one canonical identity
+    across the class, the rows, and the operator target.
     """
     registry = all_connectors_v2()
     registry_key = (VcfLogsConnector.product, VRLI_VERSION, VRLI_IMPL_ID)
@@ -456,6 +459,69 @@ async def test_vrli_e2e_session_establishes_on_first_dispatch(
         f"Expected vRLI session token cached after first dispatch; "
         f"got _session_tokens={instance._session_tokens!r}"
     )
+
+
+async def test_vrli_natural_product_token_dispatches_through_connector_not_shim(
+    vrli_e2e_canary: _VrliE2EBundle,
+) -> None:
+    """A target with the literal ``product="vrli"`` token dispatches through VcfLogsConnector.
+
+    The G0.26-T4 (#1798) SEV-2 regression. ``"vrli"`` is the natural
+    operator token — what ``meho connector list`` emits (the
+    parser-derived product) and what an operator types into ``POST
+    /api/v1/targets`` — independent of any connector class attribute.
+    Before the realignment this token resolved the auto-registered
+    ``GenericRestConnector`` shim (``auth_headers`` →
+    ``NotImplementedError`` → ``connector_unsupported`` /
+    ``unreplaced_auto_shim``), never the hand-coded connector under the
+    divergent ``vcf-logs`` namespace. After the alignment it resolves
+    :class:`VcfLogsConnector`, so ``auth_headers`` runs (the vRLI session
+    establishes) and the op returns ``status="ok"``.
+
+    Seeds its own target with the **literal** string ``"vrli"`` (not
+    ``VcfLogsConnector.product``) so the assertion pins the operator-token
+    contract even if the class attribute were ever changed.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            Target(
+                tenant_id=VRLI_CANARY_OPERATOR_TENANT,
+                name="vrli-natural-token-target",
+                aliases=[],
+                product="vrli",  # the literal natural operator token
+                host=VRLI_CANARY_BASE_URL.removeprefix("https://"),
+                port=443,
+                fqdn=None,
+                secret_ref="vrli/vrli-natural",
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                fingerprint=VRLI_CANARY_FINGERPRINT,
+                notes="seeded by test_vrli_natural_product_token_dispatch",
+            )
+        )
+        await session.commit()
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": VRLI_CONNECTOR_ID,
+            "op_id": "GET:/api/v2/version",
+            "target": {"name": "vrli-natural-token-target"},
+            "params": {},
+        },
+    )
+
+    # Dispatched through VcfLogsConnector (auth_headers ran, session
+    # established) — NOT the auto-shim, which would have returned
+    # connector_unsupported / unreplaced_auto_shim.
+    assert result["status"] == "ok", (
+        f"a product='vrli' target must dispatch through VcfLogsConnector "
+        f"(auth_headers runs), not the auto-shim; got error="
+        f"{result.get('error')!r} full={result!r}"
+    )
+    assert result.get("error") != "connector_unsupported"
 
 
 async def test_vrli_e2e_401_recovery_via_connector_method(

@@ -357,8 +357,12 @@ def _preflight_and_register_class(
 
     Both calls take the *supplied* (registry) product — not the
     dispatch-canonical one the rows persist under — so the coverage check
-    finds the real registered class (e.g. ``VcfLogsConnector`` under
-    ``product="vcf-logs"``) and no redundant shim is synthesised.
+    finds the real registered class (e.g. ``VcfAutomationConnector``
+    under ``product="vcf-automation"``) and no redundant shim is
+    synthesised. (For aligned connectors such as ``VcfLogsConnector``,
+    aligned to ``product="vrli"`` in G0.26-T4 #1798, the supplied and
+    dispatch-canonical products are identical, so the distinction is a
+    no-op.)
 
     Returns the ``connector_registered`` flag (``True`` when a fresh
     auto-shim was registered).
@@ -382,15 +386,17 @@ def _reconciled_row_product(*, product: str, version: str, impl_id: str) -> str:
     The dispatch/query surface keys on the product
     :func:`~meho_backplane.operations._lookup.parse_connector_id` derives
     from the connector_id, not the operator-supplied one. For aligned
-    connectors the two are identical (no-op); for the VCF-family long↔short
-    splits the supplied product (``vcf-logs``) diverges from the derived
-    spelling (``vrli``), and rows written under the supplied product are
-    invisible to every dispatch probe (the catalog reports
-    ``registered, 0 ops``). The pre-flight + auto-shim registration in
-    :func:`register_ingested_operations` deliberately stay on the *supplied*
-    (registry) product so the version-coverage check finds the real
-    ``VcfLogsConnector`` class and no redundant shim is synthesised; only
-    the persisted rows are reconciled here. claude-rdc-hetzner-dc#1136.
+    connectors the two are identical (no-op); for the remaining VCF-family
+    long↔short splits the supplied product (``vcf-automation``) diverges
+    from the derived spelling (``vcfa``), and rows written under the
+    supplied product are invisible to every dispatch probe (the catalog
+    reports ``registered, 0 ops``). The pre-flight + auto-shim registration
+    in :func:`register_ingested_operations` deliberately stay on the
+    *supplied* (registry) product so the version-coverage check finds the
+    real ``VcfAutomationConnector`` class and no redundant shim is
+    synthesised; only the persisted rows are reconciled here.
+    claude-rdc-hetzner-dc#1136. (vRLI / ``vrli-rest`` was aligned in
+    G0.26-T4 #1798 and no longer takes this divergent path.)
     """
     row_product = dispatch_product(product=product, version=version, impl_id=impl_id)
     if row_product != product:

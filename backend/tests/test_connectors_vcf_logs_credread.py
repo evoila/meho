@@ -75,9 +75,12 @@ from ._vault_fakes import install_fake_client
 _CANARY_USERNAME = "svc-vrli-canary"
 _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-vrli"
 
-#: The connector triple ``vrli-rest-9.0`` decodes to.
+#: The connector triple ``vrli-rest-9.0`` decodes to. Since G0.26-T4
+#: (#1798) aligned VcfLogsConnector to ``product="vrli"``, the descriptor
+#: (parser-derived) product and the target / registration product are
+#: the same canonical token — no split.
 _PRODUCT_DESCRIPTOR = "vrli"
-_PRODUCT_TARGET = "vcf-logs"
+_PRODUCT_TARGET = "vrli"
 _VERSION = "9.0"
 _IMPL_ID = "vrli-rest"
 _CONNECTOR_ID = "vrli-rest-9.0"

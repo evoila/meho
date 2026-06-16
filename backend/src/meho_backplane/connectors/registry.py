@@ -169,6 +169,7 @@ def register_connector_v2(
             f"connector already registered for v2 key {key!r}: "
             f"existing={_REGISTRY_V2[key].__name__}, attempted={cls.__name__}"
         )
+    _warn_if_product_impl_id_diverges(product=product, version=version, impl_id=impl_id, cls=cls)
     _REGISTRY_V2[key] = cls
     _log.info(
         "connector_registered_v2",
@@ -176,6 +177,79 @@ def register_connector_v2(
         version=version,
         impl_id=impl_id,
         cls=cls.__name__,
+    )
+
+
+def _warn_if_product_impl_id_diverges(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    cls: type[Connector],
+) -> None:
+    """Log a WARN when ``product`` does not round-trip through the connector_id.
+
+    G0.26-T4 (#1798). The dispatch / discovery surface never sees a
+    connector's registration triple directly: it receives a
+    ``connector_id`` string and recovers the product via
+    :func:`~meho_backplane.operations._lookup.parse_connector_id`, which
+    derives it from the first hyphen-segment of ``impl_id``
+    (``"vrli-rest" -> "vrli"``). When a connector registers a ``product``
+    that differs from that derived spelling, an operator target carrying
+    the natural (parser-derived) product token resolves a *different*
+    namespace than the registration — the silent product-namespace
+    mismatch that shadowed :class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`
+    behind an auto-shim in the v0.16.0 dogfood.
+
+    This is **advisory only** — it logs and returns; it never raises. A
+    boot-time raise would crash :func:`_eager_import_connectors` for the
+    five sanctioned ``_PRODUCT_SPLITS`` legacy connectors
+    (``sddc-manager`` / ``vcf-automation`` / ``vcf-fleet`` /
+    ``vcf-operations`` / ``hetzner-robot``), every one of which carries a
+    deliberate long↔short divergence bridged by ``dispatch_product`` /
+    migration 0038 / ``PRODUCT_ALIASES``. Realigning that family and
+    promoting this check to a hard-fail is **Initiative #1810**'s job;
+    until then those five WARN on every boot, pointing operators at the
+    tracking Initiative.
+
+    The wildcard / v1-compat row ``(product, "", "")`` is skipped: an
+    empty ``version`` / ``impl_id`` renders a parser-incompatible
+    ``connector_id`` (``"-"``) that has no derived product to compare,
+    and the padding row is a resolver-internal detail, never an
+    operator-addressable connector.
+
+    ``parse_connector_id`` is imported call-locally to keep the
+    ``connectors.registry`` -> ``operations._lookup`` edge off module
+    import time — ``_lookup`` already imports :func:`all_connectors_v2`
+    from this module, so a module-level import here would close a cycle.
+    """
+    if not version or not impl_id:
+        return
+    from meho_backplane.operations._lookup import parse_connector_id
+
+    connector_id = f"{impl_id}-{version}"
+    derived_product = parse_connector_id(connector_id)[0]
+    if derived_product == product:
+        return
+    _log.warning(
+        "connector_product_impl_id_divergence",
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        cls=cls.__name__,
+        derived_product=derived_product,
+        connector_id=connector_id,
+        message=(
+            f"connector {cls.__name__} registers product={product!r} but "
+            f"connector_id {connector_id!r} parses to product "
+            f"{derived_product!r}; an operator target with "
+            f"product={derived_product!r} (the dispatch-canonical token "
+            f"the connector listing emits) resolves a different namespace "
+            f"than this registration. Align product to {derived_product!r} "
+            f"or rename impl_id so it derives {product!r}. Family "
+            f"realignment + promotion of this check to a hard error is "
+            f"tracked under Initiative #1810."
+        ),
     )
 
 

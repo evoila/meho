@@ -16967,9 +16967,9 @@
               "vault",
               "vcf-automation",
               "vcf-fleet",
-              "vcf-logs",
               "vcf-operations",
-              "vmware"
+              "vmware",
+              "vrli"
             ],
             "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },

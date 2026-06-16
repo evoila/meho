@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+import structlog.testing
 
 from meho_backplane.connectors import (
     Connector,
@@ -27,7 +28,37 @@ from meho_backplane.connectors import (
     register_connector,
     register_connector_v2,
 )
+from meho_backplane.connectors import registry as registry_module
 from meho_backplane.connectors.registry import clear_registry, registered_product_tokens
+
+
+def _private_log_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> structlog.testing.LogCapture:
+    """Bind an xdist-safe private LogCapture onto ``registry._log``.
+
+    Mirrors the pattern in :mod:`tests.test_connector_registration` (#1254):
+    :func:`structlog.testing.capture_logs` swaps the *global* processor
+    list, which a concurrent :func:`structlog.configure` (lifespan boot /
+    observability fixtures) can race so the divergence WARN lands on the
+    real (cached) logger's stdout chain instead of the capture list. The
+    private-logger pattern is process-local, contextvar-free, and
+    auto-restored on teardown.
+    """
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(
+        structlog.PrintLogger(),
+        processors=[capture],
+    )
+    monkeypatch.setattr(registry_module, "_log", private_log)
+    return capture
+
+
+def _divergence_events(
+    capture: structlog.testing.LogCapture,
+) -> list[dict[str, Any]]:
+    return [e for e in capture.entries if e.get("event") == "connector_product_impl_id_divergence"]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -217,6 +248,192 @@ def test_register_v2_keyword_only_arguments() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Product↔impl_id round-trip invariant — G0.26-T4 (#1798)
+#
+# register_connector_v2 logs a WARN (never raises) when the declared
+# product does not equal the product parse_connector_id derives from the
+# connector_id. The check must NOT crash _eager_import_connectors, so the
+# five sanctioned _PRODUCT_SPLITS legacy connectors WARN at boot rather
+# than fail (their realignment is Initiative #1810). After the vRLI
+# alignment, vRLI no longer warns.
+# ---------------------------------------------------------------------------
+
+
+def test_register_v2_warns_on_divergent_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registration whose product != parser-derived product emits a WARN.
+
+    ``product="vcf-logs"`` with ``impl_id="vrli-rest"`` parses to
+    ``"vrli"`` — the historical split shape that shadowed VcfLogsConnector
+    behind an auto-shim. The WARN names both spellings and points at the
+    follow-up Initiative; the registration still succeeds (advisory, not
+    a hard fail).
+    """
+    capture = _private_log_capture(monkeypatch)
+
+    register_connector_v2(
+        product="vcf-logs",
+        version="9.0",
+        impl_id="vrli-rest",
+        cls=_FakeConnector,
+    )
+
+    # The registration succeeded despite the divergence.
+    assert ("vcf-logs", "9.0", "vrli-rest") in all_connectors_v2()
+
+    divergence = _divergence_events(capture)
+    assert len(divergence) == 1, f"expected exactly one divergence WARN; got {capture.entries!r}"
+    entry = divergence[0]
+    assert entry["log_level"] == "warning"
+    assert entry["product"] == "vcf-logs"
+    assert entry["derived_product"] == "vrli"
+    assert entry["impl_id"] == "vrli-rest"
+    # The message points operators at the family-realignment Initiative.
+    assert "#1810" in entry["message"]
+
+
+def test_register_v2_silent_on_aligned_product(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registration whose product round-trips parse_connector_id emits no WARN.
+
+    ``product="vmware"`` with ``impl_id="vmware-rest"`` parses back to
+    ``"vmware"`` — the aligned shape (and the shape vRLI now takes under
+    ``product="vrli"`` / ``impl_id="vrli-rest"``). No divergence event.
+    """
+    capture = _private_log_capture(monkeypatch)
+
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeConnector,
+    )
+
+    assert _divergence_events(capture) == []
+
+
+def test_register_v2_silent_on_aligned_single_segment_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-segment impl_id (``vault`` / ``vault``) round-trips and is silent."""
+    capture = _private_log_capture(monkeypatch)
+
+    register_connector_v2(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        cls=_FakeConnector,
+    )
+
+    assert _divergence_events(capture) == []
+
+
+def test_register_v2_wildcard_row_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``(product, "", "")`` wildcard / v1-compat row never warns.
+
+    An empty version/impl_id renders a parser-incompatible connector_id
+    with no derived product to compare; the check skips it so the dual
+    registration pattern (versioned + wildcard) some connectors use does
+    not emit a spurious divergence on the wildcard leg.
+    """
+    capture = _private_log_capture(monkeypatch)
+
+    register_connector_v2(
+        product="vcf-logs",
+        version="",
+        impl_id="",
+        cls=_FakeConnector,
+    )
+
+    assert _divergence_events(capture) == []
+
+
+def test_register_v2_vrli_alignment_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real VcfLogsConnector, aligned to product=\"vrli\", no longer warns.
+
+    Direct regression pin for the vRLI half of #1798: registering the
+    shipped connector under its (now canonical) triple must be silent,
+    proving the divergence the WARN catches is gone for vRLI.
+    """
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+
+    capture = _private_log_capture(monkeypatch)
+
+    register_connector_v2(
+        product=VcfLogsConnector.product,
+        version=VcfLogsConnector.version,
+        impl_id=VcfLogsConnector.impl_id,
+        cls=VcfLogsConnector,
+    )
+
+    assert VcfLogsConnector.product == "vrli"
+    assert _divergence_events(capture) == []
+
+
+def test_sanctioned_splits_warn_but_register_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The five sanctioned _PRODUCT_SPLITS connectors WARN yet still register.
+
+    The relaxed criterion: the invariant must NOT raise, otherwise the
+    live-validated sanctioned splits (sddc-manager / vcf-automation /
+    vcf-fleet / vcf-operations / hetzner-robot) would fail at
+    ``register_connector_v2`` → :func:`_eager_import_connectors` →
+    regress five shipped connectors at boot. Each real split class is
+    registered here under its real triple inside a log capture: every one
+    WARNs, none raises, and every one lands in the registry. vRLI, now
+    aligned to ``product="vrli"``, does **not** warn.
+
+    Registering the real classes directly (rather than calling
+    :func:`_eager_import_connectors`, which is a ``sys.modules``-cached
+    no-op after the session-scoped force-import in conftest) makes the
+    assertion robust against import-history coupling.
+    """
+    from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
+    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
+    from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
+    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+    from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
+
+    split_classes = [
+        SddcManagerConnector,
+        VcfAutomationConnector,
+        VcfFleetConnector,
+        VcfOperationsConnector,
+        HetznerRobotConnector,
+    ]
+
+    capture = _private_log_capture(monkeypatch)
+
+    for cls in (*split_classes, VcfLogsConnector):
+        # Must not raise — WARN-not-fail is the whole contract.
+        register_connector_v2(
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
+            cls=cls,
+        )
+
+    # Every class registered despite any divergence WARN.
+    snapshot = all_connectors_v2()
+    for cls in (*split_classes, VcfLogsConnector):
+        assert snapshot[(cls.product, cls.version, cls.impl_id)] is cls
+
+    divergent_products = {e["product"] for e in _divergence_events(capture)}
+    # The five sanctioned legacy splits warn; vRLI (now product="vrli")
+    # does not.
+    assert divergent_products == {
+        "sddc-manager",
+        "vcf-automation",
+        "vcf-fleet",
+        "vcf-operations",
+        "hetzner-robot",
+    }, f"unexpected divergence set: {divergent_products!r}"
+    assert VcfLogsConnector.product == "vrli"
+    assert "vcf-logs" not in divergent_products
+    assert "vrli" not in divergent_products
+
+
+# ---------------------------------------------------------------------------
 # v1 backward-compat bridge — register_connector populates both tables
 # ---------------------------------------------------------------------------
 
@@ -380,16 +597,19 @@ def test_vcf_operations_connector_registered_under_v2_triple() -> None:
 
 
 def test_vcf_logs_connector_registered_under_v2_triple() -> None:
-    """VcfLogsConnector package registers under (vcf-logs, 9.0, vrli-rest).
+    """VcfLogsConnector package registers under (vrli, 9.0, vrli-rest).
 
-    Same idempotent-registration pattern as the SDDC Manager / Harbor /
-    VCF Automation tests above.
+    G0.26-T4 (#1798) aligned the registry product to the
+    dispatch-canonical ``"vrli"`` token (round-trips parse_connector_id),
+    retiring the historical ``"vcf-logs"`` split. Same idempotent-
+    registration pattern as the SDDC Manager / Harbor / VCF Automation
+    tests above.
     """
     from meho_backplane.connectors.vcf_logs import VcfLogsConnector
 
     _ensure_registered_v2(VcfLogsConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-logs", "9.0", "vrli-rest")
+    key = ("vrli", "9.0", "vrli-rest")
     assert key in snapshot
     assert snapshot[key] is VcfLogsConnector
 

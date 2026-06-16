@@ -5,8 +5,14 @@
 
 Importing this package registers :class:`VcfLogsConnector` against the
 v2 connector registry under
-``(product="vcf-logs", version="9.0", impl_id="vrli-rest")``. The
-chassis lifespan calls
+``(product="vrli", version="9.0", impl_id="vrli-rest")``. The
+``product`` is the dispatch-canonical token
+:func:`~meho_backplane.operations._lookup.parse_connector_id` derives
+from the ``vrli-rest`` impl_id, so the registration round-trips and an
+operator target carrying the natural ``product="vrli"`` token resolves
+this connector rather than a shadowing auto-shim (G0.26-T4 #1798
+retired the historical ``product="vcf-logs"`` split). The chassis
+lifespan calls
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 which walks every ``connectors/<product>/`` subpackage at startup, so
 the registration lands before any dispatch can occur.
@@ -14,7 +20,7 @@ the registration lands before any dispatch can occur.
 The v1 :func:`~meho_backplane.connectors.registry.register_connector`
 entry point is deliberately **not** called. The connector advertises an
 explicit ``(version="9.0", impl_id="vrli-rest")`` key; the v1 entry
-would land as ``("vcf-logs", "", "")`` and confuse
+would land as ``("vrli", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s
 tie-break ladder. Same pattern :mod:`meho_backplane.connectors.nsx` /
 :mod:`meho_backplane.connectors.vcf_automation` established.
@@ -47,7 +53,7 @@ from meho_backplane.connectors.vcf_logs.session import (
 )
 
 register_connector_v2(
-    product="vcf-logs",
+    product="vrli",
     version="9.0",
     impl_id="vrli-rest",
     cls=VcfLogsConnector,
@@ -60,7 +66,7 @@ register_connector_v2(
 # with ``no_connector``. The versioned entry above always wins when
 # both are present (resolver tie-break step 1).
 register_connector_v2(
-    product="vcf-logs",
+    product="vrli",
     version="",
     impl_id="",
     cls=VcfLogsConnector,

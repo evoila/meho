@@ -262,3 +262,138 @@ def test_base_template_uses_compiled_tailwind_css(ui_env: Environment) -> None:
     """
     html = ui_env.get_template("base.html").render(ready=True)
     assert re.search(r'href="/ui/static/dist/tailwind\.css"', html) is not None
+
+
+# ---------------------------------------------------------------------------
+# Operator-console modal dismissal (G0.26-T3 #1803)
+#
+# Every operator modal is an HTMX-injected native ``<dialog class="modal">``
+# whose close controls (button, ESC, backdrop ``form[method="dialog"]``) route
+# through ``HTMLDialogElement.close()``. ``.close()`` clears ``[open]`` but NOT
+# CSS classes, so a dialog shown via DaisyUI's ``modal-open`` modifier stayed
+# visible after every close path and the operator had to reload the page. The
+# fix opens the injected dialogs via ``showModal()`` after the swap (a shared
+# ``app/modal-dialogs.js`` controller) and drops the static ``modal-open`` so
+# ``.close()`` fully dismisses; the same controller strips any lingering
+# ``modal-open`` on the native ``close`` event as a belt-and-suspenders.
+#
+# The console has no browser test harness (Playwright is not wired here), so
+# these server-side assertions pin the load-bearing invariants: (a) no
+# HTMX-injected ``<dialog>`` ships a static ``modal-open`` that ``.close()``
+# cannot clear, and (b) the shared open/close controller is present and wired
+# into every page via ``base.html``.
+# ---------------------------------------------------------------------------
+
+#: Every fragment that injects a native ``<dialog class="modal">`` via an HTMX
+#: swap. The close path on each routes through ``.close()`` (button / ESC /
+#: backdrop), so none may ship a static ``modal-open`` (#1803). The KB editor
+#: (``kb/_editor_modal.html``) and the memory delete-confirm dialog
+#: (``memory/detail.html``) already use ``class="modal"`` + ``showModal()`` and
+#: are the reference pattern; the runbooks confirm dialogs are Alpine ``<div>``
+#: modals (``x-show`` toggles ``modal-open`` dynamically), not native
+#: ``<dialog>``, so they are intentionally excluded.
+_INJECTED_DIALOG_TEMPLATES = (
+    "approvals/_panel.html",
+    "approvals/_modal.html",
+    "approvals/_decided.html",
+    "memory/_create_modal.html",
+    "memory/_promote_modal.html",
+    "connectors/_create_modal.html",
+    "connectors/_edit_modal.html",
+    "connectors/_delete_modal.html",
+)
+
+#: Re-find every opening ``<dialog ...>`` tag in a template source. Matches the
+#: tag up to the first ``>`` so the assertion inspects the element's own
+#: attributes, not the dialog's inner markup.
+_DIALOG_OPEN_TAG_RE = re.compile(r"<dialog\b[^>]*>", re.IGNORECASE)
+
+#: Jinja comment blocks (``{# ... #}`` and ``{#- ... -#}``). Stripped before
+#: scanning for ``<dialog>`` tags so prose like "the inserted ``<dialog>``" in a
+#: template docstring is not mistaken for a real element.
+_JINJA_COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
+
+
+@pytest.mark.parametrize("template_name", _INJECTED_DIALOG_TEMPLATES)
+def test_injected_dialog_has_no_static_modal_open(template_name: str) -> None:
+    """No HTMX-injected ``<dialog>`` ships a static ``modal-open`` (#1803).
+
+    A native ``.close()`` clears ``[open]`` but not the ``modal-open`` class,
+    so a statically-classed dialog never dismisses. Asserting on the raw
+    template source (Jinja comments stripped) keeps the guard independent of
+    the per-modal render context.
+    """
+    source = _JINJA_COMMENT_RE.sub(
+        "", (templates_dir() / template_name).read_text(encoding="utf-8")
+    )
+    open_tags = _DIALOG_OPEN_TAG_RE.findall(source)
+    assert open_tags, f"{template_name} renders no <dialog> element"
+    for tag in open_tags:
+        assert "modal-open" not in tag, (
+            f"{template_name} ships a static modal-open on {tag!r}; "
+            "native .close() cannot clear it, so the modal never dismisses"
+        )
+        # Sanity: it is still a DaisyUI modal dialog (just opened via JS now).
+        assert "modal" in tag, f"{template_name} dialog dropped the modal class"
+
+
+def test_modal_controller_script_strips_modal_open_on_close() -> None:
+    """The shared modal controller removes ``modal-open`` on the close event.
+
+    The native ``close`` event fires on every close path (button ``.close()``,
+    ESC, ``form[method="dialog"]`` submit) but does NOT bubble, so the listener
+    must be registered in the capture phase. This is the mechanism that makes
+    every operator modal dismiss (#1803).
+    """
+    script = (static_src_dir() / "app" / "modal-dialogs.js").read_text(encoding="utf-8")
+    # A delegated ``close`` listener in the capture phase (3rd arg truthy).
+    assert re.search(r'addEventListener\(\s*"close"', script), (
+        "modal controller must listen for the native dialog close event"
+    )
+    assert re.search(r'addEventListener\(\s*"close"[\s\S]*?,\s*true\s*,?\s*\)', script), (
+        "the close listener must use the capture phase (close does not bubble)"
+    )
+    assert 'classList.remove("modal-open")' in script, (
+        "the close handler must strip the modal-open class so .close() dismisses"
+    )
+
+
+def test_modal_controller_script_opens_injected_dialog_on_swap() -> None:
+    """The shared controller opens swapped-in dialogs via ``showModal()`` (#1803).
+
+    Dropping the static ``modal-open`` means the open path now relies on
+    ``showModal()`` (sets ``[open]`` and enables native ESC), driven off the
+    ``htmx:afterSwap`` event the modal fragments arrive on.
+    """
+    script = (static_src_dir() / "app" / "modal-dialogs.js").read_text(encoding="utf-8")
+    assert "htmx:afterSwap" in script, (
+        "the controller must open injected dialogs on the htmx swap event"
+    )
+    assert "showModal()" in script, (
+        "the controller must open injected dialogs via the native showModal()"
+    )
+
+
+def test_base_template_loads_modal_controller_outside_component_scripts() -> None:
+    """``base.html`` ships the modal controller on every page (#1803).
+
+    The script must load OUTSIDE the overridable ``component_scripts`` block so
+    a surface that overrides that block cannot accidentally drop modal
+    dismissal -- the same posture the app-shell approvals-bell script uses.
+    """
+    source = (templates_dir() / "base.html").read_text(encoding="utf-8")
+    assert '<script src="/ui/static/src/app/modal-dialogs.js" defer></script>' in source, (
+        "base.html must load the shared modal controller"
+    )
+    script_pos = source.index("/ui/static/src/app/modal-dialogs.js")
+    block_pos = source.index("{% block component_scripts %}")
+    assert script_pos < block_pos, (
+        "the modal controller must load before (outside) the overridable "
+        "component_scripts block so every page ships it"
+    )
+
+
+def test_base_template_modal_controller_renders_in_html(ui_env: Environment) -> None:
+    """The controller ``<script>`` survives a real render of ``base.html``."""
+    html = ui_env.get_template("base.html").render(ready=True)
+    assert '<script src="/ui/static/src/app/modal-dialogs.js" defer></script>' in html

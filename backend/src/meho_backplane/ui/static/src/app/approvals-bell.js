@@ -38,8 +38,9 @@
 document.addEventListener("alpine:init", () => {
   Alpine.data("approvalsBell", () => ({
     // Open the modal: load the pending-requests panel into the modal
-    // container. HTMX owns the swap; the panel fragment is ``modal-open``
-    // so it shows immediately.
+    // container. HTMX owns the swap; the shared modal controller
+    // (``app/modal-dialogs.js``) opens the swapped-in ``<dialog>`` via
+    // ``showModal()`` on ``htmx:afterSwap`` (#1803).
     open: false,
 
     // Ask the badge target to re-fetch its authoritative count. Dispatched
@@ -76,6 +77,9 @@ document.addEventListener("alpine:init", () => {
 
     // A decision (approve/deny) completed in the modal. Close the dialog
     // and re-fetch the count so the badge decrements without a reload.
+    // ``.close()`` fires the native ``close`` event the shared modal
+    // controller listens for, which strips any ``modal-open`` class so
+    // the dialog fully dismisses (#1803).
     onDecided() {
       const modal = document.getElementById("meho-approvals-modal");
       if (modal && typeof modal.close === "function") {

@@ -54,9 +54,8 @@
       {# T2 #878: "+" button opens the HTMX-loaded create modal. The
          button targets ``#memory-modal-container`` so the modal slots
          into a dedicated DOM mount point rather than the cards grid;
-         the inserted ``<dialog>`` opens via its ``modal-open`` class
-         (DaisyUI v5 convention) so no client-side ``showModal()``
-         call is required. #}
+         the shared app-shell modal controller opens the inserted
+         ``<dialog>`` via ``showModal()`` on ``htmx:afterSwap`` (#1803). #}
       <button
         type="button"
         class="btn btn-sm btn-primary"

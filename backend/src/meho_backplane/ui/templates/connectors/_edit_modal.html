@@ -8,8 +8,8 @@
   button's ``hx-get`` to ``/ui/connectors/<name>/edit``. Fields are
   pre-populated server-side from the resolved target.
 
-  Submit contract: the form ``hx-patch``es to ``/ui/connectors/<name>``
-  targeting itself.
+  Submit contract: the form ``hx-patch``es to ``/ui/connectors/<name>``,
+  swapping ``#connectors-modal-container`` (``hx-swap="innerHTML"``).
     * Success -> 204 + ``HX-Redirect: /ui/connectors`` (back to the
       list with the edited row).
     * Validation failure -> 422 + this modal re-rendered with
@@ -20,17 +20,25 @@
   addresses the target by the path segment, not the form body. CSRF
   posture matches the create modal.
 -#}
-<dialog id="connectors-edit-modal" class="modal modal-open">
+<dialog id="connectors-edit-modal" class="modal">
   <div class="modal-box max-w-2xl">
     <h3 class="font-semibold text-lg" id="connectors-edit-modal-title">
       Edit target <span class="font-mono">{{ target.name }}</span>
     </h3>
 
+    {#- On a 422 the route returns this whole ``<dialog>`` re-rendered with
+        per-field errors. Target the modal container (not the form) and swap
+        its contents, so the re-render replaces the dialog the same way the
+        initial open did -- rather than nesting a fresh dialog inside the form
+        slot, which strands a duplicate-id ``<dialog>`` inside the open one.
+        The shared modal controller re-opens the swapped-in dialog via
+        ``showModal()`` (#1803). The success path returns 204 + ``HX-Redirect``
+        and swaps nothing. -#}
     <form
       id="connectors-edit-form"
       hx-patch="/ui/connectors/{{ target.name | urlencode }}"
-      hx-target="this"
-      hx-swap="outerHTML"
+      hx-target="#connectors-modal-container"
+      hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]"
       class="space-y-3 py-2"
       aria-labelledby="connectors-edit-modal-title"

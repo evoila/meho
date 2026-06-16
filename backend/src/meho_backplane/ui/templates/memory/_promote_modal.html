@@ -5,9 +5,10 @@
   HTMX-loaded scope-promotion modal for the Memory detail surface
   (Initiative #341 Task #878). Loaded into ``#memory-modal-container``
   on the detail page by the "Promote to broader scope" button's
-  ``hx-get`` to ``/ui/memory/<scope>/<slug>/promote``. The inserted
-  dialog opens immediately because ``class="modal modal-open"`` is
-  set on the ``<dialog>`` element (DaisyUI v5 convention).
+  ``hx-get`` to ``/ui/memory/<scope>/<slug>/promote``. The shared
+  app-shell modal controller opens the inserted ``<dialog class="modal">``
+  via ``showModal()`` on ``htmx:afterSwap`` so it shows without an extra
+  click and dismisses on close button / ESC / backdrop (#1803).
 
   Form posts to ``POST /ui/memory/<scope>/<slug>/promote`` which on
   success returns 204 with ``HX-Redirect: /ui/memory/<target-scope>/<slug>``
@@ -29,7 +30,7 @@
   qualify for the chosen target lands a 403 with detail
   ``insufficient_promotion_authority``.
 -#}
-<dialog id="memory-promote-modal" class="modal modal-open">
+<dialog id="memory-promote-modal" class="modal">
   <div class="modal-box">
     <h3 class="font-semibold text-lg" id="memory-promote-modal-title">
       Promote memory to broader scope

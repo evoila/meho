@@ -18,7 +18,8 @@ Each builder owns one ``error_code`` from the contract documented in
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
-``connector_tls_verify_failed`` / ``connector_error``.
+``connector_auth_failed`` / ``connector_tls_verify_failed`` /
+``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -40,6 +41,7 @@ __all__ = [
     "result_awaiting_approval",
     "result_composite_l2_disabled",
     "result_composite_l2_missing",
+    "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
     "result_connector_http_422",
@@ -801,6 +803,116 @@ def result_connector_http_422(
         "http_status": 422,
         "upstream_message": upstream_message,
         "validation_errors": validation_errors,
+    }
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+#: The non-2xx statuses the dispatcher classifies as an auth/session
+#: failure rather than the generic ``connector_error``. ``401`` is the
+#: load-bearing, connector-agnostic case: the hand-coded session
+#: connectors (NSX, vcf_logs, vmware_rest, ...) already retry once on a
+#: 401 internally (``_get_json_with_session_retry``), so a 401 that
+#: reaches the dispatcher means re-login *also* failed -- the credential
+#: is missing / invalid / expired in Vault, or the target's
+#: ``auth_model`` is wrong. ``440`` is vRLI's own session-expiry status
+#: (the literal code the operator saw flattened to ``connector_error
+#: (440)`` on the #1798 dispatch); the team opted to recognise it here so
+#: the appliance status that surfaced the gap maps to the same actionable
+#: class. Every other non-2xx (404, 5xx, 429, ...) is deliberately
+#: excluded and falls through to ``connector_error`` unchanged -- 429
+#: (rate-limit) is a separate deliberate follow-up, not an auth failure.
+_AUTH_FAILED_STATUSES: frozenset[int] = frozenset({401, 440})
+
+
+def is_auth_failed_status(status_code: int) -> bool:
+    """Whether *status_code* is one the dispatcher treats as an auth failure.
+
+    The single source of truth for the recognised set
+    (:data:`_AUTH_FAILED_STATUSES`) so the dispatcher's narrowing arm and
+    this module agree on which statuses siphon into
+    :func:`result_connector_auth_failed`.
+    """
+    return status_code in _AUTH_FAILED_STATUSES
+
+
+def result_connector_auth_failed(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    target: Any,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector raised an upstream **auth/session failure** on dispatch.
+
+    T5 (#1804) of the G0.26 v0.16.0 dogfood-hardening Initiative (#1800),
+    the auth-class sibling of :func:`result_connector_http_403` (#1649)
+    and :func:`result_connector_tls_verify_failed` (#1782). A dispatch
+    whose backing credential is missing / invalid / expired -- or whose
+    target ``auth_model`` is wrong -- surfaces as an
+    :exc:`httpx.HTTPStatusError` with an auth-class status
+    (:data:`_AUTH_FAILED_STATUSES`: ``401``, plus vRLI's ``440``).
+
+    ``401`` is the load-bearing case and is connector-agnostic. The
+    hand-coded session connectors already retry once on a 401 internally
+    (``_get_json_with_session_retry``), so a 401 that reaches the
+    dispatcher means **re-login also failed** -- not a transient blip but
+    a credential / ``auth_model`` problem the operator must fix. Routing
+    it through :func:`result_connector_error` flattened that into an
+    opaque ``connector_error: HTTPStatusError`` with the cause buried in
+    ``extras["exception_message"]``, which is exactly the diagnosability
+    gap that made the #1798 vRLI dispatch (seen as ``connector_error
+    (440)``) look like a stub-auth problem.
+
+    This builder names the **host** (read from ``target.host`` -- the
+    operator's own configured value, so not an info-leak per
+    ``docs/codebase/error-message-shape.md``, the same reasoning as the
+    TLS builder and the ``/ui/auth/login`` 503 naming the operator's env
+    vars), the **status**, the likely **cause** (session/credential
+    expiry or a misconfigured ``auth_model``), and the **remediation**
+    (verify the target's Vault credential and its ``auth_model``). The
+    upstream body message (when present) tails the operator-facing
+    string. ``target`` is typed :class:`typing.Any` because the
+    dispatcher threads the live ORM/duck-typed target through; only
+    ``.host`` is read, with a ``getattr`` guard so a target shape without
+    it degrades to a bare host label rather than raising inside the
+    never-raises error path.
+
+    ``extras`` carries the machine-usable fields an agent can branch on
+    without re-parsing the transport error: ``http_status`` (the actual
+    auth-class status the upstream returned), ``host``, and the upstream
+    ``upstream_message`` (the body's ``message`` when JSON, else capped
+    raw text, ``None`` when the body was empty -- shared with the 403/422
+    builders via :func:`_http_upstream_message`).
+    """
+    response = exc.response
+    status_code = response.status_code
+    upstream_message = _http_upstream_message(response)
+    host = getattr(target, "host", None) or "the target host"
+    summary = (
+        f"connector_auth_failed: the upstream returned an auth/session "
+        f"failure (HTTP {status_code}) for {host}. The connector reached the "
+        f"host but its credential was rejected -- for the session connectors "
+        f"this is a re-login failure (they already retry once on a 401), so "
+        f"the credential is most likely missing, invalid, or expired in "
+        f"Vault, or the target's auth_model is wrong. Verify the target's "
+        f"Vault credential and its auth_model against what the connector "
+        f"expects, then retry. See docs/architecture/connector-auth.md for "
+        f"the connector auth contract and "
+        f"docs/codebase/error-message-shape.md for the dispatch error "
+        f"convention."
+    )
+    if upstream_message is not None:
+        summary = f"{summary} Upstream said: {upstream_message}"
+    extras: dict[str, Any] = {
+        "error_code": "connector_auth_failed",
+        "http_status": status_code,
+        "host": host,
+        "upstream_message": upstream_message,
     }
     return OperationResult(
         status="error",

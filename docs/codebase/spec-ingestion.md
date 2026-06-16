@@ -755,7 +755,7 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
   `<p>` is the **registry** product (the spelling the connector class
-  registers under, e.g. `vcf-logs`), not the parser-derived short one.
+  registers under, e.g. `sddc-manager`), not the parser-derived short one.
   Rationale calls out the missing catalog entry so the operator knows
   they need to source the OpenAPI spec themselves. Manual mode is the
   same path G0.7-T5 already supports for one-off / not-yet-curated specs
@@ -764,12 +764,12 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
   supplied `--product` — `check_version_covered_by_registered_class`
   (the version-coverage pre-flight) and `ensure_connector_class_registered`
   — so the registry product is what lets them find the real
-  `VcfLogsConnector`; the short `vrli` would miss it, synthesise a
-  redundant `AutoShim_vrli_*`, and make the coverage pre-flight vacuous.
+  `SddcManagerConnector`; the short `sddc` would miss it, synthesise a
+  redundant `AutoShim_sddc_*`, and make the coverage pre-flight vacuous.
   Register-time row reconciliation then persists the rows under the
   dispatch product regardless (see "Product-slug reconciliation" below),
   so the verb still round-trips to a dispatchable ingest. (Emitting the
-  registry product while the row advertised `product="vrli"` *was* the
+  registry product while the row advertised `product="sddc"` *was* the
   claude-rdc-hetzner-dc#1136 false-success **before** that reconciliation
   existed — the reconciliation is what closes it, not switching the verb
   to the short product.)
@@ -787,13 +787,16 @@ reconciliation is what keeps the resulting connector dispatchable.
 
 #### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
 
-The VCF-family connectors register their class under a *long* product
-(`VcfLogsConnector.product = "vcf-logs"`) while the dispatch/query
-surface derives a *short* product from the connector_id
-(`parse_connector_id("vrli-rest-9.0") -> "vrli"`) — the same long↔short
-split SDDC carries (`sddc-manager` vs `sddc`), and the six splits are
+The remaining VCF-family connectors register their class under a *long*
+product (`SddcManagerConnector.product = "sddc-manager"`) while the
+dispatch/query surface derives a *short* product from the connector_id
+(`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the registry and
+dispatch spellings diverge. The five splits are
 `hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
-`vcf-fleet/fleet`, `vcf-logs/vrli`, `vcf-operations/vrops`.
+`vcf-fleet/fleet`, `vcf-operations/vrops`. vRLI (`vrli-rest`) used to
+be a sixth split (`vcf-logs/vrli`); #1798 realigned it to a single
+canonical `product="vrli"` so it round-trips without reconciliation,
+and realigning the remaining five is deferred to Initiative #1810.
 
 A manual `--spec` ingest persists `endpoint_descriptor` /
 `operation_group` rows keyed on the **operator-supplied** product, but
@@ -811,12 +814,12 @@ product to the dispatch-canonical spelling
 pipeline's grouping pass keys on the same spelling so descriptors and
 groups agree. The version-coverage pre-flight and the auto-shim
 registration deliberately stay on the **supplied** (registry) product
-so the coverage check finds the real `VcfLogsConnector` class and no
+so the coverage check finds the real `SddcManagerConnector` class and no
 redundant shim is synthesised. For aligned connectors
 (`vmware`/`vmware-rest`) the normalisation is a no-op. Regression
 coverage:
 `tests/test_operations_register_ingested.py::test_ingest_under_registry_product_persists_dispatchable_rows`
-(parametrised over all six splits) and
+(parametrised over all five splits) and
 `tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`
 (the verb round-trip).
 
@@ -1428,7 +1431,7 @@ Both delegate to `ReviewService.delete_connector`
 * **Zero-op stubs are registry-only deletes.** No rows anywhere + a
   matching auto-shim → pop + audit + 204. The registry match uses the
   parsed-natural-key round-trip, so the VCF-family long↔short product
-  splits resolve (`vrli` rows ↔ `vcf-logs`-registered shim).
+  splits resolve (`sddc` rows ↔ `sddc-manager`-registered shim).
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.

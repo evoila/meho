@@ -6,9 +6,13 @@
 `VcfLogsConnector`, an `HttpConnector` subclass that authenticates
 against vRLI 9.x with a **session-token Bearer** flow. The package
 registers itself under the v2 connector registry triple
-`(product="vcf-logs", version="9.0", impl_id="vrli-rest")` at import
+`(product="vrli", version="9.0", impl_id="vrli-rest")` at import
 time; the chassis lifespan's `_eager_import_connectors` discovers it
-during startup.
+during startup. The registered `product` is the dispatch-canonical
+token `parse_connector_id("vrli-rest-9.0")` derives from the
+`vrli-rest` impl_id, so a target carrying the natural `product="vrli"`
+spelling resolves this hand-rolled connector rather than an auto-shim
+(#1798).
 
 This is one of the four VCF management-plane connectors landing under
 Initiative #369 (G3.6). The wave is generic-ingested via G0.7 — this
@@ -116,7 +120,7 @@ Response shape (mirroring the wrapper's probe output):
   "version": "9.0.0",
   "build": "21761695",
   "vendor": "vmware",
-  "product": "vcf-logs",
+  "product": "vrli",
   "extras": {
     "release_name": "VMware Aria Operations for Logs 9.0",
     "version_full": "9.0.0.0.21761695",

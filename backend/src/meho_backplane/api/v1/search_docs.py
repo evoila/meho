@@ -231,9 +231,20 @@ async def _resolve_collection_or_http_error(
             },
         ) from exc
     except CollectionForbiddenError as exc:
+        # Structured 403 (not a bare string) so a client / the CLI status
+        # renderer can name the *missing capability* and the *identity it
+        # checked* — the actionable diagnostic that turns an opaque "not
+        # entitled" into "grant meho-docs:<key> to <sub>/<tenant>" (T2 #1802).
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
+            detail={
+                "error": "not_entitled",
+                "collection": exc.collection_key,
+                "required_capability": exc.required_capability,
+                "operator_sub": exc.operator_sub,
+                "tenant_id": exc.tenant_id,
+                "message": str(exc),
+            },
         ) from exc
     except CollectionDisabledError as exc:
         raise HTTPException(
@@ -314,11 +325,14 @@ async def _run_fanout_or_http_error(
                 "Terminal rejection of an otherwise-resolvable collection, "
                 "in one of two forms (both 403, distinguished by the "
                 "``detail.error`` field): the tenant is not entitled to the "
-                "named collection -- it lacks the ``meho-docs:<collection>`` "
-                "capability even though it can see the add-on -- or the "
-                "collection has been ``disabled`` by an operator "
-                "(``detail.error='collection_disabled'``). Neither is "
-                "retryable: the collection exists but the principal cannot "
+                "named collection (``detail.error='not_entitled'`` -- it "
+                "lacks the ``meho-docs:<collection>`` capability even though "
+                "it can see the add-on; the structured detail names the "
+                "``required_capability`` and the ``operator_sub`` / "
+                "``tenant_id`` it checked so the operator can grant the "
+                "missing claim) -- or the collection has been ``disabled`` by "
+                "an operator (``detail.error='collection_disabled'``). Neither "
+                "is retryable: the collection exists but the principal cannot "
                 "search it, or an operator switched it off."
             ),
         },

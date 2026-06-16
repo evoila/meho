@@ -149,7 +149,12 @@ policies, defined once so they cannot drift per surface:
   gate still governs *visibility* (tool / template absence when the add-on
   isn't provisioned); this finer gate governs *which collections* an
   entitled tenant may query. A miss → `CollectionForbiddenError`, mapped to
-  403 / `-32602` (the 403-projected dispatcher path).
+  403 / `-32602` (the 403-projected dispatcher path). The error carries the
+  **missing capability** (`required_capability`) and the **identity it
+  checked** (`operator_sub` + `tenant_id`), so every surface renders an
+  *actionable* diagnostic — "identity `<sub>` (tenant `<id>`) is missing
+  capability `meho-docs:<key>`" — instead of an opaque denial (T2 #1802; see
+  the cross-surface diagnosability note below).
 - **Readiness** — a collection whose registry `status` is not `"ready"`
   → `CollectionNotReadyError`, mapped to 409 (REST) / `-32603` (MCP,
   server-side condition). The richer reachability *probe* is T6 (#1555);
@@ -427,6 +432,53 @@ just makes the op name canonical for `query_audit` filtering.
 - `meho_backplane.settings` — `corpus_url` / `corpus_audience` /
   `corpus_timeout_seconds` / `corpus_require_filters`
   (`CORPUS_*` env vars).
+
+## Cross-surface entitlement contract + diagnosability (T2 #1802)
+
+All three answerable surfaces — the REST route, the `search_docs` /
+`ask_docs` MCP tools, and the `/ui/corpus` BFF — gate on the **one** shared
+`resolve_entitled_ready_collection` check, which reads exactly two fields
+off the `Operator`: `tenant_id` (scopes the tenant-first resolve) and
+`capabilities` (holds `meho-docs:<key>`). The entitlement contract is
+**verified consistent** because all three build that `Operator` from the
+**same constructor** via `verify_jwt_for_audience` → the chassis JWT chain,
+which lifts `tenant_id` from `jwt_tenant_claim_name` and `capabilities` from
+`jwt_capabilities_claim_name` — identical claim derivation, no per-surface
+divergence. (The UI `UISessionContext.tenant_id` from the session row is
+used only for the page-header chip + `operator_sub` display; the
+entitlement path reconstructs a full token-derived `Operator` via
+`verify_access_token_with_refresh`, so the check never mixes a session-row
+`tenant_id` with token capabilities.)
+
+The **one deliberate divergence** is the *audience* each surface validates
+the token for: REST and the UI BFF both use `settings.keycloak_audience`
+(the HTTP-API audience), while MCP uses `mcp_resource_uri(settings)`
+(`<backplane_url>/mcp`). This is intentional and spec-driven (RFC 8707
+resource-scoped tokens), but it means a Keycloak realm that mints
+**per-audience** tokens can carry a different `meho-docs:*` claim set per
+audience — the reported asymmetry where the MCP tool succeeds while REST /
+the UI session 403 or render empty. That is a **Keycloak claim-mapper
+config gap, not a backend bug**: the fix is to attach the `meho-docs:<key>`
+capability claim to *every* audience the operator uses (see
+`deploy/values-examples/README.md` § "Docs-corpus entitlement claim
+(`meho-docs:*`) is per-audience"). The cross-surface invariant — same
+`(tenant_id, capabilities)` source contract, single deliberate audience
+divergence — is asserted by `tests/test_docs_entitlement_cross_surface.py`.
+
+Because the divergence is invisible without help, every surface now emits an
+**actionable** diagnostic instead of an opaque denial (T2 #1802):
+
+- **REST `POST /api/v1/search_docs`** — the not-entitled 403 is a structured
+  body `{"error": "not_entitled", "collection", "required_capability",
+  "operator_sub", "tenant_id", "message"}`.
+- **`/ui/corpus`** — the search 403 card surfaces the same `message`; and the
+  empty collection picker, when the catalogue holds a collection the
+  identity cannot see, names the concrete missing `meho-docs:<key>` +
+  `operator_sub` + `tenant_id` (distinct from the genuinely-unprovisioned
+  "no corpus exists" empty state).
+- **MCP `search_docs` / `ask_docs`** — the `-32602` message names the missing
+  capability + identity, and `error.data` carries
+  `{"reason": "not_entitled", "required_capability"}` for self-correction.
 
 ## Known issues / boundaries
 

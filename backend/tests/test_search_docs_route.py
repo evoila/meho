@@ -396,7 +396,9 @@ def test_not_entitled_to_collection_returns_403(client: TestClient) -> None:
 
     The base ``meho-docs`` capability authenticates the add-on; the
     per-collection entitlement is the finer gate that rejects the query.
-    The backend is never called.
+    The backend is never called. The 403 is a **structured** body naming the
+    missing capability + the identity it checked (T2 #1802) so an operator
+    can grant exactly that claim rather than guess at an opaque denial.
     """
     _seed_collection_sync()
     key = _make_rsa_keypair("kid-A")
@@ -418,7 +420,18 @@ def test_not_entitled_to_collection_returns_403(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 403
-    assert "entitled" in json.dumps(response.json()["detail"])
+    detail = response.json()["detail"]
+    # Structured diagnostic, not a bare string.
+    assert isinstance(detail, dict)
+    assert detail["error"] == "not_entitled"
+    assert detail["collection"] == "vmware"
+    assert detail["required_capability"] == "meho-docs:vmware"
+    assert detail["operator_sub"] == "op-nopriv"
+    # The tenant it checked is named (the DEFAULT_TENANT_ID the minter uses).
+    assert detail["tenant_id"]
+    # The human message names both the capability and the identity.
+    assert "meho-docs:vmware" in detail["message"]
+    assert "op-nopriv" in detail["message"]
     fake_corpus.assert_not_awaited()
 
 

@@ -162,7 +162,9 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     return operator
 
 
-async def _list_entitled_collections(operator: Operator) -> list[DocCollectionSummary]:
+async def _list_entitled_collections(
+    operator: Operator,
+) -> tuple[list[DocCollectionSummary], list[str]]:
     """List the doc collections *operator* is entitled to search.
 
     Mirrors the ``GET /api/v1/doc_collections`` catalogue query: reads
@@ -172,6 +174,16 @@ async def _list_entitled_collections(operator: Operator) -> list[DocCollectionSu
     ``meho-docs:<collection_key>`` for -- the same per-collection
     entitlement ``search_docs`` enforces, so every listed key is one the
     search path will accept. An unprovisioned tenant gets an empty list.
+
+    Returns ``(entitled_summaries, unentitled_keys)``. ``unentitled_keys``
+    is the sorted set of visible collection keys the operator is **not**
+    entitled to (no ``meho-docs:<key>`` capability). It is the signal the
+    empty-state diagnostic uses to tell a "no docs corpus exists at all"
+    tenant apart from a "a corpus exists but your identity is missing the
+    capability" one — the diagnosability gap T2 (#1802) closes. The keys
+    are never rendered as a picker (an un-entitled collection stays hidden
+    from the search surface); they only name a concrete missing capability
+    in the diagnostic.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -191,13 +203,57 @@ async def _list_entitled_collections(operator: Operator) -> list[DocCollectionSu
         if existing is None or row.tenant_id is not None:
             by_key[row.collection_key] = row
 
-    entitled = [
-        row
-        for row in by_key.values()
-        if collection_capability_key(row.collection_key) in operator.capabilities
-    ]
+    entitled: list[DocCollectionORM] = []
+    unentitled_keys: list[str] = []
+    for row in by_key.values():
+        if collection_capability_key(row.collection_key) in operator.capabilities:
+            entitled.append(row)
+        else:
+            unentitled_keys.append(row.collection_key)
     entitled.sort(key=lambda row: row.collection_key)
-    return [project_doc_collection_to_summary(row) for row in entitled]
+    return (
+        [project_doc_collection_to_summary(row) for row in entitled],
+        sorted(unentitled_keys),
+    )
+
+
+def _entitlement_diagnostic(
+    operator: Operator,
+    unentitled_keys: list[str],
+) -> dict[str, object] | None:
+    """Build the empty-picker entitlement diagnostic, or ``None``.
+
+    Returns a context dict naming a concrete missing ``meho-docs:<key>``
+    capability and the identity it was checked against (``operator_sub`` +
+    ``tenant_id``) **only** when the catalogue holds at least one collection
+    the operator cannot see. That distinguishes the two empty-picker causes
+    the operator otherwise cannot tell apart (T2 #1802):
+
+    * **A corpus exists, the identity is missing the capability** — the
+      reported symptom (the ``vmware`` collection is attached + searchable
+      via MCP, but the UI session identity lacks ``meho-docs:vmware``). The
+      diagnostic names the first such key so the operator knows *exactly*
+      which claim to grant on *which* identity — turning the opaque
+      "No doc collections available" into an actionable next step. The
+      asymmetry's root cause is a per-audience Keycloak claim divergence; the
+      remediation lives in ``deploy/values-examples/README.md``.
+    * **No corpus exists at all** (``unentitled_keys`` empty) — the genuine
+      unprovisioned case. Returns ``None`` so the template keeps the plain
+      "ask an administrator to register and entitle a collection" copy.
+
+    The un-entitled keys are never surfaced as searchable options; only the
+    first (sorted, deterministic) key names the missing capability.
+    """
+    if not unentitled_keys:
+        return None
+    missing_key = unentitled_keys[0]
+    return {
+        "required_capability": collection_capability_key(missing_key),
+        "collection_key": missing_key,
+        "operator_sub": operator.sub,
+        "tenant_id": str(operator.tenant_id),
+        "unentitled_count": len(unentitled_keys),
+    }
 
 
 def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
@@ -257,11 +313,17 @@ def _search_or_error_context(exc: HTTPException) -> dict[str, object]:
     The ``corpus/_results.html`` fragment renders an ``error`` block when
     ``error_status`` is set. The detail string is surfaced verbatim
     (the backend service guarantees no corpus response body leaks through
-    a 503 detail); a structured ``dict`` detail (the ``collection_disabled``
-    / ``unknown_collection`` shapes) is flattened to a human string.
+    a 503 detail); a structured ``dict`` detail is flattened to a human
+    string, preferring the actionable ``message`` (the ``not_entitled``
+    shape names the missing ``meho-docs:<key>`` capability + the identity it
+    checked, T2 #1802) and falling back to the ``error`` code for the
+    code-only shapes (``collection_disabled`` / ``unknown_collection``).
     """
     detail = exc.detail
-    message = str(detail.get("error") or detail) if isinstance(detail, dict) else str(detail)
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("error") or detail)
+    else:
+        message = str(detail)
     return {"error_status": exc.status_code, "error_message": message}
 
 
@@ -315,11 +377,16 @@ async def _render_corpus_index(
     passes the double-submit check.
     """
     operator = await _resolve_operator(session)
-    collections = await _list_entitled_collections(operator)
+    collections, unentitled_keys = await _list_entitled_collections(operator)
     # Default-if-one: pre-select the sole entitled collection so an operator
     # with a single corpus can search without first opening the dropdown.
     # With zero or many, no collection is pre-selected.
     selected_collection = collections[0].collection_key if len(collections) == 1 else ""
+    # When the picker is empty, tell the operator *why*: a corpus exists but
+    # their identity lacks the capability (actionable), vs. no corpus at all.
+    entitlement_diagnostic = (
+        _entitlement_diagnostic(operator, unentitled_keys) if not collections else None
+    )
 
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
@@ -329,6 +396,7 @@ async def _render_corpus_index(
         "chunks": [],
         "searched": False,
         "operator_sub": session.operator_sub,
+        "entitlement_diagnostic": entitlement_diagnostic,
         "csrf_token": csrf_token,
         "active_surface": "corpus",
         "page_title": "Docs Corpus",
@@ -463,9 +531,20 @@ async def _resolve_collection_or_http_error(
             },
         ) from exc
     except CollectionForbiddenError as exc:
+        # Structured 403 mirroring the REST route: the error card names the
+        # missing ``meho-docs:<key>`` capability and the identity it checked
+        # so the operator sees *why* the search was denied, not just "Not
+        # permitted" (T2 #1802).
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
+            detail={
+                "error": "not_entitled",
+                "collection": exc.collection_key,
+                "required_capability": exc.required_capability,
+                "operator_sub": exc.operator_sub,
+                "tenant_id": exc.tenant_id,
+                "message": str(exc),
+            },
         ) from exc
     except CollectionDisabledError as exc:
         raise HTTPException(

@@ -320,7 +320,14 @@ def test_tools_call_search_docs_403_when_not_entitled_to_collection(
     assert response.status_code == 200
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "entitled" in body["error"]["message"].lower()
+    message = body["error"]["message"]
+    assert "entitled" in message.lower()
+    # The enriched diagnostic names the missing capability + the identity it
+    # checked, and carries it on error.data for agent self-correction (#1802).
+    assert "meho-docs:vmware" in message
+    assert "op-test" in message
+    assert body["error"]["data"]["reason"] == "not_entitled"
+    assert body["error"]["data"]["required_capability"] == "meho-docs:vmware"
     assert "query" not in spy.captured  # type: ignore[attr-defined]
 
 

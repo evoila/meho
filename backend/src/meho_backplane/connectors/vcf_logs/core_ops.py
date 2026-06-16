@@ -150,14 +150,15 @@ _log = structlog.get_logger(__name__)
 #: extracts from ``"vrli-rest-9.0"`` (first hyphen-segment of impl_id
 #: ``"vrli-rest"``).
 #:
-#: Note the discrepancy: :attr:`VcfLogsConnector.product` is
-#: ``"vcf-logs"`` (the v2 registry triple key) but ingested rows
-#: carry ``product="vrli"`` because the dispatcher's
-#: :func:`parse_connector_id` reads the first hyphen-segment of the
-#: ``connector_id`` slug. Same shape SDDC Manager uses
-#: (``product="sddc"`` on rows vs ``product="sddc-manager"`` on the
-#: connector class) — documented under
-#: :data:`~meho_backplane.connectors.sddc_manager.core_ops.SDDC_PRODUCT`.
+#: G0.26-T4 (#1798) aligned the connector's registry identity to this
+#: same dispatch-canonical token, so :attr:`VcfLogsConnector.product`
+#: **equals** ``VRLI_PRODUCT`` (``"vrli"``): the registration
+#: round-trips ``parse_connector_id`` and ingested rows, the connector
+#: class, and an operator target all live under one product namespace.
+#: (The historical split — ``product="vcf-logs"`` on the class vs
+#: ``"vrli"`` on the rows, the same shape the still-split SDDC Manager
+#: family carries — was the v0.16.0 SEV-2 this Task closed; the
+#: remaining splits are tracked under Initiative #1810.)
 VRLI_PRODUCT: Final[str] = "vrli"
 VRLI_VERSION: Final[str] = "9.0"
 VRLI_IMPL_ID: Final[str] = "vrli-rest"

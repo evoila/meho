@@ -177,26 +177,28 @@ def _next_step_for_registered(
     ``"sddc"``, and ``("sddc", "9.0")`` would always miss for SDDC.
 
     The **catalog-miss** verb emits ``registry_product`` — the spelling
-    the connector class actually registers under (``vcf-logs`` for
-    ``VcfLogsConnector``, not the parser-derived ``vrli``). Two halves of
-    the ingest write path are keyed on the **supplied** ``--product``:
-    ``check_version_covered_by_registered_class`` (the version-coverage
-    pre-flight) and ``ensure_connector_class_registered``. Handing the
-    operator the registry product is what lets both find the real
-    ``VcfLogsConnector`` — emitting the short ``vrli`` instead would miss
-    it, synthesise a redundant ``AutoShim_vrli_*`` under the wrong key,
-    and make the coverage pre-flight vacuous (an out-of-range
-    ``--version`` would no longer be caught). The PR's register-time row
+    the connector class actually registers under (``vcf-automation`` for
+    ``VcfAutomationConnector``, not the parser-derived ``vcfa``; this
+    matters only for the still-split family — vRLI / ``vrli-rest`` was
+    aligned to ``product="vrli"`` in G0.26-T4 #1798 and round-trips). Two
+    halves of the ingest write path are keyed on the **supplied**
+    ``--product``: ``check_version_covered_by_registered_class`` (the
+    version-coverage pre-flight) and ``ensure_connector_class_registered``.
+    Handing the operator the registry product is what lets both find the
+    real ``VcfAutomationConnector`` — emitting the short ``vcfa`` instead
+    would miss it, synthesise a redundant ``AutoShim_vcfa_*`` under the
+    wrong key, and make the coverage pre-flight vacuous (an out-of-range
+    ``--version`` would no longer be caught). The register-time row
     reconciliation (``register_ingested_operations`` →
     ``_reconciled_row_product``) then persists the rows under the
-    parser-derived dispatch product (``vrli``) regardless, so the verb
+    parser-derived dispatch product (``vcfa``) regardless, so the verb
     still round-trips to a *dispatchable* connector — keying the
     pre-flight and class lookup on ``registry_product`` is therefore both
-    correct and dispatchable. (Emitting ``vcf-logs`` while the row carried
-    ``product="vrli"`` *was* the claude-rdc-hetzner-dc#1136 false-success
-    before that reconciliation existed; the reconciliation is what closes
-    it, not switching the verb to the short product.) The catalog-hit
-    branches keep ``entry.product``.
+    correct and dispatchable. (Emitting ``vcf-automation`` while the row
+    carried ``product="vcfa"`` *was* the claude-rdc-hetzner-dc#1136
+    false-success before that reconciliation existed; the reconciliation
+    is what closes it, not switching the verb to the short product.) The
+    catalog-hit branches keep ``entry.product``.
 
     Three branches: **supported** catalog hit → ``--catalog`` verb;
     **spec-only** catalog hit → manual ``--spec`` verb on the catalog's

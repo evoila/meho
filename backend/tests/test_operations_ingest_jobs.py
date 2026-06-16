@@ -70,7 +70,7 @@ async def _create_running_job(registry: IngestJobRegistry) -> IngestJob:
         operator_sub="op-sub",
         tenant_id=None,
         catalog_entry=None,
-        product="vcf-logs",
+        product="vrli",
         version="9.0",
         impl_id="vrli-rest",
         spec_uris=["file:///vrli.yaml"],

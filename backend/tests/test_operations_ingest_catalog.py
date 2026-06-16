@@ -227,11 +227,13 @@ def test_catalog_product_field_matches_target_create_enum(
 # parser-derived listing token differ AND no
 # :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` entry
 # bridges them yet. G0.18-T2 (#1355) reconciled the SDDC case
-# (``sddc`` -> ``sddc-manager``); the other five are adjacent findings
-# the structural test below surfaced, recorded here so the same test
-# still catches a *new* drift (a future connector that lands with the
-# same split shape) while the existing five await targeted follow-up
-# Tasks under G0.18 / a successor Initiative.
+# (``sddc`` -> ``sddc-manager``); G0.26-T4 (#1798) reconciled the vRLI
+# case by aligning the connector to ``product="vrli"`` (so ``vrli`` now
+# round-trips and is NOT listed here). The remaining four are adjacent
+# findings the structural test below surfaced, recorded here so the same
+# test still catches a *new* drift (a future connector that lands with
+# the same split shape) while the rest await the family realignment
+# tracked under Initiative #1810.
 #
 # Each row is ``(listing_token, registry_product)``. Adding a token
 # here is an explicit acknowledgement of an operator-visible 422 on
@@ -242,7 +244,6 @@ _KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {
     "hetzner": "hetzner-robot",
     "vcfa": "vcf-automation",
     "fleet": "vcf-fleet",
-    "vrli": "vcf-logs",
     "vrops": "vcf-operations",
 }
 
@@ -835,7 +836,7 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
 
 @pytest.mark.asyncio
 async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
-    """The ``vcf-logs`` registered-row ``next_step.verb`` ingests dispatchably.
+    """The ``vcf-automation`` registered-row ``next_step.verb`` ingests dispatchably.
 
     The claude-rdc-hetzner-dc#1136 false-success was: an operator copying
     the verb ingested under a product the dispatcher never queried, so the
@@ -844,11 +845,13 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     dispatch product regardless of the supplied ``--product``), which lets
     the verb keep the **registry** product so the operator's ingest also
     finds the real connector class and runs a real version-coverage
-    pre-flight. This test pins the fix end-to-end:
+    pre-flight. This test pins the fix end-to-end against a still-split
+    connector (vRLI was aligned in G0.26-T4 #1798 and no longer splits;
+    ``vcf-automation`` carries the divergence until Initiative #1810):
 
-    1. The verb for the ``vcf-logs`` registered row emits the **registry**
-       ``--product`` (``vcf-logs``) — the spelling ``VcfLogsConnector``
-       registers under.
+    1. The verb for the ``vcf-automation`` registered row emits the
+       **registry** ``--product`` (``vcf-automation``) — the spelling
+       ``VcfAutomationConnector`` registers under.
     2. Ingesting under exactly that ``--product`` yields a connector the
        dispatch/query surface resolves under the parser-derived key
        (``connector_exists`` True): reconciliation makes the verb
@@ -873,9 +876,9 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     _eager_import_connectors()
 
     item = _maybe_build_class_only_item(
-        registry_product="vcf-logs",
+        registry_product="vcf-automation",
         registry_version="9.0",
-        registry_impl_id="vrli-rest",
+        registry_impl_id="vcfa-rest",
         db_triples=set(),
         catalog=_load_catalog_or_none(),
     )
@@ -884,16 +887,16 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     # The listing row still advertises the parser-derived product (the
     # dispatch surface keys on it); the manual-mode verb, however, names
     # the registry product so the operator's ingest finds the real class.
-    assert item.product == "vrli"
+    assert item.product == "vcfa"
     assert item.next_step is not None
     verb = item.next_step.verb
     match = re.search(r"--product (\S+)", verb)
     assert match is not None, f"verb has no --product flag: {verb!r}"
     verb_product = match.group(1)
-    assert verb_product == "vcf-logs", (
+    assert verb_product == "vcf-automation", (
         f"next_step.verb emits --product {verb_product!r}; expected the "
-        f"registry product 'vcf-logs' so the operator's ingest finds the "
-        f"real VcfLogsConnector class. Full verb: {verb!r}"
+        f"registry product 'vcf-automation' so the operator's ingest finds "
+        f"the real VcfAutomationConnector class. Full verb: {verb!r}"
     )
 
     # Round-trip: ingest under the verb's --product (the registry product)
@@ -905,16 +908,16 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     result = await register_ingested_operations(
         product=verb_product,  # exactly what the verb told the operator to use
         version="9.0",
-        impl_id="vrli-rest",
-        spec_source="vrli.yaml",
+        impl_id="vcfa-rest",
+        spec_source="vcfa.yaml",
         operations=[
             EndpointDescriptorProto(
-                op_id="GET:/api/v2/version",
+                op_id="GET:/iaas/api/about",
                 method="GET",
-                path="/api/v2/version",
-                summary="version",
+                path="/iaas/api/about",
+                summary="about",
                 description="appliance version",
-                tags=["vrli"],
+                tags=["vcfa"],
                 parameter_schema={"type": "object", "properties": {}},
                 response_schema={"type": "object"},
                 safety_level="safe",
@@ -928,7 +931,7 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
-    assert rows and rows[0].product == "vrli"
+    assert rows and rows[0].product == "vcfa"
 
     probe_product, probe_version, probe_impl_id = parse_connector_id(item.connector_id)
     exists = await connector_exists(

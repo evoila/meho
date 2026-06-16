@@ -1097,26 +1097,28 @@ async def test_register_ingested_passes_pre_flight_for_compatible_version(
 # ---------------------------------------------------------------------------
 # Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
 #
-# The VCF-family connectors register under a long product
-# (``product="vcf-logs"``) while the dispatch/query surface derives the
-# short product (``"vrli"``) from the connector_id's impl_id segment.
+# The remaining VCF-family splits register under a long product
+# (``product="vcf-automation"``) while the dispatch/query surface derives
+# the short product (``"vcfa"``) from the connector_id's impl_id segment.
 # Ingesting under the long product used to persist rows the dispatcher
 # never queries → the catalog reported ``registered, 0 ops``. These
 # tests pin that an ingest under the long (registry) product now lands
 # rows under the short (dispatch) product so ``connector_exists`` — the
 # gate ``search_operations`` / ``list_operation_groups`` enforce —
-# returns True.
+# returns True. (vRLI / ``vrli-rest`` was aligned to the short product in
+# G0.26-T4 #1798 and is no longer a split — see
+# ``test_vrli_ingest_is_aligned_no_reconciliation`` below.)
 # ---------------------------------------------------------------------------
 
 
 def _register_split_connector(*, registry_product: str, version: str, impl_id: str) -> None:
     """Register a fake connector class under a long↔short *split* product.
 
-    Mirrors the real VCF-family classes (e.g. ``VcfLogsConnector`` ->
-    ``product="vcf-logs"`` / ``impl_id="vrli-rest"``) closely enough for
-    the ingest pre-flight + auto-shim skip path: the class registers
-    under the registry (long) product with a ``>=MAJOR,<MAJOR+1`` range
-    that covers *version*.
+    Mirrors the remaining split VCF-family classes (e.g.
+    ``VcfAutomationConnector`` -> ``product="vcf-automation"`` /
+    ``impl_id="vcfa-rest"``) closely enough for the ingest pre-flight +
+    auto-shim skip path: the class registers under the registry (long)
+    product with a ``>=MAJOR,<MAJOR+1`` range that covers *version*.
     """
     cls = type(
         f"_FakeSplit_{registry_product}",
@@ -1137,20 +1139,22 @@ def _register_split_connector(*, registry_product: str, version: str, impl_id: s
     )
 
 
-#: Every VCF-family long↔short split, as ``(registry_product, impl_id,
-#: dispatch_product)``. The registry product is what the connector class
-#: registers under (and what the catalog / pre-#1136 next_step verb hand
-#: the operator); the dispatch product is what ``parse_connector_id``
-#: derives from ``f"{impl_id}-{version}"`` and what the rows must persist
-#: under to be dispatchable. Mirrors ``_KNOWN_LISTING_PRODUCT_DRIFT`` in
-#: ``test_operations_ingest_catalog.py`` plus the already-handled SDDC
-#: case (same split shape).
+#: The remaining VCF-family long↔short splits, as ``(registry_product,
+#: impl_id, dispatch_product)``. The registry product is what the
+#: connector class registers under (and what the catalog / pre-#1136
+#: next_step verb hand the operator); the dispatch product is what
+#: ``parse_connector_id`` derives from ``f"{impl_id}-{version}"`` and what
+#: the rows must persist under to be dispatchable. Mirrors
+#: ``_KNOWN_LISTING_PRODUCT_DRIFT`` in ``test_operations_ingest_catalog.py``
+#: plus the already-handled SDDC case (same split shape). vRLI /
+#: ``vrli-rest`` was aligned to ``product="vrli"`` in G0.26-T4 (#1798) so
+#: it round-trips and is no longer a split; the remaining five are
+#: deferred to Initiative #1810.
 _VCF_PRODUCT_SPLITS: list[tuple[str, str, str]] = [
     ("hetzner-robot", "hetzner-rest", "hetzner"),
     ("sddc-manager", "sddc-rest", "sddc"),
     ("vcf-automation", "vcfa-rest", "vcfa"),
     ("vcf-fleet", "fleet-rest", "fleet"),
-    ("vcf-logs", "vrli-rest", "vrli"),
     ("vcf-operations", "vrops-rest", "vrops"),
 ]
 
@@ -1232,3 +1236,112 @@ async def test_aligned_product_ingest_is_unchanged(
         rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
     assert rows[0].product == "vmware"
     assert dispatch_product(product="vmware", version="9.0", impl_id="vmware-rest") == "vmware"
+
+
+@pytest.mark.asyncio
+async def test_vrli_ingest_is_aligned_no_reconciliation(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """vRLI ingest lands rows under ``vrli`` directly — the realignment closed the split.
+
+    G0.26-T4 (#1798). The real :class:`VcfLogsConnector` now registers
+    under ``product="vrli"`` (it round-trips ``parse_connector_id``), so
+    ingesting ``vrli-rest-9.0`` — whose supplied product is the
+    parser-derived ``"vrli"`` — finds the hand-coded class, synthesises
+    **no** auto-shim, and the reconciliation is a no-op. The persisted
+    rows are dispatchable under ``vrli`` and resolve through the
+    hand-coded connector, not a shadowing shim. This is the structural
+    fix for the v0.16.0 SEV-2.
+    """
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+
+    register_connector_v2(
+        product="vrli",
+        version="9.0",
+        impl_id="vrli-rest",
+        cls=VcfLogsConnector,
+    )
+
+    result = await register_ingested_operations(
+        product="vrli",  # the parser-derived product the ingest path supplies
+        version="9.0",
+        impl_id="vrli-rest",
+        spec_source="vrli.yaml",
+        operations=[_proto("GET:/api/v2/version", path="/api/v2/version")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+    # No auto-shim was synthesised — the hand-coded class already covers
+    # the triple, so the ``connector_registered`` flag stays False.
+    assert result.connector_registered is False
+    shim_keys = [
+        key for key, cls in all_connectors_v2().items() if issubclass(cls, GenericRestConnector)
+    ]
+    assert shim_keys == [], f"expected no auto-shim for an aligned ingest; got {shim_keys!r}"
+
+    # Reconciliation is a no-op; rows persist under the canonical product.
+    assert dispatch_product(product="vrli", version="9.0", impl_id="vrli-rest") == "vrli"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].product == "vrli"
+
+
+@pytest.mark.asyncio
+async def test_ingest_guard_defers_to_handrolled_under_divergent_product(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A divergent-product ingest for a hand-coded impl_id does not scaffold a shadowing shim.
+
+    G0.26-T4 (#1798) ingest guard. With :class:`VcfLogsConnector`
+    registered under the canonical ``product="vrli"``, an operator who
+    ingests the same ``vrli-rest`` impl_id under the *historical*
+    ``--product vcf-logs`` token must **not** get a
+    :class:`GenericRestConnector` shim synthesised under
+    ``(vcf-logs, 9.0, vrli-rest)`` — that shim would be non-dispatchable
+    and could shadow the real connector. The guard defers to the
+    hand-coded class (matched on impl_id), and the persisted rows
+    reconcile to the dispatch-canonical ``vrli`` so they resolve through
+    ``VcfLogsConnector``.
+    """
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+
+    register_connector_v2(
+        product="vrli",
+        version="9.0",
+        impl_id="vrli-rest",
+        cls=VcfLogsConnector,
+    )
+
+    result = await register_ingested_operations(
+        product="vcf-logs",  # the divergent (historical long) product
+        version="9.0",
+        impl_id="vrli-rest",
+        spec_source="vrli.yaml",
+        operations=[_proto("GET:/api/v2/version", path="/api/v2/version")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+    # The guard fired — no shim was registered, under vcf-logs or anywhere.
+    assert result.connector_registered is False
+    assert ("vcf-logs", "9.0", "vrli-rest") not in all_connectors_v2()
+    shim_keys = [
+        key for key, cls in all_connectors_v2().items() if issubclass(cls, GenericRestConnector)
+    ]
+    assert shim_keys == [], f"ingest guard must suppress the shadowing shim; got {shim_keys!r}"
+
+    # Rows reconcile to the dispatch-canonical product so they dispatch
+    # through VcfLogsConnector, not a shim.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].product == "vrli"
+    exists = await connector_exists(
+        tenant_id=uuid.uuid4(),
+        product="vrli",
+        version="9.0",
+        impl_id="vrli-rest",
+    )
+    assert exists is True

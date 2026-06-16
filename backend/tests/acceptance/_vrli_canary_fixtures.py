@@ -115,7 +115,7 @@ VRLI_CANARY_SESSION_REFRESH_ID: str = "canary-vrli-session-token-refreshed"
 #: binds the connector without a real probe round-trip.
 VRLI_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     vendor="vmware",
-    product="vcf-logs",
+    product="vrli",
     version=VRLI_VERSION,
     build="21761695",
     reachable=True,
@@ -387,11 +387,11 @@ async def ingested_vrli_canary(
             name=VRLI_TARGET_NAME,
             aliases=[],
             # ``Target.product`` binds via the resolver to the v2 registry
-            # triple ``("vcf-logs", "9.0", "vrli-rest")`` — that's
-            # ``VcfLogsConnector.product``, NOT ``VRLI_PRODUCT`` (which is
-            # ``"vrli"``, the ingest-row product key). The same shape SDDC
-            # Manager uses; see VRLI_PRODUCT's docstring in core_ops.py for
-            # the discrepancy rationale.
+            # triple ``("vrli", "9.0", "vrli-rest")``. Since G0.26-T4
+            # (#1798) aligned the connector, ``VcfLogsConnector.product``
+            # EQUALS ``VRLI_PRODUCT`` (both ``"vrli"``) — the target, the
+            # ingested rows, and the registration share one product
+            # namespace (the v0.16.0 SEV-2 fix).
             product=VcfLogsConnector.product,
             host=VRLI_CANARY_BASE_URL.removeprefix("https://"),
             port=443,

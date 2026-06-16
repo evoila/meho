@@ -10,7 +10,13 @@ dispatch shim. Operations arrive in #834 via G0.7 spec ingestion against
 Registered against the v2 registry at module-import time via
 :func:`~meho_backplane.connectors.registry.register_connector_v2` in
 :mod:`meho_backplane.connectors.vcf_logs.__init__` under
-``(product="vcf-logs", version="9.0", impl_id="vrli-rest")``.
+``(product="vrli", version="9.0", impl_id="vrli-rest")`` -- the
+dispatch-canonical product :func:`parse_connector_id` derives from the
+``vrli-rest`` impl_id, so an operator target carrying the natural
+``product="vrli"`` token (what ``meho connector list`` emits) resolves
+*this* connector rather than an auto-shim. G0.26-T4 (#1798) brought the
+identity into round-trip compliance, retiring the historical
+``product="vcf-logs"`` namespace split.
 
 Auth contract -- verified against the consumer wrapper
 ``scripts/vcf-logs.sh`` (2026-05-21 snapshot) and the vRLI 9.x REST API
@@ -220,9 +226,12 @@ class VcfLogsConnector(HttpConnector):
     """
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
-    # matches the dispatcher's parse_connector_id contract:
-    # ``"vrli-rest-9.0"`` -> (``"vcf-logs"``, ``"9.0"``, ``"vrli-rest"``).
-    product = "vcf-logs"
+    # round-trips through the dispatcher's parse_connector_id contract:
+    # ``"vrli-rest-9.0"`` -> (``"vrli"``, ``"9.0"``, ``"vrli-rest"``), so
+    # the registered ``product`` equals the dispatch-canonical token the
+    # connector listing emits and an ingested op dispatches here rather
+    # than to a shadowing auto-shim (G0.26-T4 #1798).
+    product = "vrli"
     version = "9.0"
     impl_id = "vrli-rest"
     supported_version_range = ">=9.0,<10.0"
@@ -440,7 +449,7 @@ class VcfLogsConnector(HttpConnector):
         except (httpx.HTTPError, OSError, ValueError) as exc:
             return FingerprintResult(
                 vendor="vmware",
-                product="vcf-logs",
+                product="vrli",
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=probe_method,
@@ -451,7 +460,7 @@ class VcfLogsConnector(HttpConnector):
         version, build, patch = _parse_vrli_version(version_full)
         return FingerprintResult(
             vendor="vmware",
-            product="vcf-logs",
+            product="vrli",
             version=version,
             build=build,
             reachable=True,
@@ -507,7 +516,7 @@ class VcfLogsConnector(HttpConnector):
         nil-UUID tenant_id + a fixed system sentinel ``sub``; the
         connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"vrli-rest-9.0"`` -> (product=``"vcf-logs"``,
+        ``"vrli-rest-9.0"`` -> (product=``"vrli"``,
         version=``"9.0"``, impl_id=``"vrli-rest"``).
         """
         # Lazy import -- meho_backplane.operations.dispatch transitively

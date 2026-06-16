@@ -2589,7 +2589,7 @@ def test_ingest_manual_spec_info_versions_compatible_accepts_self_versioned_spec
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "vcf-logs",
+                "product": "vrli",
                 "version": "9.0",
                 "impl_id": "vrli-rest",
                 "specs": [{"uri": spec_url}],
@@ -2624,7 +2624,7 @@ def test_ingest_manual_self_versioned_spec_without_opt_in_returns_422(
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "vcf-logs",
+                "product": "vrli",
                 "version": "9.0",
                 "impl_id": "vrli-rest",
                 "specs": [{"uri": spec_url}],
@@ -2661,7 +2661,7 @@ def test_ingest_manual_invalid_compat_pattern_returns_422(
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "vcf-logs",
+                "product": "vrli",
                 "version": "9.0",
                 "impl_id": "vrli-rest",
                 "specs": [{"uri": spec_url}],

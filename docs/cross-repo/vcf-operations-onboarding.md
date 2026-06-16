@@ -122,16 +122,40 @@ What this means for the credentials in Vault:
   Basic challenge; omit to fall back to the local realm. The CLI does
   not expose this as a per-call flag — it is a per-target property.
 
-To register a new target via the CLI:
+To register a new target, write a descriptor and import it. `meho targets
+import` takes a `targets.yaml` **file** (there is no `meho targets create`
+verb in v0.2 — `import` is the CLI's only write path):
+
+```yaml
+# rdc-vrops.yaml
+targets:
+  - name: rdc-vrops
+    product: vcf-operations
+    host: vrops-mgr.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/vcf-operations/rdc-vrops
+    auth_model: shared_service_account
+```
 
 ```bash
-meho targets import \
-  --name rdc-vrops \
-  --product vcf-operations \
-  --host vrops-mgr.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/vcf-operations/rdc-vrops \
-  --auth-model shared_service_account
+meho targets import rdc-vrops.yaml   # add --update to PATCH an existing target
+```
+
+**Self-signed / internal-CA appliance.** A nested-lab or freshly-deployed
+vROps commonly presents a self-signed cert, which otherwise fails the probe
+and dispatch with `connector_tls_verify_failed`. Add a per-target TLS-trust
+field to the same descriptor — prefer pinning the appliance CA (verification
+stays on); use `verify_tls: false` only as an audited last resort (the two
+are mutually exclusive — see the [per-target TLS-trust guide](../../deploy/values-examples/README.md)):
+
+```yaml
+    # secure — trust this CA; chain + hostname verification stay ON:
+    tls_ca_pin: |
+      -----BEGIN CERTIFICATE-----
+      ...appliance CA PEM...
+      -----END CERTIFICATE-----
+    # last resort instead of tls_ca_pin (verification OFF for this target; MITM risk):
+    # verify_tls: false
 ```
 
 Verify the fingerprint resolved correctly:
@@ -425,7 +449,7 @@ meho vcf-operations alert list --target rdc-vrops --params '{"activeOnly":true}'
 | `status=error … unknown_op` | The 8 core ops are not registered/enabled. | Re-run `apply_vrops_core_curation` against the vROps connector after G0.7 ingest. See [`connector-ingestion.md`](./connector-ingestion.md). |
 | `status=denied` | `read_only` role, or a tenant policy denied the dispatch. | Use an `operator`-role token. |
 | `about` / any verb times out | vROps appliance unreachable from the backplane host. | Verify the FQDN/IP in `target.host` resolves from the backplane; check firewall rules (port 443 from backplane → vROps appliance). |
-| `probe` fails with TLS error | Self-signed or expired certificate, or wrong CA bundle. | Mount the correct CA bundle in the backplane container and set `MEHO_TLS_CA_BUNDLE`; or configure vROps with a CA-signed cert. |
+| `probe` fails with TLS error | Self-signed or expired certificate, or wrong CA bundle. | Per-target (preferred): pin the appliance CA with `tls_ca_pin` (verification stays on) or, as an audited last resort, set `verify_tls: false` on the target — see the [per-target TLS-trust guide](../../deploy/values-examples/README.md). System-wide: mount the correct CA bundle in the backplane and set `MEHO_TLS_CA_BUNDLE`; or configure vROps with a CA-signed cert. |
 | `resource get <id>` returns 404 | Resource UUID not found, or stale after deletion. | Re-list via `resource list` and confirm the identifier is current. |
 | `resource list` returns an empty `resourceList` | No resources match the filter, or the adapter instance hasn't started collecting yet. | Drop the filter via `--params '{}'`; verify adapter instances in the vROps UI under Administration → Solutions. |
 

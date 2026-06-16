@@ -110,16 +110,40 @@ What this means for the credentials in Vault:
   backplane (or wait for the next session expiry) so the connector
   reloads. There is no per-target credential refresh hook in v0.5.
 
-To register a new target via the CLI:
+To register a new target, write a descriptor and import it. `meho targets
+import` takes a `targets.yaml` **file** (there is no `meho targets create`
+verb in v0.2 — `import` is the CLI's only write path):
+
+```yaml
+# rdc-vrli.yaml
+targets:
+  - name: rdc-vrli
+    product: vcf-logs
+    host: vrli.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/vrli/rdc-vrli
+    auth_model: shared_service_account
+```
 
 ```bash
-meho targets import \
-  --name rdc-vrli \
-  --product vcf-logs \
-  --host vrli.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/vrli/rdc-vrli \
-  --auth-model shared_service_account
+meho targets import rdc-vrli.yaml   # add --update to PATCH an existing target
+```
+
+**Self-signed / internal-CA appliance.** A nested-lab or freshly-deployed
+vRLI commonly presents a self-signed cert, which otherwise fails dispatch
+with `connector_tls_verify_failed`. Add a per-target TLS-trust field to the
+same descriptor — prefer pinning the appliance CA (verification stays on);
+use `verify_tls: false` only as an audited last resort (the two are mutually
+exclusive — see the [per-target TLS-trust guide](../../deploy/values-examples/README.md)):
+
+```yaml
+    # secure — trust this CA; chain + hostname verification stay ON:
+    tls_ca_pin: |
+      -----BEGIN CERTIFICATE-----
+      ...appliance CA PEM...
+      -----END CERTIFICATE-----
+    # last resort instead of tls_ca_pin (verification OFF for this target; MITM risk):
+    # verify_tls: false
 ```
 
 Verify the fingerprint resolved correctly:

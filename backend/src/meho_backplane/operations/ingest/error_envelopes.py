@@ -39,6 +39,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.operations.ingest.exceptions import (
+    AmbiguousConnectorScopeError,
     InvalidSchemaError,
     InvalidSpecError,
     LlmOutputInvalid,
@@ -53,6 +54,7 @@ __all__ = [
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",
     "build_catalog_entry_upstream_not_spec_detail",
+    "build_connector_scope_ambiguous_detail",
     "build_invalid_schema_detail",
     "build_invalid_spec_detail",
     "build_llm_output_invalid_detail",
@@ -91,6 +93,56 @@ def build_version_mismatch_detail(exc: VersionMismatchError) -> dict[str, Any]:
         "requested_version": exc.requested_version,
         "spec_info_versions": [
             {"spec_uri": uri, "info_version": version} for uri, version in exc.spec_info_versions
+        ],
+        "message": str(exc),
+    }
+
+
+def build_connector_scope_ambiguous_detail(
+    exc: AmbiguousConnectorScopeError,
+) -> dict[str, Any]:
+    """Structured detail for :class:`AmbiguousConnectorScopeError` (G0.26-T1 #1801).
+
+    Emitted by the ``GET /api/v1/connectors/{id}/review`` and
+    ``POST /api/v1/connectors/{id}/enable-reads`` routes (and their MCP
+    siblings, via the shared service resolver) when a ``connector_id``
+    maps to **both** a tenant-curated row and a built-in row, so neither
+    the read nor the write path can pick one without guessing. Carried
+    as a ``409 Conflict`` rather than a ``404`` (the label resolves —
+    just to more than one row) or a silent pick.
+
+    Body shape (T11 convention, see
+    :doc:`docs/codebase/error-message-shape.md`):
+
+    * ``detail`` — stable ``snake_case`` classifier
+      ``"connector_scope_ambiguous"`` so callers branch without
+      re-parsing the message.
+    * ``connector_id`` — the operator-facing identifier that resolved
+      ambiguously, echoed back so an agent doesn't re-thread it.
+    * ``candidates`` — the distinct row-scopes the label maps to, each
+      ``{product, version, impl_id, tenant_id}``. ``tenant_id`` is the
+      discriminating field: ``null`` for the built-in row, the
+      operator's own tenant UUID (as a string) for the tenant-curated
+      row. Surfacing the operator's own tenant id is not an info-leak —
+      it is the operator's own value, the same posture the
+      ``/ui/auth/login`` 503 takes naming env vars the operator set.
+    * ``message`` — the rendered human-readable detail (names the
+      candidates + how to disambiguate) for clients that ignore the
+      structured fields.
+    """
+    return {
+        "detail": "connector_scope_ambiguous",
+        "connector_id": exc.connector_id,
+        "candidates": [
+            {
+                "product": candidate.product,
+                "version": candidate.version,
+                "impl_id": candidate.impl_id,
+                "tenant_id": (
+                    str(candidate.tenant_id) if candidate.tenant_id is not None else None
+                ),
+            }
+            for candidate in exc.candidates
         ],
         "message": str(exc),
     }

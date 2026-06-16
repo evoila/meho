@@ -48,6 +48,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
     EditOpWarning,
@@ -412,14 +413,16 @@ async def test_get_review_payload_non_existent_connector_still_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_review_payload_prefers_tenant_row_over_builtin() -> None:
-    """G0.13-T5 (#1135): when both exist, the operator's-tenant row wins the first pass.
+async def test_get_review_payload_ambiguous_tenant_and_builtin_raises() -> None:
+    """G0.26-T1 (#1801): a label mapping to a tenant row AND a built-in row is ambiguous.
 
-    Defensive guard against the bait-and-switch failure mode: if an
+    Supersedes the prior #1135 "first-pass wins" guard. When an
     operator's tenant has a curated row at ``(product, version,
-    impl_id)`` *and* a built-in row exists at the same key, the
-    fallback must not silently return the built-in. First-pass wins;
-    fallback is only consulted on miss.
+    impl_id)`` *and* a built-in row exists at the same triple, neither
+    the read (``/review``) nor the write (``/enable-reads``) path may
+    silently pick one — they raise :class:`AmbiguousConnectorScopeError`
+    so the operator disambiguates. The candidate list enumerates both
+    row-scopes (tenant + built-in).
     """
     operator_tenant = uuid.uuid4()
     # Tenant-curated row (3 ops total).
@@ -430,7 +433,7 @@ async def test_get_review_payload_prefers_tenant_row_over_builtin() -> None:
         review_status="staged",
     )
     # Built-in row at the same triple (5 ops total — distinct count
-    # so we can tell which payload we got).
+    # so the silent-pick failure mode would be visible if it regressed).
     await _seed_connector(
         tenant_id=None,
         group_count=1,
@@ -443,10 +446,19 @@ async def test_get_review_payload_prefers_tenant_row_over_builtin() -> None:
     )
     service = ReviewService(operator)
 
-    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+    with pytest.raises(AmbiguousConnectorScopeError) as excinfo:
+        await service.get_review_payload("vmware-rest-9.0", operator_tenant)
 
-    assert payload.tenant_id == operator_tenant
-    assert payload.total_op_count == 3
+    exc = excinfo.value
+    assert exc.connector_id == "vmware-rest-9.0"
+    # Two candidates: the built-in (tenant_id=None) and the operator's
+    # tenant row. Sorted built-in-first by the exception.
+    candidate_tenants = [c.tenant_id for c in exc.candidates]
+    assert candidate_tenants == [None, operator_tenant]
+    for candidate in exc.candidates:
+        assert candidate.product == "vmware"
+        assert candidate.version == "9.0"
+        assert candidate.impl_id == "vmware-rest"
 
 
 # ---------------------------------------------------------------------------
@@ -1339,3 +1351,111 @@ async def test_enable_reads_only_flips_disabled_reads() -> None:
     assert state[get_op_id] is True
     head_op_id = next(op for op, m in op_methods.items() if m == "HEAD")
     assert state[head_op_id] is True
+
+
+# ---------------------------------------------------------------------------
+# Shared scope resolution — /review and /enable-reads resolve the SAME row
+# (G0.26-T1 #1801)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_falls_back_to_builtin_for_operator_tenant() -> None:
+    """G0.26-T1 (#1801): enable_reads honours the #1135 global fallback.
+
+    The exact dogfood footgun: a connector that exists only as a
+    built-in (``tenant_id IS NULL``) row used to 404 on
+    ``/enable-reads`` while ``/review`` returned 200 (the read/write
+    asymmetry). Now both share the resolver, so a ``tenant_admin``
+    enabling reads on a global-only label flips the **built-in** read
+    ops instead of 404'ing.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    # tenant_admin is required to act on the built-in scope; the
+    # fallback resolves to tenant_id=None.
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
+
+    # GET + HEAD on the built-in rows flipped — proving the resolver
+    # fell back to the global scope rather than raising not-found.
+    assert ops_enabled == 2
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert builtin_state["GET:/api/v1/resource"] is True
+    assert builtin_state["HEAD:/api/v1/resource"] is True
+    assert builtin_state["POST:/api/v1/resource"] is False
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_ambiguous_tenant_and_builtin_raises() -> None:
+    """G0.26-T1 (#1801): enable_reads raises on a tenant+built-in ambiguous label.
+
+    Symmetric with the read path: when both a tenant row and a
+    built-in row exist for the label, enable_reads raises
+    :class:`AmbiguousConnectorScopeError` rather than silently flipping
+    one scope's reads. Nothing flips on either scope.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=operator_tenant, op_is_enabled=False)
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    with pytest.raises(AmbiguousConnectorScopeError) as excinfo:
+        await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
+
+    assert [c.tenant_id for c in excinfo.value.candidates] == [None, operator_tenant]
+    # The raise happens before any UPDATE — both scopes untouched.
+    tenant_state = await _ops_enabled_state(tenant_id=operator_tenant)
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert not any(tenant_state.values())
+    assert not any(builtin_state.values())
+
+
+@pytest.mark.asyncio
+async def test_review_and_enable_reads_resolve_same_row_global_only() -> None:
+    """AC1 (#1801): read + write resolve the identical row for a global-only label.
+
+    Seeds a built-in-only connector, then proves ``get_review_payload``
+    renders the built-in scope (``tenant_id is None``) *and*
+    ``enable_reads`` flips that same built-in scope's read ops — one
+    shared resolution path, one row, for both the read and the write.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    # Read path resolves to the built-in scope.
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+    assert payload.tenant_id is None
+
+    # Write path resolves to the same built-in scope (flips its reads).
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
+    assert ops_enabled == 2
+    assert (await _ops_enabled_state(tenant_id=None))["GET:/api/v1/resource"] is True
+
+
+@pytest.mark.asyncio
+async def test_review_and_enable_reads_resolve_same_row_tenant_only() -> None:
+    """AC1 (#1801): read + write resolve the identical row for a tenant-only label.
+
+    The tenant-curated-only case: ``get_review_payload`` renders the
+    tenant scope and ``enable_reads`` flips that same tenant scope's
+    reads, with no built-in row in play.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=operator_tenant, op_is_enabled=False)
+    operator = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(operator)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+    assert payload.tenant_id == operator_tenant
+
+    ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
+    assert ops_enabled == 2
+    tenant_state = await _ops_enabled_state(tenant_id=operator_tenant)
+    assert tenant_state["GET:/api/v1/resource"] is True
+    assert tenant_state["HEAD:/api/v1/resource"] is True

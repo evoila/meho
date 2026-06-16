@@ -60,6 +60,7 @@ from meho_backplane.operations.ingest.error_envelopes import (
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
+    build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
@@ -70,7 +71,9 @@ from meho_backplane.operations.ingest.error_envelopes import (
     build_version_mismatch_detail,
 )
 from meho_backplane.operations.ingest.exceptions import (
+    AmbiguousConnectorScopeError,
     ConnectorNotFoundError,
+    ConnectorScopeCandidate,
     InvalidSchemaError,
     InvalidSpecError,
     InvalidStateTransitionError,
@@ -130,6 +133,7 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "AmbiguousConnectorScopeError",
     "AnthropicMessagesLlmClient",
     "CatalogError",
     "CatalogListResponse",
@@ -139,6 +143,7 @@ __all__ = [
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorScopeCandidate",
     "ConnectorSpecCatalog",
     "ConnectorSpecEntry",
     "ConnectorStatusFilter",
@@ -186,6 +191,7 @@ __all__ = [
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",
     "build_catalog_entry_upstream_not_spec_detail",
+    "build_connector_scope_ambiguous_detail",
     "build_invalid_schema_detail",
     "build_invalid_spec_detail",
     "build_llm_output_invalid_detail",

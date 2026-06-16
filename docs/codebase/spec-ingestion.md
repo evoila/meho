@@ -926,8 +926,8 @@ signal for ingested ops. The route returns `200` with
 `{connector_id, ops_enabled}` (not the `204` the enable / disable
 transitions return) so the count of flipped ops rides the wire;
 unlike `enable`, it does **not** move any group's `review_status`
-(it is a per-op flip, so there is no state-machine guard and no 409
-path). One `meho.connector.enable_reads` audit row is written when
+(it is a per-op flip, so there is no state-machine guard / transition
+409). One `meho.connector.enable_reads` audit row is written when
 at least one op flips; idempotent — a re-run flips nothing, writes
 no audit row, and returns `ops_enabled=0`. The bulk UPDATE lives in
 `bulk_enable_read_ops()` (`ingest/_internals.py`), called by
@@ -935,7 +935,12 @@ no audit row, and returns `ops_enabled=0`. The bulk UPDATE lives in
 enable-reads`) and the MCP tool (`meho.connector.enable_reads`,
 optional `tenant_id` for the built-in scope) wrap the same service
 method, the single-source discipline the rest of the surface
-follows.
+follows. Scope resolution shares `_resolve_existing_scope` with the
+`/review` read path (see "shared scope resolution" below), so a
+built-in-only label enables its reads via the global fallback
+instead of 404'ing, and a tenant+built-in ambiguous label raises a
+409 `connector_scope_ambiguous` instead of silently flipping one
+scope (G0.26-T1 #1801).
 
 **Cross-surface write-scope contract (#1699).** The two ingest
 surfaces intentionally default to *different* write scopes:
@@ -956,27 +961,50 @@ scope); the cross-surface behaviour is pinned by
 `test_cross_surface_reingest_under_global_scope_creates_shadow_copy`
 in `tests/test_api_v1_connectors_ingest.py`.
 
-Both read paths apply the same "operator's-tenant rows + built-ins
-(`tenant_id IS NULL`)" scope: the listing query does it via a
-single `WHERE tenant_id IS NULL OR tenant_id = X` clause, and
-`ReviewService.get_review_payload` mirrors it through a two-pass
-lookup (own-tenant probe first, then built-in fallback when the
-caller's tenant_id matches `operator.tenant_id`). G0.13-T5 (#1135)
-landed the review-route fallback after the v0.6.0 RDC dogfood
-flagged that every global connector in the catalog returned 404
-on review even though the listing surfaced them. Cross-tenant
-probes (`tenant_id` ≠ operator's own) still surface as 404
-`ConnectorNotFoundError` — same conflation `ReviewService` uses
-to keep the operator-facing failure surface uniform and stop
-status-code differential from enumerating other tenants.
+**Shared scope resolution (`get_review_payload` + `enable_reads`,
+G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path
+applies the same "operator's-tenant rows + built-ins (`tenant_id IS
+NULL`)" scope. The listing query does it inline via a single `WHERE
+tenant_id IS NULL OR tenant_id = X` clause. The single-connector read
+(`get_review_payload`) and the bulk write (`enable_reads`) both route
+through one shared helper — `ReviewService._resolve_existing_scope` —
+so they can never diverge on *which row* they act on. The resolver:
 
-The PATCH editing routes (`/groups`, `/operations`) deliberately
-keep their single-pass lookup against the operator's `tenant_id`:
-"do tenant_admins get to edit built-ins?" is a policy choice
-distinct from the read-visibility bug, and the route gate is
-`tenant_admin`-only — built-in writes already have an explicit
-MCP / CLI affordance (`ReviewService` accepts `tenant_id=None`
-under the `TENANT_ADMIN` role).
+- parses + authorises via `_resolve_scope` (a cross-tenant `tenant_id`
+  ≠ the operator's own is collapsed to a 404 `ConnectorNotFoundError`
+  here, preserving the no-enumeration conflation);
+- for an explicit built-in probe (`tenant_id=None`, the MCP admin
+  path) does a single-pass existence check — no fallback, no
+  ambiguity;
+- for the operator's own tenant, probes **both** the tenant scope and
+  the built-in scope with `scope_has_groups` and then:
+  - both exist → raises `AmbiguousConnectorScopeError` (the route maps
+    it to a 409 `connector_scope_ambiguous` enumerating the candidate
+    rows — neither a silent pick nor a bare 404);
+  - only the tenant row → the tenant scope;
+  - only the built-in row → the built-in scope (the **#1135 global
+    fallback**, now shared with the write path);
+  - neither → 404 `ConnectorNotFoundError`.
+
+G0.13-T5 (#1135) first landed the fallback on the *read* route after
+the v0.6.0 RDC dogfood flagged that every global connector returned
+404 on review even though the listing surfaced them. G0.26-T1 (#1801)
+extended it to the write path and added the disambiguation after the
+v0.16.0 dogfood hit `POST /{id}/enable-reads` 404'ing on a label
+`GET /{id}/review` resolved happily — the read/write resolution
+asymmetry. `bulk_enable_read_ops` and the `/review` payload render
+both run against the scope the shared resolver returns.
+
+The PATCH editing routes (`/groups`, `/operations`) and the
+connector-level `enable` / `disable` / `delete` transitions still
+keep their single-pass lookup against the operator's `tenant_id` via
+`_resolve_scope`: "do tenant_admins get to edit / transition
+built-ins?" is a policy choice distinct from the read/enable-reads
+visibility surface, and the route gate is `tenant_admin`-only —
+built-in writes already have an explicit MCP / CLI affordance
+(`ReviewService` accepts `tenant_id=None` under the `TENANT_ADMIN`
+role). They are free to adopt `_resolve_existing_scope` later if the
+same global-fallback / disambiguation is wanted there.
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)

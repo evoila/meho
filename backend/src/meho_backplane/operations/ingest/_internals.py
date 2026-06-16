@@ -29,7 +29,7 @@ from typing import Any, Final
 from uuid import UUID
 
 import structlog
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
@@ -61,6 +61,7 @@ __all__ = [
     "load_op",
     "load_ops_in_groups",
     "operator_disabled_op_ids",
+    "scope_has_groups",
     "validate_edit_op_args",
     "write_audit_row",
 ]
@@ -154,6 +155,43 @@ async def load_groups(
             tenant_id=scope.tenant_id,
         )
     return groups
+
+
+async def scope_has_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> bool:
+    """Return whether any :class:`OperationGroup` row exists under *scope*.
+
+    A non-raising existence probe used by the shared scope resolver
+    (:meth:`~meho_backplane.operations.ingest.service.ReviewService._resolve_existing_scope`)
+    to detect when a ``connector_id`` maps to both a tenant-curated row
+    (``tenant_id = scope.tenant_id``) and a built-in row
+    (``tenant_id IS NULL``). Unlike :func:`load_groups`, it returns a
+    bool instead of raising :class:`ConnectorNotFoundError` on an empty
+    result — the resolver needs to test each scope independently before
+    deciding between "resolve", "ambiguous", and "not found", so a
+    raising helper would force a try/except per probe. ``SELECT 1 ...
+    LIMIT 1`` keeps the probe cheap (no row hydration); the same
+    ``tenant_id IS NULL`` / ``tenant_id = :tid`` split every sibling
+    helper uses honours scope isolation.
+    """
+    stmt = (
+        select(literal(1))
+        .select_from(OperationGroup)
+        .where(
+            OperationGroup.product == scope.product,
+            OperationGroup.version == scope.version,
+            OperationGroup.impl_id == scope.impl_id,
+        )
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(OperationGroup.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(OperationGroup.tenant_id == scope.tenant_id)
+    stmt = stmt.limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
 
 
 async def load_group(

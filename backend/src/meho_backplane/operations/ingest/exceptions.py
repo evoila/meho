@@ -66,6 +66,20 @@ Review-queue failures (T4 #402) — raised from
   elsewhere in the backplane: an operator must not be able to
   enumerate another tenant's connectors by probing for ``HTTP 404``
   vs ``HTTP 403`` boundaries.
+* :class:`AmbiguousConnectorScopeError` — the operator-facing
+  ``connector_id`` resolves to **more than one** distinct scope
+  visible to the operator: a tenant-curated row (``tenant_id =
+  operator.tenant_id``) *and* a built-in row (``tenant_id IS NULL``)
+  exist for the same ``(product, version, impl_id)`` triple. The
+  shared scope resolver
+  (:meth:`~meho_backplane.operations.ingest.service.ReviewService._resolve_existing_scope`)
+  raises this instead of silently picking one, so the read
+  (``/review``) and write (``/enable-reads``) paths can't diverge on
+  which row they act on (G0.26-T1 #1801). Distinct from
+  :class:`~meho_backplane.connectors.resolver.AmbiguousConnectorResolution`,
+  which is a *dispatch-time* tie between two connector **classes** for
+  the same ``(product, version)`` (#1750 / #1752) — this one is a
+  *row-scope* tie between a tenant row and a built-in row.
 
 Ingest-pipeline failures (G0.9-T8) — raised from
 :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`:
@@ -86,10 +100,13 @@ precisely without catching unrelated runtime faults.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import UUID
 
 __all__ = [
+    "AmbiguousConnectorScopeError",
     "ConnectorNotFoundError",
+    "ConnectorScopeCandidate",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
@@ -97,7 +114,6 @@ __all__ = [
     "OpIdCollision",
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
-    "UpstreamNotSpecError",
     "VersionMismatchError",
 ]
 
@@ -471,6 +487,85 @@ class ConnectorNotFoundError(Exception):
         self.tenant_id = tenant_id
         scope = "built-in" if tenant_id is None else f"tenant={tenant_id}"
         super().__init__(f"connector {connector_id!r} not found ({scope})")
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectorScopeCandidate:
+    """One candidate row-scope a ``connector_id`` resolved to.
+
+    Surfaced on :class:`AmbiguousConnectorScope` so the operator-facing
+    REST / MCP layer can enumerate exactly which rows a label maps to.
+    ``tenant_id`` is the discriminating field: a built-in candidate
+    carries ``None``, a tenant-curated candidate carries the operator's
+    tenant UUID. ``product`` / ``version`` / ``impl_id`` are echoed too
+    (they are identical across candidates for a single literal
+    ``connector_id``, since :func:`parse_connector_id` is deterministic,
+    but the resolver emits the full triple so the wire shape stays
+    self-describing).
+    """
+
+    product: str
+    version: str
+    impl_id: str
+    tenant_id: UUID | None
+
+
+class AmbiguousConnectorScopeError(Exception):
+    """Raised when a ``connector_id`` resolves to more than one visible scope.
+
+    A tenant-curated row (``tenant_id = operator.tenant_id``) and a
+    built-in row (``tenant_id IS NULL``) both exist for the same
+    ``(product, version, impl_id)`` triple, so neither ``/review`` (read)
+    nor ``/enable-reads`` (write) can pick one without guessing. The
+    shared scope resolver raises this instead of silently selecting the
+    tenant row, the built-in row, or returning a bare 404 — the operator
+    must disambiguate (G0.26-T1 #1801).
+
+    Attributes
+    ----------
+    connector_id:
+        The operator-facing identifier that resolved ambiguously (e.g.
+        ``"vrli-rest-9.0"``).
+    candidates:
+        The distinct :class:`ConnectorScopeCandidate` row-scopes the
+        label maps to, sorted built-in-first then by ``tenant_id`` so
+        the rendered message + structured detail are deterministic
+        across calls.
+
+    Inherits from :class:`Exception` directly (not :class:`ValueError`)
+    so callers can ``except AmbiguousConnectorScope`` precisely without
+    catching unrelated runtime faults — the same posture
+    :class:`ConnectorNotFoundError` and
+    :class:`InvalidStateTransitionError` take in this module. The route
+    layer maps it onto ``HTTP 409 Conflict`` (the request is well-formed
+    but the target is ambiguous), carrying a structured
+    ``connector_scope_ambiguous`` detail.
+    """
+
+    def __init__(
+        self,
+        *,
+        connector_id: str,
+        candidates: Sequence[ConnectorScopeCandidate],
+    ) -> None:
+        self.connector_id = connector_id
+        # built-in (tenant_id is None) first, then tenant rows by UUID
+        # string — a stable order for the message + structured detail.
+        self.candidates = sorted(
+            candidates,
+            key=lambda c: (c.tenant_id is not None, str(c.tenant_id)),
+        )
+        rendered = ", ".join(
+            "built-in (tenant_id=None)" if c.tenant_id is None else f"tenant_id={c.tenant_id}"
+            for c in self.candidates
+        )
+        super().__init__(
+            f"connector {connector_id!r} is ambiguous: it resolves to "
+            f"{len(self.candidates)} rows [{rendered}]. Disambiguate by "
+            f"acting on the built-in scope (tenant_admin, tenant_id=None) "
+            f"or the tenant-curated row explicitly. See "
+            f"docs/codebase/error-message-shape.md."
+        )
 
 
 class VersionMismatchError(ValueError):

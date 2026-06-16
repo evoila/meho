@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Documentation
+
+- Fix the `meho targets import` examples in the VCF Operations / VCF Logs onboarding guides — they used an unsupported flag form, but `import` takes a `targets.yaml` **file** — and show the per-target `verify_tls` / `tls_ca_pin` TLS-trust fields for reaching self-signed / internal-CA appliances; refresh the vROps "probe fails with TLS error" troubleshooting row to name the per-target options (#1774).
+
 ## [0.16.0] - 2026-06-15
 
 ### Added

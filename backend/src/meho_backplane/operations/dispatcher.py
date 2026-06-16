@@ -118,9 +118,24 @@ Detail payloads land in ``extras``. Codes:
   insufficient-permission cause (connector-agnostically -- any upstream
   403); ``extras`` carries ``http_status=403``, the upstream
   ``upstream_message``, and any standard GitHub permission headers
-  (``permission_headers``) that were present. Only 403 is siphoned
-  here; every other ``HTTPStatusError`` status falls through to
-  ``connector_error``.
+  (``permission_headers``) that were present. The sibling
+  ``connector_http_422`` (#1649) covers a ``422`` invalid-payload
+  rejection in the same arm.
+* ``connector_auth_failed`` -- the connector raised
+  :exc:`httpx.HTTPStatusError` with an auth-class status (``401``, plus
+  vRLI's ``440``): the credential reached the host but was rejected on
+  authentication. T5 (#1804), the auth sibling of ``connector_http_403``
+  in the same arm. The session connectors already retry once on a 401
+  internally, so a 401 here means re-login *also* failed -- the
+  credential is missing/invalid/expired in Vault, or the ``auth_model``
+  is wrong. The ``error`` names the ``host``, the status, the likely
+  session/credential-expiry or misconfigured-``auth_model`` cause, and
+  the verify-the-Vault-credential/``auth_model`` remediation; ``extras``
+  carries ``http_status`` (the actual auth-class status), ``host``, and
+  the upstream ``upstream_message``. Only the auth-class set is siphoned
+  here; every other ``HTTPStatusError`` status (404, 429, 5xx) falls
+  through to ``connector_error`` (429 rate-limit is a deliberate
+  follow-up, not this surface).
 * ``connector_tls_verify_failed`` -- the connector raised
   :exc:`httpx.ConnectError` whose ``__cause__`` is an
   :exc:`ssl.SSLCertVerificationError` (with a ``CERTIFICATE_VERIFY_FAILED``
@@ -136,12 +151,14 @@ Detail payloads land in ``extras``. Codes:
   every other ``ConnectError`` (DNS, connection-refused, timeout) falls
   through to ``connector_error``.
 * ``connector_error`` -- the connector / handler raised any other
-  exception (any non-403 :exc:`httpx.HTTPStatusError` and any non-TLS
-  :exc:`httpx.ConnectError` included, and the reducer / redaction
-  middleware raised *any* exception -- the ``connector_unsupported`` /
-  ``connector_http_403`` / ``connector_tls_verify_failed``
-  classifications apply only to the source-kind branch where connector
-  code runs). The raised exception's class name lands in
+  exception (any :exc:`httpx.HTTPStatusError` whose status is none of
+  403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
+  included, and the reducer / redaction middleware raised *any*
+  exception -- the ``connector_unsupported`` / ``connector_http_403`` /
+  ``connector_http_422`` / ``connector_auth_failed`` /
+  ``connector_tls_verify_failed`` classifications apply only to the
+  source-kind branch where connector code runs). The raised exception's
+  class name lands in
   ``extras["exception_class"]``; the (length-capped) message in
   ``extras["exception_message"]``.
 
@@ -207,10 +224,12 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._errors import (
+    is_auth_failed_status,
     result_ambiguous_connector,
     result_awaiting_approval,
     result_composite_l2_disabled,
     result_composite_l2_missing,
+    result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
     result_connector_http_422,
@@ -709,7 +728,16 @@ async def _run_branch_with_error_handling(
     useful upstream body + GitHub permission headers / ``errors[]``
     validation array used to flatten into the same opaque
     ``connector_error``. Scoped to ``403`` + ``422``; every other status
-    falls through to ``connector_error``.
+    falls through to the auth-class check below or ``connector_error``.
+
+    T5 (#1804) adds a ``connector_auth_failed`` catch in the same
+    ``httpx.HTTPStatusError`` arm for an auth-class status (``401``, plus
+    vRLI's ``440``) -- a re-login failure (the session connectors already
+    retry once on a 401) whose missing/invalid/expired-credential or
+    misconfigured-``auth_model`` cause used to flatten into the opaque
+    ``connector_error`` that made the #1798 vRLI dispatch (``connector_error
+    (440)``) unactionable. Scoped to the auth-class set; every other status
+    (404, 429, 5xx) still falls through to ``connector_error``.
 
     Initiative #1774 T3 (#1782) adds a ``connector_tls_verify_failed``
     catch for an :exc:`httpx.ConnectError` whose ``__cause__`` is an
@@ -872,13 +900,27 @@ async def _run_branch_with_error_handling(
         #   returns a body message + an ``errors[]`` array naming the
         #   offending fields.
         #
-        # Scoped strictly to 403 + 422: every other status (401, 429, 5xx)
-        # flattens to the unchanged generic ``connector_error`` shape
-        # (401/429 are deliberate follow-ups, not this surface). The
-        # branch is taken *inside* this arm rather than re-``raise``-ing
-        # to the ``except Exception`` below -- a re-raise from one except
-        # clause is not caught by a sibling clause of the same ``try``, so
-        # it would escape the dispatcher's never-raises contract.
+        # T5 (#1804) extends the same arm to auth-class statuses: a 401
+        # (and vRLI's 440) carries an actionable auth/session-failure cause
+        # the generic ``connector_error`` likewise buried. The hand-coded
+        # session connectors already retry once on a 401 internally
+        # (``_get_json_with_session_retry``), so a 401 that reaches the
+        # dispatcher means re-login *also* failed -- the credential is
+        # missing/invalid/expired in Vault, or the ``auth_model`` is wrong.
+        # That flattened to ``connector_error (440)`` on the #1798 vRLI
+        # dispatch the operator saw as opaque. ``connector_auth_failed``
+        # names the host, status, likely cause, and the Vault-credential /
+        # ``auth_model`` remediation.
+        #
+        # Scoped to 403 + 422 + the auth-class set (``401`` / ``440``,
+        # :data:`~meho_backplane.operations._errors._AUTH_FAILED_STATUSES`):
+        # every other status (404, 429, 5xx) flattens to the unchanged
+        # generic ``connector_error`` shape (429 rate-limit is a separate
+        # deliberate follow-up, not this surface). The branch is taken
+        # *inside* this arm rather than re-``raise``-ing to the
+        # ``except Exception`` below -- a re-raise from one except clause is
+        # not caught by a sibling clause of the same ``try``, so it would
+        # escape the dispatcher's never-raises contract.
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
             audit_id=audit_id,
@@ -895,6 +937,8 @@ async def _run_branch_with_error_handling(
             return result_connector_http_403(op_id, http_exc, duration_ms)
         if status_code == 422:
             return result_connector_http_422(op_id, http_exc, duration_ms)
+        if is_auth_failed_status(status_code):
+            return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
         return result_connector_error(op_id, http_exc, duration_ms)
     except httpx.ConnectError as conn_exc:
         # #1782 (Initiative #1774 T3): a ConnectError carries no

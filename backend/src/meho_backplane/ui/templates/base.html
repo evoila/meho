@@ -96,6 +96,18 @@
        from a microtask at the end of its own script task, so a later
        script would register too late (#1692). -#}
     <script src="/ui/static/src/app/approvals-bell.js" defer></script>
+    {#- App-shell native-<dialog> modal controller (G0.26-T3 #1803).
+       Loaded OUTSIDE ``component_scripts`` so it ships on EVERY console
+       page: it opens HTMX-injected ``<dialog class="modal">`` fragments
+       via ``showModal()`` on swap and strips any lingering ``modal-open``
+       class on the native ``close`` event (close button, ESC, and the
+       backdrop ``<form method="dialog">`` all route through it), so every
+       operator modal fully dismisses (#1803). Plain first-party JS (no
+       Alpine, no inline script — same CSP posture as theme.js); it
+       registers its own ``close`` (capture-phase: the event does not
+       bubble) + ``htmx:afterSwap`` listeners, so its order relative to
+       ``alpine.min.js`` is not load-bearing. -#}
+    <script src="/ui/static/src/app/modal-dialogs.js" defer></script>
     {#- Alpine component-registration scripts. This block MUST render
        BEFORE the _head_assets.html include: every script here and in
        the include is ``defer``red, and deferred scripts execute in
@@ -346,10 +358,12 @@
       ></div>
       {# Stable modal container -- never replaced. The bell / panel / detail
          fragments swap their own ``<dialog id="meho-approvals-modal"
-         class="modal modal-open">`` into this via ``hx-swap="innerHTML"``,
-         the same container pattern the memory create modal uses. The
-         fragment is a native ``<dialog>`` so its ``.close()`` calls resolve
-         and DaisyUI's ``modal-open`` shows it immediately on swap. #}
+         class="modal">`` into this via ``hx-swap="innerHTML"``, the same
+         container pattern the memory create modal uses. The shared modal
+         controller (``app/modal-dialogs.js``) opens each swapped-in dialog
+         via ``showModal()`` and strips any lingering ``modal-open`` on its
+         native ``close`` event, so the close button / ESC / backdrop all
+         dismiss it (#1803). #}
       <div id="meho-approvals-modal-container"></div>
     </div>
 

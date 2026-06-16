@@ -5,9 +5,11 @@
   HTMX-loaded create modal for the Memory surface (Initiative #341
   Task #878). Loaded into ``#memory-modal-container`` on the list
   page by the "+" button's ``hx-get`` to ``/ui/memory/create``. The
-  inserted dialog is opened by an inline ``showModal()`` call wired
-  through HTMX's ``after-swap`` callback so the operator sees the
-  modal without an extra click.
+  shared app-shell modal controller (``app/modal-dialogs.js``) opens the
+  inserted ``<dialog class="modal">`` via ``showModal()`` on
+  ``htmx:afterSwap`` so the operator sees the modal without an extra
+  click, and strips any lingering ``modal-open`` on close so the close
+  button / ESC / backdrop all dismiss it (#1803).
 
   Form posts to ``POST /ui/memory/create`` which returns 204 with
   ``HX-Redirect: /ui/memory`` -- HTMX then reloads the full list
@@ -44,7 +46,7 @@
   so the script reads it from the DOM without re-hardcoding the
   enum on the client.
 -#}
-<dialog id="memory-create-modal" class="modal modal-open">
+<dialog id="memory-create-modal" class="modal">
   <div class="modal-box max-w-3xl">
     <h3 class="font-semibold text-lg" id="memory-create-modal-title">Create memory</h3>
 

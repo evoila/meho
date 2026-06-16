@@ -16,7 +16,7 @@
     request  -- dict: id / op_id / connector_id / principal_sub / ...
 -#}
 {% from "_icons.html" import icon %}
-<dialog id="meho-approvals-modal" class="modal modal-open" aria-label="Decision recorded">
+<dialog id="meho-approvals-modal" class="modal" aria-label="Decision recorded">
   <div class="modal-box max-w-md">
     <div class="flex flex-col items-center gap-3 py-6 text-center" role="status" aria-live="polite">
       {% if decision == "approved" %}

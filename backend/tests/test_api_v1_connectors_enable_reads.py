@@ -115,8 +115,12 @@ def _authed(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _seed_rows(*, tenant_id: uuid.UUID) -> None:
-    """Seed one group with one ingested op per HTTP verb under *tenant_id*."""
+async def _seed_rows(*, tenant_id: uuid.UUID | None) -> None:
+    """Seed one group with one ingested op per HTTP verb under *tenant_id*.
+
+    ``tenant_id=None`` seeds a built-in / global connector (the scope a
+    ``tenant_admin`` reaches via the shared-resolver global fallback).
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         group_id = uuid.uuid4()
@@ -295,3 +299,69 @@ async def test_enable_reads_unknown_connector_404(client: TestClient) -> None:
         )
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_builtin_only_falls_back_to_global(client: TestClient) -> None:
+    """G0.26-T1 (#1801): a built-in-only label enables its reads, not a 404.
+
+    The dogfood footgun in reverse: a connector that exists only as a
+    built-in (``tenant_id IS NULL``) row must enable-reads for a
+    ``tenant_admin`` via the shared-resolver global fallback —
+    matching ``GET /{id}/review`` returning 200 on the same label.
+    """
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    await _seed_rows(tenant_id=None)  # built-in / global rows only
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"connector_id": _CONNECTOR_ID, "ops_enabled": 2}
+    # The built-in rows flipped (GET + HEAD).
+    builtin_state = await _ops_enabled_state(None)
+    for op_id, enabled in builtin_state.items():
+        method = op_id.split(":", 1)[0]
+        assert enabled is (method in _READ_METHODS)
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_ambiguous_scope_returns_409(client: TestClient) -> None:
+    """G0.26-T1 (#1801): a tenant+built-in ambiguous label → 409 with candidates.
+
+    When the label maps to both a tenant-curated row and a built-in
+    row, the route returns a structured ``connector_scope_ambiguous``
+    409 (not a silent flip, not a 404). The same shape ``GET
+    /{id}/review`` returns on the same input. Nothing flips on either
+    scope.
+    """
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    await _seed_rows(tenant_id=operator_tenant)
+    await _seed_rows(tenant_id=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "connector_scope_ambiguous"
+    assert detail["connector_id"] == _CONNECTOR_ID
+    candidate_tenants = [c["tenant_id"] for c in detail["candidates"]]
+    assert candidate_tenants == [None, str(operator_tenant)]
+    for candidate in detail["candidates"]:
+        assert candidate["product"] == _PRODUCT
+        assert candidate["version"] == _VERSION
+        assert candidate["impl_id"] == _IMPL_ID
+    # Nothing flipped on either scope.
+    assert not any((await _ops_enabled_state(operator_tenant)).values())
+    assert not any((await _ops_enabled_state(None)).values())

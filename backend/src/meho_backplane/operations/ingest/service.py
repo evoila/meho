@@ -99,6 +99,7 @@ from meho_backplane.operations.ingest._internals import (
     load_op,
     load_ops_in_groups,
     operator_disabled_op_ids,
+    scope_has_groups,
     validate_edit_op_args,
     write_audit_row,
 )
@@ -109,7 +110,9 @@ from meho_backplane.operations.ingest.delete_connector import (
     stage_connector_delete,
 )
 from meho_backplane.operations.ingest.exceptions import (
+    AmbiguousConnectorScopeError,
     ConnectorNotFoundError,
+    ConnectorScopeCandidate,
     InvalidStateTransitionError,
 )
 from meho_backplane.operations.ingest.parser import parse_connector_id
@@ -218,6 +221,92 @@ class ReviewService:
             tenant_id=tenant_id,
         )
 
+    async def _resolve_existing_scope(
+        self,
+        connector_id: str,
+        tenant_id: UUID | None,
+        session: AsyncSession,
+    ) -> ConnectorScope:
+        """Resolve ``(connector_id, tenant_id)`` to the one row-scope to act on.
+
+        The single resolution path the read (:meth:`get_review_payload`)
+        and write (:meth:`enable_reads`) actions share so they can never
+        diverge on which row they touch (G0.26-T1 #1801). Authorises +
+        parses via :meth:`_resolve_scope`, then probes the database for
+        which scope actually holds rows:
+
+        * ``tenant_id is None`` (the MCP admin path's explicit built-in
+          probe) — single-pass: the caller named the built-in scope
+          deliberately, so there is no tenant fallback and no
+          tenant-vs-built-in ambiguity. Returns the built-in scope when
+          rows exist, else :class:`ConnectorNotFoundError`.
+        * ``tenant_id == operator.tenant_id`` (the daily-driver path) —
+          two-scope probe:
+
+          * a tenant-curated row **and** a built-in row exist → raise
+            :class:`AmbiguousConnectorScopeError` (don't silently pick one —
+            the silent-tenant-pick / silent-global-pick is the footgun
+            #1801 closes).
+          * only the tenant row exists → the tenant scope.
+          * only the built-in row exists → the built-in scope (the
+            G0.13-T5 #1135 global fallback, now shared with writes; the
+            built-in render bypasses :meth:`_authorize_scope`'s
+            admin-only gate intentionally — operator-level read access to
+            built-ins matches the list endpoint, and the write callers
+            are already ``tenant_admin``-gated at the route layer).
+          * neither exists → :class:`ConnectorNotFoundError`.
+
+        A cross-tenant ``tenant_id`` (≠ the operator's, not ``None``)
+        never reaches this method: :meth:`_resolve_scope` ->
+        :meth:`_authorize_scope` already collapsed it into
+        :class:`ConnectorNotFoundError`, preserving the cross-tenant
+        404 conflation.
+        """
+        scope = self._resolve_scope(connector_id, tenant_id)
+        if tenant_id is None:
+            # Explicit built-in probe (admin path) — single-pass, no
+            # fallback, no ambiguity.
+            if await scope_has_groups(session, scope):
+                return scope
+            raise ConnectorNotFoundError(
+                connector_id=connector_id,
+                tenant_id=tenant_id,
+            )
+        builtin_scope = ConnectorScope(
+            product=scope.product,
+            version=scope.version,
+            impl_id=scope.impl_id,
+            tenant_id=None,
+        )
+        tenant_exists = await scope_has_groups(session, scope)
+        builtin_exists = await scope_has_groups(session, builtin_scope)
+        if tenant_exists and builtin_exists:
+            raise AmbiguousConnectorScopeError(
+                connector_id=connector_id,
+                candidates=[
+                    ConnectorScopeCandidate(
+                        product=scope.product,
+                        version=scope.version,
+                        impl_id=scope.impl_id,
+                        tenant_id=scope.tenant_id,
+                    ),
+                    ConnectorScopeCandidate(
+                        product=builtin_scope.product,
+                        version=builtin_scope.version,
+                        impl_id=builtin_scope.impl_id,
+                        tenant_id=None,
+                    ),
+                ],
+            )
+        if tenant_exists:
+            return scope
+        if builtin_exists:
+            return builtin_scope
+        raise ConnectorNotFoundError(
+            connector_id=connector_id,
+            tenant_id=tenant_id,
+        )
+
     # -- public read API ---------------------------------------------------
 
     async def get_review_payload(
@@ -241,59 +330,47 @@ class ReviewService:
 
         Visibility scope mirrors :func:`list_ingested_connectors`:
         an operator sees rows under their own tenant **and** built-in
-        (``tenant_id IS NULL``) rows. When *tenant_id* equals the
-        operator's tenant and that probe misses, the lookup falls
-        back to ``tenant_id IS NULL`` so a ``GET
-        /api/v1/connectors/{id}/review`` against a global connector
-        returns 200 instead of 404 (G0.13-T5 #1135). When *tenant_id*
-        is passed explicitly as ``None`` (MCP admin path), the
-        existing admin-only gate stays; when it's any other UUID
-        (cross-tenant probe), the lookup stays single-pass and the
-        cross-tenant 404 conflation is preserved.
+        (``tenant_id IS NULL``) rows. Resolution runs through the
+        shared :meth:`_resolve_existing_scope` so this read path and the
+        :meth:`enable_reads` write path resolve the **same** row for the
+        same ``(connector_id, tenant_id)`` — including the global
+        fallback. When *tenant_id* equals the operator's tenant and only
+        the built-in row exists, the lookup resolves to ``tenant_id IS
+        NULL`` so a ``GET /api/v1/connectors/{id}/review`` against a
+        global connector returns 200 (G0.13-T5 #1135). When **both** a
+        tenant row and a built-in row exist for the label,
+        :class:`AmbiguousConnectorScopeError` is raised rather than silently
+        picking one (G0.26-T1 #1801). When *tenant_id* is passed
+        explicitly as ``None`` (MCP admin path), the existing admin-only
+        gate stays and the probe is single-pass; a cross-tenant probe
+        keeps the 404 conflation.
         """
-        scope = self._resolve_scope(connector_id, tenant_id)
-        try:
-            return await self._render_payload(connector_id, scope)
-        except ConnectorNotFoundError:
-            if tenant_id is None or tenant_id != self._operator.tenant_id:
-                # Explicit built-in probe (MCP admin path) or genuine
-                # cross-tenant probe — no fall-through. The original
-                # 404 stays.
-                raise
-            # Operator's own-tenant probe missed; try the built-in
-            # scope. Build a fresh scope tuple with tenant_id=None;
-            # bypass _authorize_scope's admin-only gate intentionally
-            # because read access to built-ins is operator-level
-            # (matches the list endpoint).
-            fallback_scope = ConnectorScope(
-                product=scope.product,
-                version=scope.version,
-                impl_id=scope.impl_id,
-                tenant_id=None,
-            )
-            return await self._render_payload(connector_id, fallback_scope)
+        sessionmaker = self._sessionmaker()
+        async with sessionmaker() as session:
+            scope = await self._resolve_existing_scope(connector_id, tenant_id, session)
+            return await self._render_payload(connector_id, scope, session)
 
     async def _render_payload(
         self,
         connector_id: str,
         scope: ConnectorScope,
+        session: AsyncSession,
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
         Raises :class:`ConnectorNotFoundError` when no group rows
-        exist under *scope*. Extracted from :meth:`get_review_payload`
-        so the two-pass tenant lookup there can reuse the same
-        rendering pipeline against a fallback scope without
-        duplicating the DB roundtrip + payload assembly.
+        exist under *scope* (a defensive guard — the caller resolves
+        the scope via :meth:`_resolve_existing_scope` first, so on the
+        normal path rows are present). The caller owns the open
+        *session* / transaction so scope resolution and payload
+        rendering observe one consistent snapshot.
         """
-        sessionmaker = self._sessionmaker()
-        async with sessionmaker() as session:
-            groups = await load_groups(session, scope, connector_id)
-            ops = await load_ops_in_groups(
-                session,
-                scope,
-                [group.id for group in groups],
-            )
+        groups = await load_groups(session, scope, connector_id)
+        ops = await load_ops_in_groups(
+            session,
+            scope,
+            [group.id for group in groups],
+        )
         ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
         for op in ops:
             if op.group_id is not None and op.group_id in ops_by_group:
@@ -529,21 +606,31 @@ class ReviewService:
         group level while its reads are dispatchable, the same way
         :meth:`edit_op` flips one op without a group transition.
 
-        Scope-aware and idempotent. The connector must exist in
-        *tenant_id*'s scope or :class:`ConnectorNotFoundError` is
-        raised (the same 404 conflation every other method uses).
-        Exactly **one** ``meho.connector.enable_reads`` audit row is
-        written, carrying ``ops_enabled_count``, and only when at least
-        one op actually flipped: a re-run once the reads are enabled
-        matches no rows, writes no audit row, and returns ``0``.
+        Scope-aware and idempotent. Resolution runs through the shared
+        :meth:`_resolve_existing_scope`, so this write path resolves the
+        **same** row the :meth:`get_review_payload` read path does for a
+        given ``(connector_id, tenant_id)`` — including the G0.13-T5
+        #1135 global fallback (a label that exists only as a built-in
+        row enables its reads instead of 404'ing, closing the read/write
+        asymmetry #1801 was filed for). The connector must exist in the
+        resolved scope or :class:`ConnectorNotFoundError` is raised (the
+        same 404 conflation every other method uses); when a label maps
+        to **both** a tenant row and a built-in row,
+        :class:`AmbiguousConnectorScopeError` is raised rather than silently
+        flipping one. Exactly **one** ``meho.connector.enable_reads``
+        audit row is written, carrying ``ops_enabled_count``, and only
+        when at least one op actually flipped: a re-run once the reads
+        are enabled matches no rows, writes no audit row, and returns
+        ``0``.
         """
-        scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            # Proves the connector exists in scope (else 404) before
-            # the blind bulk UPDATE — the UPDATE's rowcount alone
-            # can't tell "no read ops to flip" from "no such connector".
-            await load_groups(session, scope, connector_id)
+            # Resolve the exact row-scope (else 404 / ambiguous) before
+            # the blind bulk UPDATE — the UPDATE's rowcount alone can't
+            # tell "no read ops to flip" from "no such connector", and
+            # resolving here is what keeps this write path's target row
+            # identical to the /review read path's.
+            scope = await self._resolve_existing_scope(connector_id, tenant_id, session)
             ops_enabled = await bulk_enable_read_ops(session, scope)
             if ops_enabled == 0:
                 # Idempotent no-op: nothing changed, so write no audit

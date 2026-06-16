@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Unify connector-id resolution across `GET /api/v1/connectors/{id}/review` and `POST /api/v1/connectors/{id}/enable-reads` so a label resolves to the **same** row on both paths: `enable-reads` now honours the same tenant→built-in global fallback `review` had (a global-only connector enables its reads instead of returning 404), and a label that maps to **both** a tenant-curated row and a built-in row returns a structured `connector_scope_ambiguous` 409 listing the candidate rows on both paths — instead of `review` silently picking one and `enable-reads` 404'ing (#1801).
+
 ### Documentation
 
 - Fix the `meho targets import` examples in the VCF Operations / VCF Logs onboarding guides — they used an unsupported flag form, but `import` takes a `targets.yaml` **file** — and show the per-target `verify_tls` / `tls_ca_pin` TLS-trust fields for reaching self-signed / internal-CA appliances; refresh the vROps "probe fails with TLS error" troubleshooting row to name the per-target options (#1774).

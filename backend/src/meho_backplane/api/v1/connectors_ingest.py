@@ -71,6 +71,17 @@ The service-layer exceptions map to HTTP status codes uniformly:
 
 * :class:`ConnectorNotFoundError` → 404.
 * :class:`InvalidStateTransitionError` → 409 Conflict.
+* :class:`AmbiguousConnectorScopeError` → 409 Conflict (G0.26-T1
+  #1801). A ``connector_id`` that resolves to **both** a tenant-curated
+  row and a built-in row on ``GET /{id}/review`` or ``POST
+  /{id}/enable-reads``. The ``detail`` body is the structured envelope
+  from :func:`build_connector_scope_ambiguous_detail` (a stable
+  ``connector_scope_ambiguous`` classifier + ``connector_id`` +
+  ``candidates[]`` of ``{product, version, impl_id, tenant_id}`` + the
+  rendered ``message``). Both the read and write routes share
+  :meth:`ReviewService._resolve_existing_scope`, so they raise this on
+  the same input and surface the identical 409 instead of one silently
+  picking a row and the other 404'ing.
 * :class:`UncoveredVersionLabel` (G0.9-T9 #741 ingest pre-flight:
   the ``version`` label is outside every registered class's
   ``supported_version_range``) → 422 Unprocessable Entity. Caught
@@ -159,6 +170,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations._lookup import connector_exists, parse_connector_id
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     CatalogListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
@@ -192,6 +204,7 @@ from meho_backplane.operations.ingest import (
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
+    build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
@@ -1097,11 +1110,26 @@ async def get_review_endpoint(
     Operator-level read: any operator can inspect a connector their
     tenant owns plus built-ins. Editing the payload requires
     ``tenant_admin`` via the PATCH routes. Cross-tenant /
-    non-existent connector → 404 (the deliberate conflation).
+    non-existent connector → 404 (the deliberate conflation). A label
+    that resolves to a built-in-only row still returns 200 (the
+    G0.13-T5 #1135 global fallback); a label that maps to **both** a
+    tenant row and a built-in row → 409 ``connector_scope_ambiguous``
+    with the candidate list (G0.26-T1 #1801), identical to the write
+    sibling ``POST /{id}/enable-reads`` via the shared service resolver.
     """
     service = ReviewService(operator)
     try:
         return await service.get_review_payload(connector_id, operator.tenant_id)
+    except AmbiguousConnectorScopeError as exc:
+        # The label resolves to both a tenant row and a built-in row;
+        # 409 (not 404) with a structured candidate list so the operator
+        # disambiguates rather than getting a silent global pick. The
+        # write sibling (/enable-reads) raises the same exception via the
+        # shared resolver, so read and write surface identically (#1801).
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=build_connector_scope_ambiguous_detail(exc),
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1265,10 +1293,15 @@ async def enable_reads_endpoint(
     enabled flips nothing, writes no audit row, and returns
     ``ops_enabled=0``. Unlike ``enable``, this does not move any
     group's ``review_status`` — it is a per-op flip, so there is no
-    state-machine guard and no 409 path. Unknown / cross-tenant
-    connector → 404 (the deliberate conflation). One
-    ``meho.connector.enable_reads`` audit row is written when at least
-    one op flips.
+    state-machine guard (no transition 409). Unknown / cross-tenant
+    connector → 404 (the deliberate conflation). Resolution shares
+    :meth:`ReviewService._resolve_existing_scope` with
+    ``GET /{id}/review``, so a built-in-only label enables its reads
+    (the #1135 global fallback, not a 404) and a label that maps to
+    **both** a tenant row and a built-in row → 409
+    ``connector_scope_ambiguous`` with the candidate list instead of a
+    silent flip (G0.26-T1 #1801). One ``meho.connector.enable_reads``
+    audit row is written when at least one op flips.
 
     Tenant scoping (#1699 contract): no ``tenant_id`` parameter — the
     scope is always the calling operator's tenant from the JWT. The
@@ -1281,6 +1314,14 @@ async def enable_reads_endpoint(
             connector_id,
             tenant_id=operator.tenant_id,
         )
+    except AmbiguousConnectorScopeError as exc:
+        # Same shared-resolver outcome as GET /{id}/review: a label that
+        # maps to both a tenant row and a built-in row is a 409 with the
+        # candidate list, never a silent flip of one of them (#1801).
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=build_connector_scope_ambiguous_detail(exc),
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

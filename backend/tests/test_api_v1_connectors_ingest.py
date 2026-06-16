@@ -1573,6 +1573,40 @@ async def test_get_review_builtin_connector_visible_to_non_admin_operator(
     assert body["total_op_count"] == 6
 
 
+@pytest.mark.asyncio
+async def test_get_review_ambiguous_scope_returns_409(
+    client: TestClient,
+) -> None:
+    """G0.26-T1 (#1801): a label mapping to a tenant row AND a built-in row → 409.
+
+    The read counterpart of the enable-reads ambiguity test: rather
+    than silently returning the tenant row (the pre-#1801 behaviour),
+    the route returns a structured ``connector_scope_ambiguous`` 409
+    enumerating both candidate scopes — the identical shape ``POST
+    /{id}/enable-reads`` returns on the same input, since both routes
+    share the service resolver.
+    """
+    operator_tenant = uuid.uuid4()
+    # Tenant-curated row + a built-in row at the same triple.
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "connector_scope_ambiguous"
+    assert detail["connector_id"] == "vmware-rest-9.0"
+    assert [c["tenant_id"] for c in detail["candidates"]] == [
+        None,
+        str(operator_tenant),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # PATCH /{id}/groups/{key}
 # ---------------------------------------------------------------------------

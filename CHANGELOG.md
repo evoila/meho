@@ -93,6 +93,7 @@ connector-related release-notes line.
 ### Fixed
 
 - Unify connector-id resolution across `GET /api/v1/connectors/{id}/review` and `POST /api/v1/connectors/{id}/enable-reads` so a label resolves to the **same** row on both paths: `enable-reads` now honours the same tenant→built-in global fallback `review` had (a global-only connector enables its reads instead of returning 404), and a label that maps to **both** a tenant-curated row and a built-in row returns a structured `connector_scope_ambiguous` 409 listing the candidate rows on both paths — instead of `review` silently picking one and `enable-reads` 404'ing (#1801).
+- Docs-corpus entitlement denials are now **diagnosable** instead of opaque: `/ui/corpus` names the missing `meho-docs:<collection>` capability + the resolved identity/tenant when a corpus exists but the session identity isn't entitled (distinct from the genuinely-unprovisioned empty state), and `POST /api/v1/search_docs` returns a structured `403` (`{"error":"not_entitled","collection","required_capability","operator_sub","tenant_id"}`) — so an operator can grant exactly the right claim. The MCP `search_docs` / `ask_docs` `-32602` carries the same on `error.data`. The three surfaces' entitlement contract is verified consistent (same `(tenant_id, capabilities)` derivation; the only divergence is the per-audience token MCP vs REST/UI validate), and the Keycloak per-audience `meho-docs:*` claim requirement is documented in `deploy/` (#1802).
 
 ### Documentation
 

@@ -686,6 +686,95 @@ residual `invalid_token` is reserved for failures that aren't
 `DecodeError` (`alg: none` via `UnsupportedAlgorithmError`, future
 authlib `JoseError` subclasses, post-refresh kid miss).
 
+#### Step 3a — Docs-corpus entitlement claim (`meho-docs:*`) is per-audience
+
+> **Only relevant if you run the `meho-docs` add-on** (the federated
+> vendor-document corpus behind `search_docs` / `ask_docs` /
+> `/ui/corpus`). Skip this sub-step otherwise.
+
+The docs-corpus surfaces gate on a **capability claim**, not a role or a
+group: an operator may search collection `<key>` only when its token's
+`capabilities` claim contains `meho-docs:<key>` (e.g. `meho-docs:vmware`).
+The backplane reads that array from the claim named by
+`JWT_CAPABILITIES_CLAIM_NAME` (default `capabilities`), and **all three
+surfaces use the same `(tenant_id, capabilities)` contract** — so they
+either all see the entitlement or none do, *for a given token*.
+
+The catch is the word "token". MEHO validates each surface's token for a
+**different audience**:
+
+| Surface | Audience the token is validated for |
+| --- | --- |
+| REST `POST /api/v1/search_docs` | `KEYCLOAK_AUDIENCE` (`meho-backplane`) |
+| `/ui/corpus` (the operator web console BFF) | `KEYCLOAK_AUDIENCE` (`meho-backplane`) — same as REST |
+| MCP `search_docs` / `ask_docs` | `MCP_RESOURCE_URI` (`<backplane-url>/mcp`) |
+
+If your realm mints **per-audience tokens with different claim sets** (the
+common case once the `meho-mcp-audience` mapper from Step 3 is in play —
+the MCP token and the REST/UI token are issued for different audiences),
+the `meho-docs:*` capability can land on the MCP token but **not** the
+REST/UI token. The symptom is the [#1802](https://github.com/evoila/meho/issues/1802)
+dogfood report: `search_docs` over MCP returns cited chunks, while the same
+collection over REST 403s (`{"error":"not_entitled", ...}`) and `/ui/corpus`
+shows "Not entitled to the attached docs corpus". That is a **claim-mapper
+gap, not a backplane bug** — the entitlement check is identical across
+surfaces; the claim simply wasn't issued on every audience.
+
+**Fix: emit the `capabilities` claim on every audience the operator uses.**
+Add a `capabilities` mapper to the **realm-default client scope** every
+client inherits (the same `meho-backplane-claims` default scope the CIMD
+section recommends, or directly on each public client), so the claim rides
+both the `meho-backplane` and `<backplane-url>/mcp` audiences:
+
+| Mapper name | Type | Output claim | Notes |
+| --- | --- | --- | --- |
+| `meho-docs-capabilities` | `oidc-hardcoded-claim` (lab) or `oidc-usermodel-attribute-mapper` (realm with a `capabilities` user attribute) | `capabilities` (must match `JWT_CAPABILITIES_CLAIM_NAME`) | Claim **JSON type: `JSON`** and **Multivalued: On** so it serialises as a JSON array (`["meho-docs","meho-docs:vmware"]`), not a comma string. Include the base `meho-docs` add-on key **and** one `meho-docs:<collection_key>` per collection the identity may search. Add it to a **default** client scope (not per-client) so a CIMD-resolved or newly-added client inherits it too. |
+
+For the hardcoded-claim (lab) form, set **Claim value** to the literal JSON
+array, e.g. `["meho-docs", "meho-docs:vmware"]`.
+
+> **Per-collection, not all-or-nothing.** `meho-docs` alone makes the
+> add-on *visible* (the tool appears, the page loads); each
+> `meho-docs:<collection_key>` is what authorises searching *that*
+> collection. Granting `meho-docs` without any `meho-docs:<key>` is exactly
+> the empty-but-diagnosable state `/ui/corpus` now names explicitly.
+
+**Verify the claim is present on the audience that's failing.** Decode the
+token each surface validates and confirm both the audience and the
+capability. Using `meho status --print-token` (the CLI/REST audience):
+
+```bash
+# 1. The capabilities claim carries the per-collection key on the REST/UI
+#    audience token. (jwt-cli `jwt decode`, or jq over the base64 payload.)
+meho status --print-token \
+  | jwt decode --json - \
+  | jq '{aud: .payload.aud, capabilities: .payload.capabilities}'
+# Expect aud to include "meho-backplane" AND capabilities to include
+# "meho-docs:vmware". If capabilities is missing/empty here but the MCP
+# token has it, that is the per-audience gap — add the mapper above.
+
+# 2. Probe the REST surface directly: a 403 names the missing claim + the
+#    identity it checked, so you can grant exactly that capability.
+curl -s -X POST https://meho.example.com/api/v1/search_docs \
+  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"x","collection":"vmware"}' | jq .detail
+# {
+#   "error": "not_entitled",
+#   "collection": "vmware",
+#   "required_capability": "meho-docs:vmware",
+#   "operator_sub": "<sub>",
+#   "tenant_id": "<uuid>",
+#   "message": "identity '<sub>' (tenant <uuid>) is not entitled to doc
+#               collection 'vmware': missing capability 'meho-docs:vmware'"
+# }
+```
+
+For the MCP-audience token (minted via the `meho-mcp-client` browser flow),
+decode that token the same way and confirm `aud` includes
+`<backplane-url>/mcp` **and** the same `capabilities` array — both audiences
+must carry it for all three surfaces to agree.
+
 #### Step 4 — Explicitly assign the 4 default client scopes
 
 | Scope | Why | What breaks if it's missing |

@@ -388,11 +388,50 @@ def test_corpus_index_multiple_collections_no_default_selection() -> None:
 
 
 def test_corpus_index_empty_state_when_no_entitled_collections() -> None:
-    """An operator entitled to no collection sees the unprovisioned empty state."""
+    """A collection exists but the identity is unentitled -> diagnosable empty state.
+
+    This is the reported #1802 symptom: a ``vmware`` collection is attached
+    (and searchable via MCP) but the operator's session identity lacks
+    ``meho-docs:vmware``. The page must name the missing capability + the
+    identity it checked, NOT the opaque "No doc collections available".
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_collection(collection_key="vmware")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
-    # No ``meho-docs:vmware`` capability -> empty entitled set.
+    # No ``meho-docs:vmware`` capability -> empty entitled set, but a
+    # collection the operator can't see DOES exist.
+    operator = _operator(tenant_id=_TENANT_A, capabilities=frozenset(), sub="op-unentitled")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/corpus")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The actionable diagnostic names the missing capability + the identity.
+    assert "meho-docs:vmware" in body
+    assert "op-unentitled" in body
+    assert str(_TENANT_A) in body
+    assert "not entitled" in body.lower()
+    # It is NOT the generic unprovisioned copy (a corpus DOES exist).
+    assert "No doc collections available" not in body
+    # The search form is not rendered when there is nothing to search.
+    assert 'hx-post="/ui/corpus/search"' not in body
+
+
+def test_corpus_index_unprovisioned_state_when_no_collections_exist() -> None:
+    """A tenant with NO collections at all sees the generic unprovisioned copy.
+
+    Distinct from the diagnosable missing-capability state above: when the
+    catalogue holds nothing the operator could be entitled to, there is no
+    concrete ``meho-docs:<key>`` to name, so the page keeps the plain "ask an
+    administrator to register and entitle a collection" copy and does NOT
+    fabricate a capability name.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # No collection seeded at all.
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
     operator = _operator(tenant_id=_TENANT_A, capabilities=frozenset())
 
     with respx.mock(assert_all_called=False):
@@ -403,7 +442,8 @@ def test_corpus_index_empty_state_when_no_entitled_collections() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "No doc collections available" in body
-    # The search form is not rendered when there is nothing to search.
+    # No collection exists, so no missing-capability diagnostic is rendered.
+    assert "meho-docs:" not in body
     assert 'hx-post="/ui/corpus/search"' not in body
 
 
@@ -638,6 +678,48 @@ def test_corpus_search_disabled_collection_renders_403_card() -> None:
     assert 'role="alert"' in body
     assert "403" in body
     assert "Not permitted" in body
+
+
+def test_corpus_search_not_entitled_renders_403_card_naming_capability() -> None:
+    """Searching a collection the identity isn't entitled to names the missing claim.
+
+    The collection is seeded ``ready`` and the operator passes the static
+    ``meho-docs`` add-on gate but lacks the per-collection
+    ``meho-docs:vmware`` capability. The un-mocked resolve gate raises
+    ``CollectionForbiddenError``; the handler maps it to a 403 card whose
+    detail names the missing capability + the identity it checked (T2 #1802),
+    not just "Not permitted".
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    # Base add-on capability only -> visible tool, but not entitled to vmware.
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs"}),
+        sub="op-nopriv",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'role="alert"' in body
+    assert "403" in body
+    assert "Not permitted" in body
+    # The actionable diagnostic: the missing capability + the identity.
+    assert "meho-docs:vmware" in body
+    assert "op-nopriv" in body
+    assert str(_TENANT_A) in body
 
 
 def test_corpus_search_not_ready_collection_renders_409_card() -> None:

@@ -26,6 +26,11 @@
     query                -- str: current query (empty on first render)
     chunks               -- list[DocsChunk]: empty on first render
     searched             -- bool: False on first render
+    entitlement_diagnostic -- dict | None: when the picker is empty AND a
+                              collection exists the identity can't see, names
+                              the missing meho-docs:<key> capability +
+                              operator_sub + tenant_id (T2 #1802); None when
+                              the tenant is genuinely unprovisioned
     csrf_token           -- str: minted double-submit token
 
   Note: ``ready`` is NOT passed here -- the chassis context processor
@@ -111,10 +116,40 @@
             Search
           </button>
         </form>
+      {% elif entitlement_diagnostic %}
+        {# A corpus EXISTS but the resolved session identity is missing the
+           per-collection capability -- the diagnosable case (T2 #1802). Name
+           the concrete missing meho-docs:<key> + the identity/tenant it was
+           checked against so the operator knows which Keycloak claim to grant
+           on which identity, instead of an opaque "no collections". #}
+        <div class="alert alert-warning" role="alert" aria-live="polite">
+          <div>
+            <h3 class="font-semibold">Not entitled to the attached docs corpus</h3>
+            <p class="text-sm opacity-90">
+              Your session identity
+              <code>{{ entitlement_diagnostic.operator_sub }}</code>
+              (tenant <code>{{ entitlement_diagnostic.tenant_id }}</code>)
+              is missing the capability
+              <code>{{ entitlement_diagnostic.required_capability }}</code>
+              needed to search collection
+              <code>{{ entitlement_diagnostic.collection_key }}</code>{% if entitlement_diagnostic.unentitled_count > 1 %}
+              (and {{ entitlement_diagnostic.unentitled_count - 1 }} other
+              collection{{ "s" if entitlement_diagnostic.unentitled_count > 2 else "" }}){% endif %}.
+            </p>
+            <p class="text-sm opacity-70">
+              The collection is attached but your token does not carry the
+              entitlement claim for it. Ask an administrator to grant
+              <code>{{ entitlement_diagnostic.required_capability }}</code>
+              to this identity in Keycloak (the claim is per-audience &mdash;
+              see the deployment&rsquo;s docs-corpus entitlement note).
+            </p>
+          </div>
+        </div>
       {% else %}
-        {# No entitled collections -- the tenant is unprovisioned for any
-           docs corpus. This is the not-yet-entitled empty state, distinct
-           from a zero-results search. #}
+        {# No entitled collections AND none visible at all -- the tenant is
+           genuinely unprovisioned for any docs corpus. Distinct from the
+           diagnosable missing-capability case above and from a zero-results
+           search. #}
         <div class="text-center py-8">
           <p class="text-lg opacity-60">No doc collections available</p>
           <p class="text-sm opacity-40">

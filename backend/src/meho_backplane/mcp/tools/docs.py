@@ -213,7 +213,16 @@ async def _resolve_collection_or_error(
                 data={"known_collections": exc.known_keys},
             ) from exc
         except CollectionForbiddenError as exc:
-            raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+            # ``str(exc)`` already names the missing capability + the identity
+            # it checked; also surface the capability key on ``error.data`` so
+            # an agent can self-correct without parsing the message (T2 #1802).
+            raise McpInvalidParamsError(
+                f"{tool}: {exc}",
+                data={
+                    "reason": "not_entitled",
+                    "required_capability": exc.required_capability,
+                },
+            ) from exc
         except CollectionDisabledError as exc:
             raise McpInvalidParamsError(
                 f"{tool}: {exc}",

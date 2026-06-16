@@ -137,11 +137,36 @@ class CollectionForbiddenError(CollectionAccessError):
     capability for *this* collection. Surfaces map this to a 403-class
     rejection so it reads as "denied", not "not found" — the collection
     exists; the principal just cannot search it.
+
+    The error names the **missing capability** (``required_capability``) and
+    the **identity it checked** (``operator_sub`` + ``tenant_id``) so every
+    surface can render an *actionable* diagnostic — "your identity ``<sub>``
+    (tenant ``<id>``) is missing capability ``meho-docs:<key>``" — instead of
+    an opaque "not entitled" / empty result (T2 #1802). The asymmetry that
+    motivated this (MCP succeeds where REST / the UI session 403 / empty) is
+    a per-audience Keycloak claim divergence: the surface telling the
+    operator *which* capability is absent *on which identity* is what lets
+    them fix the mapper rather than guess (see
+    ``deploy/values-examples/README.md`` § meho-docs entitlement claim).
     """
 
-    def __init__(self, collection_key: str) -> None:
+    def __init__(
+        self,
+        collection_key: str,
+        *,
+        required_capability: str,
+        operator_sub: str,
+        tenant_id: str,
+    ) -> None:
+        self.required_capability = required_capability
+        self.operator_sub = operator_sub
+        self.tenant_id = tenant_id
         super().__init__(
-            f"not entitled to doc collection {collection_key!r}",
+            (
+                f"identity {operator_sub!r} (tenant {tenant_id}) is not entitled to "
+                f"doc collection {collection_key!r}: missing capability "
+                f"{required_capability!r}"
+            ),
             collection_key=collection_key,
         )
 
@@ -290,10 +315,16 @@ async def resolve_entitled_ready_collection(
         _log.warning(
             "doc_collection_entitlement_denied",
             tenant_id=str(operator.tenant_id),
+            operator_sub=operator.sub,
             collection_key=row.collection_key,
             required_capability=capability,
         )
-        raise CollectionForbiddenError(row.collection_key)
+        raise CollectionForbiddenError(
+            row.collection_key,
+            required_capability=capability,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
 
     if row.status != _READY_STATUS:
         _log.info(

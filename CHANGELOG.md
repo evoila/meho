@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- Promote the connector `product`↔`impl_id` round-trip check in `register_connector_v2` from an advisory WARN to a **hard fail** — now that the family is realigned (#1814) nothing diverges, so a future divergent registration crashes `_eager_import_connectors` at boot (a deploy-time typo) instead of silently shadowing the connector behind an auto-shim (#1816).
+
 ### Security
 
 - Closed a within-tenant **cross-principal memory leak** on the retrieval data path: `POST /api/v1/retrieve {source:"memory"}` and the `meho://retrieve/{query}` MCP resource returned another principal's per-principal memories (`user` / `user-tenant` / `user-target` scopes, full `body`) to any operator in the same tenant. The two surfaces called the shared `retrieve()` substrate without the per-principal `user_sub` push-down the isolated read paths (`recall`, `list`, MCP `search_memory`) already apply — the HTTP route forwarded client `metadata_filters` verbatim with no per-principal scoping, and the MCP resource passed no filters at all. The fix enforces a **mandatory, non-overridable** per-principal predicate at the shared `retrieve()` boundary (`principal_sub`): for `source="memory"` user-scoped kinds a row is returned only when its stored `user_sub` equals the caller's `sub`, applied regardless of caller and AND-enforced so a client-supplied `metadata_filters={"user_sub":"<other>"}` cannot widen it. Tenant-broadcast scopes (`tenant` / `target`) stay visible cross-principal (no over-correction), and the other `retrieve()` sources (`knowledge` / `operations` / `docs`) are tenant-scoped and carry no per-principal `user_sub` data the same gap would leak. Bidirectional + non-override + no-over-correction probes added against a real pgvector cluster, covering both the HTTP route and the MCP resource (#1797).

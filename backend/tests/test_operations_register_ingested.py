@@ -68,7 +68,6 @@ from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._lookup import (
     connector_exists,
     dispatch_product,
-    parse_connector_id,
 )
 from meho_backplane.operations.ingest import (
     EndpointDescriptorProto,
@@ -1041,11 +1040,13 @@ async def test_register_ingested_warns_and_proceeds_when_no_class_registered(
     )
     monkeypatch.setattr(connector_registration, "_log", private_log)
 
-    # Registry empty for ``(unknown-vendor, brand-new-impl)``.
+    # Registry empty for ``(newvendor, newvendor-rest)``. The triple is
+    # aligned (``newvendor-rest-1.0`` parses back to ``newvendor``) so the
+    # orphaned-class path is exercised without a product↔impl_id divergence.
     result = await register_ingested_operations(
-        product="unknown-vendor",
+        product="newvendor",
         version="1.0",
-        impl_id="brand-new-impl",
+        impl_id="newvendor-rest",
         spec_source="vendor.yaml",
         operations=[_proto("GET:/things", path="/things")],
         embedding_service=stub_embedding_service,
@@ -1059,12 +1060,12 @@ async def test_register_ingested_warns_and_proceeds_when_no_class_registered(
     ]
     assert len(orphan_events) == 1
     event = orphan_events[0]
-    assert event["product"] == "unknown-vendor"
+    assert event["product"] == "newvendor"
     assert event["version"] == "1.0"
-    assert event["impl_id"] == "brand-new-impl"
+    assert event["impl_id"] == "newvendor-rest"
     # The auto-shim is registered after the orphan log (the ingest
     # proceeded — that's the warn-but-proceed semantics).
-    assert ("unknown-vendor", "1.0", "brand-new-impl") in all_connectors_v2()
+    assert ("newvendor", "1.0", "newvendor-rest") in all_connectors_v2()
 
 
 @pytest.mark.asyncio
@@ -1097,119 +1098,23 @@ async def test_register_ingested_passes_pre_flight_for_compatible_version(
 # ---------------------------------------------------------------------------
 # Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
 #
-# The remaining VCF-family splits register under a long product
-# (``product="vcf-automation"``) while the dispatch/query surface derives
-# the short product (``"vcfa"``) from the connector_id's impl_id segment.
-# Ingesting under the long product used to persist rows the dispatcher
-# never queries → the catalog reported ``registered, 0 ops``. These
-# tests pin that an ingest under the long (registry) product now lands
-# rows under the short (dispatch) product so ``connector_exists`` — the
-# gate ``search_operations`` / ``list_operation_groups`` enforce —
-# returns True. (vRLI / ``vrli-rest`` was aligned to the short product in
-# G0.26-T4 #1798 and is no longer a split — see
-# ``test_vrli_ingest_is_aligned_no_reconciliation`` below.)
+# Historically the VCF-family connectors registered under a long product
+# (``product="vcf-automation"``) while the dispatch/query surface derived
+# the short product (``"vcfa"``) from the connector_id's impl_id segment,
+# so an ingest under the long product had to be reconciled down to the
+# short one to stay dispatchable. #1814 (Initiative #1810) realigned the
+# whole family to register under the short token directly, and #1816
+# promoted ``register_connector_v2``'s product↔impl_id round-trip check
+# to a hard-fail — so a connector can no longer register under a divergent
+# long product at all (the old ``_VCF_PRODUCT_SPLITS`` /
+# ``_register_split_connector`` setup would now raise ``RuntimeError``).
+# The aligned ingest path (the only one that remains) is covered by
+# ``test_aligned_product_ingest_is_unchanged`` and
+# ``test_vrli_ingest_is_aligned_no_reconciliation`` below; the
+# divergent-product ingest *guard* (deferring to a hand-coded class rather
+# than scaffolding a shadowing shim) by
+# ``test_ingest_guard_defers_to_handrolled_under_divergent_product``.
 # ---------------------------------------------------------------------------
-
-
-def _register_split_connector(*, registry_product: str, version: str, impl_id: str) -> None:
-    """Register a fake connector class under a long↔short *split* product.
-
-    Mirrors the remaining split VCF-family classes (e.g.
-    ``VcfAutomationConnector`` -> ``product="vcf-automation"`` /
-    ``impl_id="vcfa-rest"``) closely enough for the ingest pre-flight +
-    auto-shim skip path: the class registers under the registry (long)
-    product with a ``>=MAJOR,<MAJOR+1`` range that covers *version*.
-    """
-    cls = type(
-        f"_FakeSplit_{registry_product}",
-        (_FakeRangedConnector,),
-        {
-            "product": registry_product,
-            "version": version,
-            "impl_id": impl_id,
-            "supported_version_range": ">=9.0,<10.0",
-            "priority": 1,
-        },
-    )
-    register_connector_v2(
-        product=registry_product,
-        version=version,
-        impl_id=impl_id,
-        cls=cls,
-    )
-
-
-#: The remaining VCF-family long↔short splits, as ``(registry_product,
-#: impl_id, dispatch_product)``. The registry product is what the
-#: connector class registers under (and what the catalog / pre-#1136
-#: next_step verb hand the operator); the dispatch product is what
-#: ``parse_connector_id`` derives from ``f"{impl_id}-{version}"`` and what
-#: the rows must persist under to be dispatchable. Mirrors
-#: ``_KNOWN_LISTING_PRODUCT_DRIFT`` in ``test_operations_ingest_catalog.py``
-#: plus the already-handled SDDC case (same split shape). vRLI /
-#: ``vrli-rest`` was aligned to ``product="vrli"`` in G0.26-T4 (#1798) so
-#: it round-trips and is no longer a split; the remaining five are
-#: deferred to Initiative #1810.
-_VCF_PRODUCT_SPLITS: list[tuple[str, str, str]] = [
-    ("hetzner-robot", "hetzner-rest", "hetzner"),
-    ("sddc-manager", "sddc-rest", "sddc"),
-    ("vcf-automation", "vcfa-rest", "vcfa"),
-    ("vcf-fleet", "fleet-rest", "fleet"),
-    ("vcf-operations", "vrops-rest", "vrops"),
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("registry_product", "impl_id", "dispatch_product"), _VCF_PRODUCT_SPLITS)
-async def test_ingest_under_registry_product_persists_dispatchable_rows(
-    stub_embedding_service: AsyncMock,
-    registry_product: str,
-    impl_id: str,
-    dispatch_product: str,
-) -> None:
-    """Ingesting under the long (registry) product lands rows under the short (dispatch) one.
-
-    For every VCF-family split, an operator ingesting ``--product
-    <registry_product>`` (what the catalog row / next_step verb name)
-    must produce a connector the dispatch/query surface resolves. Rows
-    persist under the parser-derived short product and ``connector_exists``
-    — the exact gate ``search_operations`` enforces — returns True.
-    """
-    version = "9.0"
-    _register_split_connector(registry_product=registry_product, version=version, impl_id=impl_id)
-
-    result = await register_ingested_operations(
-        product=registry_product,  # the LONG product the operator was told to use
-        version=version,
-        impl_id=impl_id,
-        spec_source="upstream.yaml",
-        operations=[_proto("GET:/api/v2/version", path="/api/v2/version")],
-        embedding_service=stub_embedding_service,
-    )
-    assert result.inserted_count == 1
-
-    # Rows persisted under the SHORT (dispatch) product, never the long one.
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as fresh:
-        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
-    assert len(rows) == 1
-    assert rows[0].product == dispatch_product, (
-        f"row persisted under {rows[0].product!r}; expected the dispatch product "
-        f"{dispatch_product!r} so the dispatcher (which parses it out of the "
-        f"connector_id) can resolve it"
-    )
-
-    # connector_exists — the dispatch/query gate — keyed on the parsed
-    # natural key returns True (the connector is dispatchable).
-    parsed_product, parsed_version, parsed_impl_id = parse_connector_id(f"{impl_id}-{version}")
-    assert parsed_product == dispatch_product
-    exists = await connector_exists(
-        tenant_id=uuid.uuid4(),
-        product=parsed_product,
-        version=parsed_version,
-        impl_id=parsed_impl_id,
-    )
-    assert exists is True
 
 
 @pytest.mark.asyncio
@@ -1236,6 +1141,53 @@ async def test_aligned_product_ingest_is_unchanged(
         rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
     assert rows[0].product == "vmware"
     assert dispatch_product(product="vmware", version="9.0", impl_id="vmware-rest") == "vmware"
+
+
+@pytest.mark.asyncio
+async def test_divergent_product_ingest_scaffolds_shim_under_canonical_product(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A divergent-product ingest with no hand-coded class scaffolds the shim under the
+    dispatch-canonical product, not the supplied one.
+
+    G0.27 / T2 (#1816). When the operator ingests a novel vendor under a
+    ``product`` token that does not equal the connector_id's parser-derived
+    product (``--product drift-test --impl-id drift-impl`` →
+    ``drift-impl-9.1`` parses to ``drift``), the auto-shim is registered
+    under the dispatch-canonical ``drift`` — the same product the rows
+    persist under — so it is actually dispatchable. Registering it under the
+    supplied ``drift-test`` (the pre-#1816 behavior) put the shim in a
+    namespace the dispatcher never queries (a non-dispatchable shadow) and
+    now also trips ``register_connector_v2``'s product↔impl_id hard-fail.
+    Reconciling the shim to the canonical product keeps the warn-but-proceed
+    ingest semantics while satisfying the invariant.
+    """
+    canonical = dispatch_product(product="drift-test", version="9.1", impl_id="drift-impl")
+    assert canonical == "drift"
+
+    result = await register_ingested_operations(
+        product="drift-test",  # diverges from the parser-derived "drift"
+        version="9.1",
+        impl_id="drift-impl",
+        spec_source="vendor.yaml",
+        operations=[_proto("GET:/things", path="/things")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+    assert result.connector_registered is True
+
+    # The shim landed under the canonical product, NOT the supplied one.
+    snapshot = all_connectors_v2()
+    assert ("drift", "9.1", "drift-impl") in snapshot
+    assert ("drift-test", "9.1", "drift-impl") not in snapshot
+    assert issubclass(snapshot[("drift", "9.1", "drift-impl")], GenericRestConnector)
+
+    # Rows persist under the same canonical product so the shim resolves them.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].product == "drift"
 
 
 @pytest.mark.asyncio

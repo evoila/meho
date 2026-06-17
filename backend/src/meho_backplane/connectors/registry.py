@@ -144,7 +144,10 @@ def register_connector_v2(
 
     Raises :exc:`TypeError` when ``cls`` is not a :class:`Connector` subclass.
     Raises :exc:`RuntimeError` on duplicate registration of the same
-    three-tuple key.
+    three-tuple key, and (G0.27 / T2 #1816) when the declared ``product``
+    does not round-trip through :func:`parse_connector_id` for the
+    ``impl_id`` / ``version`` — see
+    :func:`_assert_product_impl_id_round_trips`.
 
     Does **not** write to the v1 registry. v2-only registrations are
     invisible to :func:`get_connector` (which keys on product alone);
@@ -163,7 +166,7 @@ def register_connector_v2(
             f"connector already registered for v2 key {key!r}: "
             f"existing={_REGISTRY_V2[key].__name__}, attempted={cls.__name__}"
         )
-    _warn_if_product_impl_id_diverges(product=product, version=version, impl_id=impl_id, cls=cls)
+    _assert_product_impl_id_round_trips(product=product, version=version, impl_id=impl_id, cls=cls)
     _REGISTRY_V2[key] = cls
     _log.info(
         "connector_registered_v2",
@@ -174,18 +177,19 @@ def register_connector_v2(
     )
 
 
-def _warn_if_product_impl_id_diverges(
+def _assert_product_impl_id_round_trips(
     *,
     product: str,
     version: str,
     impl_id: str,
     cls: type[Connector],
 ) -> None:
-    """Log a WARN when ``product`` does not round-trip through the connector_id.
+    """Raise when ``product`` does not round-trip through the connector_id.
 
-    G0.26-T4 (#1798). The dispatch / discovery surface never sees a
-    connector's registration triple directly: it receives a
-    ``connector_id`` string and recovers the product via
+    G0.26-T4 (#1798) introduced this as a structured WARN; G0.27 / T2
+    (#1816) promotes it to a **hard fail**. The dispatch / discovery
+    surface never sees a connector's registration triple directly: it
+    receives a ``connector_id`` string and recovers the product via
     :func:`~meho_backplane.operations._lookup.parse_connector_id`, which
     derives it from the first hyphen-segment of ``impl_id``
     (``"vrli-rest" -> "vrli"``). When a connector registers a ``product``
@@ -195,23 +199,42 @@ def _warn_if_product_impl_id_diverges(
     mismatch that shadowed :class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`
     behind an auto-shim in the v0.16.0 dogfood.
 
-    This is **advisory only** — it logs and returns; it never raises.
     The five formerly-divergent ``_PRODUCT_SPLITS`` legacy connectors
     (``sddc-manager`` / ``vcf-automation`` / ``vcf-fleet`` /
     ``vcf-operations`` / ``hetzner-robot``) were realigned to their
     short, dispatch-canonical product token by #1814 (Initiative
     #1810), so — together with vRLI (#1798) — every shipped connector
-    now round-trips and this check is silent at boot. The check stays a
-    WARN (not a hard-fail) so a future connector that reintroduces a
-    divergent registration is flagged loudly without crashing
-    :func:`_eager_import_connectors`; promoting it to a boot-time raise
-    now that the family is aligned is **#1816**'s job.
+    now round-trips. With nothing left to violate the invariant the
+    check can fail closed: a divergent registration is a deploy-time
+    bug (a new connector mis-declaring ``product``, or an ``impl_id``
+    typo), so it raises :exc:`RuntimeError` and crashes
+    :func:`_eager_import_connectors` at boot rather than letting the
+    mismatch silently shadow the connector behind an auto-shim. There
+    is no allowlist — every shipped connector is expected to round-trip,
+    and a future divergence must be fixed at the registration, not
+    sanctioned here.
 
-    The wildcard / v1-compat row ``(product, "", "")`` is skipped: an
+    The wildcard / v1-compat row ``(product, "", "")`` is exempt: an
     empty ``version`` / ``impl_id`` renders a parser-incompatible
     ``connector_id`` (``"-"``) that has no derived product to compare,
     and the padding row is a resolver-internal detail, never an
     operator-addressable connector.
+
+    Scope of the check — only **lossless** connector_ids: the invariant
+    is about the *product* segment, and it is only meaningful when
+    :func:`~meho_backplane.operations._lookup.parse_connector_id` can
+    actually recover the triple. The parser's version segment must be
+    digit-leading (``vmware-rest-9.0`` -> ``("vmware", "9.0",
+    "vmware-rest")``); a non-numeric version label (``vmware-rest-rest``,
+    a synthetic discriminator some impls register under) doesn't match,
+    so the parser falls back to ``(connector_id, "", "")`` — it didn't
+    derive a *different product*, it failed to parse at all. In that case
+    there is no dispatch-canonical product to compare against (the
+    resolver matches such a connector on its ``supported_version_range``,
+    not on a parsed connector_id), so the check skips rather than firing
+    spuriously. It raises only when the parse round-trips losslessly
+    (same ``version`` + ``impl_id`` back out) and the recovered product
+    still disagrees — exactly the ``_PRODUCT_SPLITS`` shadow shape.
 
     ``parse_connector_id`` is imported call-locally to keep the
     ``connectors.registry`` -> ``operations._lookup`` edge off module
@@ -223,28 +246,22 @@ def _warn_if_product_impl_id_diverges(
     from meho_backplane.operations._lookup import parse_connector_id
 
     connector_id = f"{impl_id}-{version}"
-    derived_product = parse_connector_id(connector_id)[0]
+    derived_product, derived_version, derived_impl_id = parse_connector_id(connector_id)
+    # Only enforce on a lossless parse: a connector_id whose version label
+    # is not digit-leading parses back to (connector_id, "", ""), losing the
+    # version/impl_id — there is no meaningfully-derived product to compare.
+    if derived_version != version or derived_impl_id != impl_id:
+        return
     if derived_product == product:
         return
-    _log.warning(
-        "connector_product_impl_id_divergence",
-        product=product,
-        version=version,
-        impl_id=impl_id,
-        cls=cls.__name__,
-        derived_product=derived_product,
-        connector_id=connector_id,
-        message=(
-            f"connector {cls.__name__} registers product={product!r} but "
-            f"connector_id {connector_id!r} parses to product "
-            f"{derived_product!r}; an operator target with "
-            f"product={derived_product!r} (the dispatch-canonical token "
-            f"the connector listing emits) resolves a different namespace "
-            f"than this registration. Align product to {derived_product!r} "
-            f"or rename impl_id so it derives {product!r}. Family "
-            f"realignment + promotion of this check to a hard error is "
-            f"tracked under Initiative #1810."
-        ),
+    raise RuntimeError(
+        f"connector {cls.__name__} registers product={product!r} but "
+        f"connector_id {connector_id!r} parses to product "
+        f"{derived_product!r}; an operator target with "
+        f"product={derived_product!r} (the dispatch-canonical token "
+        f"the connector listing emits) resolves a different namespace "
+        f"than this registration. Align product to {derived_product!r} "
+        f"or rename impl_id so it derives {product!r}."
     )
 
 

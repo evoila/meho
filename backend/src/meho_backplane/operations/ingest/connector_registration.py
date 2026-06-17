@@ -362,13 +362,40 @@ def ensure_connector_class_registered(
 
     Returns ``True`` when a new shim class was synthesised and
     registered; ``False`` when an entry already exists for the
-    ``(product, version, impl_id)`` key in the v2 registry, **or** when a
-    hand-coded connector already covers the ``(version, impl_id)`` under a
-    divergent product token (the ingest guard — see below). The return
-    value drives the ``connector_registered`` flag on
+    canonical ``(product, version, impl_id)`` key in the v2 registry,
+    **or** when a hand-coded connector already covers the
+    ``(version, impl_id)`` under a divergent product token (the ingest
+    guard — see below). The return value drives the
+    ``connector_registered`` flag on
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`
     so the CLI can report "first ingest registered the connector"
     vs "subsequent ingest reused the existing connector".
+
+    Canonical-product registration (G0.27 / T2 #1816): the shim is
+    synthesised and registered under the **dispatch-canonical** product
+    (:func:`~meho_backplane.operations._lookup.dispatch_product`, i.e. the
+    token :func:`~meho_backplane.operations._lookup.parse_connector_id`
+    derives from the connector_id), **not** the raw operator-supplied
+    ``product``. Two reasons converge:
+
+    * It is the correct, dispatchable spelling. The ingested rows already
+      persist under the dispatch-canonical product
+      (:func:`~meho_backplane.operations.ingest.register_ingested._reconciled_row_product`).
+      Registering the shim under the supplied product when the two diverge
+      (an operator ingesting ``--product drift-test --impl-id drift-impl``,
+      where the connector_id ``drift-impl-…`` parses to ``drift``) put the
+      shim in a namespace the dispatcher never queries — a non-dispatchable
+      shim that resolves nothing. Aligning the shim to the row product
+      fixes that latent footgun (the same product-namespace shadow the
+      round-trip check exists to kill).
+    * ``register_connector_v2`` now hard-fails (G0.27 / T2 #1816) when the
+      declared ``product`` does not round-trip its connector_id. Synthesising
+      under the canonical product makes the shim round-trip *by construction*,
+      so the auto-shim path satisfies the invariant rather than tripping it.
+
+    For aligned connectors (the overwhelmingly common case — the operator's
+    product already equals the parser-derived one) the canonical and
+    supplied products are identical, so this is a no-op.
 
     Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to
     any hand-coded connector already registered for the same
@@ -377,13 +404,9 @@ def ensure_connector_class_registered(
     divergent product token (``--product vcf-logs`` for ``vrli-rest``,
     after the realignment moved ``VcfLogsConnector``
     to ``product="vrli"``) would scaffold a non-dispatchable
-    ``GenericRestConnector`` shim under ``(vcf-logs, …, vrli-rest)`` that
-    shadows the real connector. The guard keys on ``impl_id`` (the
-    connector's product-independent identity), so a product-namespace
-    divergence cannot route around it. The persisted rows still reconcile
-    to the dispatch-canonical product
-    (:func:`~meho_backplane.operations.ingest.register_ingested._reconciled_row_product`),
-    so the ingested ops resolve through the hand-coded connector.
+    ``GenericRestConnector`` shim that shadows the real connector. The
+    guard keys on ``impl_id`` (the connector's product-independent
+    identity), so a product-namespace divergence cannot route around it.
 
     Idempotency note: the v2 registry rejects duplicate
     registration with :class:`RuntimeError`, so checking presence
@@ -393,30 +416,38 @@ def ensure_connector_class_registered(
     are operator-driven and serialised) so the race is theoretical.
     """
     from meho_backplane.connectors.registry import all_connectors_v2
+    from meho_backplane.operations._lookup import dispatch_product
+
+    # The shim must live under the dispatch-canonical product the ingested
+    # rows persist under (and that register_connector_v2's round-trip check
+    # now hard-fails on if violated) — not the raw operator-supplied one.
+    canonical_product = dispatch_product(product=product, version=version, impl_id=impl_id)
 
     existing = all_connectors_v2()
-    if (product, version, impl_id) in existing:
+    if (canonical_product, version, impl_id) in existing:
         _log.info(
             "connector_auto_register_skipped",
             product=product,
+            canonical_product=canonical_product,
             version=version,
             impl_id=impl_id,
-            existing_cls=existing[(product, version, impl_id)].__name__,
+            existing_cls=existing[(canonical_product, version, impl_id)].__name__,
         )
         return False
 
     handrolled = handrolled_class_for_impl_id(version=version, impl_id=impl_id)
-    if handrolled is not None and handrolled.product != product:
+    if handrolled is not None and handrolled.product != canonical_product:
         _log.info(
             "connector_auto_register_deferred_to_handrolled",
             product=product,
+            canonical_product=canonical_product,
             version=version,
             impl_id=impl_id,
             handrolled_cls=handrolled.__name__,
             handrolled_product=handrolled.product,
             message=(
                 f"not scaffolding a GenericRestConnector shim for "
-                f"({product!r}, {version!r}, {impl_id!r}): hand-coded "
+                f"({canonical_product!r}, {version!r}, {impl_id!r}): hand-coded "
                 f"{handrolled.__name__} already covers impl_id {impl_id!r} "
                 f"under product {handrolled.product!r}. Ingested rows "
                 f"reconcile to the dispatch-canonical product and dispatch "
@@ -426,13 +457,13 @@ def ensure_connector_class_registered(
         return False
 
     cls = _synthesise_shim_class(
-        product=product,
+        product=canonical_product,
         version=version,
         impl_id=impl_id,
         base_url=base_url,
     )
     register_connector_v2(
-        product=product,
+        product=canonical_product,
         version=version,
         impl_id=impl_id,
         cls=cls,
@@ -440,6 +471,7 @@ def ensure_connector_class_registered(
     _log.info(
         "connector_auto_registered",
         product=product,
+        canonical_product=canonical_product,
         version=version,
         impl_id=impl_id,
         cls=cls.__name__,

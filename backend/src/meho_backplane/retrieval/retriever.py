@@ -433,6 +433,19 @@ def _vector_literal(query_embedding: Sequence[float]) -> str:
 #: expanding bind. A corrupt user-scoped row carrying ``user_sub = null``
 #: yields ``NULL = :principal_sub`` -> NULL -> excluded, matching
 #: ``MemoryRbacResolver.can_read``'s deny-on-missing-``user_sub`` posture.
+#:
+#: This constant is the canonical text of the predicate and the assertion
+#: target for :mod:`tests.test_retrieve_isolation`. It is **not**
+#: interpolated into the candidate queries: the two ``text(...)``
+#: statements below spell the predicate out verbatim instead. Building a
+#: statement with ``text(f"...{_PRINCIPAL_PREDICATE_SQL}...")`` trips
+#: Semgrep's ``avoid-sqlalchemy-text`` rule (any non-literal ``text()``
+#: argument reads as a SQL-injection sink, even a trusted module
+#: constant), and CI's registry-pack Semgrep does not honour an inline
+#: ``# nosemgrep`` for that rule -- so the repo's convention
+#: (``topology/query.py``, ``events/outbox.py``) is to keep the
+#: ``text()`` argument a plain string literal. ``_assert_predicate_inlined``
+#: guards against the resulting duplication drifting.
 _PRINCIPAL_PREDICATE_SQL: str = """
           AND (
             CAST(:principal_sub AS text) IS NULL
@@ -440,6 +453,85 @@ _PRINCIPAL_PREDICATE_SQL: str = """
             OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
             OR metadata ->> 'user_sub' = :principal_sub
           )"""
+
+# BM25 candidate query. Fully-literal ``text("...")`` (no f-string) so the
+# ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
+# predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
+# pinned to it at module load by :func:`_assert_predicate_inlined`.
+_BM25_CANDIDATES_SQL = text(
+    """
+    SELECT id, ts_rank_cd(
+        to_tsvector('english', body),
+        plainto_tsquery('english', :query)
+    ) AS score
+    FROM documents
+    WHERE tenant_id = :tenant_id
+      AND (CAST(:source AS text) IS NULL OR source = :source)
+      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (CAST(:metadata_filters AS text) IS NULL
+           OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:principal_sub AS text) IS NULL
+        OR source <> 'memory'
+        OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+        OR metadata ->> 'user_sub' = :principal_sub
+      )
+      AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
+    ORDER BY score DESC
+    LIMIT :limit
+    """
+)
+
+# Cosine candidate query -- same literal-``text`` convention and the same
+# inlined per-principal predicate as the BM25 statement above.
+_COSINE_CANDIDATES_SQL = text(
+    """
+    SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
+    FROM documents
+    WHERE tenant_id = :tenant_id
+      AND (CAST(:source AS text) IS NULL OR source = :source)
+      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (CAST(:metadata_filters AS text) IS NULL
+           OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:principal_sub AS text) IS NULL
+        OR source <> 'memory'
+        OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+        OR metadata ->> 'user_sub' = :principal_sub
+      )
+    ORDER BY embedding <=> CAST(:emb AS vector)
+    LIMIT :limit
+    """
+)
+
+
+def _assert_predicate_inlined() -> None:
+    """Fail at import if a candidate query drifts from the predicate constant.
+
+    The per-principal predicate lives once in
+    :data:`_PRINCIPAL_PREDICATE_SQL` (the value the isolation test asserts
+    on) but is spelled out a second time inside each ``text()`` statement
+    to keep the ``avoid-sqlalchemy-text`` rule clean. This guard makes the
+    duplication safe: it normalises whitespace and checks the predicate is
+    embedded verbatim in both statements, so an edit to one copy that is
+    not mirrored to the other is a loud ``ImportError`` rather than a
+    silent isolation regression.
+    """
+    needle = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
+    for name, statement in (
+        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    ):
+        haystack = " ".join(str(statement.text).split())
+        if needle not in haystack:
+            raise AssertionError(
+                f"{name} no longer contains the per-principal predicate "
+                "verbatim; it must stay byte-equivalent to "
+                "_PRINCIPAL_PREDICATE_SQL (see retriever.py)."
+            )
+
+
+_assert_predicate_inlined()
 
 
 async def _bm25_candidates(
@@ -462,29 +554,13 @@ async def _bm25_candidates(
     CAST(:metadata_filters AS jsonb)``); the GIN index on
     ``documents.metadata`` (migration ``0032``) backs the containment
     operator so the predicate stays index-backed at corpus scale. The
-    mandatory per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`)
-    is appended last so ``source='memory'`` user-scoped rows the caller
-    does not own are excluded regardless of ``metadata_filters``.
+    mandatory per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`,
+    inlined verbatim into :data:`_BM25_CANDIDATES_SQL`) is the last
+    ``WHERE`` arm so ``source='memory'`` user-scoped rows the caller does
+    not own are excluded regardless of ``metadata_filters``.
     """
-    bm25_sql = text(
-        f"""
-        SELECT id, ts_rank_cd(
-            to_tsvector('english', body),
-            plainto_tsquery('english', :query)
-        ) AS score
-        FROM documents
-        WHERE tenant_id = :tenant_id
-          AND (CAST(:source AS text) IS NULL OR source = :source)
-          AND (CAST(:kind AS text) IS NULL OR kind = :kind)
-          AND (CAST(:metadata_filters AS text) IS NULL
-               OR metadata @> CAST(:metadata_filters AS jsonb)){_PRINCIPAL_PREDICATE_SQL}
-          AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
-        ORDER BY score DESC
-        LIMIT :limit
-        """
-    )
     result = await session.execute(
-        bm25_sql,
+        _BM25_CANDIDATES_SQL,
         {
             "query": query,
             "tenant_id": str(tenant_id),
@@ -517,25 +593,12 @@ async def _cosine_candidates(
     candidates whether the body shares query terms or not. The
     metadata-filter predicate mirrors :func:`_bm25_candidates` so a
     multi-key filter narrows both signals symmetrically; the mandatory
-    per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`) is
-    likewise shared verbatim so neither signal can surface a user-scoped
-    memory row the caller does not own.
+    per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`) is inlined
+    verbatim into :data:`_COSINE_CANDIDATES_SQL` too, so neither signal
+    can surface a user-scoped memory row the caller does not own.
     """
-    cosine_sql = text(
-        f"""
-        SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
-        FROM documents
-        WHERE tenant_id = :tenant_id
-          AND (CAST(:source AS text) IS NULL OR source = :source)
-          AND (CAST(:kind AS text) IS NULL OR kind = :kind)
-          AND (CAST(:metadata_filters AS text) IS NULL
-               OR metadata @> CAST(:metadata_filters AS jsonb)){_PRINCIPAL_PREDICATE_SQL}
-        ORDER BY embedding <=> CAST(:emb AS vector)
-        LIMIT :limit
-        """
-    )
     result = await session.execute(
-        cosine_sql,
+        _COSINE_CANDIDATES_SQL,
         {
             "emb": embedding_literal,
             "tenant_id": str(tenant_id),

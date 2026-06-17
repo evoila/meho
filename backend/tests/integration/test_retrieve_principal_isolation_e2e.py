@@ -130,6 +130,13 @@ async def seeded_memories(pg_engine: None) -> AsyncIterator[dict[str, Any]]:
     service = MemoryService()
     op_a = _operator(PRINCIPAL_A_SUB)
     op_b = _operator(PRINCIPAL_B_SUB)
+    # The ``tenant``-broadcast write is a privileged surface:
+    # ``MemoryRbacResolver.can_write`` admits ``MemoryScope.TENANT`` only
+    # for ``tenant_admin`` (rbac.py). A is the same principal, elevated
+    # just for the broadcast canary; the per-principal user-scoped writes
+    # below stay on the ordinary ``operator``-role A and B so they remain
+    # two distinct, non-privileged principals.
+    op_a_admin = _operator(PRINCIPAL_A_SUB, role=TenantRole.TENANT_ADMIN)
 
     with (
         patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
@@ -157,8 +164,11 @@ async def seeded_memories(pg_engine: None) -> AsyncIterator[dict[str, Any]]:
             _canary_body("B", MemoryScope.USER_TARGET),
             target_name="target-x",
         )
-        # A's tenant-broadcast canary (no over-correction probe).
-        await service.remember(op_a, MemoryScope.TENANT, _canary_body("A", MemoryScope.TENANT))
+        # A's tenant-broadcast canary (no over-correction probe). Written
+        # by tenant-admin A -- ``tenant``-scope writes require that role.
+        await service.remember(
+            op_a_admin, MemoryScope.TENANT, _canary_body("A", MemoryScope.TENANT)
+        )
 
     yield {"op_a": op_a, "op_b": op_b, "fake": fake}
 

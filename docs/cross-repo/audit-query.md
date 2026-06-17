@@ -87,15 +87,17 @@ The cross-tenant probe semantic: if the audit id exists but belongs to another t
 
 ### "Trace one agent session"
 
-The `agent_session_id` column does not exist on `audit_log` in v0.2 and there is no `--agent-session-id` CLI flag. The substrate's filter type carries the field as a forward-compatibility hook — the REST `POST /api/v1/audit/query` body and the MCP `query_audit` tool both accept it on the wire, but the substrate raises `UnsupportedFilterError` (rendered as HTTP 400 by the REST router; `-32602` by the MCP dispatcher) until the column lands with a future schema migration.
-
-For now the closest approximation from the CLI is `--json` plus `jq` over a wider window keyed on `request_id` (the chassis-bound `X-Request-Id` propagates into the audit row):
+The `agent_session_id` column **does** exist on `audit_log` (it landed with G8.2, #1010) and is a **supported flat filter**: pass `--session-id <uuid>` to `meho audit query`, or `agent_session_id` in the REST `POST /api/v1/audit/query` body / the MCP `query_audit` tool. It returns every audit row for that session as a flat newest-first page:
 
 ```bash
-meho audit query --since 24h --json | jq '.rows[] | select(.request_id=="<request-uuid>")'
+meho audit query --session-id 11111111-1111-1111-1111-111111111111 --result-status error
 ```
 
-Full session-graph traversal is the [G8.2 audit replay](https://github.com/evoila/meho/issues/377) Initiative's job (`meho audit replay <session-id>`); G8.1 ships the substrate `parent_audit_id` filter that G8.2's recursive-CTE traversal builds on.
+`agent_session_id` is populated **only on MCP-originated rows** — the MCP audit writer reads the bound `Mcp-Session-Id` and stamps it on the row; plain HTTP-chassis rows have `agent_session_id = NULL` by design (so a `meho audit ...` invocation's own row carries no session id).
+
+For the full parent/child **session-graph tree** (lineage between composite operations, not just a flat list) use [`meho audit replay <session-id>`](./audit-replay.md) — the G8.2 replay surface that the substrate's `parent_audit_id` recursive-CTE traversal builds on. Replay is a `tenant_admin` forensic act on every surface (#1843); see the [replay runbook](./audit-replay.md) for the role posture and the 10000-row cap.
+
+> Note: a *different* filter, `parent_audit_id`, is still **not** supported as a flat filter in v0.2 — the substrate raises `UnsupportedFilterError` (HTTP 400 / `-32602`) for it. The column itself is populated and is what the replay CTE walks; only the standalone flat filter is gated (see the [filter table](#filter-semantics) below).
 
 ## Filter semantics
 

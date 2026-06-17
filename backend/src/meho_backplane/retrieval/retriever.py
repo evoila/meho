@@ -113,6 +113,28 @@ from meho_backplane.retrieval.embedding import get_embedding_service
 __all__ = ["CANDIDATE_LIMIT", "RRF_K", "RetrievalHit", "retrieve"]
 
 
+#: The ``documents.source`` value memory rows carry. Mirrors
+#: :data:`meho_backplane.memory._internal.MEMORY_SOURCE`; duplicated here
+#: as a literal rather than imported so the shared retrieval substrate
+#: does not invert its dependency direction onto the memory consumer
+#: package. The per-principal predicate below only ever fires for this
+#: source, so a drift between the two literals would surface immediately
+#: as a memory-isolation test failure.
+_MEMORY_SOURCE: str = "memory"
+
+#: The ``documents.kind`` values whose visibility is gated by the
+#: stored ``user_sub`` -- the principal that wrote the row is the only
+#: one who may read it back. Mirrors
+#: :data:`meho_backplane.memory.schemas.USER_SCOPED` projected through
+#: ``kind_for_scope`` (``memory-<scope>``). The tenant-broadcast kinds
+#: (``memory-tenant`` / ``memory-target``) are deliberately absent: they
+#: carry ``user_sub = null`` and are visible to every principal in the
+#: tenant. Frozen so the boundary predicate cannot be mutated at runtime.
+_USER_SCOPED_MEMORY_KINDS: frozenset[str] = frozenset(
+    {"memory-user", "memory-user-tenant", "memory-user-target"}
+)
+
+
 #: RRF "k" constant. ``k = 60`` is the Microsoft paper default; the
 #: literature shows the choice is not load-bearing within the
 #: 10--100 range (RRF is robust to k variations because rank-based
@@ -172,6 +194,10 @@ class RetrievalHit(BaseModel):
     cosine_rank: int | None
 
 
+# `retrieve` was already over the 100-line block limit on main: its length is
+# the parameter/contract docstring, not branching (executable body ~15 lines,
+# McCabe trivial). #1797 adds one parameter + a concise doc note, not
+# complexity. code-quality-allow: function-size — docstring-dominated public API.
 async def retrieve(
     tenant_id: uuid.UUID,
     query: str,
@@ -180,6 +206,7 @@ async def retrieve(
     limit: int = 10,
     session: AsyncSession | None = None,
     metadata_filters: dict[str, Any] | None = None,
+    principal_sub: str | None = None,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -219,6 +246,20 @@ async def retrieve(
         substrate does not validate beyond JSON-encodability -- the
         API surface (#1177's :class:`RetrieveRequest`) is the gate
         that enforces scalar-only at request time.
+    principal_sub
+        The authenticated caller's OIDC ``sub``. When set, the substrate
+        enforces a **mandatory, non-overridable** per-principal predicate
+        (#1797, :data:`_PRINCIPAL_PREDICATE_SQL`): a ``source='memory'``
+        user-scoped row (:data:`_USER_SCOPED_MEMORY_KINDS`) is returned
+        only when its stored ``user_sub`` equals *principal_sub*. This
+        mirrors :meth:`MemoryRbacResolver.can_read` but is enforced
+        centrally so every caller (HTTP route, MCP resource, future
+        consumers) is protected without trusting client ``metadata_filters``
+        -- the predicate is ANDed in unconditionally, so a client value
+        can only narrow, never widen, the visible set. Tenant-broadcast
+        kinds and non-memory sources are unaffected. ``None`` (default)
+        disables it for callers that scope by ``user_sub`` themselves or
+        query non-principal sources.
 
     Returns
     -------
@@ -276,12 +317,12 @@ async def retrieve(
         metadata_filters = None
     if session is not None:
         return await _retrieve_in_session(
-            session, tenant_id, query, source, kind, limit, metadata_filters
+            session, tenant_id, query, source, kind, limit, metadata_filters, principal_sub
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as owned_session:
         return await _retrieve_in_session(
-            owned_session, tenant_id, query, source, kind, limit, metadata_filters
+            owned_session, tenant_id, query, source, kind, limit, metadata_filters, principal_sub
         )
 
 
@@ -293,6 +334,7 @@ async def _retrieve_in_session(
     kind: str | None,
     limit: int,
     metadata_filters: dict[str, Any] | None,
+    principal_sub: str | None,
 ) -> list[RetrievalHit]:
     """Inner implementation -- runs the two candidate queries + RRF fusion.
 
@@ -320,16 +362,20 @@ async def _retrieve_in_session(
     )
 
     bm25_rows = await _bm25_candidates(
-        session, tenant_id, query, source, kind, metadata_filters_json
+        session, tenant_id, query, source, kind, metadata_filters_json, principal_sub
     )
     cosine_rows = await _cosine_candidates(
-        session, tenant_id, embedding_literal, source, kind, metadata_filters_json
+        session, tenant_id, embedding_literal, source, kind, metadata_filters_json, principal_sub
     )
 
     # Log keys (not values) so structlog never carries tenant-shaped
     # metadata into the application log. The audit payload uses the
-    # same key-only discipline (see api/v1/retrieve.py).
+    # same key-only discipline (see api/v1/retrieve.py). ``principal_scoped``
+    # records *whether* the per-principal predicate was enforced (a bool,
+    # never the ``sub`` value) so a security analyst can confirm at a
+    # glance that a memory retrieval ran under the #1797 isolation gate.
     metadata_filter_keys = sorted(metadata_filters.keys()) if metadata_filters else None
+    principal_scoped = principal_sub is not None
 
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
@@ -339,6 +385,7 @@ async def _retrieve_in_session(
             source=source,
             kind=kind,
             metadata_filter_keys=metadata_filter_keys,
+            principal_scoped=principal_scoped,
         )
         return []
 
@@ -349,6 +396,7 @@ async def _retrieve_in_session(
         source=source,
         kind=kind,
         metadata_filter_keys=metadata_filter_keys,
+        principal_scoped=principal_scoped,
         hit_count=len(hits),
     )
     return hits
@@ -372,6 +420,120 @@ def _vector_literal(query_embedding: Sequence[float]) -> str:
     return "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
 
+#: Mandatory per-principal visibility predicate for ``source='memory'``
+#: user-scoped kinds (#1797). Shared verbatim between the BM25 and cosine
+#: candidate queries so neither signal can drift into leaking the other's
+#: rows. The predicate is inert when ``:principal_sub`` is NULL (the
+#: in-process callers that opt out) and for every non-memory source /
+#: tenant-broadcast kind; when active it admits a user-scoped memory row
+#: only if its stored ``metadata->>'user_sub'`` equals the caller's
+#: ``sub``. The three user-scoped kinds are spelled as SQL literals (not
+#: a bound IN-list) because the set is fixed by the memory scope model
+#: and PG plans a constant ``IN`` list more predictably than an
+#: expanding bind. A corrupt user-scoped row carrying ``user_sub = null``
+#: yields ``NULL = :principal_sub`` -> NULL -> excluded, matching
+#: ``MemoryRbacResolver.can_read``'s deny-on-missing-``user_sub`` posture.
+#:
+#: This constant is the canonical text of the predicate and the assertion
+#: target for :mod:`tests.test_retrieve_isolation`. It is **not**
+#: interpolated into the candidate queries: the two ``text(...)``
+#: statements below spell the predicate out verbatim instead. Building a
+#: statement with ``text(f"...{_PRINCIPAL_PREDICATE_SQL}...")`` trips
+#: Semgrep's ``avoid-sqlalchemy-text`` rule (any non-literal ``text()``
+#: argument reads as a SQL-injection sink, even a trusted module
+#: constant), and CI's registry-pack Semgrep does not honour an inline
+#: ``# nosemgrep`` for that rule -- so the repo's convention
+#: (``topology/query.py``, ``events/outbox.py``) is to keep the
+#: ``text()`` argument a plain string literal. ``_assert_predicate_inlined``
+#: guards against the resulting duplication drifting.
+_PRINCIPAL_PREDICATE_SQL: str = """
+          AND (
+            CAST(:principal_sub AS text) IS NULL
+            OR source <> 'memory'
+            OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+            OR metadata ->> 'user_sub' = :principal_sub
+          )"""
+
+# BM25 candidate query. Fully-literal ``text("...")`` (no f-string) so the
+# ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
+# predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
+# pinned to it at module load by :func:`_assert_predicate_inlined`.
+_BM25_CANDIDATES_SQL = text(
+    """
+    SELECT id, ts_rank_cd(
+        to_tsvector('english', body),
+        plainto_tsquery('english', :query)
+    ) AS score
+    FROM documents
+    WHERE tenant_id = :tenant_id
+      AND (CAST(:source AS text) IS NULL OR source = :source)
+      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (CAST(:metadata_filters AS text) IS NULL
+           OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:principal_sub AS text) IS NULL
+        OR source <> 'memory'
+        OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+        OR metadata ->> 'user_sub' = :principal_sub
+      )
+      AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
+    ORDER BY score DESC
+    LIMIT :limit
+    """
+)
+
+# Cosine candidate query -- same literal-``text`` convention and the same
+# inlined per-principal predicate as the BM25 statement above.
+_COSINE_CANDIDATES_SQL = text(
+    """
+    SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
+    FROM documents
+    WHERE tenant_id = :tenant_id
+      AND (CAST(:source AS text) IS NULL OR source = :source)
+      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (CAST(:metadata_filters AS text) IS NULL
+           OR metadata @> CAST(:metadata_filters AS jsonb))
+      AND (
+        CAST(:principal_sub AS text) IS NULL
+        OR source <> 'memory'
+        OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+        OR metadata ->> 'user_sub' = :principal_sub
+      )
+    ORDER BY embedding <=> CAST(:emb AS vector)
+    LIMIT :limit
+    """
+)
+
+
+def _assert_predicate_inlined() -> None:
+    """Fail at import if a candidate query drifts from the predicate constant.
+
+    The per-principal predicate lives once in
+    :data:`_PRINCIPAL_PREDICATE_SQL` (the value the isolation test asserts
+    on) but is spelled out a second time inside each ``text()`` statement
+    to keep the ``avoid-sqlalchemy-text`` rule clean. This guard makes the
+    duplication safe: it normalises whitespace and checks the predicate is
+    embedded verbatim in both statements, so an edit to one copy that is
+    not mirrored to the other is a loud ``ImportError`` rather than a
+    silent isolation regression.
+    """
+    needle = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
+    for name, statement in (
+        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    ):
+        haystack = " ".join(str(statement.text).split())
+        if needle not in haystack:
+            raise AssertionError(
+                f"{name} no longer contains the per-principal predicate "
+                "verbatim; it must stay byte-equivalent to "
+                "_PRINCIPAL_PREDICATE_SQL (see retriever.py)."
+            )
+
+
+_assert_predicate_inlined()
+
+
 async def _bm25_candidates(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -379,6 +541,7 @@ async def _bm25_candidates(
     source: str | None,
     kind: str | None,
     metadata_filters_json: str | None,
+    principal_sub: str | None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
 
@@ -390,33 +553,21 @@ async def _bm25_candidates(
     shape (``CAST(:metadata_filters AS text) IS NULL OR metadata @>
     CAST(:metadata_filters AS jsonb)``); the GIN index on
     ``documents.metadata`` (migration ``0032``) backs the containment
-    operator so the predicate stays index-backed at corpus scale.
+    operator so the predicate stays index-backed at corpus scale. The
+    mandatory per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`,
+    inlined verbatim into :data:`_BM25_CANDIDATES_SQL`) is the last
+    ``WHERE`` arm so ``source='memory'`` user-scoped rows the caller does
+    not own are excluded regardless of ``metadata_filters``.
     """
-    bm25_sql = text(
-        """
-        SELECT id, ts_rank_cd(
-            to_tsvector('english', body),
-            plainto_tsquery('english', :query)
-        ) AS score
-        FROM documents
-        WHERE tenant_id = :tenant_id
-          AND (CAST(:source AS text) IS NULL OR source = :source)
-          AND (CAST(:kind AS text) IS NULL OR kind = :kind)
-          AND (CAST(:metadata_filters AS text) IS NULL
-               OR metadata @> CAST(:metadata_filters AS jsonb))
-          AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
-        ORDER BY score DESC
-        LIMIT :limit
-        """
-    )
     result = await session.execute(
-        bm25_sql,
+        _BM25_CANDIDATES_SQL,
         {
             "query": query,
             "tenant_id": str(tenant_id),
             "source": source,
             "kind": kind,
             "metadata_filters": metadata_filters_json,
+            "principal_sub": principal_sub,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -430,6 +581,7 @@ async def _cosine_candidates(
     source: str | None,
     kind: str | None,
     metadata_filters_json: str | None,
+    principal_sub: str | None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` cosine candidates by pgvector distance.
 
@@ -440,29 +592,20 @@ async def _cosine_candidates(
     embedding is the query, and the IVFFlat index returns ranked
     candidates whether the body shares query terms or not. The
     metadata-filter predicate mirrors :func:`_bm25_candidates` so a
-    multi-key filter narrows both signals symmetrically.
+    multi-key filter narrows both signals symmetrically; the mandatory
+    per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`) is inlined
+    verbatim into :data:`_COSINE_CANDIDATES_SQL` too, so neither signal
+    can surface a user-scoped memory row the caller does not own.
     """
-    cosine_sql = text(
-        """
-        SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
-        FROM documents
-        WHERE tenant_id = :tenant_id
-          AND (CAST(:source AS text) IS NULL OR source = :source)
-          AND (CAST(:kind AS text) IS NULL OR kind = :kind)
-          AND (CAST(:metadata_filters AS text) IS NULL
-               OR metadata @> CAST(:metadata_filters AS jsonb))
-        ORDER BY embedding <=> CAST(:emb AS vector)
-        LIMIT :limit
-        """
-    )
     result = await session.execute(
-        cosine_sql,
+        _COSINE_CANDIDATES_SQL,
         {
             "emb": embedding_literal,
             "tenant_id": str(tenant_id),
             "source": source,
             "kind": kind,
             "metadata_filters": metadata_filters_json,
+            "principal_sub": principal_sub,
             "limit": CANDIDATE_LIMIT,
         },
     )

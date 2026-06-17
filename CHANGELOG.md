@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Closed a within-tenant **cross-principal memory leak** on the retrieval data path: `POST /api/v1/retrieve {source:"memory"}` and the `meho://retrieve/{query}` MCP resource returned another principal's per-principal memories (`user` / `user-tenant` / `user-target` scopes, full `body`) to any operator in the same tenant. The two surfaces called the shared `retrieve()` substrate without the per-principal `user_sub` push-down the isolated read paths (`recall`, `list`, MCP `search_memory`) already apply — the HTTP route forwarded client `metadata_filters` verbatim with no per-principal scoping, and the MCP resource passed no filters at all. The fix enforces a **mandatory, non-overridable** per-principal predicate at the shared `retrieve()` boundary (`principal_sub`): for `source="memory"` user-scoped kinds a row is returned only when its stored `user_sub` equals the caller's `sub`, applied regardless of caller and AND-enforced so a client-supplied `metadata_filters={"user_sub":"<other>"}` cannot widen it. Tenant-broadcast scopes (`tenant` / `target`) stay visible cross-principal (no over-correction), and the other `retrieve()` sources (`knowledge` / `operations` / `docs`) are tenant-scoped and carry no per-principal `user_sub` data the same gap would leak. Bidirectional + non-override + no-over-correction probes added against a real pgvector cluster, covering both the HTTP route and the MCP resource (#1797).
+
 ### Fixed
 
 - Unify connector-id resolution across `GET /api/v1/connectors/{id}/review` and `POST /api/v1/connectors/{id}/enable-reads` so a label resolves to the **same** row on both paths: `enable-reads` now honours the same tenant→built-in global fallback `review` had (a global-only connector enables its reads instead of returning 404), and a label that maps to **both** a tenant-curated row and a built-in row returns a structured `connector_scope_ambiguous` 409 listing the candidate rows on both paths — instead of `review` silently picking one and `enable-reads` 404'ing (#1801).

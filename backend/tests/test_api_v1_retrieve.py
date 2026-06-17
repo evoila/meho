@@ -215,6 +215,11 @@ def test_retrieve_route_returns_200_with_hits_and_duration(
     assert call_kwargs["tenant_id"] == tenant_id
     assert call_kwargs["query"] == "kubernetes ingress"
     assert call_kwargs["limit"] == 5
+    # The route threads the operator's `sub` as `principal_sub` so the
+    # substrate enforces per-principal memory isolation (#1797). Without
+    # this, a broad source="memory" retrieve would leak other principals'
+    # user-scoped rows in the same tenant.
+    assert call_kwargs["principal_sub"] == "op-1"
 
 
 def test_retrieve_route_passes_source_and_kind_filters(

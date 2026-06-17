@@ -269,6 +269,15 @@ async def retrieve_endpoint(
         audit_metadata_filters_keys=metadata_filters_keys,
     )
 
+    # `principal_sub=operator.sub` enforces the mandatory, non-overridable
+    # per-principal isolation predicate at the retrieval boundary (#1797):
+    # a `source="memory"` user-scoped row (`memory-user` /
+    # `memory-user-tenant` / `memory-user-target`) is only returned when
+    # its stored `user_sub` equals the caller's `sub`. This closes the
+    # cross-principal leak where a client passed `metadata_filters`
+    # straight through with no per-principal scoping; the predicate is
+    # AND-enforced in the substrate, so a client-supplied
+    # `metadata_filters={"user_sub": "<other>"}` cannot widen it.
     hits = await retrieve(
         tenant_id=operator.tenant_id,
         query=body.query,
@@ -276,6 +285,7 @@ async def retrieve_endpoint(
         kind=body.kind,
         limit=body.limit,
         metadata_filters=body.metadata_filters,
+        principal_sub=operator.sub,
     )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))

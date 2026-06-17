@@ -37,6 +37,7 @@ async def retrieve(
     limit: int = 10,
     session: AsyncSession | None = None,
     metadata_filters: dict[str, Any] | None = None,
+    principal_sub: str | None = None,
 ) -> list[RetrievalHit]
 ```
 
@@ -50,6 +51,27 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   intersection. `None` (default) skips the predicate. `{}` normalises
   to `None` at the boundary so the SQL never emits a no-op
   `@> '{}'::jsonb` predicate.
+- `principal_sub` — the authenticated caller's OIDC `sub`. When set,
+  the substrate enforces a **mandatory, non-overridable** per-principal
+  visibility predicate for `source='memory'` user-scoped kinds
+  (`memory-user` / `memory-user-tenant` / `memory-user-target`): a
+  user-scoped memory row is returned only when its stored
+  `metadata->>'user_sub'` equals `principal_sub`. The predicate is
+  ANDed into both candidate queries unconditionally and lives at the
+  shared boundary (not the caller), so every entry point — the HTTP
+  route, the `meho://retrieve/{query}` MCP resource, and any future
+  consumer — is protected without trusting client `metadata_filters`,
+  and a client-supplied `metadata_filters={"user_sub": "<other>"}` can
+  only narrow, never widen, the visible set. Tenant-broadcast kinds
+  (`memory-tenant` / `memory-target`) and every non-memory source
+  (`kb` / `operations` / `docs`) are unaffected — they carry no
+  per-principal `user_sub`. `None` (default) disables the predicate for
+  callers that already scope by `user_sub` themselves (e.g.
+  `MemoryService.search_memories`, which now also passes it as
+  belt-and-suspenders) or that query non-principal sources. This is the
+  #1797 cross-principal-leak fix: before it, `POST /api/v1/retrieve
+  {source:"memory"}` and the MCP retrieve resource returned other
+  principals' user-scoped memories within the same tenant.
 
 ### `RetrievalHit`
 
@@ -89,9 +111,11 @@ retrieve()
 ```
 
 The two candidate SQL statements share the same WHERE shape — every
-filter parameter (`source` / `kind` / `metadata_filters`) is applied
-symmetrically so the fused list is the intersection of two equally-
-scoped sets.
+filter parameter (`source` / `kind` / `metadata_filters`) plus the
+mandatory per-principal predicate (`principal_sub`, see the parameter
+notes above) is applied symmetrically so the fused list is the
+intersection of two equally-scoped sets and neither signal can surface
+a user-scoped memory row the caller does not own.
 
 ### API surface (`POST /api/v1/retrieve`)
 

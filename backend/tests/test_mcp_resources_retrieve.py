@@ -226,6 +226,12 @@ def test_resources_read_returns_retrieval_hit_shape(
     call_kwargs = fake.await_args.kwargs
     assert call_kwargs["tenant_id"] == op.tenant_id
     assert call_kwargs["query"] == _RAW_QUERY
+    # The resource threads the operator's `sub` as `principal_sub` so the
+    # substrate enforces per-principal memory isolation (#1797). This
+    # resource retrieves across every source with no metadata_filters, so
+    # without it a user-scoped memory row written by another principal in
+    # the same tenant would leak here.
+    assert call_kwargs["principal_sub"] == op.sub
 
 
 def test_resources_read_empty_query_is_invalid_params(

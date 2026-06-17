@@ -958,10 +958,14 @@ def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
     """Register one v2 connector whose ``(product, version)`` is NOT in the catalog.
 
     Drives the not-in-catalog branch of :func:`_next_step_for_registered`.
-    Uses a deliberately synthetic ``("custom-vendor", "1.0")`` triple — no
+    Uses a deliberately synthetic ``("customvendor", "1.0")`` triple — no
     catalog entry exists under that pair (the catalog ships seven curated
-    products and ``custom-vendor`` is not one of them), so the hint must
-    fall through to the manual-mode rationale.
+    products and ``customvendor`` is not one of them), so the hint must
+    fall through to the manual-mode rationale. The triple is aligned
+    (``customvendor-rest-1.0`` parses back to ``customvendor``): since
+    #1816 promoted the registration round-trip check to a hard-fail, a
+    divergent ``(product, impl_id)`` can no longer be registered at all, so
+    the catalog-miss branch is exercised with a round-tripping product.
 
     Re-uses :class:`HarborConnector` as the placeholder class because it
     has a no-arg construct path and the test only exercises the listing —
@@ -974,11 +978,11 @@ def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
     )
 
     existing = all_connectors_v2()
-    if ("custom-vendor", "1.0", "custom-rest") not in existing:
+    if ("customvendor", "1.0", "customvendor-rest") not in existing:
         register_connector_v2(
-            product="custom-vendor",
+            product="customvendor",
             version="1.0",
-            impl_id="custom-rest",
+            impl_id="customvendor-rest",
             cls=HarborConnector,
         )
     yield
@@ -1085,25 +1089,19 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     doesn't carry the registered connector, the rationale says so and
     points at manual-mode ``meho connector ingest`` with ``--spec``.
 
-    Uses a synthetic ``("custom-vendor", "1.0", "custom-rest")`` v2
-    registration with no catalog entry. The registry product
-    (``custom-vendor``) differs from the product the dispatcher derives
-    from the connector_id (``parse_connector_id("custom-rest-1.0") ->
-    "custom"``) — the same long↔short split shape the VCF family carries.
-    The hint must:
+    Uses a synthetic ``("customvendor", "1.0", "customvendor-rest")`` v2
+    registration with no catalog entry. The triple is aligned
+    (``parse_connector_id("customvendor-rest-1.0") -> "customvendor"``):
+    since #1816 promoted the registration round-trip check to a hard-fail,
+    a long↔short split registration (the shape the VCF family used to
+    carry) can no longer be registered at all, so the registry product and
+    the parser-derived listing token always agree. The hint must:
 
-    * point at ``meho connector ingest --product custom-vendor --version
-      1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
-      manual-mode invocation), emitting the **registry** ``--product``
-      (the spelling the connector class registers under) so the operator's
-      ingest finds the real class and runs a real version-coverage
-      pre-flight. Register-time row reconciliation persists the rows under
-      the parser-derived dispatch product (``custom``), so it still
-      round-trips to a *dispatchable* ingest — that reconciliation, not
-      switching the verb to the short product, is what closes the
-      claude-rdc-hetzner-dc#1136 false-success (the dispatchable round-trip
-      is pinned end-to-end in
-      ``test_operations_ingest_catalog.test_registered_next_step_verb_round_trips_to_dispatchable_ingest``);
+    * point at ``meho connector ingest --product customvendor --version
+      1.0 --impl customvendor-rest --spec <upstream-openapi-uri>`` (the
+      manual-mode invocation), emitting the registry ``--product`` so the
+      operator's ingest finds the real class and runs a real
+      version-coverage pre-flight;
     * carry a rationale that says the catalog has no entry so the
       operator knows they need to source the OpenAPI spec themselves;
     * name the hand-authored on-ramp (#1533 / ci-07) so a spec-less
@@ -1119,20 +1117,19 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     assert response.status_code == 200
     by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
 
-    custom = by_id["custom-rest-1.0"]
+    custom = by_id["customvendor-rest-1.0"]
     assert custom["state"] == "registered"
-    # The listing row advertises the parser-derived product.
-    assert custom["product"] == "custom"
+    # The listing row advertises the parser-derived product, which for an
+    # aligned registration equals the registry product.
+    assert custom["product"] == "customvendor"
     assert custom["next_step"] is not None
     verb = custom["next_step"]["verb"]
     assert "--catalog" not in verb
-    # The verb emits the registry product (so the operator's ingest finds
-    # the real class + runs a real version-coverage pre-flight); register-
-    # time reconciliation lands the rows dispatchably under the short
-    # product, so it still round-trips (claude-rdc-hetzner-dc#1136).
-    assert "--product custom-vendor " in verb
+    # The verb emits the registry product so the operator's ingest finds
+    # the real class + runs a real version-coverage pre-flight.
+    assert "--product customvendor " in verb
     assert "--version 1.0" in verb
-    assert "--impl custom-rest" in verb
+    assert "--impl customvendor-rest" in verb
     assert "--spec" in verb
     rationale = custom["next_step"]["rationale"]
     assert "not in catalog" in rationale
@@ -2695,9 +2692,9 @@ class _RangedTestConnector(Connector):
     looks like what a real misconfigured ingest produces.
     """
 
-    product = "t9-vmware"
+    product = "t9vmware"
     version = "9.0"
-    impl_id = "t9-vmware-rest"
+    impl_id = "t9vmware-rest"
     supported_version_range = ">=8.5,<10.0"
     priority = 1
 
@@ -2726,15 +2723,15 @@ def _registered_ranged_connector() -> Iterator[None]:
     from meho_backplane.connectors.registry import register_connector_v2
 
     register_connector_v2(
-        product="t9-vmware",
+        product="t9vmware",
         version="9.0",
-        impl_id="t9-vmware-rest",
+        impl_id="t9vmware-rest",
         cls=_RangedTestConnector,
     )
     try:
         yield
     finally:
-        _registry_mod._REGISTRY_V2.pop(("t9-vmware", "9.0", "t9-vmware-rest"), None)
+        _registry_mod._REGISTRY_V2.pop(("t9vmware", "9.0", "t9vmware-rest"), None)
 
 
 def test_ingest_returns_422_when_version_outside_registered_class_range(
@@ -2775,9 +2772,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "async": False,
             },
@@ -2785,14 +2782,14 @@ paths:
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
-    assert detail["product"] == "t9-vmware"
+    assert detail["product"] == "t9vmware"
     assert detail["version"] == "7.0"
-    assert detail["impl_id"] == "t9-vmware-rest"
+    assert detail["impl_id"] == "t9vmware-rest"
     assert detail["registered_classes"] == [
         {
             "class_name": "_RangedTestConnector",
             "version": "9.0",
-            "impl_id": "t9-vmware-rest",
+            "impl_id": "t9vmware-rest",
             "supported_version_range": ">=8.5,<10.0",
         },
     ]
@@ -2840,9 +2837,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "async": False,
             },
@@ -2852,10 +2849,10 @@ paths:
     # The same exception the pre-flight raises for this triple + registered
     # class. ``candidates`` is ``(version, impl_id, class_name, range)``.
     expected_exc = UncoveredVersionLabel(
-        product="t9-vmware",
+        product="t9vmware",
         version="7.0",
-        impl_id="t9-vmware-rest",
-        candidates=[("9.0", "t9-vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
+        impl_id="t9vmware-rest",
+        candidates=[("9.0", "t9vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
     )
     assert response.json()["detail"] == build_uncovered_version_label_detail(expected_exc)
 
@@ -2893,9 +2890,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },

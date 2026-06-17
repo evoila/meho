@@ -371,7 +371,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     )
 
     class _V2OnlyConnector(Connector):
-        product = "vmware-like"
+        product = "vmwarelike"
         # No supported_version_range → matches any target_version
         # including the no-fingerprint case (matches the resolver's
         # "v1-style + no range" pathway used by the test).
@@ -385,12 +385,14 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
             raise NotImplementedError
 
-    # v2-only registration — no register_connector("vmware-like", ...)
-    # call. The pre-#1142 /probe path would 501 on this shape.
+    # v2-only registration — no register_connector("vmwarelike", ...)
+    # call. The pre-#1142 /probe path would 501 on this shape. The triple
+    # is aligned (``vmwarelike-rest-9.0`` parses back to ``vmwarelike``) so
+    # it satisfies the #1816 registration round-trip hard-fail.
     register_connector_v2(
-        product="vmware-like",
+        product="vmwarelike",
         version="9.0",
-        impl_id="vmware-rest",
+        impl_id="vmwarelike-rest",
         cls=_V2OnlyConnector,
     )
 
@@ -398,7 +400,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
         name="rdc-vcenter",
-        product="vmware-like",
+        product="vmwarelike",
         host="vcenter.corp.internal",
     )
     key = make_rsa_keypair("kid-A")
@@ -520,7 +522,7 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
     captured: dict[str, Any] = {}
 
     class _OperatorCapturingConnector(Connector):
-        product = "operator-capture-probe"
+        product = "opcaptureprobe"
 
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
@@ -533,7 +535,7 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
             captured["operator"] = operator
             return FingerprintResult(
                 vendor="test",
-                product="operator-capture-probe",
+                product="opcaptureprobe",
                 version="1.0",
                 reachable=True,
                 probed_at=datetime.now(UTC),
@@ -549,9 +551,9 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
             raise NotImplementedError
 
     register_connector_v2(
-        product="operator-capture-probe",
+        product="opcaptureprobe",
         version="1.0",
-        impl_id="default",
+        impl_id="opcaptureprobe",
         cls=_OperatorCapturingConnector,
     )
 
@@ -559,7 +561,7 @@ async def test_probe_forwards_operator_jwt_with_three_part_token(
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
         name="rke2-infra-k8s",
-        product="operator-capture-probe",
+        product="opcaptureprobe",
         host="capture.test",
     )
     key = make_rsa_keypair("kid-A")
@@ -631,9 +633,9 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
 
     class _FailingConnector(Connector):
-        product = "k8s-fail"
+        product = "k8sfail"
         version = "1.x"
-        impl_id = "k8s"
+        impl_id = "k8sfail"
 
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
@@ -645,9 +647,9 @@ async def test_probe_fingerprint_exception_returns_structured_500(
             raise NotImplementedError
 
     register_connector_v2(
-        product="k8s-fail",
+        product="k8sfail",
         version="1.x",
-        impl_id="k8s",
+        impl_id="k8sfail",
         cls=_FailingConnector,
     )
 
@@ -655,7 +657,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
         name="rke2-infra-k8s",
-        product="k8s-fail",
+        product="k8sfail",
         host="10.10.0.1",
     )
     key = make_rsa_keypair("kid-A")
@@ -676,7 +678,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
     # capped message, and a doc reference. Each assertion pins one
     # clause of the convention.
     assert detail["error"] == "fingerprint_failed"
-    assert detail["connector_id"] == "k8s-1.x"
+    assert detail["connector_id"] == "k8sfail-1.x"
     assert detail["target_name"] == "rke2-infra-k8s"
     assert detail["exception_class"] == "RuntimeError"
     assert "kubeconfig credential load failed" in detail["exception_message"]
@@ -705,9 +707,9 @@ async def test_probe_fingerprint_exception_caps_message_length(
     huge_message = "X" * 1024
 
     class _NoisyConnector(Connector):
-        product = "k8s-noisy"
+        product = "k8snoisy"
         version = "1.x"
-        impl_id = "k8s"
+        impl_id = "k8snoisy"
 
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
@@ -719,16 +721,16 @@ async def test_probe_fingerprint_exception_caps_message_length(
             raise NotImplementedError
 
     register_connector_v2(
-        product="k8s-noisy",
+        product="k8snoisy",
         version="1.x",
-        impl_id="k8s",
+        impl_id="k8snoisy",
         cls=_NoisyConnector,
     )
     tenant_id = DEFAULT_TENANT_ID
     await _insert_target(
         tenant_id=uuid.UUID(tenant_id),
         name="noisy-k8s",
-        product="k8s-noisy",
+        product="k8snoisy",
         host="10.10.0.2",
     )
     key = make_rsa_keypair("kid-A")

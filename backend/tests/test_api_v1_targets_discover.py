@@ -68,7 +68,13 @@ from ._oidc_jwt_helpers import public_jwks as _public_jwks
 from ._targets_helpers import _insert_target
 
 _TENANT_ID = UUID("11111111-1111-1111-1111-111111111111")
-_PRODUCT = "discover-product"
+# Hyphen-free product whose value equals the first hyphen-segment of every
+# impl_id registered below. register_connector_v2 derives the connector_id as
+# f"{impl_id}-{version}", and connectors/registry._assert_product_impl_id_round_trips
+# hard-fails when the declared product does not round-trip back out of it. A
+# hyphenated product (e.g. "discover-product") parses to only its first segment
+# ("discover"), so it can never round-trip — hence the flat token + prefixed impl_ids.
+_PRODUCT = "discoverp"
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +254,11 @@ def test_discover_missing_product_returns_422(client: TestClient) -> None:
 def test_discover_merges_candidates_across_connectors(client: TestClient) -> None:
     """Candidates from every connector for the product are merged."""
     register_connector_v2(
-        product=_PRODUCT, version="9.0", impl_id="impl-a", cls=_CandidatesConnector
+        product=_PRODUCT, version="9.0", impl_id="discoverp-a", cls=_CandidatesConnector
     )
-    register_connector_v2(product=_PRODUCT, version="8.0", impl_id="impl-b", cls=_EmptyConnector)
+    register_connector_v2(
+        product=_PRODUCT, version="8.0", impl_id="discoverp-b", cls=_EmptyConnector
+    )
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
@@ -264,13 +272,17 @@ def test_discover_merges_candidates_across_connectors(client: TestClient) -> Non
     assert body["discovered"][0]["confidence"] == "high"
     # The empty connector lands in skipped with the clean-but-empty reason.
     skipped = {s["name"]: s["reason"] for s in body["skipped"]}
-    assert skipped["impl-b"] == "no candidates"
+    assert skipped["discoverp-b"] == "no candidates"
 
 
 def test_discover_records_raising_connector_and_continues(client: TestClient) -> None:
     """One connector raising does not abort the sweep — it is skipped."""
-    register_connector_v2(product=_PRODUCT, version="9.0", impl_id="good", cls=_CandidatesConnector)
-    register_connector_v2(product=_PRODUCT, version="8.0", impl_id="bad", cls=_RaisingConnector)
+    register_connector_v2(
+        product=_PRODUCT, version="9.0", impl_id="discoverp-good", cls=_CandidatesConnector
+    )
+    register_connector_v2(
+        product=_PRODUCT, version="8.0", impl_id="discoverp-bad", cls=_RaisingConnector
+    )
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
@@ -283,7 +295,7 @@ def test_discover_records_raising_connector_and_continues(client: TestClient) ->
     # The good connector still contributed despite the bad one raising.
     assert [c["name"] for c in body["discovered"]] == ["esxi-7"]
     skipped = {s["name"]: s["reason"] for s in body["skipped"]}
-    assert "RuntimeError: connector exploded" in skipped["bad"]
+    assert "RuntimeError: connector exploded" in skipped["discoverp-bad"]
 
 
 def test_discover_unknown_product_returns_empty(client: TestClient) -> None:
@@ -317,7 +329,7 @@ def test_discover_with_seed_target_resolves_and_forwards(client: TestClient) -> 
         )
     )
     register_connector_v2(
-        product=_PRODUCT, version="9.0", impl_id="impl-a", cls=_CandidatesConnector
+        product=_PRODUCT, version="9.0", impl_id="discoverp-a", cls=_CandidatesConnector
     )
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
@@ -335,7 +347,7 @@ def test_discover_with_seed_target_resolves_and_forwards(client: TestClient) -> 
 
 def test_discover_unknown_seed_target_returns_404(client: TestClient) -> None:
     register_connector_v2(
-        product=_PRODUCT, version="9.0", impl_id="impl-a", cls=_CandidatesConnector
+        product=_PRODUCT, version="9.0", impl_id="discoverp-a", cls=_CandidatesConnector
     )
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
@@ -355,7 +367,7 @@ def test_discover_unknown_seed_target_returns_404(client: TestClient) -> None:
 async def test_discover_binds_canonical_op_id(client: TestClient) -> None:
     """The audit row's payload carries op_id=targets.discover + op_class=read."""
     register_connector_v2(
-        product=_PRODUCT, version="9.0", impl_id="impl-a", cls=_CandidatesConnector
+        product=_PRODUCT, version="9.0", impl_id="discoverp-a", cls=_CandidatesConnector
     )
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:

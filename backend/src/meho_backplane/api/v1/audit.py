@@ -105,8 +105,9 @@ Error mapping
 * :class:`~meho_backplane.audit_query.InvalidCursorError` (tampered
   cursor) → 400 with the substrate's message.
 * :class:`~meho_backplane.audit_query.UnsupportedFilterError`
-  (``parent_audit_id`` / ``agent_session_id`` in v0.2) → 400 with the
-  column-name message from the substrate.
+  (``parent_audit_id`` in v0.2 — ``agent_session_id`` is a *supported*
+  flat filter as of G8.2 #1009) → 400 with the column-name message from
+  the substrate.
 
 Other exceptions propagate; the chassis middleware turns them into 500.
 """

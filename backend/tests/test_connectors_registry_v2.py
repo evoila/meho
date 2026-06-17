@@ -459,9 +459,21 @@ def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> No
         assert tokens, "expected connectors to self-register at import"
         assert {"sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"} <= tokens
     finally:
-        # Restore the import cache so the eviction is invisible to later
-        # tests; the registry contents are restored by the autouse fixtures.
+        # Restore the import cache so the eviction is invisible to later tests;
+        # the registry contents are restored by the autouse fixtures.
         sys.modules.update(evicted)
+        # _eager_import_connectors re-imported the evicted subpackages, creating
+        # FRESH module objects that it also bound as child attributes on their
+        # parent packages. The update() above restores the ORIGINAL objects into
+        # sys.modules, but the parent-package attrs still point at the fresh ones
+        # — a desync that makes a later importlib.reload of any of these modules
+        # fail with "ImportError: module ... not in sys.modules". Rebind each
+        # original onto its parent package to fully undo the re-import.
+        for _name, _module in evicted.items():
+            _parent_name, _, _child = _name.rpartition(".")
+            _parent = sys.modules.get(_parent_name)
+            if _parent is not None and _child:
+                setattr(_parent, _child, _module)
 
 
 # ---------------------------------------------------------------------------

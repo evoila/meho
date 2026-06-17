@@ -41,6 +41,35 @@ walks that table to pick the right class for a given target.
   (#224)](https://github.com/evoila/meho/issues/224); until that lands,
   the resolver reads it via `getattr(..., None)` and tolerates absence.
 
+### Canonical product identity
+
+`target.product` is the single canonical product token a connector
+registers under — the same token its `connector_id` round-trips to via
+[`parse_connector_id`](../../backend/src/meho_backplane/operations/_lookup.py).
+Every shipped connector satisfies
+`parse_connector_id(f"{impl_id}-{version}")[0] == product`: the
+registry product and the dispatch-derived product are one token, so the
+filter above (`target.product`) and the product the dispatcher resolves
+for a row never diverge.
+
+This was not always so. Six VCF-suite connectors shipped with a *long*
+registry product and a *short* dispatch-/parser-derived product
+(`sddc-manager` vs `sddc`, `vcf-automation` vs `vcfa`, `vcf-fleet` vs
+`fleet`, `vcf-operations` vs `vrops`, `hetzner-robot` vs `hetzner`, and
+`vcf-logs` vs `vrli`), bridged by sanctioned band-aids. vRLI was
+realigned in [#1798](https://github.com/evoila/meho/issues/1798); the
+remaining five in
+[#1814](https://github.com/evoila/meho/issues/1814) (Initiative
+[#1810](https://github.com/evoila/meho/issues/1810)). The split is
+retired — each connector now carries one short canonical token, and a
+target's `product` is that token verbatim.
+
+[`register_connector_v2`](../../backend/src/meho_backplane/connectors/registry.py)
+logs a WARN when a registration's product does not round-trip; with the
+family aligned this check is silent at boot and stays advisory until
+[#1816](https://github.com/evoila/meho/issues/1816) promotes it to a
+hard fail.
+
 ## Tie-break ladder
 
 When two or more connectors advertise support for a target's

@@ -23,7 +23,7 @@ seeded from
 [`VCFA_CORE_OPS`](../../backend/src/meho_backplane/connectors/vcf_automation/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="vcf-automation", version="9.0", impl_id="vcfa-rest")`
+`(product="vcfa", version="9.0", impl_id="vcfa-rest")`
 registry triple — the connector id `vcfa-rest-9.0`.
 
 VCFA 9.x is structurally different from the other three VCF
@@ -132,7 +132,7 @@ inlines into its reasoning context.
   `svc-meho` split — see "Per-plane credential override" below).
 - **A registered VCFA target.** The CLI verbs take `--target <slug>`
   (e.g. `--target rdc-vcfa`). The target carries
-  `product="vcf-automation"`, `host`, `port` (default 443), `fqdn`
+  `product="vcfa"`, `host`, `port` (default 443), `fqdn`
   (when reached by IP), `secret_ref`, and
   `auth_model="shared_service_account"`. v0.5 supports only
   `shared_service_account`; other auth models surface a clear
@@ -163,7 +163,7 @@ meho targets import path/to/targets.yaml
 ```yaml
 targets:
   - name: rdc-vcfa
-    product: vcf-automation
+    product: vcfa
     host: 10.5.50.100       # IP host requires fqdn below
     port: 443
     fqdn: vcfa.rdc.evoila.io  # canonical vhost
@@ -180,7 +180,7 @@ override fields:
 ```yaml
 targets:
   - name: rdc-vcfa
-    product: vcf-automation
+    product: vcfa
     host: vcfa.rdc.evoila.io
     port: 443
     secret_ref: kv/data/vcfa/rdc-vcfa-tenant      # tenant credentials
@@ -198,7 +198,7 @@ Verify the fingerprint resolved both planes:
 ```bash
 meho targets probe --name rdc-vcfa --json \
   | jq '{product, version, reachable, planes: .extras.planes}'
-# expected: {"product": "vcf-automation", "version": "9.0",
+# expected: {"product": "vcfa", "version": "9.0",
 #            "reachable": true, "planes": ["provider", "tenant"]}
 ```
 
@@ -319,7 +319,7 @@ Every VCFA v0.5 op is `safety_level=safe`, `requires_approval=false` —
 the read-only surface never mutates state. The audit row carries:
 `method='DISPATCH'`, `path=<op_id>`, `target_id=<uuid>`,
 `payload={"op_id": …, "params_hash": …, "source_kind": "ingested",
-"connector_product": "vcf-automation", "connector_version": "9.0",
+"connector_product": "vcfa", "connector_version": "9.0",
 "connector_impl_id": "vcfa-rest", "result_status": "ok"|"error"}`.
 
 Broadcast events publish per-tenant on every successful dispatch.

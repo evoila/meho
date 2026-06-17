@@ -21,7 +21,7 @@ read-only ops are stored as `EndpointDescriptor` rows seeded from
 [`SDDC_CORE_OPS`](../../backend/src/meho_backplane/connectors/sddc_manager/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="sddc-manager", version="9.0", impl_id="sddc-rest")` registry triple —
+`(product="sddc", version="9.0", impl_id="sddc-rest")` registry triple —
 the connector id `sddc-rest-9.0`. Auth is **HTTP Basic** on every request
 (`username@sso_realm:password`); no session establish or XSRF-token dance is
 needed. The connector handles this transparently via `SddcManagerConnector.auth_headers`.
@@ -66,7 +66,7 @@ a separate data path and is **not** mirrored on the MCP surface
   HTTP Basic auth. Credentials are cached in-process per target after first
   use.
 - **A registered SDDC Manager target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-sddc-manager`). The target carries `product="sddc-manager"`,
+  (e.g. `--target rdc-sddc-manager`). The target carries `product="sddc"`,
   `host` (the appliance FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials),
   `auth_model="shared_service_account"`, and optionally `sso_realm` if the
@@ -107,7 +107,7 @@ To register a new target via the CLI:
 ```bash
 meho targets import \
   --name rdc-sddc-manager \
-  --product sddc-manager \
+  --product sddc \
   --host sddc-manager.rdc.evoila.io \
   --port 443 \
   --secret-ref kv/data/sddc-manager/rdc \
@@ -119,7 +119,7 @@ If your VCF deployment uses a custom SSO realm:
 ```bash
 meho targets import \
   --name rdc-sddc-manager \
-  --product sddc-manager \
+  --product sddc \
   --host sddc-manager.rdc.evoila.io \
   --port 443 \
   --secret-ref kv/data/sddc-manager/rdc \
@@ -131,7 +131,7 @@ Verify the fingerprint resolved correctly:
 
 ```bash
 meho targets probe --name rdc-sddc-manager --json | jq '{product, version, reachable}'
-# expected: {"product": "sddc-manager", "version": "9.0", "reachable": true}
+# expected: {"product": "sddc", "version": "9.0", "reachable": true}
 ```
 
 ## Quick-start

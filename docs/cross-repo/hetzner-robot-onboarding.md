@@ -153,7 +153,7 @@ Add an entry to `targets.yaml` in `claude-rdc-hetzner-dc`:
 
 ```yaml
 - name: rdc-robot          # stable slug used in --target flags
-  product: hetzner-robot
+  product: hetzner
   host: robot.hetzner.com
   port: 443                # HTTPS, optional (443 is the default)
   secret_ref: kv/data/hetzner/rdc-robot

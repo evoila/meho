@@ -109,6 +109,7 @@ connector-related release-notes line.
 ### Documentation
 
 - Fix the `meho targets import` examples in the VCF Operations / VCF Logs onboarding guides — they used an unsupported flag form, but `import` takes a `targets.yaml` **file** — and show the per-target `verify_tls` / `tls_ca_pin` TLS-trust fields for reaching self-signed / internal-CA appliances; refresh the vROps "probe fails with TLS error" troubleshooting row to name the per-target options (#1774).
+- Update the connector docs for the short canonical product tokens that the connector-family realignment (#1814) shipped. `docs/architecture/connector-resolution.md` now documents the single canonical product↔impl_id identity — `target.product` is the same token `parse_connector_id` derives, the long↔short split is retired — with a historical note on the five realigned connectors. The SDDC Manager / VCF Automation / VCF Fleet / VCF Operations / Hetzner Robot onboarding guides now use the short `--product` value, `product:` field, and probe/audit output (`sddc`/`vcfa`/`fleet`/`vrops`/`hetzner`) so operators copy a working token; CLI verb trees, wrapper script names, and the vendor-reported Hetzner `robot-webservice` fingerprint are left unchanged (they are names, not the registry token) (#1818).
 
 ## [0.16.0] - 2026-06-15
 

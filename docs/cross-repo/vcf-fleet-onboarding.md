@@ -21,7 +21,7 @@ read-only ops are stored as `EndpointDescriptor` rows seeded from
 [`FLEET_CORE_OPS`](../../backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="vcf-fleet", version="9.0", impl_id="fleet-rest")` registry triple —
+`(product="fleet", version="9.0", impl_id="fleet-rest")` registry triple —
 the connector id `fleet-rest-9.0`. Auth is **HTTP Basic** on every request
 against Fleet's local LCM user store (typical service account: `admin@local`);
 no SSO federation, no session establish, no XSRF-token dance. The connector
@@ -98,7 +98,7 @@ without code changes.
   `admin@local`); no realm suffix is appended. Credentials are cached in-process
   per target after first use via the shared `CredentialsCache` helper (#841).
 - **A registered VCF Fleet target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-fleet`). The target carries `product="vcf-fleet"`,
+  (e.g. `--target rdc-fleet`). The target carries `product="fleet"`,
   `host` (the appliance FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials), and
   `auth_model="shared_service_account"`.
@@ -138,7 +138,7 @@ To register a new target via the CLI:
 ```bash
 meho targets import \
   --name rdc-fleet \
-  --product vcf-fleet \
+  --product fleet \
   --host vcf-fleet.rdc.evoila.io \
   --port 443 \
   --secret-ref kv/data/vcf-fleet/rdc \
@@ -149,7 +149,7 @@ Verify the fingerprint resolved correctly:
 
 ```bash
 meho targets probe --name rdc-fleet --json | jq '{product, version, reachable, extras}'
-# expected: {"product": "vcf-fleet", "version": "8.0", "reachable": true,
+# expected: {"product": "fleet", "version": "8.0", "reachable": true,
 #            "extras": {"lcm_api_version": "8.0", "datacenter_count": N, ...}}
 # Note: `version` carries the LCM API version (the only working version source
 # in 9.0), not the product version. The connector's class-level

@@ -769,6 +769,13 @@ class MemoryService:
                 kind=kind_for_scope(scope),
                 limit=retrieval_limit,
                 metadata_filters=_metadata_filters_for_scope(scope, operator),
+                # Belt-and-suspenders: this path already pushes the
+                # user_sub predicate down via metadata_filters, but
+                # passing principal_sub makes the boundary enforce it
+                # too (#1797), so a future change to
+                # _metadata_filters_for_scope cannot silently reopen the
+                # leak this service was already closing.
+                principal_sub=operator.sub,
             )
         else:
             hits = await self._retrieve_cross_scope(operator, query, retrieval_limit)
@@ -834,6 +841,10 @@ class MemoryService:
                 kind=kind,
                 limit=retrieval_limit,
                 metadata_filters=metadata_filters,
+                # Belt-and-suspenders, as in the single-scope path above:
+                # the boundary re-enforces the per-principal predicate
+                # (#1797) on top of the per-kind metadata_filters.
+                principal_sub=operator.sub,
             )
             all_hits.extend(hits)
         # Stable sort on ``fused_score`` desc; per-kind RRF scores

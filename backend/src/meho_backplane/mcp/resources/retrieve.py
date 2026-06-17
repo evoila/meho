@@ -153,10 +153,19 @@ async def _retrieve_handler(
         audit_kind=None,
     )
 
+    # `principal_sub=operator.sub` enforces the mandatory per-principal
+    # isolation predicate at the retrieval boundary (#1797). This resource
+    # retrieves across *every* source with no `metadata_filters`, so
+    # without the predicate a `source="memory"` user-scoped row written by
+    # another principal in the same tenant would surface here. The
+    # substrate gates `memory-user` / `memory-user-tenant` /
+    # `memory-user-target` rows on `stored user_sub == operator.sub`;
+    # tenant-broadcast and non-memory rows are unaffected.
     hits = await retrieve(
         tenant_id=operator.tenant_id,
         query=query,
         limit=_DEFAULT_LIMIT,
+        principal_sub=operator.sub,
     )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))

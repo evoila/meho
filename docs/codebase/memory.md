@@ -208,7 +208,14 @@ are the real DB column values.
    RBAC is unconditional, and the substrate's `tenant_id`
    predicate already enforces the tenant boundary).
 3. Call `meho_backplane.retrieval.retriever.retrieve` with
-   `source='memory'`, `kind=...`, and `metadata_filters=...`. The
+   `source='memory'`, `kind=...`, `metadata_filters=...`, and
+   `principal_sub=operator.sub`. The `principal_sub` argument is
+   belt-and-suspenders: this path already pushes the `user_sub`
+   predicate down via `metadata_filters`, but the substrate's
+   mandatory per-principal predicate (the #1797 cross-principal-leak
+   fix — see `docs/codebase/retrieval.md`) re-enforces it at the
+   boundary, so a future change to `_metadata_filters_for_scope`
+   cannot silently reopen the leak. The
    retriever runs a hybrid BM25 + cosine query, fuses with
    Reciprocal Rank Fusion, and SELECTs the full `documents` row
    for the top-fused ids. The `metadata_filters` dict is

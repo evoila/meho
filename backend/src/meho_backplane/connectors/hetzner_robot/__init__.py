@@ -5,7 +5,7 @@
 
 Importing this package registers :class:`HetznerRobotConnector` against the
 v2 connector registry under
-``(product="hetzner-robot", version="2026.04", impl_id="hetzner-rest")``.
+``(product="hetzner", version="2026.04", impl_id="hetzner-rest")``.
 
 Registration is synchronous (import-time) only. Operations arrive via
 G0.7 spec ingestion of the Robot Webservice OpenAPI spec into the
@@ -16,7 +16,7 @@ G0.7 spec ingestion of the Robot Webservice OpenAPI spec into the
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called.  The connector advertises an explicit
 ``(version="2026.04", impl_id="hetzner-rest")`` key; the v1 entry would land
-as ``("hetzner-robot", "", "")`` and confuse
+as ``("hetzner", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s tie-break
 ladder.  Same pattern :mod:`meho_backplane.connectors.harbor` established.
 """
@@ -44,7 +44,7 @@ from meho_backplane.connectors.hetzner_robot.session import (
 from meho_backplane.connectors.registry import register_connector_v2
 
 register_connector_v2(
-    product="hetzner-robot",
+    product="hetzner",
     version="2026.04",
     impl_id="hetzner-rest",
     cls=HetznerRobotConnector,
@@ -57,7 +57,7 @@ register_connector_v2(
 # with ``no_connector``. The versioned entry above always wins when
 # both are present (resolver tie-break step 1).
 register_connector_v2(
-    product="hetzner-robot",
+    product="hetzner",
     version="",
     impl_id="",
     cls=HetznerRobotConnector,

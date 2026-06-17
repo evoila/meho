@@ -252,10 +252,12 @@ def test_register_v2_keyword_only_arguments() -> None:
 #
 # register_connector_v2 logs a WARN (never raises) when the declared
 # product does not equal the product parse_connector_id derives from the
-# connector_id. The check must NOT crash _eager_import_connectors, so the
-# five sanctioned _PRODUCT_SPLITS legacy connectors WARN at boot rather
-# than fail (their realignment is Initiative #1810). After the vRLI
-# alignment, vRLI no longer warns.
+# connector_id. The check must NOT crash _eager_import_connectors. Since
+# #1814 (Initiative #1810) realigned the five sanctioned _PRODUCT_SPLITS
+# connectors to their short token (and #1798 realigned vRLI), every
+# shipped connector now round-trips and registers silently — the WARN
+# stays as the guard against a *future* divergent registration (its
+# promotion to a hard-fail is #1816).
 # ---------------------------------------------------------------------------
 
 
@@ -368,19 +370,21 @@ def test_register_v2_vrli_alignment_is_silent(monkeypatch: pytest.MonkeyPatch) -
     assert _divergence_events(capture) == []
 
 
-def test_sanctioned_splits_warn_but_register_without_crashing(
+def test_realigned_splits_register_silently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The five sanctioned _PRODUCT_SPLITS connectors WARN yet still register.
+    """The five formerly-split connectors now register WITHOUT a divergence WARN.
 
-    The relaxed criterion: the invariant must NOT raise, otherwise the
-    live-validated sanctioned splits (sddc-manager / vcf-automation /
-    vcf-fleet / vcf-operations / hetzner-robot) would fail at
-    ``register_connector_v2`` → :func:`_eager_import_connectors` →
-    regress five shipped connectors at boot. Each real split class is
-    registered here under its real triple inside a log capture: every one
-    WARNs, none raises, and every one lands in the registry. vRLI, now
-    aligned to ``product="vrli"``, does **not** warn.
+    #1814 (Initiative #1810) realigned sddc-manager → ``sddc``,
+    vcf-automation → ``vcfa``, vcf-fleet → ``fleet``, vcf-operations →
+    ``vrops`` and hetzner-robot → ``hetzner``, so each connector's
+    declared ``product`` now equals the token ``parse_connector_id``
+    derives from its ``impl_id``/``version``. Registering each real class
+    under its real triple inside a log capture must therefore emit **zero**
+    ``connector_product_impl_id_divergence`` events — together with vRLI
+    (#1798) the whole hand-coded family round-trips. (Before #1814 these
+    five WARNed at boot; this test pins that the realignment silenced
+    them.)
 
     Registering the real classes directly (rather than calling
     :func:`_eager_import_connectors`, which is a ``sys.modules``-cached
@@ -394,7 +398,7 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
     from meho_backplane.connectors.vcf_logs import VcfLogsConnector
     from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 
-    split_classes = [
+    realigned_classes = [
         SddcManagerConnector,
         VcfAutomationConnector,
         VcfFleetConnector,
@@ -402,10 +406,23 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
         HetznerRobotConnector,
     ]
 
+    # The short, dispatch-canonical tokens #1814 realigned each class to.
+    expected_products = {
+        "SddcManagerConnector": "sddc",
+        "VcfAutomationConnector": "vcfa",
+        "VcfFleetConnector": "fleet",
+        "VcfOperationsConnector": "vrops",
+        "HetznerRobotConnector": "hetzner",
+    }
+    for cls in realigned_classes:
+        assert cls.product == expected_products[cls.__name__], (
+            f"{cls.__name__} should register under {expected_products[cls.__name__]!r}, "
+            f"got {cls.product!r}"
+        )
+
     capture = _private_log_capture(monkeypatch)
 
-    for cls in (*split_classes, VcfLogsConnector):
-        # Must not raise — WARN-not-fail is the whole contract.
+    for cls in (*realigned_classes, VcfLogsConnector):
         register_connector_v2(
             product=cls.product,
             version=cls.version,
@@ -413,24 +430,19 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
             cls=cls,
         )
 
-    # Every class registered despite any divergence WARN.
+    # Every class registered.
     snapshot = all_connectors_v2()
-    for cls in (*split_classes, VcfLogsConnector):
+    for cls in (*realigned_classes, VcfLogsConnector):
         assert snapshot[(cls.product, cls.version, cls.impl_id)] is cls
 
+    # And not one of them tripped the divergence WARN — the whole point of
+    # the realignment.
     divergent_products = {e["product"] for e in _divergence_events(capture)}
-    # The five sanctioned legacy splits warn; vRLI (now product="vrli")
-    # does not.
-    assert divergent_products == {
-        "sddc-manager",
-        "vcf-automation",
-        "vcf-fleet",
-        "vcf-operations",
-        "hetzner-robot",
-    }, f"unexpected divergence set: {divergent_products!r}"
+    assert divergent_products == set(), (
+        f"realigned connectors must register silently; got divergence WARNs for "
+        f"{divergent_products!r}"
+    )
     assert VcfLogsConnector.product == "vrli"
-    assert "vcf-logs" not in divergent_products
-    assert "vrli" not in divergent_products
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +523,7 @@ def test_all_connectors_v2_returns_copy() -> None:
 
 
 def test_sddc_manager_connector_registered_under_v2_triple() -> None:
-    """SddcManagerConnector package registers under (sddc-manager, 9.0, sddc-rest) at import.
+    """SddcManagerConnector package registers under (sddc, 9.0, sddc-rest) at import.
 
     Uses :func:`_ensure_registered_v2` so the test passes whether the
     connector package was imported (and self-registered) before
@@ -523,7 +535,7 @@ def test_sddc_manager_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(SddcManagerConnector)
     snapshot = all_connectors_v2()
-    key = ("sddc-manager", "9.0", "sddc-rest")
+    key = ("sddc", "9.0", "sddc-rest")
     assert key in snapshot
     assert snapshot[key] is SddcManagerConnector
 
@@ -567,7 +579,7 @@ def test_argocd_connector_registered_under_v2_triple_and_wildcard() -> None:
 
 
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
-    """VcfAutomationConnector package registers under (vcf-automation, 9.0, vcfa-rest).
+    """VcfAutomationConnector package registers under (vcfa, 9.0, vcfa-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor
     tests above.
@@ -576,13 +588,13 @@ def test_vcf_automation_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfAutomationConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-automation", "9.0", "vcfa-rest")
+    key = ("vcfa", "9.0", "vcfa-rest")
     assert key in snapshot
     assert snapshot[key] is VcfAutomationConnector
 
 
 def test_vcf_operations_connector_registered_under_v2_triple() -> None:
-    """VcfOperationsConnector package registers under (vcf-operations, 9.0, vrops-rest).
+    """VcfOperationsConnector package registers under (vrops, 9.0, vrops-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
@@ -591,7 +603,7 @@ def test_vcf_operations_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfOperationsConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-operations", "9.0", "vrops-rest")
+    key = ("vrops", "9.0", "vrops-rest")
     assert key in snapshot
     assert snapshot[key] is VcfOperationsConnector
 
@@ -615,7 +627,7 @@ def test_vcf_logs_connector_registered_under_v2_triple() -> None:
 
 
 def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
-    """VcfFleetConnector package registers under (vcf-fleet, 9.0, fleet-rest).
+    """VcfFleetConnector package registers under (fleet, 9.0, fleet-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
@@ -624,7 +636,7 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfFleetConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-fleet", "9.0", "fleet-rest")
+    key = ("fleet", "9.0", "fleet-rest")
     assert key in snapshot
     assert snapshot[key] is VcfFleetConnector
 
@@ -660,7 +672,7 @@ def test_pfsense_connector_registered_under_v2_triple() -> None:
 
 
 def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
-    """HetznerRobotConnector package registers under (hetzner-robot, 2026.04, hetzner-rest).
+    """HetznerRobotConnector package registers under (hetzner, 2026.04, hetzner-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor
     tests above.
@@ -669,7 +681,7 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(HetznerRobotConnector)
     snapshot = all_connectors_v2()
-    key = ("hetzner-robot", "2026.04", "hetzner-rest")
+    key = ("hetzner", "2026.04", "hetzner-rest")
     assert key in snapshot
     assert snapshot[key] is HetznerRobotConnector
 

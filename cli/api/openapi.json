@@ -16954,22 +16954,22 @@
             "enum": [
               "argocd",
               "bind9",
+              "fleet",
               "gcloud",
               "gh",
               "harbor",
-              "hetzner-robot",
+              "hetzner",
               "holodeck",
               "k8s",
               "keycloak",
               "nsx",
               "pfsense",
-              "sddc-manager",
+              "sddc",
               "vault",
-              "vcf-automation",
-              "vcf-fleet",
-              "vcf-operations",
+              "vcfa",
               "vmware",
-              "vrli"
+              "vrli",
+              "vrops"
             ],
             "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },

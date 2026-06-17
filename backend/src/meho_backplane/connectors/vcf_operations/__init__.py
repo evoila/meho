@@ -5,12 +5,12 @@
 
 Importing this package registers :class:`VcfOperationsConnector` against the
 v2 connector registry under
-``(product="vcf-operations", version="9.0", impl_id="vrops-rest")``.
+``(product="vrops", version="9.0", impl_id="vrops-rest")``.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit
 ``(version="9.0", impl_id="vrops-rest")`` key; the v1 entry would land as
-``("vcf-operations", "", "")`` and confuse
+``("vrops", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s tie-break
 ladder. Same pattern :mod:`meho_backplane.connectors.harbor`,
 :mod:`meho_backplane.connectors.sddc_manager`, :mod:`meho_backplane.connectors.nsx`,
@@ -19,7 +19,7 @@ and :mod:`meho_backplane.connectors.vcf_automation` established.
 Once G0.7-T8 (#408) lands its
 :func:`ensure_connector_class_registered` auto-shim in main, the idempotency
 check there will no-op on the
-``(product="vcf-operations", version="9.0", impl_id="vrops-rest")`` triple
+``(product="vrops", version="9.0", impl_id="vrops-rest")`` triple
 because this module has already registered the hand-rolled class. Until
 then, this module is the only registration path.
 
@@ -63,7 +63,7 @@ from meho_backplane.connectors.vcf_operations.session import (
 )
 
 register_connector_v2(
-    product="vcf-operations",
+    product="vrops",
     version="9.0",
     impl_id="vrops-rest",
     cls=VcfOperationsConnector,
@@ -76,7 +76,7 @@ register_connector_v2(
 # with ``no_connector``. The versioned entry above always wins when
 # both are present (resolver tie-break step 1).
 register_connector_v2(
-    product="vcf-operations",
+    product="vrops",
     version="",
     impl_id="",
     cls=VcfOperationsConnector,

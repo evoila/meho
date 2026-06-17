@@ -34,14 +34,14 @@ by hand. Same pattern :mod:`tests.acceptance._nsx_canary_fixtures` and
 Rows are inserted with ``product=VROPS_PRODUCT="vrops"`` — the value
 :func:`~meho_backplane.operations._lookup.parse_connector_id` derives
 from ``"vrops-rest-9.0"`` (first hyphen-segment of impl_id
-``"vrops-rest"``). Distinct from
-:attr:`VcfOperationsConnector.product` (``"vcf-operations"``) — same
-shape as the SDDC Manager case (``SddcManagerConnector.product="sddc-manager"``
-but rows carry ``product="sddc"``).
+``"vrops-rest"``). Since #1814 (Initiative #1810) this equals
+:attr:`VcfOperationsConnector.product` (``"vrops"``) — the connector
+registers under the short, dispatch-canonical token, so the registry
+key and the parser-derived spelling agree.
 
-The :class:`Target` row uses ``product=_TARGET_PRODUCT="vcf-operations"``
+The :class:`Target` row uses ``product=_TARGET_PRODUCT="vrops"``
 so the resolver finds :class:`VcfOperationsConnector` (registered
-with ``product="vcf-operations"`` in the v2 registry). The descriptor /
+with ``product="vrops"`` in the v2 registry). The descriptor /
 group rows use ``product=VROPS_PRODUCT="vrops"`` so the dispatcher's
 ``parse_connector_id``-derived lookup hits them.
 """
@@ -102,7 +102,7 @@ VROPS_CANARY_OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fc"
 #: from :data:`VROPS_PRODUCT` (``"vrops"``), which is what
 #: :func:`parse_connector_id` derives from the connector_id slug — the
 #: SDDC Manager precedent codified this product-key split.
-_TARGET_PRODUCT: str = "vcf-operations"
+_TARGET_PRODUCT: str = "vrops"
 
 #: Stable :class:`Target.name` for the seeded vROps target.
 VROPS_TARGET_NAME: str = "vrops-acceptance"
@@ -118,7 +118,7 @@ VROPS_CANARY_BASE_URL: str = "https://vrops-canary.test.invalid"
 #: binds the connector without a real probe round-trip.
 VROPS_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     vendor="vmware",
-    product="vcf-operations",
+    product="vrops",
     version="9.0.0.1.23456789",
     build="23456789",
     reachable=True,
@@ -463,7 +463,7 @@ async def ingested_vrops_canary(
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
        rows for the 8 curated vROps core ops.
-    2. Seed a :class:`Target` with ``product="vcf-operations"`` and the
+    2. Seed a :class:`Target` with ``product="vrops"`` and the
        :data:`VROPS_CANARY_FINGERPRINT` so the resolver binds
        :class:`VcfOperationsConnector`.
     3. Resolve + cache the :class:`VcfOperationsConnector` instance the
@@ -481,7 +481,7 @@ async def ingested_vrops_canary(
             name=VROPS_TARGET_NAME,
             aliases=[],
             # Target.product matches the connector class's registry key
-            # (``"vcf-operations"``), not the parse_connector_id-derived
+            # (``"vrops"``), not the parse_connector_id-derived
             # ``"vrops"`` the descriptor / group rows use. See module
             # docstring "EndpointDescriptor.product vs Target.product".
             product=_TARGET_PRODUCT,

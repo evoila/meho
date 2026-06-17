@@ -71,12 +71,12 @@ _CANARY_USERNAME = "svc-sddc-canary"
 _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-sddc"
 
 #: The connector triple ``sddc-rest-9.0`` decodes to. Note the asymmetry:
-#: the v2 registry uses ``product="sddc-manager"`` (and so does the
+#: the v2 registry uses ``product="sddc"`` (and so does the
 #: target row + the resolver), but ``parse_connector_id("sddc-rest-9.0")``
 #: returns ``product="sddc"`` — the descriptor + dispatcher leg uses that
 #: form. See sddc_manager/core_ops.py docstring §SDDC_PRODUCT for the
 #: locked rationale.
-_REGISTRY_PRODUCT = "sddc-manager"
+_REGISTRY_PRODUCT = "sddc"
 _DESCRIPTOR_PRODUCT = "sddc"
 _VERSION = "9.0"
 _IMPL_ID = "sddc-rest"
@@ -176,7 +176,7 @@ class _CredReadTarget:
     """Target satisfying both ``SddcTargetLike`` and the resolver shape."""
 
     def __init__(self) -> None:
-        # Target rows use the v2 registry product ``"sddc-manager"`` — the
+        # Target rows use the v2 registry product ``"sddc"`` — the
         # resolver matches ``Connector.product`` against this. The descriptor
         # row (seeded below) uses ``"sddc"`` (from ``parse_connector_id``).
         self.product = _REGISTRY_PRODUCT
@@ -210,7 +210,7 @@ async def _seed_descriptor(session: AsyncSession, embedding: list[float]) -> Non
         id=uuid.uuid4(),
         tenant_id=None,
         # Descriptor uses ``"sddc"`` (parse_connector_id of "sddc-rest-9.0");
-        # the connector class + target row both use ``"sddc-manager"``.
+        # the connector class + target row both use ``"sddc"``.
         product=_DESCRIPTOR_PRODUCT,
         version=_VERSION,
         impl_id=_IMPL_ID,

@@ -34,8 +34,8 @@ for NSX (which also has no public CI simulator).
 Rows are inserted with ``product=SDDC_PRODUCT="sddc"`` — the value
 :func:`~meho_backplane.operations._lookup.parse_connector_id` derives from
 ``"sddc-rest-9.0"`` (first hyphen-segment of impl_id). The :class:`Target`
-row uses ``product="sddc-manager"`` so the resolver finds
-:class:`SddcManagerConnector` (registered with ``product="sddc-manager"``
+row uses ``product="sddc"`` so the resolver finds
+:class:`SddcManagerConnector` (registered with ``product="sddc"``
 in the v2 registry). These product values serve different purposes; both
 are required for end-to-end dispatch to succeed.
 """
@@ -97,7 +97,7 @@ SDDC_CANARY_BASE_URL: str = "https://sddc-canary.test.invalid"
 #: :class:`SddcManagerConnector` (``supported_version_range=">=9.0,<10.0"``).
 SDDC_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     vendor="vmware",
-    product="sddc-manager",
+    product="sddc",
     version=SDDC_VERSION,
     build=None,
     reachable=True,
@@ -296,7 +296,7 @@ async def _insert_sddc_descriptors() -> None:
 
     Rows use ``product=SDDC_PRODUCT="sddc"`` (from
     :func:`parse_connector_id("sddc-rest-9.0")`), not the connector class's
-    ``product="sddc-manager"``. The target row uses ``product="sddc-manager"``
+    ``product="sddc"``. The target row uses ``product="sddc"``
     so the resolver finds :class:`SddcManagerConnector`.
     """
     sessionmaker = get_sessionmaker()
@@ -420,7 +420,7 @@ async def ingested_sddc_canary(
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
        rows for the 9 curated SDDC Manager core ops.
-    2. Seed a :class:`Target` with ``product="sddc-manager"`` and the
+    2. Seed a :class:`Target` with ``product="sddc"`` and the
        :data:`SDDC_CANARY_FINGERPRINT` so the resolver binds
        :class:`SddcManagerConnector`.
     3. Resolve + cache the :class:`SddcManagerConnector` instance the
@@ -436,7 +436,7 @@ async def ingested_sddc_canary(
             tenant_id=SDDC_CANARY_OPERATOR_TENANT,
             name=SDDC_TARGET_NAME,
             aliases=[],
-            product="sddc-manager",
+            product="sddc",
             host=SDDC_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
@@ -451,7 +451,7 @@ async def ingested_sddc_canary(
         await session.commit()
 
     registry = all_connectors_v2()
-    connector_cls = registry.get(("sddc-manager", SDDC_VERSION, "sddc-rest"))
+    connector_cls = registry.get(("sddc", SDDC_VERSION, "sddc-rest"))
     if connector_cls is None:
         import importlib
 
@@ -459,7 +459,7 @@ async def ingested_sddc_canary(
 
         importlib.reload(_sddc_pkg)
         registry = all_connectors_v2()
-        connector_cls = registry.get(("sddc-manager", SDDC_VERSION, "sddc-rest"))
+        connector_cls = registry.get(("sddc", SDDC_VERSION, "sddc-rest"))
 
     assert connector_cls is SddcManagerConnector, (
         f"expected SddcManagerConnector registered for "

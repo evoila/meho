@@ -145,7 +145,7 @@ def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
 def test_vcf_fleet_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(VcfFleetConnector, HttpConnector)
-    assert VcfFleetConnector.product == "vcf-fleet"
+    assert VcfFleetConnector.product == "fleet"
     assert VcfFleetConnector.version == "9.0"
     assert VcfFleetConnector.impl_id == "fleet-rest"
     assert VcfFleetConnector.supported_version_range == ">=9.0,<10.0"
@@ -157,7 +157,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("vcf-fleet", "9.0", "fleet-rest")
+    key = ("fleet", "9.0", "fleet-rest")
     assert key in registry
     assert registry[key] is VcfFleetConnector
 
@@ -389,7 +389,7 @@ async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "vcf-fleet"
+    assert fp.product == "fleet"
     # Fleet exposes no product version via a working endpoint in 9.0;
     # the connector carries the LCM API version in `version` as the
     # only version string the wrapper-verified probe surfaces.
@@ -463,7 +463,7 @@ async def test_fingerprint_unreachable_on_500_returns_reachable_false() -> None:
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "vcf-fleet"
+    assert fp.product == "fleet"
     assert fp.reachable is False
     error = fp.extras["error"]
     assert "HTTPStatusError" in error or "500" in error

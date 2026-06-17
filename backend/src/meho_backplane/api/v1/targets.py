@@ -340,12 +340,15 @@ def _canonicalise_and_validate_product(supplied: str) -> str:
 
     G0.18-T2 (#1355). Shared canonicalisation + enum-validation step
     for the POST / PATCH write surfaces. Runs ``supplied`` through
-    :func:`canonical_product_token` so the listing-spelling alias
-    (``"sddc"``) maps to the registry's canonical form
-    (``"sddc-manager"``) before the registered-product validator
-    fires; without this an operator copying ``product`` straight out
-    of ``meho connector list`` would hit a 422 (RDC #789 Finding 6;
-    closes #1312 acceptance B).
+    :func:`canonical_product_token` so any sanctioned listing-spelling
+    alias maps to the registry's canonical form before the registered-
+    product validator fires. The historical ``"sddc"`` ->
+    ``"sddc-manager"`` alias this guarded was retired by #1814
+    (Initiative #1810), which realigned the connector to register under
+    the short ``"sddc"`` token directly, so ``product="sddc"`` now
+    validates without an alias; ``canonical_product_token`` is currently
+    the identity but stays the canonicalisation hook for any future
+    sanctioned alias.
 
     The 422 detail names the *originally supplied* token (not the
     canonicalised form) so the operator's error message shows what

@@ -5,7 +5,7 @@
 
 Importing this package registers :class:`VcfFleetConnector` against the
 v2 connector registry under
-``(product="vcf-fleet", version="9.0", impl_id="fleet-rest")``. The
+``(product="fleet", version="9.0", impl_id="fleet-rest")``. The
 chassis lifespan calls
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 which walks every ``connectors/<product>/`` subpackage at startup, so
@@ -14,7 +14,7 @@ the registration lands before any dispatch can occur.
 The v1 :func:`~meho_backplane.connectors.registry.register_connector`
 entry point is deliberately **not** called. The connector advertises an
 explicit ``(version="9.0", impl_id="fleet-rest")`` key; the v1 entry
-would land as ``("vcf-fleet", "", "")`` and confuse
+would land as ``("fleet", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s
 tie-break ladder. Same pattern :mod:`meho_backplane.connectors.harbor`
 and :mod:`meho_backplane.connectors.vcf_automation` established.
@@ -50,7 +50,7 @@ from meho_backplane.connectors.vcf_fleet.session import (
 )
 
 register_connector_v2(
-    product="vcf-fleet",
+    product="fleet",
     version="9.0",
     impl_id="fleet-rest",
     cls=VcfFleetConnector,
@@ -63,7 +63,7 @@ register_connector_v2(
 # with ``no_connector``. The versioned entry above always wins when
 # both are present (resolver tie-break step 1).
 register_connector_v2(
-    product="vcf-fleet",
+    product="fleet",
     version="",
     impl_id="",
     cls=VcfFleetConnector,

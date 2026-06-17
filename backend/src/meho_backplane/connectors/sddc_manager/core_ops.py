@@ -37,11 +37,12 @@ against an existing ingested connector.
 ``SDDC_PRODUCT = "sddc"`` is the value
 :func:`~meho_backplane.operations._lookup.parse_connector_id` extracts
 from ``SDDC_CONNECTOR_ID = "sddc-rest-9.0"`` (``head.split("-", 1)[0]``).
-It is **not** the same as :attr:`SddcManagerConnector.product`, which is
-``"sddc-manager"`` and is used only for the v2 connector registry and the
-target-product resolver. All ``endpoint_descriptor`` and
-``operation_group`` rows for this connector triple carry
-``product="sddc"``; operators pass ``--product sddc`` when driving
+Since #1814 (Initiative #1810) realigned the registry, it is **also**
+:attr:`SddcManagerConnector.product` — the connector registers under the
+short, dispatch-canonical ``"sddc"`` token, so the registry key, the
+resolver target, and the parser-derived spelling all agree. All
+``endpoint_descriptor`` and ``operation_group`` rows for this connector
+triple carry ``product="sddc"``; operators pass ``--product sddc`` when driving
 ``meho connector ingest``. Review-time helpers (including
 :class:`~meho_backplane.operations.ingest.service.ReviewService`) derive
 the product via ``parse_connector_id`` so the same constant is consistent
@@ -133,10 +134,11 @@ _log = structlog.get_logger(__name__)
 #: extracts from ``"sddc-rest-9.0"`` (first hyphen-segment of
 #: impl_id ``"sddc-rest"``).
 #:
-#: Distinct from :attr:`SddcManagerConnector.product` (``"sddc-manager"``)
-#: which is the v2 registry key and resolver target. All
-#: ``endpoint_descriptor`` + ``operation_group`` rows carry
-#: ``product="sddc"``; see the module docstring for details.
+#: Since #1814 (Initiative #1810) this equals
+#: :attr:`SddcManagerConnector.product` (``"sddc"``) — the v2 registry
+#: key and resolver target. All ``endpoint_descriptor`` +
+#: ``operation_group`` rows carry ``product="sddc"``; see the module
+#: docstring for details.
 SDDC_PRODUCT: Final[str] = "sddc"
 SDDC_VERSION: Final[str] = "9.0"
 SDDC_IMPL_ID: Final[str] = "sddc-rest"

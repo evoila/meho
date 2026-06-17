@@ -58,28 +58,22 @@ _log = structlog.get_logger(__name__)
 
 # Product-token aliases — non-canonical spellings the operator-facing
 # write surfaces accept and normalise to the registry's canonical
-# product token. G0.18-T2 (#1355, RDC #789 Finding 6; closes #1312
-# acceptance B). One entry per concept that is spelled two ways across
-# MEHO's surfaces:
+# product token. The map is keyed by the non-canonical token and valued
+# by the canonical registry token; a canonical token is never an alias
+# key (so :func:`canonical_product_token` is idempotent).
 #
-# * ``"sddc" -> "sddc-manager"`` — the connector listing emits
-#   ``product="sddc"`` (the value
-#   :func:`~meho_backplane.operations._lookup.parse_connector_id`
-#   derives from ``"sddc-rest-9.0"``, load-bearing for the #773
-#   connector_id round-trip contract), while the v2 registry, the
-#   spec catalog, and the ``TargetCreate`` validator all use
-#   ``"sddc-manager"``. The alias makes the listed token
-#   accept-equivalent at ``POST /api/v1/targets`` so an operator who
-#   copies ``product`` straight out of ``meho connector list`` into a
-#   target create no longer hits a 422; the value is normalised to the
-#   canonical ``"sddc-manager"`` before storage and resolution.
-#
-# The map is keyed by the non-canonical token and valued by the
-# canonical registry token. A canonical token is never an alias key
-# (so :func:`canonical_product_token` is idempotent).
-PRODUCT_ALIASES: dict[str, str] = {
-    "sddc": "sddc-manager",
-}
+# Currently empty. The sole historical entry, ``"sddc" -> "sddc-manager"``
+# (G0.18-T2 #1355, RDC #789 Finding 6), bridged the listing's parser-
+# derived ``"sddc"`` to the registry's then-canonical ``"sddc-manager"``.
+# #1814 (Initiative #1810) realigned ``SddcManagerConnector`` to register
+# under the short, dispatch-canonical ``"sddc"`` token directly, so the
+# alias became actively wrong: it mapped the new canonical token to a
+# spelling no longer in :func:`registered_product_tokens`, which would
+# 422 a ``POST /api/v1/targets {product:"sddc"}`` create. With the family
+# realigned there is no remaining long↔short write-time split to bridge.
+# The map (and :func:`canonical_product_token`) stay as the reconciliation
+# point should a future connector ever reintroduce a sanctioned alias.
+PRODUCT_ALIASES: dict[str, str] = {}
 
 # v1 single-product registry — shipped in G0.2-T2 (#241). Stays as the
 # authoritative table for the pre-G0.6 dispatch path; v2 is the layer
@@ -201,16 +195,17 @@ def _warn_if_product_impl_id_diverges(
     mismatch that shadowed :class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`
     behind an auto-shim in the v0.16.0 dogfood.
 
-    This is **advisory only** — it logs and returns; it never raises. A
-    boot-time raise would crash :func:`_eager_import_connectors` for the
-    five sanctioned ``_PRODUCT_SPLITS`` legacy connectors
+    This is **advisory only** — it logs and returns; it never raises.
+    The five formerly-divergent ``_PRODUCT_SPLITS`` legacy connectors
     (``sddc-manager`` / ``vcf-automation`` / ``vcf-fleet`` /
-    ``vcf-operations`` / ``hetzner-robot``), every one of which carries a
-    deliberate long↔short divergence bridged by ``dispatch_product`` /
-    migration 0038 / ``PRODUCT_ALIASES``. Realigning that family and
-    promoting this check to a hard-fail is **Initiative #1810**'s job;
-    until then those five WARN on every boot, pointing operators at the
-    tracking Initiative.
+    ``vcf-operations`` / ``hetzner-robot``) were realigned to their
+    short, dispatch-canonical product token by #1814 (Initiative
+    #1810), so — together with vRLI (#1798) — every shipped connector
+    now round-trips and this check is silent at boot. The check stays a
+    WARN (not a hard-fail) so a future connector that reintroduces a
+    divergent registration is flagged loudly without crashing
+    :func:`_eager_import_connectors`; promoting it to a boot-time raise
+    now that the family is aligned is **#1816**'s job.
 
     The wildcard / v1-compat row ``(product, "", "")`` is skipped: an
     empty ``version`` / ``impl_id`` renders a parser-incompatible
@@ -380,17 +375,18 @@ def canonical_product_token(product: str) -> str:
     so the function is idempotent: ``canonical_product_token(
     canonical_product_token(x)) == canonical_product_token(x)``.
 
-    This is the single reconciliation point for the ``sddc`` /
-    ``sddc-manager`` split RDC #789 Finding 6 re-flagged: the listing
-    emits ``product="sddc"`` (load-bearing for the #773 connector_id
-    round-trip contract) while the registry / validator use
-    ``"sddc-manager"``. Operator-facing write paths
+    This is the single reconciliation point for any sanctioned
+    listing-vs-registry product-spelling split. The historical
+    ``sddc`` / ``sddc-manager`` entry RDC #789 Finding 6 flagged was
+    retired by #1814 (Initiative #1810), which realigned the registry to
+    the short ``"sddc"`` token the listing already emits; with
+    :data:`PRODUCT_ALIASES` now empty this function is the identity, but
+    it is retained as the canonicalisation hook so a future sanctioned
+    alias is normalised in one place. Operator-facing write paths
     (:func:`~meho_backplane.api.v1.targets.create_target`,
     :func:`~meho_backplane.api.v1.targets.update_target`) canonicalise
     the incoming token through here before validating against
-    :func:`registered_product_tokens` and before storing the row, so a
-    value copied straight out of ``meho connector list`` is
-    accept-equivalent at ``POST /api/v1/targets``.
+    :func:`registered_product_tokens` and before storing the row.
     """
     return PRODUCT_ALIASES.get(product, product)
 

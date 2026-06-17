@@ -5,7 +5,7 @@
 
 Importing this package registers :class:`VcfAutomationConnector` against
 the v2 connector registry under
-``(product="vcf-automation", version="9.0", impl_id="vcfa-rest")``. The
+``(product="vcfa", version="9.0", impl_id="vcfa-rest")``. The
 chassis lifespan calls
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 which walks every ``connectors/<product>/`` subpackage at startup, so
@@ -14,7 +14,7 @@ the registration lands before any dispatch can occur.
 The v1 :func:`~meho_backplane.connectors.registry.register_connector`
 entry point is deliberately **not** called. The connector advertises an
 explicit ``(version="9.0", impl_id="vcfa-rest")`` key; the v1 entry
-would land as ``("vcf-automation", "", "")`` and confuse
+would land as ``("vcfa", "", "")`` and confuse
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s
 tie-break ladder. Same pattern :mod:`meho_backplane.connectors.nsx` /
 :mod:`meho_backplane.connectors.sddc_manager` established.
@@ -59,7 +59,7 @@ from meho_backplane.connectors.vcf_automation.session import (
 )
 
 register_connector_v2(
-    product="vcf-automation",
+    product="vcfa",
     version="9.0",
     impl_id="vcfa-rest",
     cls=VcfAutomationConnector,
@@ -72,7 +72,7 @@ register_connector_v2(
 # with ``no_connector``. The versioned entry above always wins when
 # both are present (resolver tie-break step 1).
 register_connector_v2(
-    product="vcf-automation",
+    product="vcfa",
     version="",
     impl_id="",
     cls=VcfAutomationConnector,

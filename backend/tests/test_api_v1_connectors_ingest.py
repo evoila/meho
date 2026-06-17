@@ -791,7 +791,7 @@ async def test_list_splits_enabled_vs_total_operation_count(
 
 @pytest.fixture
 def _registered_class_only_connectors() -> Iterator[None]:
-    """Ensure harbor + sddc-manager are registered against the v2 registry.
+    """Ensure harbor + sddc are registered against the v2 registry.
 
     The autouse ``_isolate_global_registries`` fixture in conftest
     snapshots the registry before each test and restores after, so the
@@ -824,9 +824,9 @@ def _registered_class_only_connectors() -> Iterator[None]:
             impl_id="harbor-rest",
             cls=HarborConnector,
         )
-    if ("sddc-manager", "9.0", "sddc-rest") not in existing:
+    if ("sddc", "9.0", "sddc-rest") not in existing:
         register_connector_v2(
-            product="sddc-manager",
+            product="sddc",
             version="9.0",
             impl_id="sddc-rest",
             cls=SddcManagerConnector,
@@ -855,31 +855,25 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       *registered-but-not-yet-dispatchable* from *ingested-and-ready*.
     * The emitted ``product`` is what
       :func:`~meho_backplane.operations._lookup.parse_connector_id`
-      derives from the ``connector_id``, not the v2 registry's
-      ``product`` field. For SDDC the registry stores
-      ``product="sddc-manager"`` but the listing emits ``"sddc"`` —
-      consistent with what the dispatcher derives from
+      derives from the ``connector_id``, which — since #1814
+      (Initiative #1810) realigned the SDDC connector to register under
+      the short token — equals the v2 registry's ``product`` field. For
+      SDDC the registry stores ``product="sddc"`` and the listing emits
+      ``"sddc"``, consistent with what the dispatcher derives from
       ``parse_connector_id("sddc-rest-9.0")`` and with
       ``SDDC_PRODUCT="sddc"`` writing into ``endpoint_descriptor``
       rows. When DB rows land under the parser-derived product the
       row transitions cleanly from ``state="registered"`` to
       ``state="ingested"`` without a ``connector_id`` change.
 
-    G0.18-T2 (#1355) — the parser-derived ``"sddc"`` token the
-    listing emits is bridged to the registry's canonical
-    ``"sddc-manager"`` by the
-    :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES`
-    map at the write surface (see
-    :func:`~meho_backplane.connectors.registry.canonical_product_token`).
-    So an operator copying ``product`` out of this listing into
-    ``POST /api/v1/targets`` succeeds: the alias normalises ``"sddc"``
-    to the canonical ``"sddc-manager"`` before the registered-product
-    validator runs, and the canonical token is what gets stored.
-    The listing keeps emitting ``"sddc"`` (not ``"sddc-manager"``)
-    because that is the parser-derived token, load-bearing for the
-    #773 connector_id round-trip; the round-trip closure for the
-    operator is now end-to-end (closes #1312 acceptance B,
-    re-flagged by RDC #789 Finding 6).
+    #1814 (Initiative #1810) — the SDDC connector registers under the
+    short, dispatch-canonical ``"sddc"`` token (RDC #789 Finding 6's
+    original ``"sddc" -> "sddc-manager"`` alias, added in G0.18-T2
+    #1355, was dropped). So an operator copying ``product`` out of this
+    listing into ``POST /api/v1/targets`` succeeds directly: ``"sddc"``
+    is a registered product token, no canonicalisation needed, and the
+    stored row carries ``"sddc"``. The round-trip closure for the
+    operator is end-to-end on one spelling.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -906,13 +900,13 @@ async def test_list_surfaces_register_connector_v2_only_entries(
 
     assert "sddc-rest-9.0" in by_id
     sddc = by_id["sddc-rest-9.0"]
-    # The listing emits the parser-derived product ("sddc"), not the
-    # v2 registry's "sddc-manager" — see test docstring for rationale.
-    # G0.18-T2 (#1355): the value below is what an operator copies
-    # into POST /api/v1/targets; round-trip closure is proved by
-    # ``test_create_target_accepts_sddc_listing_alias`` in
-    # ``test_api_v1_targets.py`` (the alias bridges this listing
-    # token to the canonical "sddc-manager" before validation).
+    # The listing emits the parser-derived product ("sddc"), which since
+    # #1814 (Initiative #1810) also equals the v2 registry's product.
+    # The value below is what an operator copies into
+    # POST /api/v1/targets; round-trip closure is proved by
+    # ``test_create_target_accepts_sddc_short_token`` in
+    # ``test_api_v1_targets.py`` (``"sddc"`` validates directly, no
+    # alias needed).
     assert sddc["product"] == "sddc"
     assert sddc["impl_id"] == "sddc-rest"
     assert sddc["version"] == "9.0"
@@ -1035,24 +1029,22 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
     G0.18-T8 (#1361) / RDC #789 N8. The VCF-family rows
-    (``vmware/9.0``, ``sddc-manager/9.0``, ``nsx/9.0``) ship with
+    (``vmware/9.0``, ``sddc/9.0``, ``nsx/9.0``) ship with
     ``catalog_ingest: spec-only`` because their upstream URLs are
-    Broadcom Developer Portal HTML landing pages (vmware, sddc-manager)
-    or fqdn-templated appliance URLs (nsx) — neither shape can drive
+    Broadcom Developer Portal HTML landing pages (vmware, sddc) or
+    fqdn-templated appliance URLs (nsx) — neither shape can drive
     ``meho connector ingest --catalog`` server-side. The previous hint
     ("spec available in catalog; run ingest") sent operators into a
     422; the refined hint points at the explicit-quadruple ``--spec``
     form using the catalog's native triple so the verb still
     copies-and-runs once the operator has the spec file in hand.
 
-    SDDC is the load-bearing case: the listing emits the parser-derived
-    ``product="sddc"`` but the catalog's native triple is
-    ``("sddc-manager", "9.0", "sddc-rest")``; the hint uses the
-    catalog's spelling so the operator's ``--product`` flag matches the
-    registered class (canonical_product_token handles the
-    listing-vs-registry split at write-time via PRODUCT_ALIASES, but
-    the manual-mode ingest path takes the catalog's spelling
-    verbatim).
+    Post-#1814 (Initiative #1810) the SDDC connector registers under the
+    short ``"sddc"`` token and the catalog row was realigned to match, so
+    the listing's parser-derived token (``"sddc"``), the catalog's native
+    triple (``("sddc", "9.0", "sddc-rest")``), and the v2 registry all
+    agree — the verb emits ``--product sddc`` and resolves the registered
+    class at ingest time with no spelling drift.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -1069,8 +1061,9 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     # The refined hint must NOT promise the broken ``--catalog`` path.
     assert "--catalog" not in verb
     # And must direct the operator at ``--spec`` with the catalog's
-    # native triple (so the registered class resolves at ingest time).
-    assert "--product sddc-manager" in verb
+    # native (realigned) triple (so the registered class resolves at
+    # ingest time).
+    assert "--product sddc" in verb
     assert "--version 9.0" in verb
     assert "--impl sddc-rest" in verb
     assert "--spec" in verb
@@ -1387,10 +1380,10 @@ def _every_v2_connector_registered() -> Iterator[None]:
     entries: tuple[tuple[str, str, str, type], ...] = (
         ("bind9", "9.x", "bind9-ssh", Bind9Connector),
         ("harbor", "2.x", "harbor-rest", HarborConnector),
-        ("hetzner-robot", "2026.04", "hetzner-rest", HetznerRobotConnector),
+        ("hetzner", "2026.04", "hetzner-rest", HetznerRobotConnector),
         ("k8s", "1.x", "k8s", KubernetesConnector),
         ("nsx", "9.0", "nsx-rest", NsxConnector),
-        ("sddc-manager", "9.0", "sddc-rest", SddcManagerConnector),
+        ("sddc", "9.0", "sddc-rest", SddcManagerConnector),
         ("vault", "1.x", "vault", VaultConnector),
         ("vmware", "9.0", "vmware-rest", VmwareRestConnector),
     )
@@ -1419,29 +1412,22 @@ async def test_register_connector_v2_round_trip_lossless_for_every_entry(
         / typed registration, including a case where
         ``product != impl_id.split("-")[0]``.
 
-    The check is *operationally* strict: we don't require the parser
-    to recover the registry's friendly ``product`` (SDDC is the
-    canonical exception: registry ``product="sddc-manager"``, but the
-    dispatcher derives ``"sddc"`` from ``impl_id="sddc-rest"``). What
-    must hold is that:
+    The check is *operationally* strict: the parser must recover
+    ``(version, impl_id)`` losslessly — these are the natural-key
+    columns the dispatcher matches on. Since #1814 (Initiative #1810)
+    realigned the ``_PRODUCT_SPLITS`` family (SDDC was the last
+    historical ``product != impl_id.split("-")[0]`` case — registry
+    ``product="sddc-manager"`` vs derived ``"sddc"``), every connector's
+    registry ``product`` now equals its parser-derived product, so the
+    registry product, the parser-derived product, and the
+    ``endpoint_descriptor`` row product all agree and a DB-backed row
+    lookup succeeds for every connector.
 
-    * the parser recovers ``(version, impl_id)`` losslessly — these
-      are the natural-key columns the dispatcher matches on; and
-    * when the registry's ``product`` differs from the parser's
-      derived ``product``, the registry's ``product`` matches what
-      :func:`~meho_backplane.connectors.kubernetes.SDDC_PRODUCT`-style
-      constants write into ``endpoint_descriptor`` rows — i.e., the
-      dispatcher's parsed product matches the DB row product, so a
-      DB-backed row lookup succeeds.
-
-    Concretely: ``product != impl_id.split("-")[0]`` is allowed when
-    the v2-registry product is purely a friendly resolver-key label
-    and DB writes use the parser-derived product (the documented SDDC
-    convention). It is *not* allowed when the registry product would
-    also be the DB-row product, because then the dispatcher's parse
-    would miss every row. The class-side-only listing path
-    (``_class_side_only_items``) enforces this by emitting the
-    parser-derived ``product`` on each class-only row.
+    The test pins the impl_id-prefix convention
+    (``parsed_product == impl_id.split("-")[0]``) so a future
+    registration that reintroduces a divergence — registering under a
+    product the parser can't derive from the connector_id — is caught
+    here at unit-test time.
 
     This test exhaustively enumerates ``all_connectors_v2()`` and
     pins the property; new connectors added to the registry are
@@ -1454,12 +1440,14 @@ async def test_register_connector_v2_round_trip_lossless_for_every_entry(
     )
 
     registry = all_connectors_v2()
-    # Sanity-check the registry actually has the SDDC entry that
-    # exercises the product != impl_id.split("-")[0] case the
-    # acceptance criterion calls out explicitly.
-    assert ("sddc-manager", "9.0", "sddc-rest") in registry, (
-        "SDDC v2 registration missing — the test relies on it as the "
-        "canonical product != impl_id.split('-')[0] case"
+    # Sanity-check the registry actually has the SDDC entry. Since #1814
+    # (Initiative #1810) realigned it, SDDC registers under the short
+    # ``sddc`` token (``product == impl_id.split("-")[0]``) like every
+    # other connector — the historical ``product != derived`` exception
+    # is gone.
+    assert ("sddc", "9.0", "sddc-rest") in registry, (
+        "SDDC v2 registration missing — the round-trip property is "
+        "checked against every registered connector"
     )
 
     for (product, version, impl_id), _cls in registry.items():
@@ -3425,7 +3413,7 @@ def test_ingest_packaged_catalog_html_portal_entries_carry_warning_notes() -> No
         and any(url.startswith("https://developer.broadcom.com/") for url in e.upstream)
     }
     assert ("vmware", "9.0") in html_portal_entries
-    assert ("sddc-manager", "9.0") in html_portal_entries
+    assert ("sddc", "9.0") in html_portal_entries
     for product, version in html_portal_entries:
         entry = catalog.get(product, version)
         assert entry is not None

@@ -66,7 +66,7 @@ from meho_backplane.operations.ingest.catalog import (
 # docs/cross-repo/github-connector.md.
 _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
-    ("sddc-manager", "9.0"),
+    ("sddc", "9.0"),
     ("harbor", "2.x"),
     # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
     # the catalog row tracks the VCF-9-aligned "9.0" line (NsxConnector
@@ -226,26 +226,25 @@ def test_catalog_product_field_matches_target_create_enum(
 # is a known split where the v2-registry ``product`` and the
 # parser-derived listing token differ AND no
 # :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` entry
-# bridges them yet. G0.18-T2 (#1355) reconciled the SDDC case
-# (``sddc`` -> ``sddc-manager``); G0.26-T4 (#1798) reconciled the vRLI
-# case by aligning the connector to ``product="vrli"`` (so ``vrli`` now
-# round-trips and is NOT listed here). The remaining four are adjacent
-# findings the structural test below surfaced, recorded here so the same
-# test still catches a *new* drift (a future connector that lands with
-# the same split shape) while the rest await the family realignment
-# tracked under Initiative #1810.
+# bridges them yet.
+#
+# Now empty. G0.18-T2 (#1355) reconciled the SDDC case via an alias;
+# G0.26-T4 (#1798) reconciled vRLI by aligning the connector to
+# ``product="vrli"``; #1814 (Initiative #1810) realigned the last four
+# (``hetzner``, ``vcfa``, ``fleet``, ``vrops``) to their short,
+# dispatch-canonical registry token and #1814 also dropped the now-
+# redundant ``sddc`` alias (the connector registers under ``"sddc"``
+# directly). Every shipped connector's listing token now equals its
+# registered product, so all four formerly-listed splits round-trip and
+# the allowlist is empty. The structural test below still catches a
+# *new* drift (a future connector that lands with the split shape).
 #
 # Each row is ``(listing_token, registry_product)``. Adding a token
 # here is an explicit acknowledgement of an operator-visible 422 on
 # ``POST /api/v1/targets`` with the listing spelling; removing one
 # requires either dropping the alias-or-rename or otherwise
 # reconciling the split.
-_KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {
-    "hetzner": "hetzner-robot",
-    "vcfa": "vcf-automation",
-    "fleet": "vcf-fleet",
-    "vrops": "vcf-operations",
-}
+_KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {}
 
 
 def test_listing_product_round_trips_through_target_create_validator(
@@ -275,15 +274,14 @@ def test_listing_product_round_trips_through_target_create_validator(
     canonical nor an alias trips here at unit-test time, not on
     the next dogfood cycle.
 
-    Five existing connectors carry the same split shape SDDC did
-    pre-reconciliation (hetzner-robot, vcf-automation, vcf-fleet,
-    vcf-logs, vcf-operations); they are recorded in
-    :data:`_KNOWN_LISTING_PRODUCT_DRIFT` and excluded from the
-    assertion so the SDDC fix can ship without spilling into a
-    five-connector audit. The exclusion list IS the audit surface
-    — each entry is an acknowledged operator-visible 422 on the
-    listing spelling, awaiting its own follow-up task. The test
-    still catches a *new* drift outside that allowlist.
+    The five connectors that once carried the same split shape SDDC
+    did pre-reconciliation (hetzner-robot, vcf-automation, vcf-fleet,
+    vcf-logs, vcf-operations) have all been realigned to their short,
+    dispatch-canonical registry token (vcf-logs by #1798; the other
+    four by #1814 / Initiative #1810), so
+    :data:`_KNOWN_LISTING_PRODUCT_DRIFT` is now empty — every shipped
+    connector's listing token round-trips through the create validator.
+    The test still catches a *new* drift outside that (empty) allowlist.
     """
     from meho_backplane.connectors.registry import (
         canonical_product_token,
@@ -798,14 +796,16 @@ def test_entry_rejects_unknown_catalog_ingest_value() -> None:
 
 
 def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
-    """vmware/9.0, sddc-manager/9.0, nsx/4.2 ship ``catalog_ingest: spec-only``.
+    """vmware/9.0, sddc/9.0, nsx/4.2 ship ``catalog_ingest: spec-only``.
 
     G0.18-T8 (#1361, RDC #789 N8). All three upstreams fundamentally
     cannot drive ``meho connector ingest --catalog`` server-side:
 
-    * ``vmware/9.0`` + ``sddc-manager/9.0`` — Broadcom Developer Portal
+    * ``vmware/9.0`` + ``sddc/9.0`` — Broadcom Developer Portal
       ``text/html`` landing pages; the route's existing
-      ``catalog_entry_upstream_not_spec`` 422 fires.
+      ``catalog_entry_upstream_not_spec`` 422 fires. (The SDDC row's
+      product realigned from ``sddc-manager`` to the short ``sddc``
+      token in #1814 / Initiative #1810.)
     * ``nsx/9.0`` — first upstream is fqdn-templated
       (``<nsx-mgr-fqdn>``); the route's
       ``catalog_entry_templated_upstream`` 422 fires. (Row renumbered
@@ -816,7 +816,7 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
     "spec available in catalog; run ingest" line that sent operators
     into a 422.
     """
-    spec_only_pairs = {("vmware", "9.0"), ("sddc-manager", "9.0"), ("nsx", "9.0")}
+    spec_only_pairs = {("vmware", "9.0"), ("sddc", "9.0"), ("nsx", "9.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (

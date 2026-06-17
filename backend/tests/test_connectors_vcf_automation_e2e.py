@@ -135,7 +135,7 @@ _GET_BY_ID_PARAMS: dict[str, dict[str, object]] = {
 # :class:`VcfAutomationConnector`.
 _FINGERPRINT: dict[str, Any] = FingerprintResult(
     vendor="vmware",
-    product="vcf-automation",
+    product="vcfa",
     version="9.0",
     reachable=True,
     probed_at=datetime(2026, 5, 22, 10, 0, 0, tzinfo=UTC),
@@ -501,7 +501,7 @@ def _resolve_connector() -> VcfAutomationConnector:
 
 
 # The connector class registers under the *target* product slug
-# (``"vcf-automation"``); the descriptor rows use the ``vcfa`` slug
+# (``"vcfa"``); the descriptor rows use the ``vcfa`` slug
 # parse_connector_id derives. The two are distinct deliberately --
 # same shape the SDDC Manager precedent established (sddc-manager vs
 # sddc).

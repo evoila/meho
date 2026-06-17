@@ -135,7 +135,7 @@ def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
 def test_sddc_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(SddcManagerConnector, HttpConnector)
-    assert SddcManagerConnector.product == "sddc-manager"
+    assert SddcManagerConnector.product == "sddc"
     assert SddcManagerConnector.version == "9.0"
     assert SddcManagerConnector.impl_id == "sddc-rest"
     assert SddcManagerConnector.supported_version_range == ">=9.0,<10.0"
@@ -147,7 +147,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("sddc-manager", "9.0", "sddc-rest")
+    key = ("sddc", "9.0", "sddc-rest")
     assert key in registry
     assert registry[key] is SddcManagerConnector
 
@@ -523,7 +523,7 @@ async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "sddc-manager"
+    assert fp.product == "sddc"
     assert fp.version == "9.0.0.0-24276214"
     assert fp.build == "24276214"
     assert fp.reachable is True
@@ -545,7 +545,7 @@ async def test_fingerprint_unreachable_returns_reachable_false_with_structured_e
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
-    assert fp.product == "sddc-manager"
+    assert fp.product == "sddc"
     assert fp.reachable is False
     assert fp.probe_method == "GET /v1/sddc-managers"
     error = fp.extras["error"]

@@ -87,7 +87,7 @@ _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-vrops"
 
 #: The connector triple ``vrops-rest-9.0`` decodes to.
 _PRODUCT_DESCRIPTOR = "vrops"  # parse_connector_id splits at first hyphen
-_PRODUCT_TARGET = "vcf-operations"  # the registered connector class key
+_PRODUCT_TARGET = "vrops"  # the registered connector class key
 _VERSION = "9.0"
 _IMPL_ID = "vrops-rest"
 _CONNECTOR_ID = "vrops-rest-9.0"

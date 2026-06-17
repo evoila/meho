@@ -35,8 +35,8 @@ other no-public-simulator connectors.
 Rows are inserted with ``product=FLEET_PRODUCT="fleet"`` — the value
 :func:`~meho_backplane.operations._lookup.parse_connector_id` derives
 from ``"fleet-rest-9.0"`` (the first hyphen-segment of impl_id). The
-:class:`Target` row uses ``product="vcf-fleet"`` so the resolver finds
-:class:`VcfFleetConnector` (registered with ``product="vcf-fleet"`` in
+:class:`Target` row uses ``product="fleet"`` so the resolver finds
+:class:`VcfFleetConnector` (registered with ``product="fleet"`` in
 the v2 registry). These product values serve different purposes; both
 are required for end-to-end dispatch to succeed. Same divergence
 :mod:`tests.acceptance._sddc_canary_fixtures` documents for SDDC
@@ -129,7 +129,7 @@ FLEET_FORCE_HANDLE_LIST_OP_ID: str = "GET:/lcm/lcops/api/v2/environments"
 #: under ``extras.lcm_api_version`` for documentation.
 FLEET_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     vendor="vmware",
-    product="vcf-fleet",
+    product="fleet",
     version=FLEET_VERSION,
     build=None,
     reachable=True,
@@ -341,8 +341,8 @@ async def _insert_fleet_descriptors() -> None:
 
     Rows use ``product=FLEET_PRODUCT="fleet"`` (from
     :func:`parse_connector_id("fleet-rest-9.0")`), not the connector
-    class's ``product="vcf-fleet"``. The :class:`Target` row uses
-    ``product="vcf-fleet"`` so the resolver finds
+    class's ``product="fleet"``. The :class:`Target` row uses
+    ``product="fleet"`` so the resolver finds
     :class:`VcfFleetConnector`.
 
     Multiple ops can reference the same ``group_key`` — environments

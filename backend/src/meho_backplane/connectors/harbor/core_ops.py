@@ -39,9 +39,9 @@ connector.
 from ``HARBOR_CONNECTOR_ID = "harbor-rest-2.x"``
 (``head.split("-", 1)[0]`` where head is ``"harbor-rest"``). It is
 the same as :attr:`HarborConnector.product` (``"harbor"``), so no
-product-key discrepancy exists for Harbor (unlike the SDDC Manager
-case where ``SddcManagerConnector.product="sddc-manager"`` but rows
-carry ``product="sddc"``).
+product-key discrepancy exists for Harbor — like every connector after
+#1810 realigned the ``_PRODUCT_SPLITS`` family to its short,
+dispatch-canonical token.
 
 The 9 ops (paths cross-checked against Harbor 2.11 at
 https://goharbor.io/docs/2.11.0/build-customize-contribute/configure-swagger/):
@@ -142,8 +142,9 @@ _log = structlog.get_logger(__name__)
 #: extracts from ``"harbor-rest-2.x"`` (first hyphen-segment of
 #: impl_id ``"harbor-rest"``).
 #:
-#: Matches :attr:`HarborConnector.product` directly — no discrepancy
-#: like the SDDC Manager case (``"sddc"`` vs ``"sddc-manager"``).
+#: Matches :attr:`HarborConnector.product` directly — like every
+#: connector after #1810 realigned the registry product to the short,
+#: parser-derived token.
 HARBOR_PRODUCT: Final[str] = "harbor"
 HARBOR_VERSION: Final[str] = "2.x"
 HARBOR_IMPL_ID: Final[str] = "harbor-rest"

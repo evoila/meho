@@ -477,18 +477,25 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_product_token_maps_sddc_alias() -> None:
-    """``"sddc"`` (the connector-list spelling) canonicalises to ``"sddc-manager"``."""
+def test_canonical_product_token_sddc_is_identity_after_realignment() -> None:
+    """``"sddc"`` is now a canonical registry token — canonicalised to itself.
+
+    The ``"sddc" -> "sddc-manager"`` alias was retired by #1814 (Initiative
+    #1810), which realigned the connector to register under ``"sddc"``
+    directly. With :data:`PRODUCT_ALIASES` empty the canonicaliser is the
+    identity, so the connector-list spelling ``"sddc"`` passes through
+    unchanged and validates directly at ``POST /api/v1/targets``.
+    """
     from meho_backplane.connectors.registry import canonical_product_token
 
-    assert canonical_product_token("sddc") == "sddc-manager"
+    assert canonical_product_token("sddc") == "sddc"
 
 
 def test_canonical_product_token_is_identity_for_canonical_tokens() -> None:
     """A canonical registry token is returned verbatim (never re-aliased)."""
     from meho_backplane.connectors.registry import canonical_product_token
 
-    assert canonical_product_token("sddc-manager") == "sddc-manager"
+    assert canonical_product_token("sddc") == "sddc"
     assert canonical_product_token("vmware") == "vmware"
     assert canonical_product_token("k8s") == "k8s"
 
@@ -506,10 +513,15 @@ def test_canonical_product_token_passes_unknown_tokens_through() -> None:
 
 
 def test_canonical_product_token_is_idempotent() -> None:
-    """``canonical(canonical(x)) == canonical(x)`` for the alias + identity cases."""
+    """``canonical(canonical(x)) == canonical(x)`` for identity + unknown cases.
+
+    With :data:`PRODUCT_ALIASES` empty post-#1814 every token is its own
+    canonical form; idempotency holds trivially but is pinned so a future
+    sanctioned alias addition keeps the one-hop contract.
+    """
     from meho_backplane.connectors.registry import canonical_product_token
 
-    for token in ("sddc", "sddc-manager", "vmware", "totally-unknown"):
+    for token in ("sddc", "vmware", "totally-unknown"):
         once = canonical_product_token(token)
         assert canonical_product_token(once) == once
 

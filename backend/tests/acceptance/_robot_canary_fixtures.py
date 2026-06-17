@@ -34,11 +34,11 @@ that seeds the 10 curated endpoint_descriptor rows by hand. Same pattern
 Rows are inserted with ``product=ROBOT_PRODUCT="hetzner"`` — the value
 :func:`~meho_backplane.operations._lookup.parse_connector_id` derives from
 ``"hetzner-rest-2026.04"`` (first hyphen-segment of impl_id). The
-:class:`Target` row also uses ``product="hetzner-robot"`` so the resolver
+:class:`Target` row also uses ``product="hetzner"`` so the resolver
 finds :class:`HetznerRobotConnector` (registered with
-``product="hetzner-robot"`` in the v2 registry). This mirrors the SDDC
-Manager discrepancy (``SddcManagerConnector.product="sddc-manager"`` but
-rows carry ``product="sddc"``).
+``product="hetzner"`` in the v2 registry). Since #1814 (Initiative
+#1810) the registry key, the descriptor/group rows, and the
+parser-derived token all agree on ``"hetzner"``.
 """
 
 from __future__ import annotations
@@ -426,7 +426,7 @@ async def ingested_robot_canary(
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
        rows for the 10 curated Robot core ops.
-    2. Seed a :class:`Target` with ``product="hetzner-robot"`` and the
+    2. Seed a :class:`Target` with ``product="hetzner"`` and the
        :data:`ROBOT_CANARY_FINGERPRINT` so the resolver binds
        :class:`HetznerRobotConnector`.
     3. Resolve + cache the :class:`HetznerRobotConnector` instance the
@@ -442,7 +442,7 @@ async def ingested_robot_canary(
             tenant_id=ROBOT_CANARY_OPERATOR_TENANT,
             name=ROBOT_TARGET_NAME,
             aliases=[],
-            product="hetzner-robot",
+            product="hetzner",
             host=ROBOT_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
@@ -457,7 +457,7 @@ async def ingested_robot_canary(
         await session.commit()
 
     registry = all_connectors_v2()
-    connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+    connector_cls = registry.get(("hetzner", ROBOT_VERSION, ROBOT_IMPL_ID))
     if connector_cls is None:
         import importlib
 
@@ -465,7 +465,7 @@ async def ingested_robot_canary(
 
         importlib.reload(_robot_pkg)
         registry = all_connectors_v2()
-        connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+        connector_cls = registry.get(("hetzner", ROBOT_VERSION, ROBOT_IMPL_ID))
 
     assert connector_cls is HetznerRobotConnector, (
         f"expected HetznerRobotConnector registered for "
@@ -523,7 +523,7 @@ async def ingested_robot_canary_sandbox(
             tenant_id=ROBOT_CANARY_OPERATOR_TENANT,
             name=ROBOT_SANDBOX_TARGET_NAME,
             aliases=[],
-            product="hetzner-robot",
+            product="hetzner",
             host=ROBOT_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
@@ -538,7 +538,7 @@ async def ingested_robot_canary_sandbox(
         await session.commit()
 
     registry = all_connectors_v2()
-    connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+    connector_cls = registry.get(("hetzner", ROBOT_VERSION, ROBOT_IMPL_ID))
     if connector_cls is None:
         import importlib
 
@@ -546,7 +546,7 @@ async def ingested_robot_canary_sandbox(
 
         importlib.reload(_robot_pkg)
         registry = all_connectors_v2()
-        connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+        connector_cls = registry.get(("hetzner", ROBOT_VERSION, ROBOT_IMPL_ID))
 
     assert connector_cls is HetznerRobotConnector, (
         f"expected HetznerRobotConnector registered for "

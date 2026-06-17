@@ -94,7 +94,7 @@ entries:
       and pass them via the explicit-quadruple shape. spec_info_version
       pending the first MEHO-verified ingest. See #743 / connector-ingestion.md.
 
-  - product: sddc-manager
+  - product: sddc
     version: "9.0"
     impl_id: sddc-rest
     requires_connector_class: SddcManagerConnector
@@ -113,11 +113,12 @@ entries:
       Portal (link above). SHARP EDGE: the upstream URL above is an HTML
       developer-portal landing page, not raw OpenAPI YAML/JSON, so
       catalog-driven ingest via
-      `meho connector ingest --catalog sddc-manager/9.0` returns HTTP 422
+      `meho connector ingest --catalog sddc/9.0` returns HTTP 422
       `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
       spec manually from the appliance and pass it via the explicit-
       quadruple shape. spec_info_version pending first verified ingest.
-      See #743.
+      Product realigned from `sddc-manager` to the short, dispatch-
+      canonical `sddc` token in #1814 (Initiative #1810). See #743.
 
   - product: harbor
     version: "2.x"

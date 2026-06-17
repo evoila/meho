@@ -137,7 +137,7 @@ async def _seed_target() -> Any:
             tenant_id=SDDC_CANARY_OPERATOR_TENANT,
             name=_E2E_TARGET_NAME,
             aliases=[],
-            product="sddc-manager",
+            product="sddc",
             host=SDDC_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
@@ -158,7 +158,7 @@ async def _seed_target() -> Any:
 def _resolve_connector() -> SddcManagerConnector:
     """Resolve + cache the SddcManagerConnector instance with a stubbed credentials loader."""
     registry = all_connectors_v2()
-    connector_cls = registry.get(("sddc-manager", SDDC_VERSION, SDDC_IMPL_ID))
+    connector_cls = registry.get(("sddc", SDDC_VERSION, SDDC_IMPL_ID))
     assert connector_cls is SddcManagerConnector, (
         f"SddcManagerConnector not registered for "
         f"(sddc-manager, {SDDC_VERSION}, {SDDC_IMPL_ID}); got {connector_cls!r}"

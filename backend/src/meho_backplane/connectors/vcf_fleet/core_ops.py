@@ -139,15 +139,13 @@ _log = structlog.get_logger(__name__)
 #: row, and the value :class:`ReviewService._resolve_scope` queries
 #: against at review time.
 #:
-#: It differs from :attr:`VcfFleetConnector.product` (``"vcf-fleet"``)
-#: — same shape as the SDDC Manager case
-#: (``SddcManagerConnector.product="sddc-manager"`` but rows carry
-#: ``product="sddc"``). The discrepancy is harmless: the registry's
+#: Since #1814 (Initiative #1810) this equals
+#: :attr:`VcfFleetConnector.product` (``"fleet"``): the registry's
 #: dispatch path looks up the connector class by the v2 triple
-#: (``"vcf-fleet", "9.0", "fleet-rest"``) before any descriptor lookup,
-#: and the descriptor lookup itself only consults the natural key
-#: derived from ``parse_connector_id``. The two keys never collide
-#: because they live in different lookup paths.
+#: (``"fleet", "9.0", "fleet-rest"``), and the descriptor lookup consults
+#: the natural key derived from ``parse_connector_id`` — both now agree on
+#: the short, dispatch-canonical token. Same short token the SDDC Manager
+#: precedent uses (``"sddc"``).
 FLEET_PRODUCT: Final[str] = "fleet"
 FLEET_VERSION: Final[str] = "9.0"
 FLEET_IMPL_ID: Final[str] = "fleet-rest"

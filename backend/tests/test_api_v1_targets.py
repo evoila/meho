@@ -1050,39 +1050,41 @@ def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> No
 
 
 # ---------------------------------------------------------------------------
-# G0.18-T2 (#1355) product alias bridge — sddc / sddc-manager round-trip
+# #1814 (Initiative #1810) — SDDC product realigned to the short token
 #
-# RDC #789 Finding 6 caught that ``meho connector list`` emits
-# ``product="sddc"`` (parser-derived, load-bearing for the #773
-# connector_id round-trip) while ``POST /api/v1/targets`` validates
-# against the registry's canonical ``"sddc-manager"`` — so an
-# operator copying the listing token into a create hit a 422. The
-# alias bridge in
-# :data:`meho_backplane.connectors.registry.PRODUCT_ALIASES` makes
-# the listing token accept-equivalent at the write surface; the
-# canonical token is what gets stored, so every downstream read
-# sees one spelling regardless of which the operator typed.
+# RDC #789 Finding 6 originally caught that ``meho connector list``
+# emits ``product="sddc"`` (parser-derived, load-bearing for the #773
+# connector_id round-trip) while ``POST /api/v1/targets`` validated
+# against the registry's then-canonical ``"sddc-manager"`` — bridged by
+# the ``"sddc" -> "sddc-manager"`` ``PRODUCT_ALIASES`` entry (G0.18-T2
+# #1355). #1814 realigned :class:`SddcManagerConnector` to register
+# under the short, dispatch-canonical ``"sddc"`` token directly and
+# dropped the now-redundant alias, so the listing token round-trips
+# without canonicalisation and ``"sddc-manager"`` is no longer a valid
+# write-surface token.
 #
-# These tests are the round-trip closure for #1312 acceptance B.
+# These tests pin the post-realignment contract: ``product="sddc"``
+# creates/patches/lists cleanly storing ``"sddc"``, and the retired long
+# token now 422s.
 # ---------------------------------------------------------------------------
 
 
-def _register_fake_sddc_manager_connector() -> None:
-    """Register a no-op connector under the canonical ``sddc-manager`` triple.
+def _register_fake_sddc_connector() -> None:
+    """Register a no-op connector under the short ``sddc`` triple.
 
-    Mirrors :func:`_register_fake_k8s_connector` but for the alias-bridge
-    surface. The real :class:`SddcManagerConnector` brings in adapter
-    state we don't need for an enum-validation round-trip; a minimal
-    stand-in under the same ``(product="sddc-manager", version="9.0",
-    impl_id="sddc-rest")`` triple is enough to drive the validator and
-    the stored-row assertion.
+    Mirrors :func:`_register_fake_k8s_connector` but for the realigned
+    SDDC surface. The real :class:`SddcManagerConnector` brings in
+    adapter state we don't need for an enum-validation round-trip; a
+    minimal stand-in under the post-#1814 ``(product="sddc",
+    version="9.0", impl_id="sddc-rest")`` triple is enough to drive the
+    validator and the stored-row assertion.
     """
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
 
-    class _FakeSddcManagerConnector(Connector):
-        product = "sddc-manager"
+    class _FakeSddcConnector(Connector):
+        product = "sddc"
 
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
@@ -1094,62 +1096,51 @@ def _register_fake_sddc_manager_connector() -> None:
             raise NotImplementedError
 
     register_connector_v2(
-        product="sddc-manager",
+        product="sddc",
         version="9.0",
         impl_id="sddc-rest",
-        cls=_FakeSddcManagerConnector,
+        cls=_FakeSddcConnector,
     )
 
 
-def test_create_target_accepts_sddc_listing_alias(client: TestClient) -> None:
-    """POST with ``product="sddc"`` (listing token) succeeds; stores ``"sddc-manager"``.
+def test_create_target_accepts_sddc_short_token(client: TestClient) -> None:
+    """POST with ``product="sddc"`` (listing + registry token) succeeds and stores ``"sddc"``.
 
-    The acceptance B round-trip closure. An operator copying the
-    ``product`` field straight out of ``meho connector list`` (which
-    emits the parser-derived ``"sddc"`` — load-bearing for the
-    #773 connector_id round-trip and asserted in
-    ``test_api_v1_connectors_ingest.py``) into a create no longer
-    hits a 422. The alias normalises the incoming token to the
-    canonical registry spelling before the registered-product
-    validator runs, and the stored row carries the canonical
-    ``"sddc-manager"`` so the resolver, audit log, and every list
-    / detail read see one spelling regardless of which the
-    operator typed. RDC #789 Finding 6 / closes #1312 acceptance B.
+    Post-#1814 the SDDC connector registers under the short,
+    dispatch-canonical ``"sddc"`` token — the exact token
+    ``meho connector list`` / GET /api/v1/connectors emits (load-bearing
+    for the #773 connector_id round-trip). An operator copying that
+    token straight into a create gets a 201 and the row stores ``"sddc"``
+    verbatim (no alias canonicalisation step). This is the proof the
+    realignment closed the operator-facing 422 the old alias bridged.
     """
-    _register_fake_sddc_manager_connector()
+    _register_fake_sddc_connector()
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/targets",
             json={
-                # The exact token ``meho connector list`` / GET
-                # /api/v1/connectors emits for the SDDC connector.
                 "product": "sddc",
-                "name": "rdc-sddc-manager",
+                "name": "rdc-sddc",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 201
-    body = response.json()
-    # The response — and the stored row — uses the canonical token,
-    # not the alias the operator typed. Downstream reads see one
-    # spelling.
-    assert body["product"] == "sddc-manager"
+    assert response.json()["product"] == "sddc"
 
 
-def test_create_target_accepts_canonical_sddc_manager_directly(client: TestClient) -> None:
-    """POST with ``product="sddc-manager"`` (canonical token) also succeeds.
+def test_create_target_rejects_retired_sddc_manager_long_token(client: TestClient) -> None:
+    """POST with the retired ``product="sddc-manager"`` long token now 422s.
 
-    The other half of the round-trip: the canonical spelling is
-    still accepted unchanged (it isn't an alias key, so
-    :func:`canonical_product_token` passes it through verbatim). An
-    operator who skips the listing and types the canonical token
-    directly hits the same 201 + stored ``"sddc-manager"`` shape as
-    the alias path.
+    The other half of the realignment: ``"sddc-manager"`` is no longer a
+    registered product token (the connector moved to ``"sddc"`` and the
+    ``"sddc" -> "sddc-manager"`` alias was dropped), so the long spelling
+    fails the registered-product validator. The 422 detail echoes the
+    token the operator typed.
     """
-    _register_fake_sddc_manager_connector()
+    _register_fake_sddc_connector()
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -1157,27 +1148,26 @@ def test_create_target_accepts_canonical_sddc_manager_directly(client: TestClien
             "/api/v1/targets",
             json={
                 "product": "sddc-manager",
-                "name": "rdc-sddc-manager-direct",
+                "name": "rdc-sddc-long",
                 "host": "sddc.corp.internal",
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
-    assert response.status_code == 201
-    assert response.json()["product"] == "sddc-manager"
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["product"] == "sddc-manager"
 
 
-def test_patch_target_accepts_sddc_listing_alias(client: TestClient) -> None:
-    """PATCH with ``product="sddc"`` stores ``"sddc-manager"`` in the row.
+def test_patch_target_accepts_sddc_short_token(client: TestClient) -> None:
+    """PATCH with ``product="sddc"`` stores ``"sddc"`` in the row.
 
     Symmetric coverage with the create path — an operator
-    typo-correcting a misregistered target via PATCH using the
-    listing token gets the same canonicalisation. The validation
-    detail uses the canonical spelling on the post-update row so the
-    PATCH-then-list round-trip stays consistent.
+    typo-correcting a target via PATCH to the SDDC connector uses the
+    short token and the post-update row carries ``"sddc"``.
     """
-    _register_fake_sddc_manager_connector()
+    _register_fake_sddc_connector()
     # Also register k8s so the create can succeed with a different
-    # product before the PATCH flips it to sddc via the alias.
+    # product before the PATCH flips it to sddc.
     _register_fake_k8s_connector()
     key = make_rsa_keypair("kid-A")
     headers = {"Authorization": f"Bearer {_admin_token(key)}"}
@@ -1195,25 +1185,21 @@ def test_patch_target_accepts_sddc_listing_alias(client: TestClient) -> None:
         assert create.status_code == 201
         patch = client.patch(
             "/api/v1/targets/typo-correct",
-            json={"product": "sddc"},  # the listing token, via PATCH
+            json={"product": "sddc"},
             headers=headers,
         )
     assert patch.status_code == 200
-    assert patch.json()["product"] == "sddc-manager"
+    assert patch.json()["product"] == "sddc"
 
 
-def test_create_target_alias_round_trips_through_list_endpoint(client: TestClient) -> None:
-    """End-to-end: POST via alias → GET /api/v1/targets returns the canonical token.
+def test_create_target_sddc_round_trips_through_list_endpoint(client: TestClient) -> None:
+    """End-to-end: POST ``product="sddc"`` → GET /api/v1/targets returns ``"sddc"``.
 
-    The acceptance B contract end-to-end. The list response uses
-    the canonical token (stored), not the alias the operator
-    typed. Without canonicalisation at the write surface this test
-    fails because the stored ``product`` is ``"sddc"`` and the list
-    row reflects that; with canonicalisation the list row carries
-    ``"sddc-manager"`` and any subsequent read uses the registry
-    spelling consistently.
+    The realigned round-trip end-to-end: the stored + listed token is
+    the short ``"sddc"`` the operator typed, with no spelling drift
+    between the write and the read surfaces.
     """
-    _register_fake_sddc_manager_connector()
+    _register_fake_sddc_connector()
     key = make_rsa_keypair("kid-A")
     headers = {"Authorization": f"Bearer {_admin_token(key)}"}
     with respx.mock as mock_router:
@@ -1232,7 +1218,7 @@ def test_create_target_alias_round_trips_through_list_endpoint(client: TestClien
     rows = response.json()
     by_name = {row["name"]: row for row in rows}
     assert "roundtrip-sddc" in by_name
-    assert by_name["roundtrip-sddc"]["product"] == "sddc-manager"
+    assert by_name["roundtrip-sddc"]["product"] == "sddc"
 
 
 # ---------------------------------------------------------------------------

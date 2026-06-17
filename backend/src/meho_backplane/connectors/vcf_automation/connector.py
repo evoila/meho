@@ -151,8 +151,8 @@ class VcfAutomationConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"vcfa-rest-9.0"`` -> (``"vcf-automation"``, ``"9.0"``, ``"vcfa-rest"``).
-    product = "vcf-automation"
+    # ``"vcfa-rest-9.0"`` -> (``"vcfa"``, ``"9.0"``, ``"vcfa-rest"``).
+    product = "vcfa"
     version = "9.0"
     impl_id = "vcfa-rest"
     supported_version_range = ">=9.0,<10.0"
@@ -527,7 +527,7 @@ class VcfAutomationConnector(HttpConnector):
         )
         return FingerprintResult(
             vendor="vmware",
-            product="vcf-automation",
+            product="vcfa",
             version=latest_api_version,
             reachable=True,
             probed_at=probed_at,
@@ -554,7 +554,7 @@ class VcfAutomationConnector(HttpConnector):
             extras["failed_plane"] = failed_plane
         return FingerprintResult(
             vendor="vmware",
-            product="vcf-automation",
+            product="vcfa",
             reachable=False,
             probed_at=probed_at,
             probe_method=probe_method,

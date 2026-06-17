@@ -779,6 +779,21 @@ connector-related release-notes line.
 
 ### Fixed
 
+- The chart CI lane's `helm-test` job no longer intermittently fails its local
+  backplane image build on HuggingFace's anonymous per-IP `429 Too Many
+  Requests`. The model-bake layer (`RUN python -m meho_backplane.retrieval.warm`)
+  re-downloaded the default embedding model on effectively every run — the
+  BuildKit layer cache misses because per-build `BUILD_DATE`/`GIT_SHA` args and
+  per-commit venv content invalidate the warm layer — and GitHub-hosted runners
+  share egress IPs, so the anonymous HF quota tripped at random. The job now
+  restores the unit lane's existing fastembed `actions/cache` entry (same key),
+  stages the snapshot into the gitignored `backend/.model-preseed/`, and the
+  Dockerfile `COPY`s it into `/opt/meho/model-cache` ahead of the warm `RUN`;
+  fastembed's local-first probe then finds the snapshot and performs zero
+  HuggingFace requests on a warm build. A cold cache (or a local
+  `docker build backend/` with no pre-seed) downloads exactly once, as before,
+  and the warm step still runs the #574 drift-guard assertion (real embed +
+  `EMBEDDING_DIMENSION` check) in every path (#1623).
 - An async `--spec` ingest no longer false-succeeds when nothing became
   dispatchable, and the `--product` the catalog's `next_step` verb prints
   now round-trips. Two tangled defects: (1) ingesting under a VCF-family

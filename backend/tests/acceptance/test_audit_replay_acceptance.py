@@ -414,7 +414,8 @@ async def test_scenario_1_rest_replay_returns_multi_level_tree(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -525,7 +526,8 @@ async def test_scenario_2_rest_tenant_isolation_same_session_id(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -861,7 +863,8 @@ async def test_scenario_4_over_cap_session_returns_413_without_building_tree(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -898,7 +901,8 @@ async def test_scenario_4_at_cap_boundary_returns_200(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -940,7 +944,8 @@ async def test_scenario_5_replay_broadcast_is_aggregate_only(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -988,7 +993,8 @@ async def test_scenario_5_over_cap_rejection_broadcast_is_aggregate_only(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:
@@ -1045,7 +1051,8 @@ async def test_e2e_cli_wire_contract_replay_envelope_against_seeded_db(
 
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
-    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID)
+    # #1843: the REST cross-session replay route is tenant_admin-gated.
+    token_a = _mint_operator(keypair=key, tenant_id=TENANT_A_ID, role=TenantRole.TENANT_ADMIN)
 
     async with _make_async_client(app) as client:
         with respx.mock as mock_router:

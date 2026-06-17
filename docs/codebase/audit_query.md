@@ -180,7 +180,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. | Per-session replay (G8.2-T4). |
+| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
 `SELECT count(*) WHERE agent_session_id = :id AND tenant_id = :tid` (the
@@ -204,7 +204,24 @@ returns — and on the 413 path before raising — so the broadcast event's
 `row_count` field reflects the actual cardinality. The shape mirrors
 `api/v1/retrieve_usage.py`.
 
-RBAC: `operator` role minimum. `read_only` → 403; `tenant_admin` → 200.
+RBAC: the five flat / self-scoped routes (`query`, `who-touched`,
+`by-work-ref`, `my-recent`, `show`) require `operator` minimum —
+`read_only` → 403; `operator` / `tenant_admin` → 200. These mirror the
+operator-gated MCP `query_audit` tool (including its self-session-only
+`shape="tree"` path).
+
+The cross-session **replay** route
+(`GET /api/v1/audit/sessions/{session_id}/replay`) requires
+`tenant_admin` (#1843): it takes an *arbitrary* `session_id` and
+reconstructs another principal's full session trace, a privileged
+forensic act. `read_only` / `operator` → 403; `tenant_admin` → 200. This
+aligns REST with the MCP posture, where cross-session replay is the
+`tenant_admin`-gated `meho.audit.replay` tool — the operator-level
+`query_audit` `shape="tree"` path replays only the caller's own session.
+Before #1843 the REST route gated replay at `operator`, making the
+web/CLI surface more permissive than MCP and `audit-replay.md`. The
+gate is orthogonal to cross-tenant isolation (always enforced via the
+JWT `tenant_id`), which is unchanged.
 
 Error mapping at the router boundary: `DurationParseError` (router-side),
 `InvalidCursorError` (substrate-side), `UnsupportedFilterError`

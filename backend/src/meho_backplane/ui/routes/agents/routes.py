@@ -65,13 +65,6 @@ from meho_backplane.ui.routes.agents.operator import (
     resolve_role_probe,
     resolve_run_operator_or_403,
 )
-from meho_backplane.ui.routes.agents.run import (
-    INPUT_MAX,
-    WORK_REF_MAX,
-    render_run_console,
-    stream_run_events,
-    submit_run,
-)
 from meho_backplane.ui.routes.agents.principals_forms import (
     NAME_MAX as PRINCIPAL_NAME_MAX,
 )
@@ -85,6 +78,13 @@ from meho_backplane.ui.routes.agents.principals_forms import (
 from meho_backplane.ui.routes.agents.principals_views import (
     render_principals_index,
     validate_principal_name,
+)
+from meho_backplane.ui.routes.agents.run import (
+    INPUT_MAX,
+    WORK_REF_MAX,
+    render_run_console,
+    stream_run_events,
+    submit_run,
 )
 from meho_backplane.ui.routes.agents.views import render_detail, render_index, validate_name
 

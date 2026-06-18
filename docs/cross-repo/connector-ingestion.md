@@ -57,7 +57,7 @@ The ingest pipeline only ever sees the *bytes* of an OpenAPI 3.x document — it
 
    ```bash
    meho connector ingest \
-     --product hetzner-robot --version 1.0 --impl hetzner-rest \
+     --product hetzner --version 1.0 --impl hetzner-rest \
      --spec file:///abs/path/hetzner-robot.yaml \
      --dry-run
    ```

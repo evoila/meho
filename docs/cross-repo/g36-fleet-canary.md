@@ -141,7 +141,7 @@ concern above the per-product connector.
 
 ```bash
 meho connector ingest \
-  --product vcf-fleet --version 9.0 --impl fleet-rest \
+  --product fleet --version 9.0 --impl fleet-rest \
   --spec /path/to/vcf-fleet-9.0/<lcm-api>.yaml \
   --json
 ```
@@ -151,7 +151,7 @@ against `$CLAUDE_RDC_DOCS`:
 
 ```bash
 meho connector ingest \
-  --product vcf-fleet --version 9.0 --impl fleet-rest \
+  --product fleet --version 9.0 --impl fleet-rest \
   --spec docs:vcf-fleet-9.0/<lcm-api>.yaml \
   --json
 ```

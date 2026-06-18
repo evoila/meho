@@ -114,7 +114,7 @@ local realm.
 
 ```bash
 meho connector ingest \
-  --product vcf-operations --version 9.0 --impl vrops-rest \
+  --product vrops --version 9.0 --impl vrops-rest \
   --spec docs:vcf-operations-9.0/suite-api.yaml \
   --json
 ```

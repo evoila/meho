@@ -100,6 +100,12 @@ _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 _REQUESTER_SUB = "agent-7"
 _REVIEWER_SUB = "op-42"
 
+#: HTMX request headers. The bell's modal-open ``hx-get /ui/approvals``
+#: carries ``HX-Request: true``; the content-negotiated index route returns
+#: the pending **panel** fragment for an HTMX fetch and the full-page
+#: console for a normal navigation (#1827).
+_HX_HEADERS = {"HX-Request": "true"}
+
 #: The route-module symbol patched so the handlers get a reconstructed
 #: operator without a live JWKS round-trip.
 _RESOLVE_OPERATOR = "meho_backplane.ui.routes.approvals.routes._resolve_operator"
@@ -186,6 +192,9 @@ def _seed_request(
     principal_sub: str = _REQUESTER_SUB,
     status_value: str = ApprovalRequestStatus.PENDING.value,
     proposed_effect: dict[str, object] | None = None,
+    reviewed_by: str | None = None,
+    decided_at: datetime | None = None,
+    work_ref: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -207,6 +216,9 @@ def _seed_request(
                     params={"flavor": "small"},
                     proposed_effect=effect,
                     status=status_value,
+                    reviewed_by=reviewed_by,
+                    decided_at=decided_at,
+                    work_ref=work_ref,
                     created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=None,
                 ),
@@ -369,19 +381,19 @@ def test_badge_excludes_decided_and_cross_tenant() -> None:
 
 
 # ---------------------------------------------------------------------------
-# GET /ui/approvals -- pending panel
+# GET /ui/approvals -- pending panel (bell modal; HX-Request fragment, #1827)
 # ---------------------------------------------------------------------------
 
 
 def test_panel_lists_pending_requests() -> None:
-    """``GET /ui/approvals`` lists this tenant's pending requests with a Review action."""
+    """The bell's HX-Request fetch lists pending requests with a Review action."""
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(tenant_id=_TENANT_A, op_id="vsphere.vm.create")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
-        response = client.get("/ui/approvals")
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
 
     assert response.status_code == 200, response.text
     body = response.text
@@ -395,20 +407,20 @@ def test_panel_lists_pending_requests() -> None:
 
 
 def test_panel_empty_state() -> None:
-    """An empty queue renders the no-pending-approvals state."""
+    """An empty queue renders the no-pending-approvals state in the bell modal."""
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
-        response = client.get("/ui/approvals")
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
 
     assert response.status_code == 200, response.text
     assert "No pending approvals" in response.text
 
 
 def test_panel_hides_cross_tenant_requests() -> None:
-    """A request owned by another tenant never appears in the panel."""
+    """A request owned by another tenant never appears in the bell panel."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_tenant(_TENANT_B, "tenant-b")
     _seed_request(tenant_id=_TENANT_B, op_id="secret.cross.tenant")
@@ -416,7 +428,7 @@ def test_panel_hides_cross_tenant_requests() -> None:
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
-        response = client.get("/ui/approvals")
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
 
     assert response.status_code == 200, response.text
     assert "secret.cross.tenant" not in response.text
@@ -797,3 +809,354 @@ def test_dashboard_surface_grid_and_nav_include_approvals() -> None:
     body = response.text
     assert 'href="/ui/approvals"' in body
     assert "Approvals" in body
+
+
+# ---------------------------------------------------------------------------
+# GET /ui/approvals -- full-page console (#1827)
+# ---------------------------------------------------------------------------
+
+
+def test_index_normal_navigation_renders_full_page() -> None:
+    """A normal navigation (no HX-Request) renders the chrome'd console page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="vsphere.vm.create")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Full page: the base-layout chrome is present, not the bare modal.
+    assert "<!doctype html>" in body.lower()
+    assert "MEHO Operator Console" in body
+    # Status tabs + history list + the request row.
+    assert 'role="tablist"' in body
+    assert 'hx-get="/ui/approvals/list?tab=approved"' in body
+    assert "vsphere.vm.create" in body
+    # Sidebar highlights the Approvals surface.
+    assert 'aria-current="page"' in body
+
+
+def test_index_bell_click_returns_panel_fragment() -> None:
+    """The bell's HX-Request fetch still returns the pending panel modal fragment."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, op_id="vsphere.vm.create")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The unchanged pending-panel modal fragment, not the full page.
+    assert "Pending approvals" in body
+    assert "<!doctype html>" not in body.lower()
+    assert f'hx-get="/ui/approvals/{rid}"' in body
+    # The console's status tabs do NOT leak into the bell fragment.
+    assert 'role="tablist"' not in body
+
+
+# ---------------------------------------------------------------------------
+# GET /ui/approvals/list -- decision-history partial (#1827)
+# ---------------------------------------------------------------------------
+
+
+def test_history_default_tab_is_pending_only() -> None:
+    """The list partial defaults to the Pending tab (decided rows excluded)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="approved.op",
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "pending.op" in body
+    assert "approved.op" not in body
+
+
+def test_history_approved_tab_shows_decided_rows_with_reviewer() -> None:
+    """The Approved tab lists decided rows with the reviewer + status pill."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="approved.op",
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime(2026, 6, 16, 9, 0, tzinfo=UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "approved.op" in body
+    assert "pending.op" not in body
+    # The reviewer (who decided) is surfaced.
+    assert _REVIEWER_SUB in body
+    # Approved rows carry the success pill.
+    assert "badge-success" in body
+
+
+def test_history_all_tab_includes_every_status() -> None:
+    """The All tab passes status=None and returns pending + decided rows."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="rejected.op",
+        status_value=ApprovalRequestStatus.REJECTED.value,
+        reviewed_by=_REVIEWER_SUB,
+    )
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="expired.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "pending.op" in body
+    assert "rejected.op" in body
+    assert "expired.op" in body
+
+
+def test_history_work_ref_filter_narrows_results() -> None:
+    """A work_ref filter narrows the list to that change ticket."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="ticketed.op", work_ref="gh:evoila/meho#1")
+    _seed_request(tenant_id=_TENANT_A, op_id="untickled.op", work_ref=None)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(
+            "/ui/approvals/list?tab=all&work_ref=gh:evoila/meho%231",
+            headers=_HX_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "ticketed.op" in body
+    assert "untickled.op" not in body
+
+
+def test_history_offset_pager_is_not_capped_at_the_badge_limit() -> None:
+    """The history pager uses offset; page 2 surfaces rows past the first page.
+
+    The page size is 25, so seeding 26 pending requests must spill onto a
+    second page reachable via ``offset`` -- proving the history is NOT
+    silently truncated at the badge's 50-row glance cap.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # 26 rows: page 1 = 25, page 2 = 1. created_at is constant in the seed,
+    # so order is stable for the assertion on count, not identity.
+    for i in range(26):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op.{i:02d}")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        page1 = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
+        page2 = client.get("/ui/approvals/list?tab=pending&offset=25", headers=_HX_HEADERS)
+
+    assert page1.status_code == 200, page1.text
+    assert page2.status_code == 200, page2.text
+    # Page 1 offers "Load more" (a further page exists).
+    assert "Load more" in page1.text
+    assert "offset=25" in page1.text
+    # Page 2 is the tail: exactly one row, no further "Load more".
+    assert page2.text.count("<li ") == 1
+    assert "Load more" not in page2.text
+
+
+def test_history_unknown_tab_is_422() -> None:
+    """An unknown status-tab query value fails loud (422), not a silent default."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=bogus", headers=_HX_HEADERS)
+
+    assert response.status_code == 422, response.text
+
+
+def test_history_empty_state_per_tab() -> None:
+    """An empty tab renders a tab-specific empty state."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=rejected", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    assert "No rejected requests" in response.text
+
+
+def test_history_hides_cross_tenant_rows() -> None:
+    """The history list never surfaces another tenant's decided rows."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    _seed_request(
+        tenant_id=_TENANT_B,
+        op_id="secret.cross.tenant",
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by="op-other",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    assert "secret.cross.tenant" not in response.text
+
+
+def test_history_re_fetches_on_live_decision_events() -> None:
+    """The history region re-fetches its active tab on the bell's live events."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The region re-fetches the ACTIVE tab (not just the badge) on the
+    # body-wide events the app-shell bell dispatches.
+    assert "meho:approval-bump from:body" in body
+    assert "meho:approval-decided from:body" in body
+    assert 'hx-get="/ui/approvals/list?tab=pending"' in body
+
+
+# ---------------------------------------------------------------------------
+# Badge stays pending-only (#1827 -- a hard requirement)
+# ---------------------------------------------------------------------------
+
+
+def test_badge_stays_pending_only_after_console_upgrade() -> None:
+    """The badge still counts ONLY pending requests, never decided history."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A)  # pending -> counts
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="approved.op",
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+    )
+    _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="rejected.op",
+        status_value=ApprovalRequestStatus.REJECTED.value,
+        reviewed_by=_REVIEWER_SUB,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/badge")
+
+    assert response.status_code == 200, response.text
+    # Exactly one pending request -> count is 1, not 3.
+    assert 'data-pending-count="1"' in " ".join(response.text.split())
+
+
+# ---------------------------------------------------------------------------
+# Detail modal -- decided rows render read-only (#1827)
+# ---------------------------------------------------------------------------
+
+
+def test_detail_modal_decided_row_is_read_only() -> None:
+    """A decided request renders a decision banner and NO approve/deny forms."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="approved.op",
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime(2026, 6, 16, 9, 0, tzinfo=UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Decision banner names the outcome + reviewer.
+    assert "Approved" in body
+    assert _REVIEWER_SUB in body
+    # No decision forms on a closed request.
+    assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def test_detail_modal_pending_row_still_offers_decisions() -> None:
+    """A pending request still renders the approve/deny forms (regression guard)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert f'hx-post="/ui/approvals/{rid}/approve"' in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' in body
+
+
+# ---------------------------------------------------------------------------
+# params / params_hash never leak (#1827 -- a hard requirement)
+# ---------------------------------------------------------------------------
+
+
+def test_internal_params_never_reach_the_history_view() -> None:
+    """The internal params / params_hash columns are never projected to the UI."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # The seed sets params={"flavor": "small"} + params_hash="0"*64.
+    _seed_request(tenant_id=_TENANT_A, op_id="op.with.params")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        list_resp = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS)
+        page_resp = client.get("/ui/approvals")
+
+    for response in (list_resp, page_resp):
+        assert response.status_code == 200, response.text
+        body = response.text
+        assert "flavor" not in body
+        assert "params_hash" not in body
+        assert "0" * 64 not in body

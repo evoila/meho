@@ -30,16 +30,33 @@ Route inventory
 * ``GET /ui/approvals/badge`` -- the live pending count, rendered as the
   bell badge fragment. The app-shell bell loads it on ``hx-trigger="load"``
   to seed the count authoritatively; the SSE stream keeps it live after.
-* ``GET /ui/approvals`` -- the pending-requests panel (a modal fragment):
-  one row per pending request with an "open" affordance.
+  Always pending-only -- it counts *actionable* work, never decided rows.
+* ``GET /ui/approvals`` -- content-negotiated (#1827). A normal navigation
+  (sidebar link, bookmark, hard-refresh -- no ``HX-Request`` header)
+  renders the **full-page console** (``extends base.html``): status tabs
+  (Pending / Approved / Rejected / Expired / All), a work_ref filter, and
+  the decision-history list. The bell's ``hx-get`` carries ``HX-Request:
+  true`` and keeps getting the existing **pending panel** modal fragment,
+  so the bell-click flow is unchanged.
+* ``GET /ui/approvals/list`` -- the decision-history partial (#1827): the
+  HTMX swap target for the status tabs / work_ref filter / "load more"
+  offset pager on the full page. Reuses ``list_pending`` with an explicit
+  ``status`` (``None`` for the All tab), an optional ``work_ref``, and a
+  real ``offset`` pager (not the badge's 50-row glance cap).
 * ``GET /ui/approvals/{id}`` -- the request-detail modal fragment
   (op_id / connector_id / proposed_effect / requester principal_sub /
-  created_at) with Approve + Deny buttons. Mints + re-sets the
-  ``meho_csrf`` cookie so the modal's own ``hx-headers`` echo lines up
-  with the cookie (the modal render rotates it -- #1693 / #1754).
+  created_at) with Approve + Deny buttons. A **decided** row (#1827)
+  renders read-only: a decision banner ("Approved by X" / "Rejected by X")
+  and no Approve/Deny actions. Mints + re-sets the ``meho_csrf`` cookie so
+  the modal's own ``hx-headers`` echo lines up with the cookie (the modal
+  render rotates it -- #1693 / #1754).
 * ``POST /ui/approvals/{id}/approve`` -- approve in-process, re-dispatch
   the parked op, publish the fail-open broadcast.
 * ``POST /ui/approvals/{id}/reject`` -- reject in-process, publish.
+
+The ``params`` / ``params_hash`` columns are internal (swap-defence +
+re-dispatch input) and are **never** projected onto any of these views or
+the badge -- the projection in :mod:`.render` omits them by construction.
 
 Self-approval invariant (#1401)
 -------------------------------
@@ -80,7 +97,7 @@ import uuid
 from typing import Final
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
@@ -106,6 +123,7 @@ from meho_backplane.ui.auth.refresh import (
 )
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
+    STATUS_PILL_CLASS,
     project_request_to_view,
     set_csrf_cookie,
 )
@@ -120,6 +138,37 @@ log = structlog.get_logger(__name__)
 #: has a queue-management problem the bell isn't the answer to. 50 matches
 #: the ``list_pending`` default and the dashboard feed-tray DOM cap.
 _PENDING_LIMIT: Final[int] = 50
+
+#: Page size for the full-page decision-history list (#1827). The history
+#: view is a *browse* surface, not a glance: it pages through every status
+#: with a real offset pager, so it must not inherit the badge's 50-row
+#: glance cap (which would silently truncate the history). One page is kept
+#: small so the first paint is fast; "Load more" advances the offset.
+_HISTORY_PAGE_SIZE: Final[int] = 25
+
+#: Maximum work_ref length accepted by the history filter. ``work_ref`` is
+#: an opaque external change-ticket string (e.g. ``"gh:evoila/meho#1"``);
+#: bounding the wire shape rejects an oversized paste at the form boundary
+#: (FastAPI 422) rather than forwarding it into the WHERE clause.
+_MAX_WORK_REF_LENGTH: Final[int] = 512
+
+#: The status-tab vocabulary the full-page console exposes. Each entry maps
+#: a tab key the template renders to the ``list_pending`` ``status``
+#: argument: the four closed ``ApprovalRequestStatus`` values plus an "all"
+#: tab that passes ``status=None`` (every state). A query value outside this
+#: set is rejected as an unknown tab (422) rather than silently coerced, so
+#: a typo'd URL fails loud instead of returning a misleading filtered view.
+_HISTORY_TABS: Final[dict[str, str | None]] = {
+    "pending": "pending",
+    "approved": "approved",
+    "rejected": "rejected",
+    "expired": "expired",
+    "all": None,
+}
+
+#: Default tab when none is supplied. Pending is the actionable queue, so a
+#: bare ``/ui/approvals`` lands the operator on the work that needs them.
+_DEFAULT_HISTORY_TAB: Final[str] = "pending"
 
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
@@ -164,6 +213,19 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     return operator
 
 
+def _is_htmx(request: Request) -> bool:
+    """Return whether *request* is an HTMX-driven fetch.
+
+    HTMX 2 sets ``HX-Request: true`` on every directive-driven fetch
+    (bell-click ``hx-get``, status-tab swap, pager). Case-insensitive read
+    matching the topology / memory / runbooks surfaces' helper. The bell's
+    modal-open ``hx-get /ui/approvals`` is the one HTMX caller of the index
+    route; a normal navigation (sidebar link, bookmark, hard-refresh) omits
+    the header and gets the full page instead.
+    """
+    return request.headers.get("hx-request", "").lower() == "true"
+
+
 async def _list_pending_for_session(session: UISessionContext) -> list[ApprovalRequest]:
     """List this session tenant's pending approval requests (newest-first).
 
@@ -179,6 +241,38 @@ async def _list_pending_for_session(session: UISessionContext) -> list[ApprovalR
             status="pending",
             limit=_PENDING_LIMIT,
         )
+
+
+async def _list_history_for_session(
+    session: UISessionContext,
+    *,
+    status_filter: str | None,
+    work_ref: str | None,
+    offset: int,
+) -> tuple[list[ApprovalRequest], bool]:
+    """Page through this tenant's approval history (newest-first).
+
+    Reuses the same ``list_pending`` substrate the badge + panel call, but
+    with an explicit ``status`` (``None`` for the All tab) + ``work_ref``
+    filter + a real ``offset`` pager. Tenant-isolated by the service WHERE
+    clause -- the tenant id comes from the validated session only.
+
+    Over-fetches one row (``limit + 1``) to detect a further page without a
+    second count query, then trims to the page size. Returns
+    ``(rows, has_more)``; ``has_more`` drives the "Load more" affordance.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        rows = await list_pending(
+            db_session,
+            tenant_id=session.tenant_id,
+            status=status_filter,
+            work_ref=work_ref,
+            limit=_HISTORY_PAGE_SIZE + 1,
+            offset=offset,
+        )
+    has_more = len(rows) > _HISTORY_PAGE_SIZE
+    return rows[:_HISTORY_PAGE_SIZE], has_more
 
 
 async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) -> ApprovalRequest:
@@ -229,11 +323,11 @@ def build_approvals_router() -> APIRouter:
     """
     router = APIRouter(tags=["ui-approvals"])
 
-    # NOTE: the literal ``badge`` segment is registered BEFORE the
-    # ``/ui/approvals/{request_id}`` slug route so first-match-wins routing
-    # never binds it as the request-id parameter -- the ordering discipline
-    # the kb / corpus routers document. ``approve`` / ``reject`` are POST,
-    # so they never collide with the GET slug route.
+    # NOTE: the literal ``badge`` / ``list`` segments are registered BEFORE
+    # the ``/ui/approvals/{request_id}`` slug route so first-match-wins
+    # routing never binds them as the request-id parameter -- the ordering
+    # discipline the kb / corpus routers document. ``approve`` / ``reject``
+    # are POST, so they never collide with the GET slug route.
 
     @router.get("/ui/approvals/badge", response_class=HTMLResponse)
     async def approvals_badge(
@@ -243,13 +337,34 @@ def build_approvals_router() -> APIRouter:
         """Render the live pending-count badge fragment (delegates below)."""
         return await _render_badge(request, session)
 
-    @router.get("/ui/approvals", response_class=HTMLResponse)
-    async def approvals_panel(
+    @router.get("/ui/approvals/list", response_class=HTMLResponse)
+    async def approvals_history(
         request: Request,
         session: UISessionContext = _require_session,
+        tab: str = Query(default=_DEFAULT_HISTORY_TAB),
+        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        offset: int = Query(default=0, ge=0),
     ) -> HTMLResponse:
-        """Render the pending-requests panel modal fragment (delegates below)."""
-        return await _render_panel(request, session)
+        """Render the decision-history list partial (delegates below)."""
+        return await _render_history(request, session, tab, work_ref, offset)
+
+    @router.get("/ui/approvals", response_class=HTMLResponse)
+    async def approvals_index(
+        request: Request,
+        session: UISessionContext = _require_session,
+        tab: str = Query(default=_DEFAULT_HISTORY_TAB),
+        work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
+        offset: int = Query(default=0, ge=0),
+    ) -> HTMLResponse:
+        """Render the approvals surface, content-negotiated by ``HX-Request``.
+
+        The bell's modal-open ``hx-get`` (``HX-Request: true``) gets the
+        existing pending **panel** fragment unchanged; a normal navigation
+        gets the full-page **console** with the status tabs + history.
+        """
+        if _is_htmx(request):
+            return await _render_panel(request, session)
+        return await _render_index(request, session, tab, work_ref, offset)
 
     @router.get("/ui/approvals/{request_id}", response_class=HTMLResponse)
     async def approval_detail(
@@ -305,6 +420,89 @@ async def _render_panel(request: Request, session: UISessionContext) -> HTMLResp
     return get_templates().TemplateResponse(request, "approvals/_panel.html", context)
 
 
+def _resolve_history_tab(tab: str) -> str:
+    """Validate a status-tab key, mapping an unknown one to a 422.
+
+    The query value must be one of :data:`_HISTORY_TABS`. A foreign value
+    (a typo'd bookmark, a hand-edited URL) fails loud rather than silently
+    coercing to a default that would render a misleading filtered view.
+    """
+    if tab not in _HISTORY_TABS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown approvals tab '{tab}'.",
+        )
+    return tab
+
+
+async def _build_history_context(
+    session: UISessionContext,
+    tab: str,
+    work_ref: str,
+    offset: int,
+) -> dict[str, object]:
+    """Assemble the shared context for the history page + its list partial.
+
+    Both the full-page render and the HTMX list-swap render the same row
+    projection + pager state, so they share this builder -- the markup is
+    identical across a direct navigation and a tab/pager swap. The
+    ``work_ref`` filter is applied only when non-blank (a blank box means
+    "no work_ref filter", i.e. every request for the active tab).
+    """
+    tab = _resolve_history_tab(tab)
+    work_ref_filter = work_ref.strip() or None
+    rows, has_more = await _list_history_for_session(
+        session,
+        status_filter=_HISTORY_TABS[tab],
+        work_ref=work_ref_filter,
+        offset=offset,
+    )
+    return {
+        "requests": [project_request_to_view(row) for row in rows],
+        "status_pill_class": STATUS_PILL_CLASS,
+        "active_tab": tab,
+        "tabs": list(_HISTORY_TABS.keys()),
+        "work_ref": work_ref.strip(),
+        "offset": offset,
+        "page_size": _HISTORY_PAGE_SIZE,
+        "next_offset": offset + _HISTORY_PAGE_SIZE,
+        "has_more": has_more,
+    }
+
+
+async def _render_index(
+    request: Request,
+    session: UISessionContext,
+    tab: str,
+    work_ref: str,
+    offset: int,
+) -> HTMLResponse:
+    """Render the full-page approvals console for a normal navigation.
+
+    Extends ``base.html`` (chrome + sidebar highlight) and seeds the status
+    tabs + work_ref filter + first history page. The status-tab/pager swaps
+    re-fetch ``GET /ui/approvals/list`` (the partial) into the list region.
+    No CSRF cookie is set here: this surface is read-only (the decision
+    POSTs live on the detail modal, which mints its own token).
+    """
+    context = await _build_history_context(session, tab, work_ref, offset)
+    context["active_surface"] = "approvals"
+    context["page_title"] = "Approvals"
+    return get_templates().TemplateResponse(request, "approvals/index.html", context)
+
+
+async def _render_history(
+    request: Request,
+    session: UISessionContext,
+    tab: str,
+    work_ref: str,
+    offset: int,
+) -> HTMLResponse:
+    """Render the decision-history list partial for the HTMX tab/pager swap."""
+    context = await _build_history_context(session, tab, work_ref, offset)
+    return get_templates().TemplateResponse(request, "approvals/_history.html", context)
+
+
 async def _render_detail_modal(
     request: Request,
     session: UISessionContext,
@@ -334,6 +532,7 @@ async def _render_detail_modal(
         "self_approval_blocked": self_approval_blocked,
         "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
         "operator_sub": operator.sub,
+        "status_pill_class": STATUS_PILL_CLASS,
         "csrf_token": csrf_token,
         "error_status": error_status,
         "error_message": error_message,

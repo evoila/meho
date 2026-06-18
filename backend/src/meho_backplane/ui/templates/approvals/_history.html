@@ -1,0 +1,152 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approvals decision-history list partial (G10.8-T #1827).
+
+  The HTMX swap target for the full-page console's status tabs, work_ref
+  filter, and "Load more" offset pager. It is also included directly into
+  ``index.html`` for the initial (server-rendered) page so both paths share
+  identical markup.
+
+  Status tabs / pager wiring:
+    * Each status tab is an ``hx-get /ui/approvals/list?tab=<key>`` that
+      swaps ``#approvals-history`` in place. ``hx-include`` carries the
+      live work_ref box so switching tabs preserves the filter.
+    * The work_ref input fires the same fetch on a debounced ``keyup``.
+    * ``hx-push-url`` keeps the browser URL in sync so a filtered view is
+      bookmarkable / shareable.
+    * "Load more" advances ``offset`` and APPENDS the next page
+      (``hx-swap="beforeend"`` onto the rows list) rather than replacing
+      the region, so paging never loses the rows already shown.
+    * The whole region re-fetches the ACTIVE tab on the body-wide
+      ``meho:approval-bump`` / ``meho:approval-decided`` events the
+      app-shell bell dispatches, so a decision made elsewhere (or in this
+      session's modal) drops out of the open Pending tab without a reload.
+
+  No ``params`` / ``params_hash`` are ever in the projected row -- the
+  render projection omits them by construction (approvals contract).
+
+  Context variables:
+    requests          -- list[dict]: projected rows for the active tab/page
+                         (id / op_id / connector_id / principal_sub /
+                          principal_act / status / reviewed_by / work_ref /
+                          created_at / decided_at / expires_at)
+    status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
+    active_tab        -- str: the selected tab key
+    tabs              -- list[str]: ordered tab keys
+    work_ref          -- str: the current work_ref filter ("" when unset)
+    offset            -- int: current page offset
+    page_size         -- int: rows per page
+    next_offset       -- int: offset for the next "Load more" fetch
+    has_more          -- bool: whether a further page exists
+-#}
+<div
+  id="approvals-history"
+  class="space-y-4"
+  hx-get="/ui/approvals/list?tab={{ active_tab }}"
+  hx-target="#approvals-history"
+  hx-swap="outerHTML"
+  hx-trigger="meho:approval-bump from:body, meho:approval-decided from:body"
+  hx-include="[name='work_ref']"
+>
+  {# ---------- Status tabs ---------- #}
+  <div role="tablist" class="tabs tabs-boxed w-fit" aria-label="Filter by status">
+    {% for tab in tabs %}
+      <button
+        type="button"
+        role="tab"
+        class="tab{% if tab == active_tab %} tab-active{% endif %}"
+        {% if tab == active_tab %}aria-selected="true"{% endif %}
+        hx-get="/ui/approvals/list?tab={{ tab }}"
+        hx-target="#approvals-history"
+        hx-swap="outerHTML"
+        hx-include="[name='work_ref']"
+        hx-push-url="/ui/approvals?tab={{ tab }}"
+      >
+        {{ tab | capitalize }}
+      </button>
+    {% endfor %}
+  </div>
+
+  {# ---------- work_ref filter ---------- #}
+  <label class="form-control w-full max-w-sm">
+    <div class="label">
+      <span class="label-text text-xs">Change ticket (work_ref)</span>
+    </div>
+    <input
+      type="search"
+      name="work_ref"
+      value="{{ work_ref }}"
+      placeholder="e.g. gh:evoila/meho#1"
+      class="input input-bordered input-sm w-full"
+      aria-label="Filter by change ticket"
+      autocomplete="off"
+      hx-get="/ui/approvals/list?tab={{ active_tab }}"
+      hx-target="#approvals-history"
+      hx-swap="outerHTML"
+      hx-trigger="keyup changed delay:300ms, search"
+      hx-push-url="/ui/approvals?tab={{ active_tab }}"
+    />
+  </label>
+
+  {# ---------- Rows ---------- #}
+  {% if requests %}
+    <ul
+      id="approvals-history-rows"
+      class="divide-base-content/8 divide-y rounded-box border border-base-300 bg-base-100"
+      role="list"
+      aria-label="Approval requests"
+    >
+      {% include "approvals/_history_rows.html" %}
+    </ul>
+
+    {# ---------- Pager ---------- #}
+    <div class="flex items-center justify-between gap-2">
+      <span class="text-sm opacity-60">
+        Showing {{ offset + 1 }}&ndash;{{ offset + requests | length }}
+      </span>
+      {% if has_more %}
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          hx-get="/ui/approvals/list?tab={{ active_tab }}&offset={{ next_offset }}"
+          hx-target="#approvals-history-rows"
+          hx-swap="beforeend"
+          hx-include="[name='work_ref']"
+          aria-label="Load more approval requests"
+        >
+          Load more
+        </button>
+      {% else %}
+        <span class="text-xs opacity-40">No more requests</span>
+      {% endif %}
+    </div>
+  {% else %}
+    {# ---------- Empty state (per active tab) ---------- #}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body items-center py-10 text-center">
+        {% if work_ref %}
+          <p class="text-base opacity-60">
+            No {{ active_tab if active_tab != "all" else "" }} requests for
+            <span class="font-mono">{{ work_ref }}</span>.
+          </p>
+          <p class="text-sm opacity-40">Clear the change-ticket filter or pick another tab.</p>
+        {% elif active_tab == "pending" %}
+          <p class="text-base opacity-60">No pending approvals</p>
+          <p class="text-sm opacity-40">
+            New requests appear here the moment an agent action needs your sign-off.
+          </p>
+        {% elif active_tab == "all" %}
+          <p class="text-base opacity-60">No approval requests yet</p>
+          <p class="text-sm opacity-40">
+            Requests appear here once an agent action requires approval.
+          </p>
+        {% else %}
+          <p class="text-base opacity-60">No {{ active_tab }} requests</p>
+          <p class="text-sm opacity-40">Nothing has been {{ active_tab }} in this tenant yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

@@ -1,0 +1,40 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Agent run console (Initiative #1824 Task
+  #1829). Extends ``base.html``. Invoke one agent and watch it reason
+  live: the run form (prompt + optional work_ref + Run button) posts to
+  the CSRF-gated ``POST /ui/agents/{name}/run``, which authorises the run
+  and swaps in the transcript fragment whose ``EventSource`` subscribes
+  to the cookie-authed SSE bridge.
+
+  The page-level ``hx-headers`` directive echoes the CSRF token so the
+  run POST carries the double-submit pair (the bridge GET is a safe
+  method and needs no token; the run prompt it executes was authorised
+  by the CSRF-gated POST that minted its run token).
+
+  The transcript Alpine controller (``app/agent-run-console.js``) loads
+  in ``component_scripts`` so it registers on ``alpine:init`` before
+  Alpine boots (#1692).
+
+  No Stop affordance: "Stop watching" merely closes the EventSource; it
+  does not cancel the run. The operator run-cancel backend (T8 #1828)
+  and its Stop button (T9 #1833) are separate Tasks.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Run {{ agent_name }} &middot; MEHO Operator Console{% endblock %}
+
+{% block component_scripts %}
+  <script src="/ui/static/src/app/agent-run-console.js" defer></script>
+{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  {% include "agents/_run_console_body.html" %}
+</section>
+{% endblock %}

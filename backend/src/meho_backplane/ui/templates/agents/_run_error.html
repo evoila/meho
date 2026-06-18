@@ -1,0 +1,20 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent run error fragment (Initiative #1824 Task #1829). Returned by
+  ``POST /ui/agents/{name}/run`` when the runnable pre-check refuses the
+  run (404 no such agent / 409 disabled / 429 budget exceeded) or the
+  prompt is empty (422). Swapped into ``#agent-run-transcript`` in place
+  of the transcript, so the operator reads *why* the run was refused
+  rather than seeing a torn stream or a generic error page.
+-#}
+{% from "_icons.html" import icon %}
+<div
+  role="alert"
+  class="alert alert-error text-sm"
+  data-role="run-error"
+>
+  {{ icon("ban", class="size-4") }}
+  <span data-role="run-error-message">{{ error_message }}</span>
+</div>

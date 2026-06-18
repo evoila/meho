@@ -10751,6 +10751,168 @@
         }
       }
     },
+    "/ui/agents/{name}/run": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Run Console",
+        "description": "``GET /ui/agents/{name}/run`` -- the run console page (operator read).",
+        "operationId": "ui_agents_run_console_ui_agents__name__run_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Run Submit",
+        "description": "``POST /ui/agents/{name}/run`` -- authorise a run (CSRF-gated, operator).",
+        "operationId": "ui_agents_run_submit_ui_agents__name__run_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agents_run_submit_ui_agents__name__run_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/{name}/run/stream": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Run Stream",
+        "description": "``GET /ui/agents/{name}/run/stream`` -- cookie-authed SSE bridge.",
+        "operationId": "ui_agents_run_stream_ui_agents__name__run_stream_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 4096,
+              "default": "",
+              "title": "Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/{name}/toggle": {
       "post": {
         "tags": [
@@ -14114,6 +14276,28 @@
         },
         "type": "object",
         "title": "Body_ui_agents_edit_submit_ui_agents__name__patch"
+      },
+      "Body_ui_agents_run_submit_ui_agents__name__run_post": {
+        "properties": {
+          "input": {
+            "type": "string",
+            "maxLength": 16384,
+            "title": "Input",
+            "default": ""
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agents_run_submit_ui_agents__name__run_post"
       },
       "Body_ui_agents_toggle_ui_agents__name__toggle_post": {
         "properties": {

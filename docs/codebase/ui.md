@@ -2293,8 +2293,83 @@ surfacing is the accepted shape per the #1825 issue body.
   entry in `base.html`'s `nav_surfaces`, the `bot` icon in `_icons.html`,
   and the Agents tile in `dashboard.py`'s `_SURFACE_TILES`.
 
-This is a UI-only surface — it touches no `api/v1` schema, so the OpenAPI
-snapshot is unchanged.
+This surface adds no `api/v1` schema, but its `/ui/*` routes **do**
+register into the FastAPI app, so they appear in the OpenAPI snapshot
+(`cli/api/openapi.json`) the CLI client is generated from — regenerate it
+(`cd cli && make snapshot-openapi && make generate`) when adding or
+renaming a `/ui/agents*` route, the same as any other route change.
+
+## Agent principals surface (G10.8-T4 #1831)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824). The
+agent-identity inventory and the **Keycloak kill switch**, hung off the
+T1 agents scaffold as the `/ui/agents/principals` sub-surface. The console
+over the G11.2 agent-principal lifecycle (`api/v1/agent_principals.py`,
+`auth/agent_principals.py`, `auth/keycloak_admin.py`). Registered inside
+`build_agents_router` **before** the `/ui/agents/{name}` read route so the
+literal `principals` segment is not swallowed as an agent `{name}` (the
+same first-match discipline `/ui/agents/create` follows).
+
+`meho_backplane.ui.routes.agents.principals_*` ships:
+
+- `GET /ui/agents/principals` — the per-tenant principals list (operator).
+  One handler serves both shapes (branch on `HX-Request`): the full
+  `agents/principals/index.html` page on a browser nav, the
+  `agents/principals/_table.html` fragment on the `include_revoked` toggle
+  swap. One row per principal: name, `keycloak_client_id`, a revoked /
+  active pill, `owner_sub`, `created_by_sub`, `created_at`. The internal
+  `keycloak_internal_id` is never surfaced. The `include_revoked` toggle
+  flips the service query so revoked rows join the inventory for audit.
+- `GET/POST /ui/agents/principals/register` — register a new principal
+  (**tenant_admin**). An upstream side-effecting op: the service creates a
+  Keycloak client + writes its generated credential to Vault before the DB
+  row lands. Failures re-render the modal inline (not a generic error):
+  empty / bad-character `name` → 422 `name` field error; duplicate
+  `(tenant, name)` → 409 `name` field error; **Keycloak unconfigured →
+  503** banner carrying the gold-standard `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL`
+  three-clause text; other Keycloak API failure → 502 `keycloak_admin_error`
+  banner; Vault credential-write failure → 502 `scheduler_vault_write_error`
+  banner. The actionable backend detail is rendered verbatim, never
+  flattened to "something went wrong".
+- `GET/POST /ui/agents/principals/{name}/revoke` — revoke = the **Keycloak
+  kill switch** (**tenant_admin**): disables the Keycloak client, which
+  blocks all new token grants for the identity (tokens already minted stay
+  valid until their `exp`). It is terminal — there is no un-revoke. Because
+  a too-easy kill switch is a footgun (#1831 risk note), the confirm modal
+  demands a **type-to-confirm of the principal name**: an inline Alpine
+  `x-data` gate keeps the destructive submit `:disabled` until the typed
+  value equals the name, and the handler **re-checks the typed value
+  server-side** (a crafted POST cannot skip the confirm — a mismatch
+  re-renders the modal with a 422 banner and makes no service call). 404
+  on an absent / cross-tenant / already-revoked name; Keycloak
+  unconfigured / API failures render the same 503 / 502 actionable banners
+  as register.
+
+RBAC + service-delegation + CSRF posture is identical to the
+agent-definition surface: `resolve_role_probe` (soft, read) +
+`resolve_operator_or_403` (hard tenant_admin gate, write) from
+`agents/operator.py`; the write handlers call `AgentPrincipalService`
+**in-process** (the same path the REST routes + the `meho agent-principal`
+CLI use); `POST` is CSRF-double-submit-gated by the chassis
+`CSRFMiddleware`, with each modal render re-minting + re-setting the
+`meho_csrf` cookie.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/principals_views.py` — the
+  read render (`render_principals_index`) + the row projection +
+  `validate_principal_name` + `fetch_principal_or_404`.
+* `backend/src/meho_backplane/ui/routes/agents/principals_forms.py` — the
+  register + revoke modal renders + submit handlers, with the 503 / 502 /
+  422 / 409 inline error mapping and the server-side type-to-confirm check.
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` —
+  `_register_principals_routes`, wired into `build_agents_router` before
+  the `/ui/agents/{name}` read route.
+* `backend/src/meho_backplane/ui/templates/agents/principals/index.html`,
+  `_table.html`, `_register_modal.html`, `_revoke_modal.html` — the
+  surface templates. The principals surface keeps `active_surface="agents"`
+  (it is a sub-surface; the sidebar highlights Agents) and is reached via a
+  "Principals" link on the agents list header.
 
 ## Runbooks surface (G10.6)
 

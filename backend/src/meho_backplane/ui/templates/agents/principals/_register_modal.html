@@ -1,0 +1,123 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded register-principal modal for the Agent principals console
+  (Initiative #1824 Task #1831). Loaded into
+  ``#principals-modal-container`` on the list page by the "Register
+  principal" button's ``hx-get`` to ``/ui/agents/principals/register``.
+  The shared app-shell modal controller opens the inserted ``<dialog>``
+  via ``showModal()`` on ``htmx:afterSwap`` (#1803).
+
+  Register is an upstream SIDE-EFFECTING op: it creates a Keycloak client
+  and writes the generated credential to Vault before the DB row lands.
+  So the failure modes are not all field-attributable -- a Keycloak-
+  unconfigured (503), Keycloak-API (502), or Vault-write (502) failure
+  renders the ACTIONABLE backend detail as an alert banner above the
+  form (``banner``), not a generic "something went wrong". The
+  field-attributable failures (empty / bad-character name -> 422,
+  duplicate name -> 409) render against the ``name`` input.
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/agents/principals/register``, swapping
+  ``#principals-modal-container``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/principals``.
+    * Failure -> this same modal re-rendered with ``errors`` / ``banner``
+      populated and the operator's typed values echoed back.
+
+  CSRF: the form declares its own ``hx-headers`` echo of the token THIS
+  render minted; the route sets the matching ``meho_csrf`` cookie on the
+  same response so the double-submit pair lines up (#1693).
+-#}
+<dialog id="principals-register-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg" id="principals-register-modal-title">
+      Register agent principal
+    </h3>
+
+    <p class="py-2 text-sm opacity-80">
+      Creates a Keycloak OAuth client for this identity and stores its
+      generated credential. The agent authenticates as
+      <span class="font-mono">agent:&lt;name&gt;</span> via the
+      client-credentials grant.
+    </p>
+
+    {% if banner %}
+      <div role="alert" class="alert alert-error text-sm mt-2" data-register-banner>
+        <span class="break-words">{{ banner }}</span>
+      </div>
+    {% endif %}
+
+    <form
+      id="principals-register-form"
+      hx-post="/ui/agents/principals/register"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#principals-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="principals-register-modal-title"
+    >
+      <label class="form-control">
+        <span class="label-text">Name</span>
+        <input
+          type="text"
+          name="name"
+          required
+          minlength="1"
+          maxlength="128"
+          pattern="[A-Za-z0-9_\-\.]+"
+          value="{{ values.name if values and values.name else '' }}"
+          class="input input-bordered input-sm font-mono {% if errors and 'name' in errors %}input-error{% endif %}"
+          aria-label="Principal name"
+          placeholder="deploy-bot"
+        />
+        {% if errors and 'name' in errors %}
+          <span class="label-text-alt text-error" role="alert" data-error-for="name">
+            {{ errors['name'] }}
+          </span>
+        {% endif %}
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Owner (optional)</span>
+        <input
+          type="text"
+          name="owner_sub"
+          maxlength="256"
+          value="{{ values.owner_sub if values and values.owner_sub else '' }}"
+          class="input input-bordered input-sm font-mono {% if errors and 'owner_sub' in errors %}input-error{% endif %}"
+          aria-label="Owner sub"
+          placeholder="defaults to you"
+          aria-describedby="principal-owner-hint"
+        />
+        <span id="principal-owner-hint" class="text-xs opacity-60 mt-1">
+          Keycloak <span class="font-mono">sub</span> of the owning
+          operator. Defaults to the registering operator if left blank.
+        </span>
+        {% if errors and 'owner_sub' in errors %}
+          <span class="label-text-alt text-error" role="alert" data-error-for="owner_sub">
+            {{ errors['owner_sub'] }}
+          </span>
+        {% endif %}
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-register"
+          onclick="document.getElementById('principals-register-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="register-submit">
+          Register
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

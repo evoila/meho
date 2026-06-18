@@ -1,0 +1,89 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Agent principals console surface (Initiative
+  #1824 Task #1831 G10.8-T4). Extends ``base.html`` so the chrome
+  (sidebar, footer) matches the rest of the operator console. The
+  principals surface is the agent-identity inventory and the Keycloak
+  kill switch.
+
+  Layout (top-down):
+    * Breadcrumb back to the Agents list (principals is a sub-surface of
+      the agents console; the sidebar highlights "Agents").
+    * Header -- title + principal count + "Register principal" button
+      (tenant_admin only) + an ``include_revoked`` toggle. The Register
+      button opens the HTMX-loaded modal into the dedicated
+      ``#principals-modal-container`` mount; the shared app-shell modal
+      controller opens the inserted ``<dialog>`` via ``showModal()`` on
+      ``htmx:afterSwap`` (#1803).
+    * Table (``#principals-table``) -- one row per principal: name,
+      keycloak_client_id, revoked pill, owner_sub, created_by_sub,
+      created_at, and (tenant_admin) a Revoke kill-switch button.
+
+  HTMX wiring: the page-level ``hx-headers`` directive echoes the CSRF
+  token for any state-changing request triggered from this page.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agent principals &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/agents" class="link link-hover">Agents</a>
+    <span aria-hidden="true">/</span>
+    <span>Principals</span>
+  </nav>
+
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Agent principals</h1>
+      <p class="text-sm opacity-70">
+        Registered agent identities and the Keycloak kill switch. Each
+        principal is an OAuth client; revoking one blocks all new token
+        grants for that identity.
+      </p>
+    </div>
+    <div class="flex items-center gap-3">
+      <label class="label cursor-pointer gap-2 text-sm">
+        <input
+          type="checkbox"
+          class="toggle toggle-sm"
+          name="include_revoked"
+          {% if include_revoked %}checked{% endif %}
+          hx-get="/ui/agents/principals?include_revoked={{ 'false' if include_revoked else 'true' }}"
+          hx-target="#principals-table"
+          hx-swap="outerHTML"
+          aria-label="Show revoked principals"
+        />
+        <span class="opacity-70">Show revoked</span>
+      </label>
+      {% if can_write %}
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        hx-get="/ui/agents/principals/register"
+        hx-target="#principals-modal-container"
+        hx-swap="innerHTML"
+        data-action="open-register-modal"
+        aria-label="Register principal"
+      >
+        + Register principal
+      </button>
+      {% endif %}
+    </div>
+  </header>
+
+  {# Mount point for HTMX-loaded modals (register / revoke). The empty
+     wrapper persists across HTMX swaps so the modal markup always has a
+     stable target. #}
+  <div id="principals-modal-container"></div>
+
+  {# Table -- the HTMX swap target for re-renders / toggle. #}
+  {% include "agents/principals/_table.html" %}
+</section>
+{% endblock %}

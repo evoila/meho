@@ -10,7 +10,7 @@ the run executes. It sits under the `/ui/agents` surface that Task #1825
 
 ## Overview
 
-Three routes, all under the per-agent `/run` sub-path:
+Four routes, all under the per-agent `/run` sub-path:
 
 | Method · path | Role | Purpose |
 |---|---|---|

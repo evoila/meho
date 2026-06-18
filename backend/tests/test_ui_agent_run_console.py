@@ -28,6 +28,7 @@ SSE bridge streams known frames without a live model / DB run row.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Iterator
@@ -831,3 +832,40 @@ def test_run_transcript_carries_stop_wiring() -> None:
     assert 'data-role="stop-confirm"' in body
     assert "/run/__RUN_ID__/cancel" in body
     assert "cancelUrlTemplate" in body
+
+
+def test_can_stop_stays_available_after_stream_drop() -> None:
+    """A dropped SSE stream must not disqualify a still-executing run from Stop.
+
+    The transcript controller's ``canStop()`` gates the Stop button. The SSE
+    bridge dying (``streamErrored``) does *not* terminate the backend run, so a
+    run with a known ``runId`` and no terminal frame must stay cancellable after
+    a stream drop -- otherwise the operator loses the only way to stop a run
+    that is still burning budget. ``canStop()`` therefore gates on
+    ``runId``/``finalStatus``/``cancelled``/``cancelUrlTemplate`` only, and must
+    not reference ``streamErrored``. The controller is client-side Alpine state
+    with no JS test runner in this repo, so we assert the source contract: the
+    ``streamErrored`` flag is still tracked for transcript messaging but is
+    absent from the ``canStop()`` predicate.
+    """
+    source = (static_root_dir() / "src" / "app" / "agent-run-console.js").read_text(
+        encoding="utf-8"
+    )
+
+    # The drop flag is still part of the controller (it drives the dropped /
+    # error transcript hints) -- this guards against asserting on a typo.
+    assert "streamErrored" in source
+
+    can_stop_match = re.search(r"canStop\(\)\s*\{(?P<body>.*?)\}", source, flags=re.DOTALL)
+    assert can_stop_match is not None, "canStop() not found in controller source"
+    can_stop_body = can_stop_match.group("body")
+
+    assert "streamErrored" not in can_stop_body, (
+        "canStop() must not gate on streamErrored: a dropped stream leaves a "
+        "non-terminal backend run cancellable (review M1, PR #1878)."
+    )
+    # The genuine non-terminal gates remain.
+    assert "this.runId" in can_stop_body
+    assert "this.finalStatus" in can_stop_body
+    assert "this.cancelled" in can_stop_body
+    assert "this.cancelUrlTemplate" in can_stop_body

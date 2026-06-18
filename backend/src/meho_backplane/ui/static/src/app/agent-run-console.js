@@ -191,18 +191,20 @@ document.addEventListener("alpine:init", () => {
 
     // ---- Stop / cancel (T9 #1833) ----
 
-    // The Stop affordance shows only while the run is live: a run_id has
-    // landed (so there is something to cancel), no terminal frame has
-    // arrived (final / error), the stream has not dropped, and we have
-    // not already cancelled. A terminal run is not cancellable -- the BFF
-    // proxy would 409 it -- so the button must vanish the moment a
-    // terminal frame lands.
+    // The Stop affordance shows only while the run is non-terminal: a
+    // run_id has landed (so there is something to cancel), no terminal
+    // frame has arrived (final / error), and we have not already
+    // cancelled. A terminal run is not cancellable -- the BFF proxy would
+    // 409 it -- so the button must vanish the moment a terminal frame
+    // lands. A *dropped stream* (streamErrored) is deliberately NOT
+    // disqualifying: the SSE bridge dying does not stop the backend run,
+    // so an operator must still be able to cancel a run that is executing
+    // after the transcript stream drops.
     canStop() {
       return (
         !!this.runId &&
         !this.finalStatus &&
         !this.cancelled &&
-        !this.streamErrored &&
         !!this.cancelUrlTemplate
       );
     },

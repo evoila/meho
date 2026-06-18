@@ -1,0 +1,159 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shared grant form fields for the create + elevate modals (Task #1832).
+  Included by ``_create_modal.html`` and ``_elevate_modal.html`` so both
+  render the same field set + the same per-field error + echoed-value
+  wiring.
+
+  Context contract (set by
+  :func:`~meho_backplane.ui.routes.agents.grants.forms._build_form_context`):
+    * ``verdicts``        -- list[str] of PermissionVerdict enum values.
+    * ``default_verdict`` -- str; the conservative default ("deny").
+    * ``errors``          -- dict[field -> message]; empty on a fresh
+                             render, populated on a 422 re-render.
+    * ``values``          -- dict[field -> submitted value]; echoed back
+                             so the operator keeps their input.
+    * ``mode``            -- "create" | "elevate". In elevate mode the
+                             ``expires_at`` field is required.
+
+  ``principal_sub`` is a free-text field for now (the picker over
+  registered principals is T4 #1831; until it lands a free-text field is
+  the accepted shape -- the same precedent #1825 set for ``identity_ref``).
+-#}
+{%- macro field_value(field) -%}
+  {%- if values and field in values and values[field] not in (None, "") -%}
+    {{- values[field] -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_for(field) -%}
+  {%- if errors and field in errors -%}
+    <span class="label-text-alt text-error" role="alert" data-error-for="{{ field }}">
+      {{ errors[field] }}
+    </span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_class(field, base) -%}
+  {%- if errors and field in errors -%}{{ base }}{%- endif -%}
+{%- endmacro -%}
+
+{%- if errors and "__root__" in errors -%}
+  <div class="alert alert-error text-sm" role="alert" data-error-for="__root__">
+    {{ errors["__root__"] }}
+  </div>
+{%- endif -%}
+
+<label class="form-control">
+  <span class="label-text">Principal sub</span>
+  <input
+    type="text"
+    name="principal_sub"
+    required
+    minlength="1"
+    maxlength="512"
+    value="{{ field_value('principal_sub') }}"
+    class="input input-bordered input-sm font-mono {{ error_class('principal_sub', 'input-error') }}"
+    aria-label="Principal sub"
+    placeholder="agent-incident-triage"
+    aria-describedby="grant-principal-hint"
+  />
+  <span id="grant-principal-hint" class="text-xs opacity-60 mt-1">
+    The JWT ``sub`` of the agent principal this grant applies to.
+  </span>
+  {{ error_for('principal_sub') }}
+</label>
+
+<label class="form-control">
+  <span class="label-text">Op pattern</span>
+  <input
+    type="text"
+    name="op_pattern"
+    required
+    minlength="1"
+    maxlength="512"
+    value="{{ field_value('op_pattern') }}"
+    class="input input-bordered input-sm font-mono {{ error_class('op_pattern', 'input-error') }}"
+    aria-label="Op pattern"
+    placeholder="vault.kv.* or *"
+    aria-describedby="grant-op-pattern-hint"
+  />
+  <span id="grant-op-pattern-hint" class="text-xs opacity-60 mt-1">
+    fnmatch glob over operation ids. <span class="font-mono">*</span> matches all ops.
+  </span>
+  {{ error_for('op_pattern') }}
+</label>
+
+<div class="grid gap-3 md:grid-cols-2">
+  <label class="form-control">
+    <span class="label-text">Target scope</span>
+    <input
+      type="text"
+      name="target_scope"
+      maxlength="256"
+      value="{{ field_value('target_scope') }}"
+      class="input input-bordered input-sm font-mono {{ error_class('target_scope', 'input-error') }}"
+      aria-label="Target scope"
+      placeholder="UUID, * , or blank for any"
+      aria-describedby="grant-target-scope-hint"
+    />
+    <span id="grant-target-scope-hint" class="text-xs opacity-60 mt-1">
+      A target UUID, <span class="font-mono">*</span>, or blank (= any target).
+    </span>
+    {{ error_for('target_scope') }}
+  </label>
+
+  <label class="form-control">
+    <span class="label-text">Verdict</span>
+    {%- set selected_verdict = field_value('verdict') or default_verdict -%}
+    <select
+      name="verdict"
+      required
+      class="select select-bordered select-sm {{ error_class('verdict', 'select-error') }}"
+      aria-label="Verdict"
+      aria-describedby="grant-verdict-hint"
+    >
+      {% for option in verdicts %}
+        <option value="{{ option }}" {% if option == selected_verdict %}selected{% endif %}>
+          {{ option }}
+        </option>
+      {% endfor %}
+    </select>
+    <span id="grant-verdict-hint" class="text-xs opacity-60 mt-1">
+      <span class="font-mono">deny</span> refuses the op,
+      <span class="font-mono">needs-approval</span> parks it for review,
+      <span class="font-mono">auto-execute</span> runs it unattended.
+    </span>
+    {{ error_for('verdict') }}
+  </label>
+</div>
+
+<label class="form-control">
+  <span class="label-text">
+    Expires at{% if mode == "elevate" %} <span class="text-error">(required)</span>{% endif %}
+  </span>
+  <input
+    type="text"
+    name="expires_at"
+    {% if mode == "elevate" %}required{% endif %}
+    maxlength="64"
+    value="{{ field_value('expires_at') }}"
+    class="input input-bordered input-sm font-mono {{ error_class('expires_at', 'input-error') }}"
+    aria-label="Expires at"
+    placeholder="2026-07-01T13:30:00+00:00"
+    aria-describedby="grant-expires-hint"
+  />
+  <span id="grant-expires-hint" class="text-xs opacity-60 mt-1">
+    {% if mode == "elevate" %}
+      A future, timezone-aware UTC timestamp -- the elevation auto-expires
+      then and the principal reverts to its baseline permissions.
+    {% else %}
+      Blank for a permanent grant; a future timezone-aware UTC timestamp
+      makes this a time-bounded elevation (include an offset or
+      <span class="font-mono">Z</span>).
+    {% endif %}
+  </span>
+  {{ error_for('expires_at') }}
+</label>

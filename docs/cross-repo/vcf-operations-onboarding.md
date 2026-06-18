@@ -161,7 +161,7 @@ are mutually exclusive — see the [per-target TLS-trust guide](../../deploy/val
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-vrops --json | jq '{product, version, reachable}'
+meho targets probe rdc-vrops --json | jq '{product, version, reachable}'
 # expected: {"product": "vrops", "version": "9.0.0.…", "reachable": true}
 ```
 

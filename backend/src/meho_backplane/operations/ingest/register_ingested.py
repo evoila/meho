@@ -104,7 +104,6 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._lookup import dispatch_product
 from meho_backplane.operations.ingest._upsert import (
     build_upsert_context,
     upsert_one_operation,
@@ -121,8 +120,6 @@ __all__ = [
     "IngestionResult",
     "register_ingested_operations",
 ]
-
-_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,15 +260,16 @@ async def register_ingested_operations(
     (multi-spec merge, idempotency invariant, connector auto-shim
     semantics, transaction-boundary discipline).
 
-    Persisted rows carry the *dispatch-canonical* product (see
-    :func:`_reconciled_row_product`), not necessarily the supplied
-    ``product`` — the VCF-family long↔short reconciliation. The
-    pre-flight + auto-shim registration stay on the supplied product.
+    Persisted rows carry the supplied ``product`` directly. The ingest
+    route boundary (G0.27 / T3 #1817) rejects a supplied product that
+    does not round-trip its connector_id, so the supplied product always
+    equals the dispatch-canonical (parser-derived) spelling here — no
+    long↔short row reconciliation is needed or performed.
 
     Args:
         product, version, impl_id: Connector triple. The persisted row's
-            natural key is ``(reconciled_product, version, impl_id,
-            op_id)`` with ``tenant_id IS NULL`` for built-in rows.
+            natural key is ``(product, version, impl_id, op_id)`` with
+            ``tenant_id IS NULL`` for built-in rows.
         spec_source: Logical-source tag (e.g. ``"vcenter.yaml"``)
             appended as ``f"spec:{spec_source}"`` to every row's
             ``tags`` so multi-spec ingests stay distinguishable.
@@ -312,11 +310,9 @@ async def register_ingested_operations(
         impl_id=impl_id,
         base_url=base_url,
     )
-    # Rows persist under the dispatch-canonical product (no-op for
-    # aligned connectors; the VCF-family reconciliation).
     coords = _BatchCoordinates(
         tenant_id=tenant_id,
-        product=_reconciled_row_product(product=product, version=version, impl_id=impl_id),
+        product=product,
         version=version,
         impl_id=impl_id,
         spec_source=spec_source,
@@ -355,14 +351,12 @@ def _preflight_and_register_class(
     the label; logs ``connector_ingest_orphaned_class`` and proceeds when
     no class is registered yet (the v0.4-staging path).
 
-    Both calls take the *supplied* (registry) product — not the
-    dispatch-canonical one the rows persist under — so the coverage check
-    finds the real registered class (e.g. ``VcfAutomationConnector``
-    under ``product="vcf-automation"``) and no redundant shim is
-    synthesised. (For aligned connectors such as ``VcfLogsConnector``,
-    aligned to ``product="vrli"`` in G0.26-T4 #1798, the supplied and
-    dispatch-canonical products are identical, so the distinction is a
-    no-op.)
+    Both calls take the supplied ``product``, which — since the ingest
+    route boundary rejects a non-round-tripping product (G0.27 / T3
+    #1817) — is the dispatch-canonical spelling the rows persist under
+    and the connector class registers under. So the coverage check finds
+    the real registered class and the auto-shim, when synthesised, lands
+    in the dispatchable namespace.
 
     Returns the ``connector_registered`` flag (``True`` when a fresh
     auto-shim was registered).
@@ -378,36 +372,6 @@ def _preflight_and_register_class(
         impl_id=impl_id,
         base_url=base_url,
     )
-
-
-def _reconciled_row_product(*, product: str, version: str, impl_id: str) -> str:
-    """Return the product the persisted rows must carry to be dispatchable.
-
-    The dispatch/query surface keys on the product
-    :func:`~meho_backplane.operations._lookup.parse_connector_id` derives
-    from the connector_id, not the operator-supplied one. For aligned
-    connectors the two are identical (no-op); for the remaining VCF-family
-    long↔short splits the supplied product (``vcf-automation``) diverges
-    from the derived spelling (``vcfa``), and rows written under the
-    supplied product are invisible to every dispatch probe (the catalog
-    reports ``registered, 0 ops``). The pre-flight + auto-shim registration
-    in :func:`register_ingested_operations` deliberately stay on the
-    *supplied* (registry) product so the version-coverage check finds the
-    real ``VcfAutomationConnector`` class and no redundant shim is
-    synthesised; only the persisted rows are reconciled here.
-    claude-rdc-hetzner-dc#1136. (vRLI / ``vrli-rest`` was aligned in
-    G0.26-T4 #1798 and no longer takes this divergent path.)
-    """
-    row_product = dispatch_product(product=product, version=version, impl_id=impl_id)
-    if row_product != product:
-        _log.info(
-            "ingested_rows_product_reconciled",
-            supplied_product=product,
-            row_product=row_product,
-            version=version,
-            impl_id=impl_id,
-        )
-    return row_product
 
 
 async def _register_in_session(

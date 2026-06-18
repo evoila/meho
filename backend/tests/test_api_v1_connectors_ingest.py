@@ -2430,7 +2430,7 @@ paths:
     assert "8.0" in detail["message"]
 
 
-def test_ingest_compatible_drift_succeeds(
+def test_ingest_compatible_version_drift_succeeds(
     client: TestClient,
     tmp_path: Any,
     stub_embedding_service: AsyncMock,
@@ -2439,7 +2439,9 @@ def test_ingest_compatible_drift_succeeds(
 
     The cross-check classifies this as ``compatible`` (same major,
     different minor) and proceeds — only the cross-major mismatches
-    raise 422.
+    raise 422. The product round-trips its connector_id
+    (``drift-9.1`` parses to ``drift``) so the #1817 boundary guard is a
+    no-op and the version cross-check is what's under test here.
     """
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(
@@ -2481,7 +2483,59 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "drift-test",
+                "product": "drift",
+                "version": "9.1",
+                "impl_id": "drift",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+
+
+def test_ingest_divergent_product_rejected_with_422(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A supplied product that does not round-trip its connector_id → 422.
+
+    G0.27 / T3 (#1817). ``--product drift-test --impl-id drift-impl``
+    renders ``drift-impl-9.1``, which the dispatcher parses to product
+    ``drift`` — so rows ingested under ``drift-test`` would be invisible
+    to every dispatch probe and the auto-shim would trip
+    ``register_connector_v2``'s round-trip hard-fail. The ingest route
+    rejects the divergence up front with a 422
+    ``product_impl_id_mismatch`` naming the supplied and derived products,
+    before any spec is fetched. This is the operator-facing contract
+    change that let the long↔short row-reconciliation helpers be retired:
+    a divergent ingest that returned 200 (and silently reconciled) now
+    fails loud.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '9.0.3'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-divergent.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "drift-test",  # diverges from the parser-derived "drift"
                 "version": "9.1",
                 "impl_id": "drift-impl",
                 "specs": [{"uri": spec_url}],
@@ -2489,7 +2543,14 @@ paths:
             },
             headers=_authed(token),
         )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["kind"] == "product_impl_id_mismatch"
+    assert detail["product"] == "drift-test"
+    assert detail["derived_product"] == "drift"
+    # The message names both spellings so the operator knows the fix.
+    assert "drift-test" in detail["message"]
+    assert "drift" in detail["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -2970,13 +3031,17 @@ paths:
 """,
     )
     catalog_spec_url = f"{_SPEC_BASE}/catalog-spec.yaml"
+    # Synthetic catalog entry whose product round-trips its connector_id
+    # (``vmwaret9-rest-9.0`` parses to ``vmwaret9``) so the #1817 ingest
+    # boundary guard is a no-op; the ``t9`` suffix keeps it distinct from
+    # the real ``vmware`` / ``vmware-rest`` registration.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "vmware-t9",
+                "product": "vmwaret9",
                 "version": "9.0",
-                "impl_id": "vmware-rest-t9",
+                "impl_id": "vmwaret9-rest",
                 "requires_connector_class": "VmwareRestConnector",
                 "upstream": (catalog_spec_url,),
             },
@@ -2994,7 +3059,7 @@ paths:
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "vmware-t9/9.0", "dry_run": True},
+            json={"catalog_entry": "vmwaret9/9.0", "dry_run": True},
             headers=_authed(token),
         )
     assert response.status_code == 200, response.text
@@ -3003,7 +3068,7 @@ paths:
     # The resolved triple round-trips into the connector_id the response
     # echoes (`<impl_id>-<version>`) so a REST client sees the resolved
     # identity without needing to re-derive it.
-    assert body["ingestion"]["connector_id"] == "vmware-rest-t9-9.0"
+    assert body["ingestion"]["connector_id"] == "vmwaret9-rest-9.0"
 
 
 def test_ingest_catalog_entry_unknown_returns_structured_422(
@@ -3237,13 +3302,16 @@ def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
     cross-referencing the byte stream.
     """
     portal_url = "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
+    # Synthetic entry whose product round-trips (``vmwaret1211-rest-9.0``
+    # parses to ``vmwaret1211``) so the test exercises the HTML-portal
+    # content-type guard, not the #1817 round-trip guard.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "vmware-t1211",
+                "product": "vmwaret1211",
                 "version": "9.0",
-                "impl_id": "vmware-rest-t1211",
+                "impl_id": "vmwaret1211-rest",
                 "requires_connector_class": "VmwareRestConnector",
                 "upstream": (portal_url,),
             },
@@ -3266,13 +3334,13 @@ def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "vmware-t1211/9.0", "async": False},
+            json={"catalog_entry": "vmwaret1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["detail"] == "catalog_entry_upstream_not_spec"
-    assert detail["catalog_entry"] == "vmware-t1211/9.0"
+    assert detail["catalog_entry"] == "vmwaret1211/9.0"
     assert detail["upstream_url"] == portal_url
     assert detail["content_type"] == "text/html; charset=utf-8"
     # T11 convention: the human-readable message names the values, the
@@ -3294,13 +3362,16 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
     detection logic by product.
     """
     portal_url = "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    # Synthetic entry whose product round-trips (``sddct1211-rest-9.0``
+    # parses to ``sddct1211``) so the HTML-portal guard is what's under
+    # test, not the #1817 round-trip guard.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "sddc-manager-t1211",
+                "product": "sddct1211",
                 "version": "9.0",
-                "impl_id": "sddc-rest-t1211",
+                "impl_id": "sddct1211-rest",
                 "requires_connector_class": "SddcManagerConnector",
                 "upstream": (portal_url,),
             },
@@ -3318,13 +3389,13 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "sddc-manager-t1211/9.0", "async": False},
+            json={"catalog_entry": "sddct1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["detail"] == "catalog_entry_upstream_not_spec"
-    assert detail["catalog_entry"] == "sddc-manager-t1211/9.0"
+    assert detail["catalog_entry"] == "sddct1211/9.0"
     assert detail["upstream_url"] == portal_url
     assert detail["content_type"] == "text/html; charset=utf-8"
 
@@ -3356,9 +3427,13 @@ def test_ingest_explicit_quadruple_html_upstream_returns_422_without_catalog_fie
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "explicit-quad",
+                # Single-segment product == impl_id round-trips its
+                # connector_id (``explicitquad-1.0`` parses to
+                # ``explicitquad``) so the test hits the HTML-upstream
+                # guard, not the #1817 round-trip guard.
+                "product": "explicitquad",
                 "version": "1.0",
-                "impl_id": "explicit-quad",
+                "impl_id": "explicitquad",
                 "specs": [{"uri": portal_url}],
                 "dry_run": True,
             },
@@ -3455,9 +3530,13 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "test-quadruple",
+                # Product round-trips its connector_id
+                # (``testquad-impl-1.0`` parses to ``testquad``) so the
+                # #1817 boundary guard is a no-op and the regression under
+                # test is the explicit-quadruple shape's parse + dry-run.
+                "product": "testquad",
                 "version": "1.0",
-                "impl_id": "test-impl",
+                "impl_id": "testquad-impl",
                 "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
@@ -3658,9 +3737,9 @@ async def test_ingest_async_default_returns_202_with_job_handle(
             response = await ac.post(
                 "/api/v1/connectors/ingest",
                 json={
-                    "product": "stress-vmware",
+                    "product": "stressvmware",
                     "version": "9.0.0.0",
-                    "impl_id": "stress-vmware-rest",
+                    "impl_id": "stressvmware-rest",
                     "specs": [{"uri": spec_url}],
                     # Default is ``async=true``; the assertion below
                     # is what the issue's "must not crash the pod"
@@ -3803,9 +3882,13 @@ paths:
             response = await ac.post(
                 "/api/v1/connectors/ingest",
                 json={
-                    "product": "tenant-iso",
+                    # Product round-trips its connector_id
+                    # (``tenantiso-impl-1.0`` parses to ``tenantiso``) so
+                    # the #1817 boundary guard is a no-op; this test is
+                    # about cross-tenant job-poll isolation.
+                    "product": "tenantiso",
                     "version": "1.0",
-                    "impl_id": "tenant-iso-impl",
+                    "impl_id": "tenantiso-impl",
                     "specs": [{"uri": spec_url}],
                 },
                 headers=_authed(token_a),

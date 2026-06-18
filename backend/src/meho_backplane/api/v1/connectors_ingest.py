@@ -168,6 +168,7 @@ from meho_backplane.api.v1._envelope import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.operations._lookup import connector_exists, parse_connector_id
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
@@ -392,15 +393,15 @@ async def ingest_endpoint(
     the same spec under the other scope re-inserts every op as a
     shadow copy there — verify the scope matches your intent.
     """
-    # Remember the original ``catalog_entry`` (pre-resolution) so the
-    # ``UpstreamNotSpecError`` path -- raised deep inside the parser
-    # when an HTML developer-portal page comes back instead of an
-    # OpenAPI spec -- can include the catalog reference in its 422
-    # envelope. ``_resolve_catalog_entry_if_set`` returns an explicit-
-    # quadruple body with ``catalog_entry=None``, so we have to snapshot
-    # before resolution.
+    # Snapshot the original ``catalog_entry`` before resolution (which
+    # nulls it) so the ``UpstreamNotSpecError`` 422 — raised deep in the
+    # parser when an HTML developer-portal page comes back — can still
+    # name the catalog reference.
     catalog_entry = body.catalog_entry
     resolved, catalog_compatible = _resolve_catalog_entry_if_set(body)
+    # Reject a non-round-tripping product up front, post-resolution so
+    # catalog- and explicit-shape bodies are checked alike (G0.27 / T3 #1817).
+    _assert_product_round_trips(resolved)
     # The catalog-driven shape resolves its opt-in band from the catalog
     # row (``catalog_compatible``); the explicit-quadruple shape carries
     # the operator-supplied band on the body itself (T1 #1646). The two
@@ -429,6 +430,69 @@ async def ingest_endpoint(
         resolved=resolved,
         operator=operator,
         spec_info_versions_compatible=spec_info_versions_compatible,
+    )
+
+
+def _assert_product_round_trips(resolved: IngestRequest) -> None:
+    """Reject a supplied ``product`` that does not round-trip its connector_id.
+
+    G0.27 / T3 (#1817). The ingest write path persists rows, scaffolds the
+    auto-shim, and runs the version-coverage pre-flight under the supplied
+    ``product``. The dispatch / discovery surface, however, recovers the
+    product from the rendered ``connector_id`` via
+    :func:`~meho_backplane.operations._lookup.parse_connector_id` (the
+    first hyphen-segment of ``impl_id``). When the two diverge — an
+    operator ingesting ``--product drift-test --impl-id drift-impl`` whose
+    ``drift-impl-9.1`` parses to ``drift`` — rows land in a namespace no
+    dispatch probe queries and the auto-shim trips
+    :func:`~meho_backplane.connectors.registry.register_connector_v2`'s
+    round-trip hard-fail (#1816) with a 500-class ``RuntimeError``.
+
+    Rejecting the divergence here, at the request boundary, turns that
+    into an actionable 422 before any spec fetch or DB write, and is what
+    let G0.27 / T3 retire the long↔short row-reconciliation helpers
+    (``dispatch_product`` / ``_reconciled_row_product``) that previously
+    silently rewrote the row product. The registration hard-fail stays as
+    the backstop for any path that bypasses this boundary.
+
+    Reuses :func:`~meho_backplane.connectors.registry.product_impl_id_round_trips`
+    so the parse rule is shared with the registration check: the guard is
+    a no-op when ``version`` / ``impl_id`` is empty or the parse is lossy
+    (non-digit-leading version), and fires only on a lossless parse whose
+    recovered product disagrees.
+
+    ``resolved`` is the post-:func:`_resolve_catalog_entry_if_set` body, so
+    the triple is in explicit-quadruple shape; the request-model validator
+    guarantees the three fields are present by this point.
+    """
+    product = resolved.product
+    version = resolved.version
+    impl_id = resolved.impl_id
+    if product is None or version is None or impl_id is None:
+        return
+    if product_impl_id_round_trips(product=product, version=version, impl_id=impl_id):
+        return
+    derived_product = parse_connector_id(f"{impl_id}-{version}")[0]
+    raise HTTPException(
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "kind": "product_impl_id_mismatch",
+            "product": product,
+            "version": version,
+            "impl_id": impl_id,
+            "derived_product": derived_product,
+            "message": (
+                f"product={product!r} does not round-trip: connector_id "
+                f"{f'{impl_id}-{version}'!r} derives product "
+                f"{derived_product!r}, the dispatch-canonical token the "
+                f"connector listing emits and every dispatch probe keys "
+                f"on. Rows ingested under {product!r} would be invisible "
+                f"to dispatch. Use product={derived_product!r}, or rename "
+                f"impl_id so it derives {product!r}. "
+                f"See docs/codebase/error-message-shape.md for the "
+                f"convention."
+            ),
+        },
     )
 
 

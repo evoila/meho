@@ -351,6 +351,10 @@ def handrolled_class_for_impl_id(
     return None
 
 
+# Pre-existing 129-line blocker; #1817 cut it to ~104 by retiring the
+# dispatch_product reconciliation. The three structured-log branches are
+# the operator-facing audit trail; a real split is its own task.
+# code-quality-allow: function-size — pre-existing debt reduced by #1817, full split out of scope
 def ensure_connector_class_registered(
     *,
     product: str,
@@ -362,66 +366,41 @@ def ensure_connector_class_registered(
 
     Returns ``True`` when a new shim class was synthesised and
     registered; ``False`` when an entry already exists for the
-    canonical ``(product, version, impl_id)`` key in the v2 registry,
-    **or** when a hand-coded connector already covers the
-    ``(version, impl_id)`` under a divergent product token (the ingest
-    guard — see below). The return value drives the
+    ``(product, version, impl_id)`` key in the v2 registry, **or** when a
+    hand-coded connector already covers the ``(version, impl_id)`` (the
+    ingest guard — see below). The return value drives the
     ``connector_registered`` flag on
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`
     so the CLI can report "first ingest registered the connector"
     vs "subsequent ingest reused the existing connector".
 
-    Canonical-product registration (G0.27 / T2 #1816): the shim is
-    synthesised and registered under the **dispatch-canonical** product
-    (:func:`~meho_backplane.operations._lookup.dispatch_product`, i.e. the
-    token :func:`~meho_backplane.operations._lookup.parse_connector_id`
-    derives from the connector_id), **not** the raw operator-supplied
-    ``product``. Two reasons converge:
+    The shim is synthesised under the supplied ``product``. The ingest
+    route boundary rejects a product that does not round-trip its
+    connector_id (G0.27 / T3 #1817), so the supplied product is the
+    dispatch-canonical token (the spelling the rows persist under and
+    every dispatch probe queries); the shim is therefore dispatchable by
+    construction and satisfies
+    :func:`~meho_backplane.connectors.registry.register_connector_v2`'s
+    round-trip hard-fail (G0.27 / T2 #1816) rather than tripping it.
 
-    * It is the correct, dispatchable spelling. The ingested rows already
-      persist under the dispatch-canonical product
-      (:func:`~meho_backplane.operations.ingest.register_ingested._reconciled_row_product`).
-      Registering the shim under the supplied product when the two diverge
-      (an operator ingesting ``--product drift-test --impl-id drift-impl``,
-      where the connector_id ``drift-impl-…`` parses to ``drift``) put the
-      shim in a namespace the dispatcher never queries — a non-dispatchable
-      shim that resolves nothing. Aligning the shim to the row product
-      fixes that latent footgun (the same product-namespace shadow the
-      round-trip check exists to kill).
-    * ``register_connector_v2`` now hard-fails (G0.27 / T2 #1816) when the
-      declared ``product`` does not round-trip its connector_id. Synthesising
-      under the canonical product makes the shim round-trip *by construction*,
-      so the auto-shim path satisfies the invariant rather than tripping it.
+    Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to a
+    hand-coded connector already registered for the same
+    ``(version, impl_id)`` — a round-tripping ingest whose ``impl_id`` is
+    already served by a hand-coded class reuses it rather than scaffolding
+    a duplicate shim. The guard keys on ``impl_id`` (the product-
+    independent identity).
 
-    For aligned connectors (the overwhelmingly common case — the operator's
-    product already equals the parser-derived one) the canonical and
-    supplied products are identical, so this is a no-op.
-
-    Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to
-    any hand-coded connector already registered for the same
-    ``(version, impl_id)`` — even when that class registered under a
-    *different* ``product``. Without this, ingesting a spec under a
-    divergent product token (``--product vcf-logs`` for ``vrli-rest``,
-    after the realignment moved ``VcfLogsConnector``
-    to ``product="vrli"``) would scaffold a non-dispatchable
-    ``GenericRestConnector`` shim that shadows the real connector. The
-    guard keys on ``impl_id`` (the connector's product-independent
-    identity), so a product-namespace divergence cannot route around it.
-
-    Idempotency note: the v2 registry rejects duplicate
-    registration with :class:`RuntimeError`, so checking presence
-    first is necessary (not merely an optimisation). The check is
-    racy against concurrent ingests of the same triple, but v0.2
-    ingestion is single-threaded per pod (the CLI / REST handlers
-    are operator-driven and serialised) so the race is theoretical.
+    Idempotency: the v2 registry rejects duplicate registration with
+    :class:`RuntimeError`, so the presence check is necessary, not just an
+    optimisation. It is racy against concurrent ingests of the same
+    triple, but v0.2 ingestion is single-threaded per pod so the race is
+    theoretical.
     """
     from meho_backplane.connectors.registry import all_connectors_v2
-    from meho_backplane.operations._lookup import dispatch_product
 
-    # The shim must live under the dispatch-canonical product the ingested
-    # rows persist under (and that register_connector_v2's round-trip check
-    # now hard-fails on if violated) — not the raw operator-supplied one.
-    canonical_product = dispatch_product(product=product, version=version, impl_id=impl_id)
+    # ``canonical_product`` is a local alias of ``product`` (the boundary
+    # guard guarantees they are equal) kept only for the log fields below.
+    canonical_product = product
 
     existing = all_connectors_v2()
     if (canonical_product, version, impl_id) in existing:

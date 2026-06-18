@@ -84,7 +84,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.operations._lookup import dispatch_product
 from meho_backplane.operations.ingest._llm_grouping_internals import (
     DEFAULT_GROUPING_BATCH_SIZE,
     DEFAULT_MAX_GROUPS,
@@ -720,16 +719,14 @@ class IngestionPipelineService:
             connector_registered=aggregated.connector_registered,
         )
 
-        # Grouping reads the descriptor rows the register phase just
-        # wrote and writes its OperationGroup rows under the same
-        # product. register_ingested_operations persists rows under the
-        # dispatch-canonical product (reconciling the VCF-family
-        # long↔short split), so the grouping pass must key on the same
-        # spelling or it would read zero ungrouped ops and write groups
-        # under a product no dispatch probe queries. claude-rdc-hetzner-dc#1136.
-        row_product = dispatch_product(product=product, version=version, impl_id=impl_id)
+        # Grouping reads the descriptor rows the register phase just wrote
+        # and writes its OperationGroup rows under the same product. The
+        # register phase persists rows under the supplied ``product``,
+        # which the ingest route boundary guarantees round-trips its
+        # connector_id (G0.27 / T3 #1817), so descriptors and groups agree
+        # on the dispatch-canonical spelling every dispatch probe queries.
         grouping_result = await self._run_grouping_phase(
-            product=row_product,
+            product=product,
             version=version,
             impl_id=impl_id,
             tenant_id=tenant_id,

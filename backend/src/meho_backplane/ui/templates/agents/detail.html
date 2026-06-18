@@ -23,10 +23,17 @@
   class="space-y-4"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
-  <nav class="text-sm" aria-label="Breadcrumb">
-    <a href="/ui/agents" class="link link-hover">Agents</a>
-    <span aria-hidden="true">/</span>
-    <span class="font-mono">{{ agent.name }}</span>
+  <nav class="text-sm flex items-center justify-between gap-4" aria-label="Breadcrumb">
+    <div>
+      <a href="/ui/agents" class="link link-hover">Agents</a>
+      <span aria-hidden="true">/</span>
+      <span class="font-mono">{{ agent.name }}</span>
+    </div>
+    {# Entry point to the run history (T3 #1830). The run summaries carry no
+       per-run agent-definition back-link in the substrate, so this links to
+       the cross-agent runs list (filterable there by status / work_ref)
+       rather than fabricating an agent filter the read path cannot serve. #}
+    <a href="/ui/agents/runs" class="link link-primary">Recent runs &rarr;</a>
   </nav>
 
   {# Body slot -- full agent projection. #}

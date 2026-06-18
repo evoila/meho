@@ -648,8 +648,8 @@ func TestSearchSendsConnectorIDPreBaked(t *testing.T) {
 			if got := r.URL.Query().Get("connector_id"); got != "vmware-rest-9.0" {
 				t.Errorf("connector_id: got %q", got)
 			}
-			if got := r.URL.Query().Get("query"); got != "list VMs" {
-				t.Errorf("query: got %q", got)
+			if got := r.URL.Query().Get("q"); got != "list VMs" {
+				t.Errorf("q: got %q", got)
 			}
 			writeJSON(t, w, 200, searchResponse{
 				Hits: []searchHit{{OpID: "GET:/vcenter/vm", FusedScore: 1.0}},

@@ -153,7 +153,7 @@ func (p *plan) summary() string {
 //
 //	meho targets import <file>
 //	  [--update]              # PATCH existing targets instead of erroring on duplicates
-//	  [--dry-run]             # print the plan; no API calls
+//	  [--dry-run]             # print the plan (read-only: one GET, no writes)
 //	  [--json]                # output the plan as JSON (use with --dry-run)
 //	  [--backplane <url>]     # override the backplane URL
 //

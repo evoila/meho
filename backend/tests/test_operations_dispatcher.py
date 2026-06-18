@@ -2152,11 +2152,13 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 ) -> None:
     """A parked write with a registered permission preflight stores its banner.
 
-    G0.20-T4 (#1504): a credential-class write has no preview (suppressed),
-    but its capability-only permission preflight still runs and is merged
-    under ``proposed_effect["permission_preflight"]`` — so the reviewer
-    sees "this write will be denied" at park time, alongside the
-    identifier-only default (op identity is preserved).
+    G0.20-T4 (#1504): the capability-only permission preflight runs and is
+    merged under ``proposed_effect["permission_preflight"]`` — so the
+    reviewer sees "this write will be denied" at park time. Since #1856,
+    a non-credential write with no bespoke builder also carries the
+    generic params-echo default, so the preflight rides on the
+    ``{op_class, params_echo}`` base rather than the bare identifier
+    default; the banner is present either way.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -2206,10 +2208,10 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
         async with sessionmaker() as fresh:
             row = await fresh.get(ApprovalRequest, approval_request_id)
             assert row is not None
-            # Identifier default is preserved, with the preflight merged in.
-            assert row.proposed_effect["op_id"] == "vault.kv.preflight_op"
-            assert row.proposed_effect["connector_id"] == "vault-1.x"
-            assert row.proposed_effect["target_id"] == str(target.id)
+            # Generic params-echo base (#1856) carries the op identity via
+            # op_class + the echoed params; the preflight is merged in.
+            assert row.proposed_effect["op_class"] == "other"
+            assert row.proposed_effect["params_echo"] == {"path": "meho/test/x"}
             preflight = row.proposed_effect["permission_preflight"]
             assert preflight["will_be_denied"] is True
             assert preflight["required"] == ["create", "update"]

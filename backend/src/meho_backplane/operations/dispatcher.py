@@ -1300,6 +1300,7 @@ async def _build_proposed_effect(
             operator=operator,
             target=target,
             params=params,
+            connector_id=connector_id,
         )
         preview = await build_proposed_effect(ctx)
         if preview is not None and preview.get("preview_unavailable") is True:

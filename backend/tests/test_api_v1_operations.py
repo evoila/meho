@@ -394,6 +394,50 @@ async def test_get_search_returns_hits(
     assert "query_duration_ms" in body
 
 
+@pytest.mark.asyncio
+async def test_get_search_canonical_q_returns_hits(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The canonical ``q`` free-text param (#1854) drives the search like ``query``."""
+    await _seed_descriptor(op_id="vault.kv.read", summary="Read a secret.")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&q=read",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["hits"][0]["op_id"] == "vault.kv.read"
+
+
+def test_get_search_missing_query_returns_422(client: TestClient) -> None:
+    """Neither ``q`` nor the deprecated ``query`` supplied -> typed 422 (#1854)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    assert "missing_query" in response.json()["detail"]
+
+
+def test_get_search_q_and_query_conflict_returns_422(client: TestClient) -> None:
+    """``q`` and the deprecated ``query`` disagreeing is a 422, not a silent pick (#1854)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&q=read&query=write",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    assert "ambiguous_free_text_filter" in response.json()["detail"]
+
+
 def test_get_search_unknown_connector_returns_404(client: TestClient) -> None:
     """AC: /search behaves identically to /groups for an unknown connector."""
     key = make_rsa_keypair("kid-A")

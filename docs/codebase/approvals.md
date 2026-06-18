@@ -311,26 +311,34 @@ The per-op preview is opt-in via a builder registry in
   operator + target + params.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
-  `build_proposed_effect`. The result — wrapped as
-  `{op_class, preview}` — becomes the base envelope; when the builder
-  declines (returns `None`) the dispatcher's `_build_proposed_effect`
-  seam substitutes the identifier-only base. Onto whichever base it has,
-  the seam stamps the catalog `descriptor.safety_level` (#1855) before
-  handing the envelope to `create_pending_request` as `proposed_effect`
-  (see "Catalog `safety_level` on every envelope" below). `_build_proposed_effect`
+  `build_proposed_effect`. A bespoke builder's result — wrapped as
+  `{op_class, preview}` — becomes the base envelope; an op with no bespoke
+  builder gets the **generic params-echo default**
+  (`{op_class, params_echo}`, see invariant 1); when the builder declines
+  (returns `None`) the dispatcher's `_build_proposed_effect` seam
+  substitutes the identifier-only base. Onto whichever base it has, the
+  seam stamps the catalog `descriptor.safety_level` (#1855) before handing
+  the envelope to `create_pending_request` as `proposed_effect` (see
+  "Catalog `safety_level` on every envelope" below). `_build_proposed_effect`
   returns `None` — and the caller stores its own bare identifier-only
-  default — only when connector resolution / hook execution itself
-  raises.
+  default — only when connector resolution / hook execution itself raises.
 
 Three invariants make the hook safe to wire on the park path:
 
-1. **Opt-in / no regression for the preview.** An op with no registered
-   builder gets no `{op_class, preview}` envelope — the per-op
-   `build_proposed_effect` returns `None`. As of #1855 the durable row
-   is no longer byte-identical to the pre-#1855 identifier-only default,
-   though: the dispatcher seam layers `safety_level` on top of the
-   identifier base (below), so the parked row always names its severity.
-   The *preview* itself is still strictly opt-in.
+1. **Generic echo default, opt-in bespoke builder (#1856); safety_level
+   on every envelope (#1855).** An op *without* a registered builder no
+   longer yields `None` — it gets a **generic params-echo default**: the
+   requested params are echoed under a `params_echo` envelope key (distinct
+   from a computed `preview`), redaction-safe (see invariant 3), so every
+   approval-gated op (keycloak, nsx, sddc, vcfa, …) gets param-level
+   legibility for free instead of showing the approver only `{op_id,
+   connector_id, target_id}`. A registered builder still wins (no
+   double-echo). The identifier-only default is reached only when the op is
+   credential-class (suppressed), its params are empty, or a registered
+   builder declines. Independently, the dispatcher seam layers the catalog
+   `safety_level` on top of whichever base it has (below), so the parked
+   row always names its severity — the durable row is no longer
+   byte-identical to the pre-#1855 identifier-only default.
 2. **Fail-soft, never silent.** A builder that raises (a dry-run that
    hits the API and errors, a preview listing read that can't execute)
    never blocks the park — the safety-relevant action always proceeds.
@@ -347,10 +355,21 @@ Three invariants make the hook safe to wire on the park path:
 3. **Redaction-safe.** `build_proposed_effect` classifies the op via
    `classify_op` (the same single-sourced sensitivity classification used
    for broadcast/audit redaction, #1401) and **suppresses** the preview
-   for any credential class (`credential_read` / `credential_mint` /
-   `credential_write`) before the builder even runs — a durable row
-   never carries secret material. Builders are themselves expected to
-   return identity-only summaries.
+   (bespoke *and* generic) for any credential class (`credential_read` /
+   `credential_mint` / `credential_write`) — the suppression check runs
+   first, before the builder lookup — so a credential-class op never
+   surfaces request/response detail in a durable row. Builders are
+   themselves expected to return identity-only summaries. The generic
+   params-echo default (#1856) scrubs the echoed params with **two**
+   passes that reuse the existing redaction discipline:
+   `_scrub_secret_param_keys` masks values keyed by a well-known
+   credential name (`password` / `client_secret` / `token` / … —
+   recursively, since the connector-boundary engine walks Mappings
+   key-by-key without inspecting the *key*), then
+   `apply_connector_boundary_redaction` (the same per-`(connector_id,
+   tenant, op)` pipeline the response path and the dispatch-request
+   preview run) catches secret *value* shapes (JWTs, bearer tokens,
+   kubeconfig blobs, labelled `key=value` strings in a single leaf).
 
 The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's

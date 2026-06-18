@@ -165,6 +165,13 @@ const (
 	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
 )
 
+// Defines values for KindFilterValue.
+const (
+	KindFilterValueCron   KindFilterValue = "cron"
+	KindFilterValueEvent  KindFilterValue = "event"
+	KindFilterValueOneOff KindFilterValue = "one_off"
+)
+
 // Defines values for MemoryScope.
 const (
 	MemoryScopeTarget     MemoryScope = "target"
@@ -229,6 +236,14 @@ const (
 	ShowTemplateResponseStatusDeprecated ShowTemplateResponseStatus = "deprecated"
 	ShowTemplateResponseStatusDraft      ShowTemplateResponseStatus = "draft"
 	ShowTemplateResponseStatusPublished  ShowTemplateResponseStatus = "published"
+)
+
+// Defines values for StatusFilterValue.
+const (
+	StatusFilterValueActive    StatusFilterValue = "active"
+	StatusFilterValueCancelled StatusFilterValue = "cancelled"
+	StatusFilterValueFired     StatusFilterValue = "fired"
+	StatusFilterValuePaused    StatusFilterValue = "paused"
 )
 
 // Defines values for StepBodyType.
@@ -381,17 +396,17 @@ const (
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
 const (
-	ListTriggersApiV1SchedulerTriggersGetParamsKindCron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
-	ListTriggersApiV1SchedulerTriggersGetParamsKindEvent  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
-	ListTriggersApiV1SchedulerTriggersGetParamsKindOneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
+	Cron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
+	Event  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
+	OneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
 )
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsStatus.
 const (
-	ListTriggersApiV1SchedulerTriggersGetParamsStatusActive    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
-	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
-	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
-	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
+	Active    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
+	Cancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
+	Fired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
+	Paused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -1545,6 +1560,67 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
 	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 	To MemoryScope `json:"to"`
+}
+
+// BodyUiSchedulerCreateSubmitUiSchedulerCreatePost defines model for Body_ui_scheduler_create_submit_ui_scheduler_create_post.
+type BodyUiSchedulerCreateSubmitUiSchedulerCreatePost struct {
+	AgentDefinitionId *string `json:"agent_definition_id,omitempty"`
+	CronExpr          *string `json:"cron_expr"`
+	EventFilter       *string `json:"event_filter"`
+	FireAt            *string `json:"fire_at"`
+	InFlightPolicy    *string `json:"in_flight_policy,omitempty"`
+	Inputs            *string `json:"inputs"`
+	Kind              *string `json:"kind,omitempty"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Timezone   *string           `json:"timezone,omitempty"`
+	WorkRef    *string           `json:"work_ref"`
+}
+
+// BodyUiSchedulerValidateCronUiSchedulerValidateCronPost defines model for Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post.
+type BodyUiSchedulerValidateCronUiSchedulerValidateCronPost struct {
+	CronExpr *string `json:"cron_expr,omitempty"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Timezone   *string           `json:"timezone,omitempty"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
@@ -3133,6 +3209,15 @@ type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
 
+// KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
+//
+// Mirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`
+// literal (“cron“ / “one_off“ / “event“). The “str“ mixin keeps
+// the template's “{{ kind_filter }}“ rendering + “selected“ matching
+// stable, and an out-of-enum value fails Pydantic validation at the HTTP
+// boundary with a 422 rather than silently filtering nothing.
+type KindFilterValue string
+
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
 //
 // Carries no operation call -- :attr:`body` is the operator-readable
@@ -4314,6 +4399,11 @@ type StartRunRequest struct {
 	TemplateSlug string                  `json:"template_slug"`
 	WorkRef      *string                 `json:"work_ref"`
 }
+
+// StatusFilterValue Closed enum of the trigger “status“ values exposed in the filter URL.
+//
+// Mirrors :data:`~meho_backplane.scheduler.schemas.StatusFilter`.
+type StatusFilterValue string
 
 // StepBody The opaque-by-construction single-step shape returned by “meho.runbook.next“.
 //
@@ -6230,6 +6320,13 @@ type RunbooksDetailUiRunbooksSlugGetParams struct {
 	Version *int `form:"version,omitempty" json:"version,omitempty"`
 }
 
+// UiSchedulerListUiSchedulerGetParams defines parameters for UiSchedulerListUiSchedulerGet.
+type UiSchedulerListUiSchedulerGetParams struct {
+	Kind    *KindFilterValue   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status  *StatusFilterValue `form:"status,omitempty" json:"status,omitempty"`
+	WorkRef *string            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort *MehoBackplaneUiRoutesTopologyTableSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
@@ -6500,6 +6597,27 @@ type RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody = BodyRunbook
 
 // RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody defines body for RunbooksPublishUiRunbooksSlugPublishPost for application/x-www-form-urlencoded ContentType.
 type RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody = BodyRunbooksPublishUiRunbooksSlugPublishPost
+
+// UiSchedulerListUiSchedulerGetJSONRequestBody defines body for UiSchedulerListUiSchedulerGet for application/json ContentType.
+type UiSchedulerListUiSchedulerGetJSONRequestBody = UISessionContext
+
+// UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody defines body for UiSchedulerCreateModalUiSchedulerCreateGet for application/json ContentType.
+type UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody = UISessionContext
+
+// UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody defines body for UiSchedulerCreateSubmitUiSchedulerCreatePost for application/x-www-form-urlencoded ContentType.
+type UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody = BodyUiSchedulerCreateSubmitUiSchedulerCreatePost
+
+// UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody defines body for UiSchedulerValidateCronUiSchedulerValidateCronPost for application/x-www-form-urlencoded ContentType.
+type UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody = BodyUiSchedulerValidateCronUiSchedulerValidateCronPost
+
+// SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody defines body for SchedulerDetailUiSchedulerTriggerIdGet for application/json ContentType.
+type SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody = UISessionContext
+
+// UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody defines body for UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet for application/json ContentType.
+type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody = UISessionContext
+
+// UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody defines body for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost for application/json ContentType.
+type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISessionContext
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -8037,6 +8155,41 @@ type ClientInterface interface {
 	RunbooksPublishUiRunbooksSlugPublishPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerListUiSchedulerGetWithBody request with any body
+	UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerListUiSchedulerGet(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerCreateModalUiSchedulerCreateGetWithBody request with any body
+	UiSchedulerCreateModalUiSchedulerCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerCreateModalUiSchedulerCreateGet(ctx context.Context, body UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerCreateSubmitUiSchedulerCreatePostWithBody request with any body
+	UiSchedulerCreateSubmitUiSchedulerCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerCreateSubmitUiSchedulerCreatePostWithFormdataBody(ctx context.Context, body UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerValidateCronUiSchedulerValidateCronPostWithBody request with any body
+	UiSchedulerValidateCronUiSchedulerValidateCronPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerValidateCronUiSchedulerValidateCronPostWithFormdataBody(ctx context.Context, body UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SchedulerDetailUiSchedulerTriggerIdGetWithBody request with any body
+	SchedulerDetailUiSchedulerTriggerIdGetWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SchedulerDetailUiSchedulerTriggerIdGet(ctx context.Context, triggerId openapi_types.UUID, body SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBody request with any body
+	UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody request with any body
+	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11194,6 +11347,174 @@ func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithBody(ctx context.Co
 
 func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksPublishUiRunbooksSlugPublishPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerListUiSchedulerGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerListUiSchedulerGet(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerListUiSchedulerGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCreateModalUiSchedulerCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCreateModalUiSchedulerCreateGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCreateModalUiSchedulerCreateGet(ctx context.Context, body UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCreateModalUiSchedulerCreateGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCreateSubmitUiSchedulerCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCreateSubmitUiSchedulerCreatePostWithFormdataBody(ctx context.Context, body UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerValidateCronUiSchedulerValidateCronPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerValidateCronUiSchedulerValidateCronPostWithFormdataBody(ctx context.Context, body UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SchedulerDetailUiSchedulerTriggerIdGetWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSchedulerDetailUiSchedulerTriggerIdGetRequestWithBody(c.Server, triggerId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SchedulerDetailUiSchedulerTriggerIdGet(ctx context.Context, triggerId openapi_types.UUID, body SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSchedulerDetailUiSchedulerTriggerIdGetRequest(c.Server, triggerId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequestWithBody(c.Server, triggerId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequest(c.Server, triggerId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody(c.Server, triggerId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequest(c.Server, triggerId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22217,6 +22538,361 @@ func NewRunbooksPublishUiRunbooksSlugPublishPostRequestWithBody(server string, s
 	return req, nil
 }
 
+// NewUiSchedulerListUiSchedulerGetRequest calls the generic UiSchedulerListUiSchedulerGet builder with application/json body
+func NewUiSchedulerListUiSchedulerGetRequest(server string, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiSchedulerListUiSchedulerGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiSchedulerListUiSchedulerGetRequestWithBody generates requests for UiSchedulerListUiSchedulerGet with any type of body
+func NewUiSchedulerListUiSchedulerGetRequestWithBody(server string, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSchedulerCreateModalUiSchedulerCreateGetRequest calls the generic UiSchedulerCreateModalUiSchedulerCreateGet builder with application/json body
+func NewUiSchedulerCreateModalUiSchedulerCreateGetRequest(server string, body UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiSchedulerCreateModalUiSchedulerCreateGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiSchedulerCreateModalUiSchedulerCreateGetRequestWithBody generates requests for UiSchedulerCreateModalUiSchedulerCreateGet with any type of body
+func NewUiSchedulerCreateModalUiSchedulerCreateGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithFormdataBody calls the generic UiSchedulerCreateSubmitUiSchedulerCreatePost builder with application/x-www-form-urlencoded body
+func NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithFormdataBody(server string, body UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithBody generates requests for UiSchedulerCreateSubmitUiSchedulerCreatePost with any type of body
+func NewUiSchedulerCreateSubmitUiSchedulerCreatePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithFormdataBody calls the generic UiSchedulerValidateCronUiSchedulerValidateCronPost builder with application/x-www-form-urlencoded body
+func NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithFormdataBody(server string, body UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithBody generates requests for UiSchedulerValidateCronUiSchedulerValidateCronPost with any type of body
+func NewUiSchedulerValidateCronUiSchedulerValidateCronPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/validate-cron")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSchedulerDetailUiSchedulerTriggerIdGetRequest calls the generic SchedulerDetailUiSchedulerTriggerIdGet builder with application/json body
+func NewSchedulerDetailUiSchedulerTriggerIdGetRequest(server string, triggerId openapi_types.UUID, body SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSchedulerDetailUiSchedulerTriggerIdGetRequestWithBody(server, triggerId, "application/json", bodyReader)
+}
+
+// NewSchedulerDetailUiSchedulerTriggerIdGetRequestWithBody generates requests for SchedulerDetailUiSchedulerTriggerIdGet with any type of body
+func NewSchedulerDetailUiSchedulerTriggerIdGetRequestWithBody(server string, triggerId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequest calls the generic UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet builder with application/json body
+func NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequest(server string, triggerId openapi_types.UUID, body UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequestWithBody(server, triggerId, "application/json", bodyReader)
+}
+
+// NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequestWithBody generates requests for UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet with any type of body
+func NewUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetRequestWithBody(server string, triggerId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/%s/cancel", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequest calls the generic UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost builder with application/json body
+func NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequest(server string, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody(server, triggerId, "application/json", bodyReader)
+}
+
+// NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody generates requests for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost with any type of body
+func NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody(server string, triggerId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/scheduler/%s/cancel", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiTopologyTableUiTopologyGetRequest generates requests for UiTopologyTableUiTopologyGet
 func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTableUiTopologyGetParams) (*http.Request, error) {
 	var err error
@@ -23270,6 +23946,41 @@ type ClientWithResponsesInterface interface {
 	RunbooksPublishUiRunbooksSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksPublishUiRunbooksSlugPublishPostResponse, error)
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksPublishUiRunbooksSlugPublishPostResponse, error)
+
+	// UiSchedulerListUiSchedulerGetWithBodyWithResponse request with any body
+	UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error)
+
+	UiSchedulerListUiSchedulerGetWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error)
+
+	// UiSchedulerCreateModalUiSchedulerCreateGetWithBodyWithResponse request with any body
+	UiSchedulerCreateModalUiSchedulerCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCreateModalUiSchedulerCreateGetResponse, error)
+
+	UiSchedulerCreateModalUiSchedulerCreateGetWithResponse(ctx context.Context, body UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCreateModalUiSchedulerCreateGetResponse, error)
+
+	// UiSchedulerCreateSubmitUiSchedulerCreatePostWithBodyWithResponse request with any body
+	UiSchedulerCreateSubmitUiSchedulerCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCreateSubmitUiSchedulerCreatePostResponse, error)
+
+	UiSchedulerCreateSubmitUiSchedulerCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCreateSubmitUiSchedulerCreatePostResponse, error)
+
+	// UiSchedulerValidateCronUiSchedulerValidateCronPostWithBodyWithResponse request with any body
+	UiSchedulerValidateCronUiSchedulerValidateCronPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerValidateCronUiSchedulerValidateCronPostResponse, error)
+
+	UiSchedulerValidateCronUiSchedulerValidateCronPostWithFormdataBodyWithResponse(ctx context.Context, body UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerValidateCronUiSchedulerValidateCronPostResponse, error)
+
+	// SchedulerDetailUiSchedulerTriggerIdGetWithBodyWithResponse request with any body
+	SchedulerDetailUiSchedulerTriggerIdGetWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SchedulerDetailUiSchedulerTriggerIdGetResponse, error)
+
+	SchedulerDetailUiSchedulerTriggerIdGetWithResponse(ctx context.Context, triggerId openapi_types.UUID, body SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*SchedulerDetailUiSchedulerTriggerIdGetResponse, error)
+
+	// UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBodyWithResponse request with any body
+	UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse, error)
+
+	UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse, error)
+
+	// UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse request with any body
+	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
+
+	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -27474,6 +28185,160 @@ func (r RunbooksPublishUiRunbooksSlugPublishPostResponse) StatusCode() int {
 	return 0
 }
 
+type UiSchedulerListUiSchedulerGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerListUiSchedulerGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerListUiSchedulerGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSchedulerCreateModalUiSchedulerCreateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerCreateModalUiSchedulerCreateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerCreateModalUiSchedulerCreateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSchedulerCreateSubmitUiSchedulerCreatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerCreateSubmitUiSchedulerCreatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerCreateSubmitUiSchedulerCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSchedulerValidateCronUiSchedulerValidateCronPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerValidateCronUiSchedulerValidateCronPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerValidateCronUiSchedulerValidateCronPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SchedulerDetailUiSchedulerTriggerIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SchedulerDetailUiSchedulerTriggerIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SchedulerDetailUiSchedulerTriggerIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyTableUiTopologyGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -29825,6 +30690,125 @@ func (c *ClientWithResponses) RunbooksPublishUiRunbooksSlugPublishPostWithFormda
 		return nil, err
 	}
 	return ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp)
+}
+
+// UiSchedulerListUiSchedulerGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerListUiSchedulerGetResponse
+func (c *ClientWithResponses) UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error) {
+	rsp, err := c.UiSchedulerListUiSchedulerGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerListUiSchedulerGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerListUiSchedulerGetWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error) {
+	rsp, err := c.UiSchedulerListUiSchedulerGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerListUiSchedulerGetResponse(rsp)
+}
+
+// UiSchedulerCreateModalUiSchedulerCreateGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerCreateModalUiSchedulerCreateGetResponse
+func (c *ClientWithResponses) UiSchedulerCreateModalUiSchedulerCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCreateModalUiSchedulerCreateGetResponse, error) {
+	rsp, err := c.UiSchedulerCreateModalUiSchedulerCreateGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCreateModalUiSchedulerCreateGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerCreateModalUiSchedulerCreateGetWithResponse(ctx context.Context, body UiSchedulerCreateModalUiSchedulerCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCreateModalUiSchedulerCreateGetResponse, error) {
+	rsp, err := c.UiSchedulerCreateModalUiSchedulerCreateGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCreateModalUiSchedulerCreateGetResponse(rsp)
+}
+
+// UiSchedulerCreateSubmitUiSchedulerCreatePostWithBodyWithResponse request with arbitrary body returning *UiSchedulerCreateSubmitUiSchedulerCreatePostResponse
+func (c *ClientWithResponses) UiSchedulerCreateSubmitUiSchedulerCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCreateSubmitUiSchedulerCreatePostResponse, error) {
+	rsp, err := c.UiSchedulerCreateSubmitUiSchedulerCreatePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCreateSubmitUiSchedulerCreatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerCreateSubmitUiSchedulerCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiSchedulerCreateSubmitUiSchedulerCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCreateSubmitUiSchedulerCreatePostResponse, error) {
+	rsp, err := c.UiSchedulerCreateSubmitUiSchedulerCreatePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCreateSubmitUiSchedulerCreatePostResponse(rsp)
+}
+
+// UiSchedulerValidateCronUiSchedulerValidateCronPostWithBodyWithResponse request with arbitrary body returning *UiSchedulerValidateCronUiSchedulerValidateCronPostResponse
+func (c *ClientWithResponses) UiSchedulerValidateCronUiSchedulerValidateCronPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerValidateCronUiSchedulerValidateCronPostResponse, error) {
+	rsp, err := c.UiSchedulerValidateCronUiSchedulerValidateCronPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerValidateCronUiSchedulerValidateCronPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerValidateCronUiSchedulerValidateCronPostWithFormdataBodyWithResponse(ctx context.Context, body UiSchedulerValidateCronUiSchedulerValidateCronPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerValidateCronUiSchedulerValidateCronPostResponse, error) {
+	rsp, err := c.UiSchedulerValidateCronUiSchedulerValidateCronPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerValidateCronUiSchedulerValidateCronPostResponse(rsp)
+}
+
+// SchedulerDetailUiSchedulerTriggerIdGetWithBodyWithResponse request with arbitrary body returning *SchedulerDetailUiSchedulerTriggerIdGetResponse
+func (c *ClientWithResponses) SchedulerDetailUiSchedulerTriggerIdGetWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SchedulerDetailUiSchedulerTriggerIdGetResponse, error) {
+	rsp, err := c.SchedulerDetailUiSchedulerTriggerIdGetWithBody(ctx, triggerId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSchedulerDetailUiSchedulerTriggerIdGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) SchedulerDetailUiSchedulerTriggerIdGetWithResponse(ctx context.Context, triggerId openapi_types.UUID, body SchedulerDetailUiSchedulerTriggerIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*SchedulerDetailUiSchedulerTriggerIdGetResponse, error) {
+	rsp, err := c.SchedulerDetailUiSchedulerTriggerIdGet(ctx, triggerId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSchedulerDetailUiSchedulerTriggerIdGetResponse(rsp)
+}
+
+// UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse
+func (c *ClientWithResponses) UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse, error) {
+	rsp, err := c.UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithBody(ctx, triggerId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse, error) {
+	rsp, err := c.UiSchedulerCancelModalUiSchedulerTriggerIdCancelGet(ctx, triggerId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse(rsp)
+}
+
+// UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse request with arbitrary body returning *UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse
+func (c *ClientWithResponses) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error) {
+	rsp, err := c.UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(ctx, triggerId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error) {
+	rsp, err := c.UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx, triggerId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -35271,6 +36255,188 @@ func ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp *http.Response) (
 	}
 
 	response := &RunbooksPublishUiRunbooksSlugPublishPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerListUiSchedulerGetResponse parses an HTTP response from a UiSchedulerListUiSchedulerGetWithResponse call
+func ParseUiSchedulerListUiSchedulerGetResponse(rsp *http.Response) (*UiSchedulerListUiSchedulerGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerListUiSchedulerGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerCreateModalUiSchedulerCreateGetResponse parses an HTTP response from a UiSchedulerCreateModalUiSchedulerCreateGetWithResponse call
+func ParseUiSchedulerCreateModalUiSchedulerCreateGetResponse(rsp *http.Response) (*UiSchedulerCreateModalUiSchedulerCreateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerCreateModalUiSchedulerCreateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerCreateSubmitUiSchedulerCreatePostResponse parses an HTTP response from a UiSchedulerCreateSubmitUiSchedulerCreatePostWithResponse call
+func ParseUiSchedulerCreateSubmitUiSchedulerCreatePostResponse(rsp *http.Response) (*UiSchedulerCreateSubmitUiSchedulerCreatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerCreateSubmitUiSchedulerCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerValidateCronUiSchedulerValidateCronPostResponse parses an HTTP response from a UiSchedulerValidateCronUiSchedulerValidateCronPostWithResponse call
+func ParseUiSchedulerValidateCronUiSchedulerValidateCronPostResponse(rsp *http.Response) (*UiSchedulerValidateCronUiSchedulerValidateCronPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerValidateCronUiSchedulerValidateCronPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSchedulerDetailUiSchedulerTriggerIdGetResponse parses an HTTP response from a SchedulerDetailUiSchedulerTriggerIdGetWithResponse call
+func ParseSchedulerDetailUiSchedulerTriggerIdGetResponse(rsp *http.Response) (*SchedulerDetailUiSchedulerTriggerIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SchedulerDetailUiSchedulerTriggerIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse parses an HTTP response from a UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetWithResponse call
+func ParseUiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse(rsp *http.Response) (*UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse parses an HTTP response from a UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithResponse call
+func ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp *http.Response) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

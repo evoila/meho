@@ -1,0 +1,170 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Per-trigger detail page (Initiative #1824, Task #1826, G10.8-T6).
+  Extends ``base.html``. Renders the full ``ScheduledTriggerRead`` row:
+  the discriminator (kind + cron/fire_at/event_filter), the lifecycle
+  (status, next_fire_at, last_fired_at), the governance fields
+  (in_flight_policy, identity_sub, created_by_sub), the inputs blob
+  (pretty JSON), and the work_ref chip.
+
+  The cancel button (tenant_admin-only, hidden on a terminal trigger)
+  HTMX-loads the terminal-confirm dialog into the modal container.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Scheduled trigger &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-5"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <div id="scheduler-modal-container"></div>
+
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div class="space-y-1">
+      <a href="/ui/scheduler" class="link link-hover text-sm opacity-70">&larr; Scheduler</a>
+      <h1 class="text-xl font-semibold flex items-center gap-3">
+        <span class="badge badge-ghost">{{ trigger.kind }}</span>
+        <span class="badge {{ trigger.status_badge }}">{{ trigger.status }}</span>
+        <span class="font-mono text-sm opacity-70">{{ trigger.id }}</span>
+      </h1>
+    </div>
+    {% if can_cancel %}
+      <button
+        type="button"
+        class="btn btn-error btn-sm"
+        hx-get="/ui/scheduler/{{ trigger.id }}/cancel"
+        hx-target="#scheduler-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Cancel this trigger"
+      >
+        Cancel trigger
+      </button>
+    {% elif is_terminal %}
+      <span class="text-xs opacity-60">
+        This trigger is terminal ({{ trigger.status }}) and cannot be cancelled.
+      </span>
+    {% endif %}
+  </header>
+
+  <div class="grid gap-5 lg:grid-cols-2">
+    {# ---------- Schedule card ---------- #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body">
+        <h2 class="card-title text-base">Schedule</h2>
+        <dl class="grid grid-cols-[10rem_1fr] gap-y-2 text-sm">
+          <dt class="opacity-60">Kind</dt>
+          <dd>{{ trigger.kind }}</dd>
+
+          {% if trigger.kind == "cron" %}
+            <dt class="opacity-60">Cron expression</dt>
+            <dd class="font-mono">{{ trigger.cron_expr }}</dd>
+            <dt class="opacity-60">Timezone</dt>
+            <dd>{{ trigger.timezone }}</dd>
+          {% elif trigger.kind == "one_off" %}
+            <dt class="opacity-60">Fire at</dt>
+            <dd class="font-mono">{% if trigger.fire_at %}{{ trigger.fire_at.isoformat() }}{% else %}—{% endif %}</dd>
+          {% else %}
+            <dt class="opacity-60">Event filter</dt>
+            <dd>
+              {% if trigger.event_filter_json %}
+                <pre class="bg-base-200 rounded p-2 text-xs overflow-x-auto">{{ trigger.event_filter_json }}</pre>
+              {% else %}
+                <span class="opacity-40">—</span>
+              {% endif %}
+            </dd>
+          {% endif %}
+
+          <dt class="opacity-60">Next fire</dt>
+          <dd class="font-mono">{% if trigger.next_fire_at %}{{ trigger.next_fire_at.isoformat() }}{% else %}<span class="opacity-40">— (no future fire)</span>{% endif %}</dd>
+
+          <dt class="opacity-60">Last fired</dt>
+          <dd class="font-mono">{% if trigger.last_fired_at %}{{ trigger.last_fired_at.isoformat() }}{% else %}<span class="opacity-40">— (never)</span>{% endif %}</dd>
+        </dl>
+      </div>
+    </div>
+
+    {# ---------- Governance card ---------- #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body">
+        <h2 class="card-title text-base">Governance</h2>
+        <dl class="grid grid-cols-[10rem_1fr] gap-y-2 text-sm">
+          <dt class="opacity-60">Agent</dt>
+          <dd>
+            {% if trigger.agent_name %}
+              {{ trigger.agent_name }}
+            {% else %}
+              <span class="opacity-50">(definition deleted)</span>
+            {% endif %}
+            <span class="font-mono text-xs opacity-50 block">{{ trigger.agent_definition_id }}</span>
+          </dd>
+
+          <dt class="opacity-60">In-flight policy</dt>
+          <dd>{{ trigger.in_flight_policy }}</dd>
+
+          {# identity_sub governs who the run impersonates -- read-only,
+             advanced (Initiative #1824 keeps it read-mostly). #}
+          <dt class="opacity-60">Run identity</dt>
+          <dd class="font-mono text-xs">{{ trigger.identity_sub }}</dd>
+
+          <dt class="opacity-60">Created by</dt>
+          <dd class="font-mono text-xs">{{ trigger.created_by_sub }}</dd>
+
+          <dt class="opacity-60">Change ticket</dt>
+          <dd>
+            {% if trigger.work_ref %}
+              <span class="badge badge-outline badge-sm font-mono">{{ trigger.work_ref }}</span>
+            {% else %}
+              <span class="opacity-40">—</span>
+            {% endif %}
+          </dd>
+
+          <dt class="opacity-60">Created</dt>
+          <dd class="font-mono text-xs">{% if trigger.created_at %}{{ trigger.created_at.isoformat() }}{% endif %}</dd>
+          <dt class="opacity-60">Updated</dt>
+          <dd class="font-mono text-xs">{% if trigger.updated_at %}{{ trigger.updated_at.isoformat() }}{% endif %}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  {# ---------- Inputs card ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body">
+      <h2 class="card-title text-base">Run inputs</h2>
+      {% if trigger.inputs_json %}
+        <pre class="bg-base-200 rounded p-3 text-xs overflow-x-auto">{{ trigger.inputs_json }}</pre>
+      {% else %}
+        <p class="text-sm opacity-60">No inputs configured for this trigger.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ---------- Recent fires (work_ref-correlated) ----------
+     A trigger carries no ``trigger_id -> run`` back-link in the substrate
+     (documented gap, Initiative #1824). When the trigger carries a
+     ``work_ref`` the runs it dispatched share that reference, so we link
+     to the work_ref-filtered runs view rather than fabricating a
+     correlation that doesn't exist. #}
+  {% if trigger.work_ref %}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body">
+        <h2 class="card-title text-base">Recent fires</h2>
+        <p class="text-sm opacity-70">
+          Runs dispatched under this trigger share its change ticket. View
+          the work_ref-correlated agent runs:
+        </p>
+        <a
+          href="/ui/agents/runs?work_ref={{ trigger.work_ref | urlencode }}"
+          class="link link-primary text-sm"
+        >
+          Runs for {{ trigger.work_ref }} &rarr;
+        </a>
+      </div>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

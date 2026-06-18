@@ -1,0 +1,227 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded create-trigger modal for the Scheduler surface
+  (Initiative #1824 Task #1826 G10.8-T6). Loaded into
+  ``#scheduler-modal-container`` by the "Create trigger" button's
+  ``hx-get`` to ``/ui/scheduler/create``. The shared app-shell modal
+  controller opens the inserted ``<dialog>`` via ``showModal()`` on
+  ``htmx:afterSwap`` and dismisses on close / ESC / backdrop (#1803).
+
+  Submit contract: the form ``hx-post``s to ``/ui/scheduler/create``,
+  swapping ``#scheduler-modal-container`` (``hx-swap="innerHTML"``).
+    * Success -> the handler returns 204 + ``HX-Redirect: /ui/scheduler``
+      so HTMX reloads the list with the new trigger (newest first).
+    * Validation failure -> the handler returns this same modal re-rendered
+      with ``error_message`` set; HTMX replaces the container's dialog so
+      the operator fixes the field without leaving the flow.
+
+  Kind switch: an Alpine ``x-data`` root toggles the per-kind field group
+  (cron / one_off / event) on the ``kind`` <select>. Only the selected
+  kind's discriminator field is meaningful; the server populates only that
+  field on the wire schema regardless of any stale hidden values.
+
+  Live cron validation: the cron <input> ``hx-post``s to
+  ``/ui/scheduler/validate-cron`` (debounced) and swaps the
+  ``#scheduler-cron-preview`` fragment, so the operator sees validity + a
+  ``next_fire_at`` preview before submit -- no free-text cron with no
+  feedback.
+
+  CSRF: the form carries its own ``hx-headers`` echo of the token (HTMX
+  does not inherit ``hx-headers`` to children injected into a swapped
+  fragment), and the route re-mints + re-sets the ``meho_csrf`` cookie on
+  every modal render so the double-submit pair lines up (#1693 / #1754).
+-#}
+<dialog id="scheduler-create-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="scheduler-create-modal-title">Create scheduled trigger</h3>
+
+    {% if error_message %}
+      <div role="alert" class="alert alert-error text-sm mt-2">
+        <span>{{ error_message }}</span>
+      </div>
+    {% endif %}
+
+    {% if not agent_definitions %}
+      <div role="alert" class="alert alert-warning text-sm mt-2">
+        <span>
+          This tenant has no agent definitions yet. A trigger needs an agent
+          to dispatch — define one under Agents first.
+        </span>
+      </div>
+    {% endif %}
+
+    <form
+      id="scheduler-create-form"
+      hx-post="/ui/scheduler/create"
+      hx-target="#scheduler-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      class="space-y-3 py-2"
+      aria-labelledby="scheduler-create-modal-title"
+      x-data="{ kind: 'cron' }"
+    >
+      {# ---------- Agent definition ---------- #}
+      <label class="form-control">
+        <span class="label-text">Agent definition</span>
+        <select
+          name="agent_definition_id"
+          class="select select-bordered select-sm"
+          required
+          aria-label="Agent definition"
+        >
+          <option value="" disabled selected>Select an agent…</option>
+          {% for agent in agent_definitions %}
+            <option value="{{ agent.id }}">
+              {{ agent.name }}{% if not agent.enabled %} (disabled){% endif %}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      {# ---------- Kind switch ---------- #}
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        <select
+          name="kind"
+          class="select select-bordered select-sm"
+          x-model="kind"
+          aria-label="Trigger kind"
+        >
+          {% for k in kind_values %}
+            <option value="{{ k }}">{{ k }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      {# ---------- cron fields ---------- #}
+      <div x-show="kind === 'cron'" class="space-y-2 rounded-box border border-base-300 p-3">
+        <label class="form-control">
+          <span class="label-text">Cron expression (5-field)</span>
+          <input
+            type="text"
+            name="cron_expr"
+            class="input input-bordered input-sm font-mono"
+            placeholder="*/15 * * * *"
+            maxlength="128"
+            hx-post="/ui/scheduler/validate-cron"
+            hx-trigger="input changed delay:400ms, change from:find input[name=timezone]"
+            hx-target="#scheduler-cron-preview"
+            hx-swap="innerHTML"
+            hx-include="closest div"
+            aria-label="Cron expression"
+          />
+        </label>
+        <label class="form-control">
+          <span class="label-text">Timezone (IANA)</span>
+          <input
+            type="text"
+            name="timezone"
+            class="input input-bordered input-sm"
+            value="UTC"
+            maxlength="64"
+            placeholder="UTC"
+            aria-label="Timezone"
+          />
+        </label>
+        {# Live validation + next_fire_at preview target -- the
+           validate-cron fragment renders here on each debounced keystroke. #}
+        <div id="scheduler-cron-preview" class="text-xs"></div>
+      </div>
+
+      {# ---------- one_off fields ---------- #}
+      <div x-show="kind === 'one_off'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
+        <label class="form-control">
+          <span class="label-text">Fire at</span>
+          <input
+            type="datetime-local"
+            name="fire_at"
+            class="input input-bordered input-sm"
+            aria-label="Fire at"
+          />
+          <span class="label-text-alt opacity-60">Interpreted as UTC if no offset.</span>
+        </label>
+      </div>
+
+      {# ---------- event fields ---------- #}
+      <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
+        <label class="form-control">
+          <span class="label-text">Event filter (JSON object)</span>
+          <textarea
+            name="event_filter"
+            class="textarea textarea-bordered textarea-sm font-mono"
+            rows="3"
+            placeholder='{"type": "connector.fingerprint.changed"}'
+            aria-label="Event filter"
+          ></textarea>
+        </label>
+      </div>
+
+      {# ---------- shared fields ---------- #}
+      <label class="form-control">
+        <span class="label-text">Run inputs (JSON object, optional)</span>
+        <textarea
+          name="inputs"
+          class="textarea textarea-bordered textarea-sm font-mono"
+          rows="2"
+          placeholder='{"prompt": "summarise overnight alerts"}'
+          aria-label="Run inputs"
+        ></textarea>
+      </label>
+
+      <fieldset class="form-control">
+        <legend class="label-text mb-1">In-flight policy</legend>
+        <div class="flex flex-col gap-1">
+          {% for policy in in_flight_policy_values %}
+            <label class="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="in_flight_policy"
+                value="{{ policy }}"
+                class="radio radio-sm"
+                {% if policy == in_flight_policy_default %}checked{% endif %}
+              />
+              <span class="font-mono">{{ policy }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <label class="form-control">
+        <span class="label-text">Change ticket (work_ref, optional)</span>
+        <input
+          type="text"
+          name="work_ref"
+          class="input input-bordered input-sm font-mono"
+          placeholder="gh:evoila/meho#1826"
+          maxlength="256"
+          aria-label="Change ticket reference"
+        />
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-create"
+          onclick="document.getElementById('scheduler-create-modal').close()"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          class="btn btn-sm btn-primary"
+          data-action="create-submit"
+          {% if not agent_definitions %}disabled{% endif %}
+        >
+          Create trigger
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

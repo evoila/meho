@@ -53,17 +53,51 @@ REDACTED = "***REDACTED***"
 
 #: Field names whose value (scalar **or** subtree) is secret material and
 #: is replaced wholesale with :data:`REDACTED` wherever it appears in a
-#: representation (case-sensitive — Keycloak's JSON keys are stable
-#: camelCase / lowercase). Replacing the whole value rather than
+#: representation. Matched **case-insensitively** (lowercased here): a
+#: representation is ``additionalProperties: true``, so a credential field
+#: can arrive under any casing and the scrub must not depend on Keycloak's
+#: camelCase convention to catch it. Replacing the whole value rather than
 #: descending keeps a ``credentials`` *list* of hash records from leaking
 #: any element, and a scalar ``secret`` from leaking its value.
+#:
+#: Two families of key are covered:
+#:
+#: * **Keycloak representation secret fields** — the camelCase keys the
+#:   Admin REST representations use for credential material.
+#: * **Generic credential param spellings** — the same well-known
+#:   credential key names the generic params-echo default scrubs
+#:   (:data:`~meho_backplane.operations._preview._SECRET_PARAM_KEYS`).
+#:   Notably ``password``: a ``RealmRepresentation.smtpServer`` is a
+#:   ``Map<String,String>`` that stores the SMTP relay password under the
+#:   ``password`` key, and a representation is ``additionalProperties: true``
+#:   so a ``password`` can appear anywhere. Including these here makes the
+#:   bespoke keycloak preview builders (#1857) at least as strict as the
+#:   generic echo they bypass, so no ``password``-keyed secret lands in the
+#:   durable ``ApprovalRequest.proposed_effect`` row.
 _SECRET_FIELDS: frozenset[str] = frozenset(
     {
+        # Keycloak representation secret fields (camelCase, as Keycloak emits).
         "secret",  # ClientRepresentation.secret (confidential client secret)
         "credentials",  # UserRepresentation.credentials (list of credential records)
         "value",  # CredentialRepresentation.value (raw credential value)
-        "secretData",  # CredentialRepresentation.secretData (hash + salt blob)
-        "credentialData",  # CredentialRepresentation.credentialData (algo metadata)
+        "secretdata",  # CredentialRepresentation.secretData (hash + salt blob)
+        "credentialdata",  # CredentialRepresentation.credentialData (algo metadata)
+        # Generic credential param spellings, mirroring the generic echo's
+        # _SECRET_PARAM_KEYS so the bespoke path scrubs at least as much.
+        # `password` closes the RealmRepresentation.smtpServer.password leak.
+        "password",
+        "passwd",
+        "pwd",
+        "client_secret",
+        "secret_id",
+        "token",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "session_token",
+        "private_key",
     }
 )
 
@@ -71,12 +105,11 @@ _SECRET_FIELDS: frozenset[str] = frozenset(
 def redact_secret_fields(value: Any) -> Any:
     """Return *value* with Keycloak secret material scrubbed, recursively.
 
-    Walks dicts and lists. For every dict, keys in :data:`_SECRET_FIELDS`
-    (``secret`` / ``credentials`` / ``value`` / ``secretData`` /
-    ``credentialData``) have their whole value replaced with
-    :data:`REDACTED`; every other value is walked recursively so a secret
-    nested inside a protocol mapper or identity-provider config is still
-    caught.
+    Walks dicts and lists. For every dict, a key matching
+    :data:`_SECRET_FIELDS` (case-insensitively) has its whole value
+    replaced with :data:`REDACTED`; every other value is walked
+    recursively so a secret nested inside a protocol mapper, an
+    identity-provider config, or a ``smtpServer`` map is still caught.
 
     Scalars (``str`` / ``int`` / ``bool`` / ``None``) pass through
     unchanged. The input is not mutated — a new structure is returned so
@@ -85,7 +118,11 @@ def redact_secret_fields(value: Any) -> Any:
     """
     if isinstance(value, dict):
         return {
-            key: REDACTED if key in _SECRET_FIELDS else redact_secret_fields(item)
+            key: (
+                REDACTED
+                if isinstance(key, str) and key.lower() in _SECRET_FIELDS
+                else redact_secret_fields(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):

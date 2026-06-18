@@ -357,22 +357,16 @@ async def test_builder_failure_reason_is_truncated_and_message_less_safe() -> No
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_preview_suppressed() -> None:
-    """A credential-class op never stores a raw preview (redaction-safe).
+async def test_credential_class_op_generic_echo_suppressed() -> None:
+    """A credential-class op with NO bespoke builder gets no generic echo.
 
-    Even with a registered builder, an op classifying as a credential
-    class (here ``k8s.secret.create`` → ``credential_write``) is
-    suppressed before the builder runs -- the durable approval row must
-    not carry secret material.
+    The generic params-echo default (#1856) can only do generic key-name /
+    value-shape redaction and is not trusted to scrub a connector-specific
+    secret shape, so an op classifying credential-class (here
+    ``k8s.secret.create`` → ``credential_write``) with no registered
+    builder collapses to the identifier-only default -- the durable
+    approval row must not carry secret material.
     """
-    builder_ran = False
-
-    async def _leaky(_ctx: PreviewContext) -> dict[str, Any] | None:
-        nonlocal builder_ran
-        builder_ran = True
-        return {"secret_value": "super-secret"}
-
-    register_preview_builder("k8s.secret.create", _leaky)
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
         connector_instance=None,
@@ -381,7 +375,42 @@ async def test_credential_class_op_preview_suppressed() -> None:
         params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
     )
     assert await build_proposed_effect(ctx) is None
-    assert builder_ran is False, "sensitive-class gate must run before the builder"
+
+
+@pytest.mark.asyncio
+async def test_credential_class_op_bespoke_builder_runs() -> None:
+    """A *bespoke* builder runs even for a credential-class op (#1857).
+
+    Unlike the generic echo, a registered builder is trusted to own its
+    own field discipline (the keycloak user-create preview scrubs the
+    inline password before returning), so the credential-class
+    suppression does not apply to it -- the same trust model the
+    permission-preflight hook relies on. The builder's output is wrapped
+    in the ``{op_class, preview}`` envelope.
+    """
+    builder_ran = False
+
+    async def _scrubbed(_ctx: PreviewContext) -> dict[str, Any] | None:
+        nonlocal builder_ran
+        builder_ran = True
+        # A real builder returns a scrubbed view; the test stand-in echoes
+        # only non-secret identity so the contract is "builder ran + result
+        # surfaced", not "result blindly trusted".
+        return {"username": "svc-meho", "password": "***REDACTED***"}
+
+    register_preview_builder("k8s.secret.create", _scrubbed)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert builder_ran is True, "a bespoke builder must run for a credential-class op"
+    assert effect is not None
+    assert effect["op_class"] == "credential_write"
+    assert effect["preview"] == {"username": "svc-meho", "password": "***REDACTED***"}
 
 
 # ---------------------------------------------------------------------------

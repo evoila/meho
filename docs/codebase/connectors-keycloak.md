@@ -178,11 +178,17 @@ op first.
 Every handler runs its response through `redact_secret_fields` before
 returning, so the value of `secret` (confidential-client secret),
 `credentials` / `value` / `secretData` / `credentialData` (user
-credential material) is replaced with `***REDACTED***` — recursively,
-including secrets nested inside protocol mappers or identity-provider
-configs. The scrub happens at the connector boundary (not the broadcast
-layer) because these are config reads where the secret is incidental: it
-must never enter the synchronous `OperationResult` the caller receives.
+credential material), **and** the generic credential key spellings
+(`password` / `client_secret` / `token` / `private_key` / … — the same set
+the generic params-echo default scrubs) is replaced with `***REDACTED***`
+— recursively and case-insensitively, including secrets nested inside
+protocol mappers, identity-provider configs, or a `smtpServer` map. The
+`password` coverage matters because a `RealmRepresentation.smtpServer` is a
+`Map<String,String>` carrying the SMTP relay password under the `password`
+key, and a representation is `additionalProperties: true`. The scrub
+happens at the connector boundary (not the broadcast layer) because these
+are config reads where the secret is incidental: it must never enter the
+synchronous `OperationResult` the caller receives.
 The write surface redacts secret *inputs* at the classification layer per
 the general posture (see "Write ops" below).
 
@@ -220,6 +226,39 @@ Three load-bearing properties:
   credential body but never in op params; audit stores a `params_hash`
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
+
+### Park-time approval preview (#1857)
+
+Three of the write ops register bespoke `proposed_effect` preview builders
+in `connectors/keycloak/ops_write_preview.py`, wired onto the per-op hook
+(`operations/_preview.py`, #1437) by an import side-effect in the package
+`__init__`. They give the approval reviewer a resource-centric view at park
+time — secrets scrubbed via the same `redact_secret_fields` the read ops
+use:
+
+| op_id | preview keys |
+|---|---|
+| `keycloak.realm.create` | `{resource, realm, representation}` |
+| `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+
+`keycloak.user.create` classifies as `credential_write`, so the *generic*
+params-echo default (#1856) is suppressed for it — but a bespoke builder is
+the deliberate exception (it owns its field discipline), so the user-create
+builder runs and scrubs the inline password
+(`representation.credentials[].value`) to `***REDACTED***` while the
+username stays visible. Because `redact_secret_fields` also covers the
+generic credential key names (notably `password`, case-insensitively), the
+bespoke builders are at least as strict as the generic echo they bypass: a
+`RealmRepresentation.smtpServer.password` (or any `password`-keyed field
+anywhere in an `additionalProperties` representation) is scrubbed too, so no
+cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
+password (`password_secret_ref`) is a path, not a secret, so it is surfaced
+as `password_source: "vault"` + the ref. The other six write ops fall
+through to the generic params-echo
+default. The builders are pure (no connector I/O) and so fail-soft by
+construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
+hook" for the registry contract.
 
 ## Target configuration
 

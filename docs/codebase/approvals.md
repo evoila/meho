@@ -334,7 +334,8 @@ Three invariants make the hook safe to wire on the park path:
    legibility for free instead of showing the approver only `{op_id,
    connector_id, target_id}`. A registered builder still wins (no
    double-echo). The identifier-only default is reached only when the op is
-   credential-class (suppressed), its params are empty, or a registered
+   credential-class *and has no bespoke builder* (the generic echo is
+   suppressed — see invariant 3), its params are empty, or a registered
    builder declines. Independently, the dispatcher seam layers the catalog
    `safety_level` on top of whichever base it has (below), so the parked
    row always names its severity — the durable row is no longer
@@ -354,12 +355,18 @@ Three invariants make the hook safe to wire on the park path:
    the hook.
 3. **Redaction-safe.** `build_proposed_effect` classifies the op via
    `classify_op` (the same single-sourced sensitivity classification used
-   for broadcast/audit redaction, #1401) and **suppresses** the preview
-   (bespoke *and* generic) for any credential class (`credential_read` /
-   `credential_mint` / `credential_write`) — the suppression check runs
-   first, before the builder lookup — so a credential-class op never
-   surfaces request/response detail in a durable row. Builders are
-   themselves expected to return identity-only summaries. The generic
+   for broadcast/audit redaction, #1401) and **suppresses the generic
+   params-echo default** for any credential class (`credential_read` /
+   `credential_mint` / `credential_write`) — the generic echo can only do
+   generic key-name / value-shape redaction and is not trusted to scrub a
+   connector-specific secret shape, so a credential-class op with no
+   bespoke builder collapses to the identifier-only default. A **bespoke
+   builder is the deliberate exception (#1857)**: like the
+   permission-preflight hook, it is trusted to own its own field
+   discipline and runs even for a credential-class op (e.g. the keycloak
+   user-create preview scrubs the inline password via the connector's own
+   `redact_secret_fields` before returning). Builders are themselves
+   expected to return identity-only / scrubbed summaries. The generic
    params-echo default (#1856) scrubs the echoed params with **two**
    passes that reuse the existing redaction discipline:
    `_scrub_secret_param_keys` masks values keyed by a well-known
@@ -391,8 +398,22 @@ the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
 [`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
-approval previews". Further connectors register their own builders as
-needed.
+approval previews". The Keycloak write ops register bespoke builders in
+`connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
+populates `{resource, realm, representation}`, `keycloak.user.create`
+populates `{resource, username, realm, representation}` (the inline
+password scrubbed to `***REDACTED***` via the connector's own
+`redact_secret_fields` — and it runs *despite* `keycloak.user.create`
+classifying as `credential_write`, the bespoke-builder exception to
+invariant 3). `redact_secret_fields` covers the Keycloak representation
+secret fields *and* the generic credential key spellings (notably
+`password`, case-insensitively), so the bespoke builders are at least as
+strict as the generic echo they bypass — a
+`RealmRepresentation.smtpServer.password` (or any `password`-keyed field
+in an `additionalProperties` representation) never reaches the durable
+row. `keycloak.role_mapping.assign` populates
+`{resource, username, id, realm, granted_roles}` (the granted realm role
+names). Further connectors register their own builders as needed.
 
 ## Catalog `safety_level` on every envelope (#1855)
 
@@ -421,8 +442,9 @@ default the caller stores when `_build_proposed_effect` returns `None`
 
 ## Permission preflight hook (#1504)
 
-The `proposed_effect` *preview* above is suppressed for credential-class
-ops — but a credential write (`vault.kv.put`) is precisely the op most
+The generic `proposed_effect` *preview* above is suppressed for
+credential-class ops without a bespoke builder — but a credential write
+(`vault.kv.put`) is precisely the op most
 likely to be **denied** by Vault *after* a human spends a four-eyes
 review approving it (the `meho-mcp` role grants `read` but no
 `create`/`update` on the write path). To surface that at park time

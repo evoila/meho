@@ -637,8 +637,9 @@ def _isolate_global_registries() -> Iterator[None]:
     lifespan and ``@register_*`` decorators populate:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
     ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
-    ``operations.typed_register._TYPED_OP_REGISTRARS``, and the
-    dispatcher's per-process caches
+    ``operations.typed_register._TYPED_OP_REGISTRARS``,
+    ``operations._preview._PREVIEW_BUILDERS`` / ``_PERMISSION_PREFLIGHTS``,
+    and the dispatcher's per-process caches
     ``operations._handler_resolve._HANDLER_CACHE`` /
     ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
     reset, so a test that triggered the lifespan (or dispatched an op)
@@ -679,6 +680,7 @@ def _isolate_global_registries() -> Iterator[None]:
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
     from meho_backplane.operations import _handler_resolve as handler_resolve
+    from meho_backplane.operations import _preview as preview_reg
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
 
@@ -689,6 +691,20 @@ def _isolate_global_registries() -> Iterator[None]:
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
     handler_cache = dict(handler_resolve._HANDLER_CACHE)
     instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
+    # The per-op approval-preview registries (#1437 / #1504 / #1608 / #1857).
+    # ``test_connectors_registry_v2`` evicts every ``connectors.*`` subpackage
+    # from ``sys.modules`` and re-runs ``_eager_import_connectors``, so each
+    # connector's import-time ``register_preview_builder`` /
+    # ``register_permission_preflight`` re-fires under a FRESH module object
+    # (a new ``_vm_create_preview`` etc.). That test restores ``sys.modules``
+    # but not these registries, leaving ``_PREVIEW_BUILDERS`` pointing at the
+    # re-imported function objects while the original ``_write_preview`` module
+    # still holds the originals — so a later same-worker
+    # ``test_all_eight_write_composites_register_a_preview_builder`` saw its
+    # ``is``-identity check fail under ``--dist loadscope`` bucketing. Snapshot
+    # + restore them with the other process-global registries.
+    preview_builders = dict(preview_reg._PREVIEW_BUILDERS)
+    permission_preflights = dict(preview_reg._PERMISSION_PREFLIGHTS)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -706,6 +722,10 @@ def _isolate_global_registries() -> Iterator[None]:
         handler_resolve._HANDLER_CACHE.update(handler_cache)
         handler_resolve._CONNECTOR_INSTANCE_CACHE.clear()
         handler_resolve._CONNECTOR_INSTANCE_CACHE.update(instance_cache)
+        preview_reg._PREVIEW_BUILDERS.clear()
+        preview_reg._PREVIEW_BUILDERS.update(preview_builders)
+        preview_reg._PERMISSION_PREFLIGHTS.clear()
+        preview_reg._PERMISSION_PREFLIGHTS.update(permission_preflights)
         set_default_reducer(default_reducer)
 
 

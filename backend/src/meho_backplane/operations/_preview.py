@@ -49,13 +49,22 @@ Design contract
   reuses the single-sourced sensitivity classification from
   :func:`~meho_backplane.broadcast.events.classify_op` (shipped by
   G11.7-T1 #1401): an op that classifies as a credential class
-  (``credential_read`` / ``credential_mint`` / ``credential_write``)
-  never has a raw preview stored -- it collapses to an aggregate marker
-  the same way the broadcast layer collapses such ops. Builders are
-  themselves expected to return identity-only summaries (``k8s.apply``'s
-  dry-run echoes resource identity + ``resourceVersion`` + ``uid``, never
-  Secret ``data``), so this gate is defence-in-depth, not the only
-  guard.
+  (``credential_read`` / ``credential_mint`` / ``credential_write``) gets
+  **no generic params-echo default** -- the generic echo can only do
+  key-name / value-shape redaction and is not trusted to scrub a
+  connector-specific secret shape, so a credential-class op with no
+  bespoke builder collapses to the identifier-only default the same way
+  the broadcast layer collapses such ops. A *bespoke* builder is the
+  deliberate exception (#1857): it is trusted to own its field discipline
+  and runs even for a credential-class op (the keycloak user-create
+  preview scrubs the inline password via the connector's own
+  ``redact_secret_fields`` before returning), mirroring the
+  permission-preflight hook which likewise runs for credential-class ops.
+  Builders are themselves expected to return identity-only / scrubbed
+  summaries (``k8s.apply``'s dry-run echoes resource identity +
+  ``resourceVersion`` + ``uid``, never Secret ``data``), so the
+  classify-op gate is defence-in-depth for the generic path, not the
+  only guard.
 
 The k8s.apply builder is wired here (the only op in scope per #1437);
 additional ops register their own builders as the need arises (argocd
@@ -345,23 +354,29 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
 
     Resolution order:
 
-    1. **Credential-class suppression first.** An op classifying as a
-       credential class (:data:`_SENSITIVE_CLASSES`) never surfaces
-       request/response detail in a durable row -- not via a bespoke
-       builder, and not via the generic params-echo default. Returns
-       ``None`` (caller uses the identifier-only default).
-    2. **Bespoke builder, if registered** for ``ctx.descriptor.op_id``.
+    1. **Bespoke builder, if registered** for ``ctx.descriptor.op_id``.
        Its result is wrapped ``{op_class, preview}``; ``None`` from the
        builder declines to the identifier-only default. Richer than the
-       generic echo (a computed dry-run, before/after specs, …).
-    3. **Generic params-echo default** when no builder is registered
-       (#1856). The requested params are echoed under a ``params_echo``
-       envelope key (distinct from a computed ``preview``) after a
-       two-pass redaction -- key-name scrub + connector-boundary
-       value-shape scrub (:func:`_redact_echoed_params`) -- so every
-       approval-gated op gets param-level legibility for free without
-       leaking secret material. Empty params carry no more legibility
-       than the identifier-only default and collapse to ``None``.
+       generic echo (a computed dry-run, before/after specs, …). A bespoke
+       builder runs **even for a credential-class op** (#1857): like the
+       permission-preflight hook, it is trusted to own its own field
+       discipline (e.g. the keycloak user-create preview scrubs the inline
+       password before returning), so the credential-class suppression in
+       step 3 does not apply to it.
+    2. **Generic params-echo default** when no builder is registered
+       (#1856) *and* the op is not credential-class. The requested params
+       are echoed under a ``params_echo`` envelope key (distinct from a
+       computed ``preview``) after a two-pass redaction -- key-name scrub +
+       connector-boundary value-shape scrub (:func:`_redact_echoed_params`)
+       -- so every approval-gated op gets param-level legibility for free
+       without leaking secret material. Empty params carry no more
+       legibility than the identifier-only default and collapse to ``None``.
+    3. **Credential-class suppression** for a credential-class op
+       (:data:`_SENSITIVE_CLASSES`) with **no** bespoke builder: the
+       generic echo can only do generic redaction and cannot be trusted
+       to scrub a connector-specific secret shape, so it is refused and
+       the caller falls back to the identifier-only default. Returns
+       ``None``.
 
     A builder that **raises** is still fail-soft -- the park proceeds
     regardless -- but no longer silent (#1628): the hook returns an
@@ -379,23 +394,32 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     """
     op_id = ctx.descriptor.op_id
     op_class = classify_op(op_id)
-    if op_class in _SENSITIVE_CLASSES:
-        # A credential-class op must not surface request/response detail
-        # in a durable row -- not via a bespoke builder, and not via the
-        # generic params-echo default below. Refuse outright; the reviewer
-        # still sees the identifier-only default via the caller's fallback.
+    builder = _PREVIEW_BUILDERS.get(op_id)
+    if op_class in _SENSITIVE_CLASSES and builder is None:
+        # A credential-class op with NO bespoke builder must not surface
+        # request/response detail in a durable row -- the *generic*
+        # params-echo default below is suppressed because it can only do
+        # generic key-name / value-shape redaction and cannot be trusted
+        # to scrub a connector-specific secret shape. Refuse outright; the
+        # reviewer still sees the identifier-only default via the caller's
+        # fallback. A *bespoke* builder (below) is the deliberate
+        # exception: like the permission-preflight hook
+        # (:func:`build_permission_preflight`), it is trusted to own its
+        # own field discipline and may run for a credential-class op (e.g.
+        # the keycloak user-create preview, #1857, scrubs the inline
+        # password via the connector's own ``redact_secret_fields``).
         _log.info(
             "proposed_effect_preview_suppressed",
             op_id=op_id,
             op_class=op_class,
-            reason="sensitive_op_class",
+            reason="sensitive_op_class_no_builder",
         )
         return None
 
-    builder = _PREVIEW_BUILDERS.get(op_id)
     if builder is None:
-        # No bespoke builder: fall back to the generic params-echo default
-        # so every approval-gated op gets param-level legibility for free.
+        # No bespoke builder, not credential-class: fall back to the generic
+        # params-echo default so every approval-gated op gets param-level
+        # legibility for free.
         return _generic_params_echo(ctx, op_class=op_class)
 
     try:

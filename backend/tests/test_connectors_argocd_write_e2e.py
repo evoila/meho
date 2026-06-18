@@ -604,27 +604,33 @@ async def test_park_appproject_update_populates_before_after_preview(
         ("argocd.app.refresh", {"name": _APP_NAME}),
     ],
 )
-async def test_park_no_builder_ops_use_identifier_only_default(
+async def test_park_no_builder_ops_use_generic_params_echo(
     argocd_write_e2e: ArgoCdConnector,
     op_id: str,
     params: dict[str, Any],
 ) -> None:
-    """sync / rollback / refresh park with the identifier-only default — no preview.
+    """sync / rollback / refresh park with the generic params-echo (#1856).
 
-    They register no builder, so proposed_effect stays the bare
-    ``{op_id, connector_id, target_id}`` and no cluster call fires on the
-    park path (the handler is never reached, and no preview read is issued).
+    They register no bespoke builder, so since #1856 their proposed_effect
+    is the generic ``{op_class, params_echo}`` default (param-level
+    legibility for free) rather than a computed ``preview``. No cluster
+    call fires on the park path: the echo only redacts the already-known
+    params, the handler is never reached, and no preview read is issued.
     """
     with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
         result = await _dispatch(op_id, params, approved=False)
         assert result["status"] == "awaiting_approval", result
         assert not mock.calls, f"{op_id} must make no cluster call on the park path"
 
+    from meho_backplane.broadcast.events import classify_op
+
     request_id = result["extras"]["approval_request_id"]
     effect = await _parked_proposed_effect(request_id)
-    # Identifier-only default: no preview envelope, just the call identity.
+    # Generic params-echo default: no computed preview, but the requested
+    # params are echoed (none secret-bearing here, so they pass through).
     assert "preview" not in effect
-    assert effect["op_id"] == op_id
+    assert effect["op_class"] == classify_op(op_id)
+    assert effect["params_echo"] == params
 
 
 @pytest.mark.asyncio

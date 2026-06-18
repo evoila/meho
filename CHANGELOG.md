@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Operator agent run-cancel**: `POST /api/v1/agents/runs/{handle}/cancel` (REST) and `meho agent run-cancel <handle>` (CLI) let an operator stop a non-terminal agent run — previously only the internal reaper/scheduler could write `cancelled`. Both wrap the existing `cancel_run` service path, so the durable `cancelled` transition and its `agent_run.completed` lifecycle outbox event (emitted by the shared `transition` for every terminal state) are produced by one code path with no second status-write. The route is operator-role, tenant-scoped (an unknown / cross-tenant handle is `404`, no existence leak) and race-safe: a run that completes between the request and the write returns `409 agent_run_not_cancellable`, not a 500. An `awaiting_approval` run cancels cleanly; its pending approval is left to expire / be rejected on resume. The OpenAPI snapshot and the generated Go client are regenerated in lock-step (#1828).
+
 ### Changed
 
 - Promote the connector `product`↔`impl_id` round-trip check in `register_connector_v2` from an advisory WARN to a **hard fail** — now that the family is realigned (#1814) nothing diverges, so a future divergent registration crashes `_eager_import_connectors` at boot (a deploy-time typo) instead of silently shadowing the connector behind an auto-shim (#1816).

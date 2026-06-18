@@ -1223,6 +1223,54 @@ class AgentInvoker:
                 raise AgentRunNotFoundError(run_id)
             return _row_to_view(row)
 
+    async def cancel(self, operator: Operator, run_id: uuid.UUID) -> AgentRunSummary:
+        """Cancel a non-terminal run the operator's tenant owns.
+
+        The operator-facing cancel path behind ``POST
+        /api/v1/agents/runs/{handle}/cancel`` and ``meho agent
+        run-cancel``. It wraps the shared
+        :func:`~meho_backplane.operations.agent_run.cancel_run` service
+        helper -- the *same* terminal-transition path the reaper writes
+        through -- so the durable ``cancelled`` state and the
+        ``agent_run.completed`` outbox event
+        (:func:`~meho_backplane.operations.agent_run.transition` emits one
+        for every terminal transition, cancellation included) are produced
+        by one code path, never a second status-write.
+
+        Tenant isolation is enforced here, before the service call: a
+        cross-tenant / unknown handle raises :class:`AgentRunNotFoundError`
+        (mapped to 404 by the boundary) so a run's existence is not leaked
+        across tenants -- the same posture :meth:`poll` takes. The service
+        helper additionally raises
+        :class:`~meho_backplane.operations.agent_run.IllegalTransitionError`
+        for an already-terminal run (mapped to 409) and
+        :class:`~meho_backplane.operations.agent_run.UnauthorizedCancellationError`
+        for a sub-operator role (mapped to 403). An ``awaiting_approval``
+        run cancels cleanly (the state machine permits the edge); its
+        pending approval is left to expire / be rejected on resume rather
+        than being force-decided here.
+
+        The in-flight async loop is *not* interrupted synchronously: this
+        records the durable cancel intent, and the loop observes the
+        ``cancelled`` status on its next turn boundary and stops -- the
+        cancellation contract :func:`cancel_run` documents.
+
+        Raises:
+            AgentRunNotFoundError: no run for *run_id* in the tenant.
+            run_lifecycle.UnauthorizedCancellationError: the operator's
+                role ranks below the cancel minimum.
+            run_lifecycle.IllegalTransitionError: the run is already
+                terminal (succeeded / failed / cancelled).
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            row = await run_lifecycle.get_run(session, run_id)
+            if row is None or row.tenant_id != operator.tenant_id:
+                raise AgentRunNotFoundError(run_id)
+            cancelled = await run_lifecycle.cancel_run(session, run_id, operator=operator)
+            await session.commit()
+            return _row_to_summary(cancelled)
+
     async def list_runs(
         self,
         operator: Operator,

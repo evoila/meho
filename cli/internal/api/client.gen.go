@@ -5578,6 +5578,11 @@ type GetRunStatusApiV1AgentsRunsHandleGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// CancelRunApiV1AgentsRunsHandleCancelPostParams defines parameters for CancelRunApiV1AgentsRunsHandleCancelPost.
+type CancelRunApiV1AgentsRunsHandleCancelPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DeleteAgentApiV1AgentsNameDeleteParams defines parameters for DeleteAgentApiV1AgentsNameDelete.
 type DeleteAgentApiV1AgentsNameDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7500,6 +7505,9 @@ type ClientInterface interface {
 	// GetRunStatusApiV1AgentsRunsHandleGet request
 	GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CancelRunApiV1AgentsRunsHandleCancelPost request
+	CancelRunApiV1AgentsRunsHandleCancelPost(ctx context.Context, handle openapi_types.UUID, params *CancelRunApiV1AgentsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteAgentApiV1AgentsNameDelete request
 	DeleteAgentApiV1AgentsNameDelete(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8419,6 +8427,18 @@ func (c *Client) ListRunsApiV1AgentsRunsGet(ctx context.Context, params *ListRun
 
 func (c *Client) GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetRunStatusApiV1AgentsRunsHandleGetRequest(c.Server, handle, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelRunApiV1AgentsRunsHandleCancelPost(ctx context.Context, handle openapi_types.UUID, params *CancelRunApiV1AgentsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelRunApiV1AgentsRunsHandleCancelPostRequest(c.Server, handle, params)
 	if err != nil {
 		return nil, err
 	}
@@ -12458,6 +12478,55 @@ func NewGetRunStatusApiV1AgentsRunsHandleGetRequest(server string, handle openap
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCancelRunApiV1AgentsRunsHandleCancelPostRequest generates requests for CancelRunApiV1AgentsRunsHandleCancelPost
+func NewCancelRunApiV1AgentsRunsHandleCancelPostRequest(server string, handle openapi_types.UUID, params *CancelRunApiV1AgentsRunsHandleCancelPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/runs/%s/cancel", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -23291,6 +23360,9 @@ type ClientWithResponsesInterface interface {
 	// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request
 	GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error)
 
+	// CancelRunApiV1AgentsRunsHandleCancelPostWithResponse request
+	CancelRunApiV1AgentsRunsHandleCancelPostWithResponse(ctx context.Context, handle openapi_types.UUID, params *CancelRunApiV1AgentsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*CancelRunApiV1AgentsRunsHandleCancelPostResponse, error)
+
 	// DeleteAgentApiV1AgentsNameDeleteWithResponse request
 	DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error)
 
@@ -24328,6 +24400,29 @@ func (r GetRunStatusApiV1AgentsRunsHandleGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetRunStatusApiV1AgentsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelRunApiV1AgentsRunsHandleCancelPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentRunSummaryResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelRunApiV1AgentsRunsHandleCancelPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelRunApiV1AgentsRunsHandleCancelPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -28572,6 +28667,15 @@ func (c *ClientWithResponses) GetRunStatusApiV1AgentsRunsHandleGetWithResponse(c
 	return ParseGetRunStatusApiV1AgentsRunsHandleGetResponse(rsp)
 }
 
+// CancelRunApiV1AgentsRunsHandleCancelPostWithResponse request returning *CancelRunApiV1AgentsRunsHandleCancelPostResponse
+func (c *ClientWithResponses) CancelRunApiV1AgentsRunsHandleCancelPostWithResponse(ctx context.Context, handle openapi_types.UUID, params *CancelRunApiV1AgentsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*CancelRunApiV1AgentsRunsHandleCancelPostResponse, error) {
+	rsp, err := c.CancelRunApiV1AgentsRunsHandleCancelPost(ctx, handle, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelRunApiV1AgentsRunsHandleCancelPostResponse(rsp)
+}
+
 // DeleteAgentApiV1AgentsNameDeleteWithResponse request returning *DeleteAgentApiV1AgentsNameDeleteResponse
 func (c *ClientWithResponses) DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error) {
 	rsp, err := c.DeleteAgentApiV1AgentsNameDelete(ctx, name, params, reqEditors...)
@@ -31295,6 +31399,39 @@ func ParseGetRunStatusApiV1AgentsRunsHandleGetResponse(rsp *http.Response) (*Get
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AgentRunStatusResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelRunApiV1AgentsRunsHandleCancelPostResponse parses an HTTP response from a CancelRunApiV1AgentsRunsHandleCancelPostWithResponse call
+func ParseCancelRunApiV1AgentsRunsHandleCancelPostResponse(rsp *http.Response) (*CancelRunApiV1AgentsRunsHandleCancelPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelRunApiV1AgentsRunsHandleCancelPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentRunSummaryResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -792,7 +792,9 @@ def test_upload_admin_gate_binds_audit_contextvars() -> None:
 
         captured_contextvars: dict[str, object] = {}
 
-        original_create_entry = None
+        from meho_backplane.kb import KbService
+
+        original_create_entry = KbService.create_entry
 
         async def _capture_and_create(
             tenant_id: object,
@@ -800,15 +802,17 @@ def test_upload_admin_gate_binds_audit_contextvars() -> None:
             body: str,
             *,
             metadata: dict[str, object] | None = None,
+            actor_sub: str | None = None,
         ) -> object:
             # Snapshot the structlog contextvars at the point create_entry
             # is called (i.e. after require_ui_admin has run).
             captured_contextvars.update(structlog.contextvars.get_contextvars())
-            return await original_create_entry(tenant_id, slug, body, metadata=metadata)  # type: ignore[misc]
-
-        from meho_backplane.kb import KbService
-
-        original_create_entry = KbService.create_entry
+            # ``side_effect`` mocks are called unbound (no ``self``), so
+            # forward through a real service instance and pass actor_sub
+            # (#1845) through to the original.
+            return await original_create_entry(
+                KbService(), tenant_id, slug, body, metadata=metadata, actor_sub=actor_sub
+            )
 
         with (
             patch(

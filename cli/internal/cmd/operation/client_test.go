@@ -246,8 +246,8 @@ func TestGetSearchPassesTypedParams(t *testing.T) {
 		t.Fatalf("getSearch: %v", err)
 	}
 	p := f.lastSearchParams
-	if p == nil || p.ConnectorId != "vault-1.x" || p.Query != "secret" {
-		t.Fatalf("getSearch should pass typed ConnectorId+Query; got %+v", p)
+	if p == nil || p.ConnectorId != "vault-1.x" || p.Q == nil || *p.Q != "secret" {
+		t.Fatalf("getSearch should pass typed ConnectorId + canonical Q; got %+v", p)
 	}
 	if p.Group == nil || *p.Group != "kv" {
 		t.Fatalf("getSearch should pass typed Group=%q; got %+v", "kv", p.Group)

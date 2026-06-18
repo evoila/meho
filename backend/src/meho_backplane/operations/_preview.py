@@ -22,9 +22,15 @@ post-approval op result.
 Design contract
 ---------------
 
-* **Opt-in per op.** A builder is registered against an ``op_id``; ops
-  without a registered builder fall through to the identifier-only
-  default exactly as before -- no extra work, no new failure mode.
+* **Opt-in bespoke builder, generic echo default.** A builder is
+  registered against an ``op_id`` to compute a richer preview (a
+  computed dry-run, before/after specs, …). An op *without* a registered
+  builder no longer falls straight through to the identifier-only
+  default: it gets a **generic params-echo default** (#1856) that echoes
+  the requested params -- redaction-safe -- so every approval-gated op
+  has param-level legibility for free. The identifier-only default is
+  reached only when the op is credential-class (suppressed), its params
+  are empty, or the params dict normalises to nothing to show.
 * **Fail-soft, never silent.** A builder that raises (a dry-run that
   hits the API server and errors, a transient connector fault) must
   never block the park: :func:`build_proposed_effect` swallows the
@@ -35,8 +41,9 @@ Design contract
   ``{op_class, preview_unavailable: True, preview_error}`` marker
   rather than ``None``, so the reviewer can tell "blast-radius
   unknown" from a genuinely small action. Only a *declined* preview
-  (no builder registered, builder returns ``None``, credential-class
-  suppression) yields ``None`` → the identifier-only default.
+  (builder returns ``None``, credential-class suppression, or an empty
+  params dict with no builder) yields ``None`` → the identifier-only
+  default.
 * **Redaction-safe.** The preview lands in a durable row surfaced over
   REST / MCP / CLI, so it must not carry secret material. The hook
   reuses the single-sourced sensitivity classification from
@@ -63,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -86,6 +94,46 @@ _SENSITIVE_CLASSES: frozenset[str] = frozenset(
     {"credential_read", "credential_mint", "credential_write"}
 )
 
+#: Sentinel substituted for a scrubbed secret-bearing param value. A
+#: non-empty marker (rather than dropping the key) keeps the param shape
+#: legible -- the reviewer sees that a ``password`` field *existed* on the
+#: parked call without learning its value. Mirrors the keycloak read-op
+#: scrub sentinel (:data:`~meho_backplane.connectors.keycloak.redaction.REDACTED`).
+_PARAM_REDACTED = "***REDACTED***"
+
+#: Param key names whose value is secret material regardless of its
+#: string shape, scrubbed by exact (case-insensitive) key match before the
+#: echo is stored. The connector-boundary redaction engine matches secret
+#: *value* shapes (JWTs, bearer tokens, labelled ``key=value`` strings in a
+#: single leaf) but walks Mappings key-by-key without inspecting the key
+#: itself -- so a structured ``{"password": "hunter2"}`` param slips
+#: through it. This set closes that gap for the generic echo: a
+#: secret-by-key-name param never lands verbatim in the durable approval
+#: row even when its value carries no recognisable secret signature. Kept
+#: deliberately narrow (the well-known credential param spellings); a
+#: connector whose params need richer scrubbing registers a bespoke
+#: builder (e.g. the keycloak write preview, #1857) that owns its own
+#: field discipline.
+_SECRET_PARAM_KEYS: frozenset[str] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "client_secret",
+        "secret_id",
+        "token",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "session_token",
+        "private_key",
+        "credentials",
+    }
+)
+
 #: Truncation bound for the reviewer-facing ``preview_error`` reason. A
 #: builder fault is normally a one-line message; the cap keeps a
 #: pathological exception repr (an HTTP error echoing a response body)
@@ -107,6 +155,96 @@ def _preview_failure_reason(exc: Exception) -> str:
     return reason
 
 
+def _scrub_secret_param_keys(value: Any) -> Any:
+    """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
+
+    Walks dicts + lists recursively. For every dict, a key matching
+    :data:`_SECRET_PARAM_KEYS` (case-insensitively) has its whole value
+    replaced -- scalar or subtree -- so a nested ``{"credentials": [...]}``
+    leaks no element. Every other value is walked so a secret keyed deep
+    inside the params tree is still caught. Scalars pass through. The input
+    is never mutated; a new structure is returned.
+
+    This is the key-name half of the generic echo's redaction; the
+    value-shape half is :func:`apply_connector_boundary_redaction`.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                _PARAM_REDACTED
+                if isinstance(key, str) and key.lower() in _SECRET_PARAM_KEYS
+                else _scrub_secret_param_keys(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_secret_param_keys(item) for item in value]
+    return value
+
+
+def _redact_echoed_params(
+    params: dict[str, Any],
+    *,
+    connector_id: str | None,
+    tenant: str | None,
+    op_id: str,
+) -> dict[str, Any]:
+    """Scrub a params dict for the generic params-echo default.
+
+    Two passes, both reusing the existing redaction discipline:
+
+    1. **Key-name scrub** (:func:`_scrub_secret_param_keys`) -- masks
+       values keyed by a well-known credential name. The connector-boundary
+       engine walks Mappings key-by-key but matches secret *value* shapes
+       only, so a structured ``{"password": "hunter2"}`` would otherwise
+       echo verbatim.
+    2. **Value-shape scrub** (:func:`apply_connector_boundary_redaction`)
+       -- the same connector-boundary pipeline the response path and the
+       dispatch-request preview (:mod:`._request_preview`) run, catching
+       JWTs / bearer tokens / kubeconfig blobs / labelled ``key=value``
+       secrets embedded in a string leaf. Run *after* the key-name pass so
+       a masked sentinel is what the engine sees, never the raw secret.
+
+    Returns a JSON-shaped dict (the engine normalises models / tuples).
+    """
+    key_scrubbed = _scrub_secret_param_keys(params)
+    redaction = apply_connector_boundary_redaction(
+        key_scrubbed,
+        connector_id=connector_id,
+        tenant=tenant,
+        op=op_id,
+    )
+    # The engine normalises a dict input to a dict (``.redacted`` is typed
+    # ``Any``); narrow it so the echo envelope value stays well-typed.
+    redacted = redaction.redacted
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _generic_params_echo(ctx: PreviewContext, *, op_class: str) -> dict[str, Any] | None:
+    """Build the generic params-echo default for an op with no builder (#1856).
+
+    Echoes the requested params under a ``params_echo`` envelope key
+    (distinct from a computed ``preview``) after the two-pass redaction in
+    :func:`_redact_echoed_params`, so the approval surface can tell a
+    generic echo from a bespoke preview. Empty params carry no more
+    legibility than the identifier-only default and collapse to ``None``
+    (the caller's fallback). Credential-class suppression is handled by the
+    caller *before* this runs, so a secret-class op never reaches here.
+    """
+    if not ctx.params:
+        return None
+    tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
+    return {
+        "op_class": op_class,
+        "params_echo": _redact_echoed_params(
+            ctx.params,
+            connector_id=ctx.connector_id,
+            tenant=tenant,
+            op_id=ctx.descriptor.op_id,
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class PreviewContext:
     """Everything a preview builder needs to compute a dry-run.
@@ -123,6 +261,12 @@ class PreviewContext:
         operator: The authenticated operator whose dispatch parked.
         target: The dispatch target (or ``None`` for tenant-wide ops).
         params: The original dispatch params.
+        connector_id: The call's natural-key connector id (e.g.
+            ``"vault-1.x"``), used to resolve the per-connector
+            :class:`~meho_backplane.redaction.policy.RedactionPolicy` for
+            the generic params-echo default. ``None`` (the default) falls
+            back to the conservative connector-boundary default policy --
+            the same behaviour as an unmatched override.
     """
 
     descriptor: EndpointDescriptor
@@ -130,6 +274,7 @@ class PreviewContext:
     operator: Operator
     target: Any
     params: dict[str, Any]
+    connector_id: str | None = None
 
 
 class PreviewBuilder(Protocol):
@@ -198,11 +343,25 @@ def register_permission_preflight(op_id: str, preflight: PermissionPreflight) ->
 async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     """Compute the ``proposed_effect`` preview for a parking dispatch.
 
-    Looks up a builder for ``ctx.descriptor.op_id``; returns ``None``
-    (caller uses the identifier-only default) when no builder is
-    registered, when the op classifies as a credential class (the
-    preview is suppressed to stay redaction-safe), or when the builder
-    declines.
+    Resolution order:
+
+    1. **Credential-class suppression first.** An op classifying as a
+       credential class (:data:`_SENSITIVE_CLASSES`) never surfaces
+       request/response detail in a durable row -- not via a bespoke
+       builder, and not via the generic params-echo default. Returns
+       ``None`` (caller uses the identifier-only default).
+    2. **Bespoke builder, if registered** for ``ctx.descriptor.op_id``.
+       Its result is wrapped ``{op_class, preview}``; ``None`` from the
+       builder declines to the identifier-only default. Richer than the
+       generic echo (a computed dry-run, before/after specs, …).
+    3. **Generic params-echo default** when no builder is registered
+       (#1856). The requested params are echoed under a ``params_echo``
+       envelope key (distinct from a computed ``preview``) after a
+       two-pass redaction -- key-name scrub + connector-boundary
+       value-shape scrub (:func:`_redact_echoed_params`) -- so every
+       approval-gated op gets param-level legibility for free without
+       leaking secret material. Empty params carry no more legibility
+       than the identifier-only default and collapse to ``None``.
 
     A builder that **raises** is still fail-soft -- the park proceeds
     regardless -- but no longer silent (#1628): the hook returns an
@@ -212,22 +371,19 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     default indistinguishable from a small action. The dispatcher
     merges the marker onto the identifier fields before parking.
 
-    On success the returned dict is wrapped with a ``"preview"`` envelope
-    key + the op's sensitivity ``"op_class"`` so the approval surface can
-    label it as a computed preview rather than the bare identifier
-    default.
+    On builder success the returned dict is wrapped with a ``"preview"``
+    envelope key + the op's sensitivity ``"op_class"`` so the approval
+    surface can label it as a computed preview rather than the bare
+    identifier default; the generic default uses ``"params_echo"`` in
+    place of ``"preview"``.
     """
     op_id = ctx.descriptor.op_id
-    builder = _PREVIEW_BUILDERS.get(op_id)
-    if builder is None:
-        return None
-
     op_class = classify_op(op_id)
     if op_class in _SENSITIVE_CLASSES:
         # A credential-class op must not surface request/response detail
-        # in a durable row. Refuse the preview outright rather than risk
-        # a builder that echoes secret material; the reviewer still sees
-        # the identifier-only default via the caller's fallback.
+        # in a durable row -- not via a bespoke builder, and not via the
+        # generic params-echo default below. Refuse outright; the reviewer
+        # still sees the identifier-only default via the caller's fallback.
         _log.info(
             "proposed_effect_preview_suppressed",
             op_id=op_id,
@@ -235,6 +391,12 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
             reason="sensitive_op_class",
         )
         return None
+
+    builder = _PREVIEW_BUILDERS.get(op_id)
+    if builder is None:
+        # No bespoke builder: fall back to the generic params-echo default
+        # so every approval-gated op gets param-level legibility for free.
+        return _generic_params_echo(ctx, op_class=op_class)
 
     try:
         preview = await builder(ctx)

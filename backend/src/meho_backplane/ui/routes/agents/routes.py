@@ -72,6 +72,20 @@ from meho_backplane.ui.routes.agents.run import (
     stream_run_events,
     submit_run,
 )
+from meho_backplane.ui.routes.agents.principals_forms import (
+    NAME_MAX as PRINCIPAL_NAME_MAX,
+)
+from meho_backplane.ui.routes.agents.principals_forms import (
+    OWNER_SUB_MAX,
+    render_register_modal,
+    render_revoke_modal,
+    submit_register,
+    submit_revoke,
+)
+from meho_backplane.ui.routes.agents.principals_views import (
+    render_principals_index,
+    validate_principal_name,
+)
 from meho_backplane.ui.routes.agents.views import render_detail, render_index, validate_name
 
 __all__ = ["build_agents_router"]
@@ -273,6 +287,82 @@ async def _delete_submit_handler(
     return await submit_delete(session_ctx, operator, name=name)
 
 
+async def _principals_list_handler(
+    request: Request,
+    session_ctx: UISessionContext = _require_session_dep,
+    role_probe: OperatorRoleProbe = _role_probe_dep,
+    include_revoked: bool = Query(default=False),
+) -> HTMLResponse:
+    """``GET /ui/agents/principals`` -- list page or HTMX table fragment."""
+    return await render_principals_index(
+        request,
+        session_ctx,
+        is_tenant_admin=role_probe.is_tenant_admin,
+        include_revoked=include_revoked,
+    )
+
+
+async def _principals_register_modal_handler(
+    request: Request,
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+) -> HTMLResponse:
+    """``GET /ui/agents/principals/register`` -- HTMX-loaded register modal."""
+    del operator  # gate only; render needs no operator-specific context.
+    return await render_register_modal(request, session_ctx)
+
+
+async def _principals_register_submit_handler(
+    request: Request,
+    # ``Form(default="")`` (not ``Form(...)``) so an empty / omitted
+    # submit flows to the service-layer name validation (which re-renders
+    # the modal with the field error) rather than tripping FastAPI's own
+    # raw-422 boundary.
+    name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
+    owner_sub: str | None = Form(default=None, max_length=OWNER_SUB_MAX),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+) -> HTMLResponse:
+    """``POST /ui/agents/principals/register`` -- register a new principal."""
+    return await submit_register(
+        request,
+        session_ctx,
+        operator,
+        name=name,
+        owner_sub=owner_sub,
+    )
+
+
+async def _principals_revoke_modal_handler(
+    request: Request,
+    name: str,
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+) -> HTMLResponse:
+    """``GET /ui/agents/principals/{name}/revoke`` -- kill-switch confirm modal."""
+    del operator  # gate only.
+    validate_principal_name(name)
+    return await render_revoke_modal(request, session_ctx, name=name)
+
+
+async def _principals_revoke_submit_handler(
+    request: Request,
+    name: str,
+    confirm_name: str = Form(default="", max_length=PRINCIPAL_NAME_MAX),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+) -> HTMLResponse:
+    """``POST /ui/agents/principals/{name}/revoke`` -- revoke (kill switch)."""
+    validate_principal_name(name)
+    return await submit_revoke(
+        request,
+        session_ctx,
+        operator,
+        name=name,
+        confirm_name=confirm_name,
+    )
+
+
 def _register_static_prefix_routes(router: APIRouter) -> None:
     """Wire the literal-prefix routes (``/ui/agents/create``) onto *router*.
 
@@ -398,16 +488,84 @@ def _register_write_routes(router: APIRouter) -> None:
     )
 
 
+def _register_principals_routes(router: APIRouter) -> None:
+    """Wire the agent-principals sub-surface routes (T4 #1831) onto *router*.
+
+    Registration order is **load-bearing**: these literal-prefix routes
+    (``/ui/agents/principals`` and ``/ui/agents/principals/register``)
+    MUST register before :func:`_register_read_routes`, whose
+    ``/ui/agents/{name}`` template would otherwise consume the literal
+    ``"principals"`` token and route a principals request to the
+    agent-definition detail handler (a 404 from its validate-name check).
+
+    Read (operator-or-above; soft role probe for the affordance hints):
+
+    * ``GET /ui/agents/principals`` -- principals list page / HTMX table.
+
+    Write (tenant_admin only; server-side 403 via
+    :func:`resolve_operator_or_403`):
+
+    * ``GET  /ui/agents/principals/register`` -- register modal.
+    * ``POST /ui/agents/principals/register`` -- register submit.
+    * ``GET  /ui/agents/principals/{name}/revoke`` -- kill-switch modal.
+    * ``POST /ui/agents/principals/{name}/revoke`` -- revoke submit.
+
+    The ``/register`` literal registers before the ``{name}/revoke``
+    parametrised pair; the trailing ``/revoke`` literal on the latter
+    keeps the two from colliding, but the bare-prefix discipline matches
+    the agent-definition router's convention.
+    """
+    router.add_api_route(
+        "/ui/agents/principals",
+        _principals_list_handler,
+        methods=["GET"],
+        name="ui_agent_principals_list",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/principals/register",
+        _principals_register_modal_handler,
+        methods=["GET"],
+        name="ui_agent_principals_register_modal",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/principals/register",
+        _principals_register_submit_handler,
+        methods=["POST"],
+        name="ui_agent_principals_register_submit",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/principals/{name}/revoke",
+        _principals_revoke_modal_handler,
+        methods=["GET"],
+        name="ui_agent_principals_revoke_modal",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/principals/{name}/revoke",
+        _principals_revoke_submit_handler,
+        methods=["POST"],
+        name="ui_agent_principals_revoke_submit",
+        response_class=HTMLResponse,
+    )
+
+
 def build_agents_router() -> APIRouter:
     """Construct the agents UI :class:`APIRouter`.
 
     Factory function (not a module-level constant) so a test app can
     construct parallel routers without sharing route state -- mirrors
     the memory / connectors convention. Registration order is
-    load-bearing for the static-prefix ``/ui/agents/create`` route.
+    load-bearing: the static-prefix ``/ui/agents/create`` route and the
+    ``/ui/agents/principals*`` sub-surface routes (T4 #1831) both register
+    before the parametrised ``/ui/agents/{name}`` read route so the
+    literal segments are not bound as a ``{name}``.
     """
     router = APIRouter(tags=["ui-agents"])
     _register_static_prefix_routes(router)
+    _register_principals_routes(router)
     _register_read_routes(router)
     _register_run_routes(router)
     _register_write_routes(router)

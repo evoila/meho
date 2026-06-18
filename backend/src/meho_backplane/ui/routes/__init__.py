@@ -27,6 +27,23 @@ ships the umbrella :func:`build_router` that aggregates:
   write routes delegate to ``AgentDefinitionService`` in-process so the
   UI and REST surfaces share one validation + identity-ref-check +
   persist code path.
+* :mod:`~meho_backplane.ui.routes.agents.grants` -- the agent permission
+  grants surface (G10.8-T5 #1832): ``GET /ui/agents/grants`` table,
+  ``GET /ui/agents/grants/<grant_id>`` per-grant detail, and the
+  create / elevate (time-bounded) / revoke write routes
+  (``/ui/agents/grants/create``, ``/ui/agents/grants/elevate``,
+  ``/ui/agents/grants/<grant_id>/revoke``). The **whole** surface --
+  reads included -- is tenant_admin, because a grant listing reveals the
+  tenant's least-privilege posture. Delegates to ``AgentGrantService``
+  in-process.
+* :mod:`~meho_backplane.ui.routes.agents.runs` -- the agent-runs read
+  surface (G10.8-T3 #1830): ``GET /ui/agents/runs`` cross-agent run list
+  (``status`` + ``work_ref`` filters, full-page / HTMX-fragment) and
+  ``GET /ui/agents/runs/{handle}`` per-run detail (poll-after-the-fact
+  while non-terminal, static once terminal). Operator-readable; reuses the
+  in-process ``AgentInvoker`` ``list_runs`` / ``poll`` read path. Its
+  router is included **before** ``build_agents_router`` so the literal
+  ``/ui/agents/runs`` segment is not bound as ``/ui/agents/{name}``.
 * :mod:`~meho_backplane.ui.routes.kb` -- ``GET /ui/kb``,
   ``POST /ui/kb/search``, ``GET /ui/kb/<slug>``,
   ``GET /ui/kb/<slug>/preview`` -- KB read surface (G10.2-T1 #870).
@@ -71,6 +88,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.agents import build_agents_router
+from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
+from meho_backplane.ui.routes.agents.runs import build_runs_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
@@ -84,6 +103,7 @@ from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
 __all__ = [
+    "build_agent_grants_router",
     "build_agents_router",
     "build_approvals_router",
     "build_broadcast_router",
@@ -94,6 +114,7 @@ __all__ = [
     "build_memory_router",
     "build_router",
     "build_runbooks_router",
+    "build_runs_router",
     "build_scheduler_router",
     "build_stubs_router",
     "build_topology_router",
@@ -130,6 +151,19 @@ def build_router() -> APIRouter:
     router.include_router(build_topology_router())
     router.include_router(build_memory_router())
     router.include_router(build_connectors_router())
+    # Agent-grants surface ahead of the agents surface: the literal
+    # ``/ui/agents/grants`` path must win the first-match-wins lookup
+    # against the agents surface's ``/ui/agents/{name}`` (which would
+    # otherwise bind ``name="grants"``). Inside the grants router the
+    # literal ``create`` / ``elevate`` routes register before the
+    # ``{grant_id}`` detail route for the same reason (G10.8-T5 #1832).
+    router.include_router(build_agent_grants_router())
+    # Agent-runs read surface (G10.8-T3 #1830) before the agents-definition
+    # router: ``/ui/agents/runs`` + ``/ui/agents/runs/{handle}`` are literal-
+    # prefixed under ``/ui/agents`` and MUST win the first-match-wins lookup
+    # against the definition surface's ``/ui/agents/{name}`` (which would
+    # otherwise bind ``"runs"`` as a definition name).
+    router.include_router(build_runs_router())
     router.include_router(build_agents_router())
     router.include_router(build_kb_router())
     router.include_router(build_corpus_router())

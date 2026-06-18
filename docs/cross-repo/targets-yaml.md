@@ -349,15 +349,18 @@ v0.2.
 meho targets import rdc-hetzner-dc/targets.yaml --dry-run
 ```
 
-Prints the per-entry plan without making any API calls. The dry-run
-code path is strictly air-gap-safe — it does not contact the
-backplane — so existence is unknown and **every entry lists as
-CREATE** regardless of `--update`. For an existence-aware preview,
-run `meho targets list` first to see what's already in the tenant.
+Prints the per-entry plan. Dry-run is **existence-accurate and
+read-only**: it issues a single listing `GET /api/v1/targets` to
+learn which names already exist, then classifies each entry exactly
+as the real apply would — existing names render `UPDATE` (with the
+sparse-PATCH body), new ones render `CREATE` — and returns before
+any `POST`/`PATCH`. So `--update --dry-run` against a tenant that
+already has a target previews `UPDATE`, matching the apply's
+"updated" count (issue #1785). Dry-run still requires a valid
+`meho login` session because of that GET; it is no longer air-gapped.
 Add `--json` to format the plan as a structured object
-(`{create: [...], update: [...], skip: [...]}`, with `update` and
-`skip` empty in dry-run) for piping into `jq` or capturing for diff
-against a follow-up dry-run.
+(`{create: [...], update: [...], skip: [...]}`) for piping into `jq`
+or capturing for diff against a follow-up dry-run.
 
 ### Step 2 — First import
 

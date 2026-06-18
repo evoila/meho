@@ -153,7 +153,7 @@ func (p *plan) summary() string {
 //
 //	meho targets import <file>
 //	  [--update]              # PATCH existing targets instead of erroring on duplicates
-//	  [--dry-run]             # print the plan; no API calls
+//	  [--dry-run]             # print the plan (read-only: one GET, no writes)
 //	  [--json]                # output the plan as JSON (use with --dry-run)
 //	  [--backplane <url>]     # override the backplane URL
 //
@@ -187,9 +187,11 @@ func newImportCmd() *cobra.Command {
 			"`name` already exists in the tenant (no partial write — the plan " +
 			"is built before any API call fires). `--update` PATCHes existing " +
 			"targets with the fields present in the YAML and POSTs new ones, " +
-			"mixed-mode-safe. `--dry-run` prints the plan and returns without " +
-			"calling the apply path. `--json` formats the plan as a structured " +
-			"object (use with --dry-run).\n\n" +
+			"mixed-mode-safe. `--dry-run` queries existing targets (one " +
+			"read-only GET) and prints the resulting plan — existing names " +
+			"render UPDATE, new ones CREATE — then returns before any " +
+			"POST/PATCH. `--json` formats the plan as a structured object " +
+			"(use with --dry-run).\n\n" +
 			"Authentication. Uses the token `meho login` wrote, with the same " +
 			"401-refresh-retry behaviour as `meho status` and `meho operation " +
 			"call`. The tenant is the operator's JWT-bound tenant — there is no " +
@@ -210,7 +212,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&updateMode, "update", false,
 		"PATCH existing targets instead of erroring on duplicate names")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
-		"print the plan; no API calls")
+		"print the plan (read-only: one GET, no writes); does not apply")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"output the plan as JSON (use with --dry-run)")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -241,17 +243,6 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 			output.Unexpected(err.Error()), opts.JSONOut)
 	}
 
-	// Dry-run path: resolve nothing against the backplane. Existence
-	// is unknown, so every entry plans as CREATE. Operators wanting
-	// "what would change" against a live tenant pass --dry-run after
-	// running once with --update, or just look at `meho targets list`
-	// before running. v0.2 keeps the no-API-call contract strict; a
-	// future `--dry-run --against-tenant` could relax it.
-	if opts.DryRun {
-		p := buildOfflinePlan(entries, opts.Update)
-		return renderPlan(cmd, p, opts.JSONOut)
-	}
-
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
@@ -261,6 +252,17 @@ func runImport(cmd *cobra.Command, opts importOptions) error {
 	p, err := buildLivePlan(cmd.Context(), doer, entries, opts.Update)
 	if err != nil {
 		return renderImportRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+
+	// Dry-run path: the plan is existence-accurate because buildLivePlan
+	// issued the listing GET above — an existing target renders UPDATE
+	// (sparse-PATCH body, via entryToUpdateBody) and a new one renders
+	// CREATE, matching exactly what apply would do. Print the plan and
+	// return before executePlan, so dry-run is read-only (one GET, zero
+	// POST/PATCH). The duplicate-abort below is an apply-path concern;
+	// dry-run is a pure preview and never errors on existing names.
+	if opts.DryRun {
+		return renderPlan(cmd, p, opts.JSONOut)
 	}
 
 	// Default mode: duplicates abort the whole import.
@@ -414,24 +416,6 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 }
 
 // --- plan building -----------------------------------------------------
-
-// buildOfflinePlan partitions entries without consulting the
-// backplane: every entry plans as CREATE (existence is unknown).
-// Used by --dry-run.
-func buildOfflinePlan(entries []map[string]any, _ bool) *plan {
-	p := &plan{}
-	for _, e := range entries {
-		name, _ := e["name"].(string)
-		body, warnings := entryToCreateBody(e)
-		p.Create = append(p.Create, planEntry{
-			Name:     name,
-			Action:   actionCreate,
-			Body:     body,
-			Warnings: warnings,
-		})
-	}
-	return p
-}
 
 // httpDoer is the function shape buildLivePlan / executePlan use to
 // talk to the backplane. Production code passes doAuthedRequest;

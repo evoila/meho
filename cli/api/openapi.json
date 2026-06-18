@@ -2625,7 +2625,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {
@@ -2655,14 +2655,32 @@
             }
           },
           {
-            "name": "query",
+            "name": "q",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "minLength": 1,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Query"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "group",
@@ -3527,9 +3545,22 @@
           "knowledge"
         ],
         "summary": "List Kb",
-        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``filter`` is forwarded to :meth:`KbService.list_entries` as a SQL\n``LIKE`` pattern; the operator is the trust boundary for pattern\nshape. ``limit`` is capped at 500 (the substrate's\n:data:`DEFAULT_LIST_LIMIT` is 100; the API surface allows higher\nexplicit values so a one-shot dump of a 200-entry corpus\ncompletes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
+        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
         "operationId": "list_kb_api_v1_kb_get",
         "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
           {
             "name": "filter",
             "in": "query",
@@ -3538,8 +3569,12 @@
               "type": "string",
               "maxLength": 256,
               "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Filter"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "limit",
@@ -3603,7 +3638,7 @@
           "knowledge"
         ],
         "summary": "Create Kb",
-        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
+        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nStatus code (#1845 ask 1): the service reports whether the slug\nwas genuinely new. This handler returns **201 Created** only for a\nfresh slug and **200 OK** when an existing row was overwritten in\nplace -- ``201`` for an in-place mutation is REST-incorrect, and\nthe response body already differentiates the two cases (preserved\n``id`` + ``created_at`` on overwrite). The decorator declares\n``201`` as the default so OpenAPI advertises the create path;\n``response.status_code`` is reset to ``200`` on the overwrite path\n(FastAPI lets an injected :class:`Response` override the declared\ncode while still applying ``response_model``).\n\nCross-principal overwrite is wiki-like and intentional (any\n``tenant_admin`` may replace any other's row in-tenant); this\nhandler adds no ownership gate. It does pass ``operator.sub`` as\n``actor_sub`` so the service stamps ``created_by_sub`` /\n``last_updated_by_sub`` into the entry's ``metadata`` -- the entry\nis then self-describing about authorship on every read surface.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
         "operationId": "create_kb_api_v1_kb_post",
         "parameters": [
           {
@@ -3630,6 +3665,16 @@
         "responses": {
           "201": {
             "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbEntry"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An existing entry with this slug was overwritten in place (id + created_at preserved, updated_at bumped). 201 is returned only for a genuinely-new slug.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4645,7 +4690,7 @@
           "memory"
         ],
         "summary": "List Memories",
-        "description": "List memories visible to the operator in this tenant.\n\nTenant-scoped via ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler.\n\nFilters (``scope`` / ``slug_pattern`` / ``tag``) are forwarded\nverbatim to :meth:`MemoryService.list_memories`; the service is\nthe contract owner for filter semantics (slug ``in`` substring\nmatch, tag membership in metadata, etc.). ``include_expired``\ndefaults to ``False`` so expired entries are filtered out on\nthe read side until G5.2 #374's daily cleanup task physically\nremoves them.\n\nBinds ``audit_op_id=\"memory.list\"`` + ``audit_op_class=\"read\"``\nbefore the service call so a handler exception still produces\nan audit row classified under the canonical op id.",
+        "description": "List memories visible to the operator in this tenant.\n\nTenant-scoped via ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``slug_pattern``\nis its deprecated alias, kept working for back-compat. The resolved\nvalue plus ``scope`` / ``tag`` are forwarded verbatim to\n:meth:`MemoryService.list_memories`; the service is the contract\nowner for filter semantics (slug ``in`` substring match, tag\nmembership in metadata, etc.). Supplying both ``q`` and\n``slug_pattern`` with different values is a 422 rather than a\nsilent pick. ``include_expired`` defaults to ``False`` so expired\nentries are filtered out on the read side until G5.2 #374's daily\ncleanup task physically removes them.\n\nBinds ``audit_op_id=\"memory.list\"`` + ``audit_op_class=\"read\"``\nbefore the service call so a handler exception still produces\nan audit row classified under the canonical op id.",
         "operationId": "list_memories_api_v1_memory_get",
         "parameters": [
           {
@@ -4659,6 +4704,19 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
+          {
             "name": "slug_pattern",
             "in": "query",
             "required": false,
@@ -4666,8 +4724,12 @@
               "type": "string",
               "maxLength": 256,
               "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Slug Pattern"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "tag",
@@ -9570,6 +9632,495 @@
         }
       }
     },
+    "/ui/agents/grants": {
+      "get": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants List",
+        "description": "``GET /ui/agents/grants`` -- table page or HTMX tbody fragment.",
+        "operationId": "ui_agent_grants_list_ui_agents_grants_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Expired"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/grants/create": {
+      "get": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Create Modal",
+        "description": "``GET /ui/agents/grants/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_agent_grants_create_modal_ui_agents_grants_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Create Submit",
+        "description": "``POST /ui/agents/grants/create`` -- create one permission grant.",
+        "operationId": "ui_agent_grants_create_submit_ui_agents_grants_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agent_grants_create_submit_ui_agents_grants_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/grants/elevate": {
+      "get": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Elevate Modal",
+        "description": "``GET /ui/agents/grants/elevate`` -- HTMX-loaded elevate modal fragment.",
+        "operationId": "ui_agent_grants_elevate_modal_ui_agents_grants_elevate_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Elevate Submit",
+        "description": "``POST /ui/agents/grants/elevate`` -- create one time-bounded elevation.",
+        "operationId": "ui_agent_grants_elevate_submit_ui_agents_grants_elevate_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agent_grants_elevate_submit_ui_agents_grants_elevate_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/grants/{grant_id}": {
+      "get": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Detail",
+        "description": "``GET /ui/agents/grants/{grant_id}`` -- per-grant detail.",
+        "operationId": "ui_agent_grants_detail_ui_agents_grants__grant_id__get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/grants/{grant_id}/revoke": {
+      "get": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Revoke Modal",
+        "description": "``GET /ui/agents/grants/{grant_id}/revoke`` -- revoke-confirm modal.",
+        "operationId": "ui_agent_grants_revoke_modal_ui_agents_grants__grant_id__revoke_get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agent-grants"
+        ],
+        "summary": "Ui Agent Grants Revoke Submit",
+        "description": "``POST /ui/agents/grants/{grant_id}/revoke`` -- revoke one grant.",
+        "operationId": "ui_agent_grants_revoke_submit_ui_agents_grants__grant_id__revoke_post",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/runs": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Runs List",
+        "description": "Serve ``GET /ui/agents/runs``. See module docstring for the URL contract.",
+        "operationId": "ui_agents_runs_list_ui_agents_runs_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AgentRunStatus",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/runs/{handle}": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Run Detail",
+        "description": "Render the per-run detail page or poll the status-panel fragment.",
+        "operationId": "run_detail_ui_agents_runs__handle__get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/create": {
       "get": {
         "tags": [
@@ -9624,6 +10175,247 @@
             "application/x-www-form-urlencoded": {
               "schema": {
                 "$ref": "#/components/schemas/Body_ui_agents_create_submit_ui_agents_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/principals": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agent Principals List",
+        "description": "``GET /ui/agents/principals`` -- list page or HTMX table fragment.",
+        "operationId": "ui_agent_principals_list_ui_agents_principals_get",
+        "parameters": [
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/principals/register": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agent Principals Register Modal",
+        "description": "``GET /ui/agents/principals/register`` -- HTMX-loaded register modal.",
+        "operationId": "ui_agent_principals_register_modal_ui_agents_principals_register_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agent Principals Register Submit",
+        "description": "``POST /ui/agents/principals/register`` -- register a new principal.",
+        "operationId": "ui_agent_principals_register_submit_ui_agents_principals_register_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agent_principals_register_submit_ui_agents_principals_register_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/principals/{name}/revoke": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agent Principals Revoke Modal",
+        "description": "``GET /ui/agents/principals/{name}/revoke`` -- kill-switch confirm modal.",
+        "operationId": "ui_agent_principals_revoke_modal_ui_agents_principals__name__revoke_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agent Principals Revoke Submit",
+        "description": "``POST /ui/agents/principals/{name}/revoke`` -- revoke (kill switch).",
+        "operationId": "ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post"
               }
             }
           }
@@ -13286,6 +14078,122 @@
         },
         "type": "object",
         "title": "Body_runbooks_publish_ui_runbooks__slug__publish_post"
+      },
+      "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Principal Sub",
+            "default": ""
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Op Pattern",
+            "default": ""
+          },
+          "target_scope": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Scope"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict",
+            "default": ""
+          },
+          "expires_at": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post"
+      },
+      "Body_ui_agent_grants_elevate_submit_ui_agents_grants_elevate_post": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Principal Sub",
+            "default": ""
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Op Pattern",
+            "default": ""
+          },
+          "target_scope": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Scope"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict",
+            "default": ""
+          },
+          "expires_at": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agent_grants_elevate_submit_ui_agents_grants_elevate_post"
+      },
+      "Body_ui_agent_principals_register_submit_ui_agents_principals_register_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Name",
+            "default": ""
+          },
+          "owner_sub": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Owner Sub"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agent_principals_register_submit_ui_agents_principals_register_post"
+      },
+      "Body_ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post": {
+        "properties": {
+          "confirm_name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Confirm Name",
+            "default": ""
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post"
       },
       "Body_ui_agents_create_submit_ui_agents_create_post": {
         "properties": {

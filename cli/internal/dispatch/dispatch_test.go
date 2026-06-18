@@ -313,8 +313,8 @@ func TestSearchPassesTypedParams(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 	p := f.lastSearchParams
-	if p == nil || p.ConnectorId != "vault-1.x" || p.Query != "secret" {
-		t.Fatalf("Search should pass typed ConnectorId+Query; got %+v", p)
+	if p == nil || p.ConnectorId != "vault-1.x" || p.Q == nil || *p.Q != "secret" {
+		t.Fatalf("Search should pass typed ConnectorId + canonical Q; got %+v", p)
 	}
 	if p.Group == nil || *p.Group != "kv" {
 		t.Fatalf("Search should pass typed Group=%q; got %+v", "kv", p.Group)

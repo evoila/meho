@@ -196,7 +196,7 @@ lands them as first-class columns — tracked under Goal #214.)
 Verify the fingerprint resolved both planes:
 
 ```bash
-meho targets probe --name rdc-vcfa --json \
+meho targets probe rdc-vcfa --json \
   | jq '{product, version, reachable, planes: .extras.planes}'
 # expected: {"product": "vcfa", "version": "9.0",
 #            "reachable": true, "planes": ["provider", "tenant"]}
@@ -428,19 +428,19 @@ first dispatch against a new VCFA target. Symptoms:
 
 The fix:
 
-1. **Inspect the target.** `meho targets describe --name rdc-vcfa`
+1. **Inspect the target.** `meho targets describe rdc-vcfa`
    should show a populated `fqdn:` field. If it doesn't, the
    `targets.yaml` import didn't include the field (or the operator
    imported before `fqdn:` was added).
 2. **Set `fqdn:` in `targets.yaml`** to the appliance's canonical
    FQDN — the value returned by `dig +short PTR <vcfa-ip>` or the
-   `cn` / `subjectAltName` on the appliance's TLS cert. Re-import
-   with `meho targets import --update <file>`.
+   `cn` / `subjectAltName` on the appliance's TLS cert. Re-import the
+   descriptor with `meho targets import --update <file>`.
 3. **Verify with `meho targets probe`.** A green probe confirms
    the connector reached the appliance through the FQDN-rooted base
    URL — every subsequent dispatch will work.
-4. **As a debugging override**, pass `--fqdn <vhost>` on a single
-   dispatch:
+4. **As a debugging override**, pass the FQDN override flag on a
+   single dispatch:
 
    ```bash
    meho vcf-automation about --plane provider --target rdc-vcfa \

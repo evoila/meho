@@ -30,6 +30,12 @@
   class="space-y-4"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
+  {# ---------- Definitions / Runs tab strip (T3 #1830) ---------- #}
+  <div role="tablist" class="tabs tabs-bordered">
+    <a role="tab" class="tab tab-active" aria-current="page" href="/ui/agents">Definitions</a>
+    <a role="tab" class="tab" href="/ui/agents/runs">Runs</a>
+  </div>
+
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
       <h1 class="text-2xl font-semibold">Agents</h1>
@@ -42,7 +48,21 @@
       <span class="text-sm opacity-70" aria-live="polite">
         {{ agent_count }} agent{{ "" if agent_count == 1 else "s" }}
       </span>
+      <a href="/ui/agents/principals" class="btn btn-sm btn-ghost" data-action="open-principals">
+        Principals
+      </a>
       {% if can_write %}
+      {# Permission grants are a tenant_admin-only sub-surface (reads
+         included), so the link only renders for admins -- a non-admin
+         would 403 the route (G10.8-T5 #1832). #}
+      <a
+        href="/ui/agents/grants"
+        class="btn btn-sm btn-ghost"
+        data-action="open-grants"
+        aria-label="Agent permission grants"
+      >
+        Grants
+      </a>
       <button
         type="button"
         class="btn btn-sm btn-primary"

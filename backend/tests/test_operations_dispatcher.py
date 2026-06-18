@@ -2134,11 +2134,13 @@ async def test_park_without_builder_uses_identifier_default(
     async with sessionmaker() as fresh:
         row = await fresh.get(ApprovalRequest, approval_request_id)
         assert row is not None
-        # Identifier-only default -- no built-preview envelope.
+        # Identifier-only default -- no built-preview envelope -- with the
+        # catalog safety_level stamped on by the dispatcher seam (#1855).
         assert row.proposed_effect == {
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
+            "safety_level": "safe",
         }
         assert "preview" not in row.proposed_effect
 

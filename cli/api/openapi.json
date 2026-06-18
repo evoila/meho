@@ -9632,6 +9632,105 @@
         }
       }
     },
+    "/ui/agents/runs": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Runs List",
+        "description": "Serve ``GET /ui/agents/runs``. See module docstring for the URL contract.",
+        "operationId": "ui_agents_runs_list_ui_agents_runs_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AgentRunStatus",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/runs/{handle}": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Run Detail",
+        "description": "Render the per-run detail page or poll the status-panel fragment.",
+        "operationId": "run_detail_ui_agents_runs__handle__get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/create": {
       "get": {
         "tags": [

@@ -1,0 +1,85 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent-run status panel (Task #1830). Rendered in two contexts:
+    * ``{% include %}``d by ``detail.html`` on the initial full-page render.
+    * Returned standalone by ``GET /ui/agents/runs/{handle}`` when the
+      ``HX-Request`` header is set (a poll tick). HTMX outerHTML-swaps it
+      into the existing ``#agent-run-status-panel`` element.
+
+  Polling contract (https://htmx.org/docs/#polling):
+    While the run is NON-terminal the wrapper carries
+    ``hx-get`` + ``hx-trigger="every Ns"`` so HTMX re-fetches the panel on
+    a timer. Once the run is terminal (succeeded / failed / cancelled) the
+    wrapper drops those directives, so the load-poll cycle ends naturally --
+    "stop returning the polling element". No JS, no 286-response plumbing.
+
+  Output / error are populated only on a terminal run; the panel shows the
+  pretty-printed ``output`` JSON or the ``error`` reason accordingly. The
+  panel never renders ``system_prompt`` / ``toolset`` / approval params --
+  the poll view carries none of them.
+-#}
+<div
+  id="agent-run-status-panel"
+  class="space-y-5"
+  {% if not run.is_terminal %}
+  hx-get="/ui/agents/runs/{{ run.run_id }}"
+  hx-trigger="every {{ poll_interval_seconds }}s"
+  hx-swap="outerHTML"
+  {% endif %}
+>
+  {# ---------- Lifecycle card ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body">
+      <h2 class="card-title text-base flex items-center gap-3">
+        <span class="badge {{ run.status_badge }}">{{ run.status }}</span>
+        {% if not run.is_terminal %}
+          <span class="text-xs opacity-60" aria-live="polite">
+            live · refreshing every {{ poll_interval_seconds }}s
+          </span>
+        {% endif %}
+      </h2>
+
+      {% if run.is_awaiting_approval %}
+        {# Parked on a policy-gated tool call -- deep-link to the approvals
+           queue so an operator can decide it (T7). #}
+        <div class="alert alert-warning text-sm">
+          <span>
+            This run is paused awaiting approval of a policy-gated tool call.
+          </span>
+          <a href="/ui/approvals" class="link link-primary">Review approvals &rarr;</a>
+        </div>
+      {% endif %}
+
+      <dl class="grid grid-cols-[8rem_1fr] gap-y-2 text-sm">
+        <dt class="opacity-60">Turns</dt>
+        <dd>{{ run.turns }}</dd>
+
+        <dt class="opacity-60">Provider</dt>
+        <dd>{% if run.provider %}{{ run.provider }}{% else %}<span class="opacity-40">— (not resolved)</span>{% endif %}</dd>
+
+        <dt class="opacity-60">Model</dt>
+        <dd class="font-mono text-xs">{% if run.model %}{{ run.model }}{% else %}<span class="opacity-40">— (not resolved)</span>{% endif %}</dd>
+      </dl>
+    </div>
+  </div>
+
+  {# ---------- Output / error card ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body">
+      <h2 class="card-title text-base">Result</h2>
+      {% if run.error %}
+        <div class="alert alert-error text-sm">
+          <span class="font-mono whitespace-pre-wrap">{{ run.error }}</span>
+        </div>
+      {% elif output_json %}
+        <pre class="bg-base-200 rounded p-3 text-xs overflow-x-auto">{{ output_json }}</pre>
+      {% elif run.is_terminal %}
+        <p class="text-sm opacity-60">This run produced no output.</p>
+      {% else %}
+        <p class="text-sm opacity-60">No result yet — the run is still in progress.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>

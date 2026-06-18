@@ -6238,6 +6238,12 @@ type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// UiAgentsRunsListUiAgentsRunsGetParams defines parameters for UiAgentsRunsListUiAgentsRunsGet.
+type UiAgentsRunsListUiAgentsRunsGetParams struct {
+	Status  *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
+	WorkRef *string         `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+}
+
 // ApprovalsIndexUiApprovalsGetParams defines parameters for ApprovalsIndexUiApprovalsGet.
 type ApprovalsIndexUiApprovalsGetParams struct {
 	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
@@ -7928,6 +7934,12 @@ type ClientInterface interface {
 	UiAgentsCreateSubmitUiAgentsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiAgentsCreateSubmitUiAgentsCreatePostWithFormdataBody(ctx context.Context, body UiAgentsCreateSubmitUiAgentsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentsRunsListUiAgentsRunsGet request
+	UiAgentsRunsListUiAgentsRunsGet(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunDetailUiAgentsRunsHandleGet request
+	RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsDetailUiAgentsNameGetWithBody request with any body
 	UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10199,6 +10211,30 @@ func (c *Client) UiAgentsCreateSubmitUiAgentsCreatePostWithBody(ctx context.Cont
 
 func (c *Client) UiAgentsCreateSubmitUiAgentsCreatePostWithFormdataBody(ctx context.Context, body UiAgentsCreateSubmitUiAgentsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentsCreateSubmitUiAgentsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsRunsListUiAgentsRunsGet(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunsListUiAgentsRunsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunDetailUiAgentsRunsHandleGetRequest(c.Server, handle)
 	if err != nil {
 		return nil, err
 	}
@@ -19626,6 +19662,105 @@ func NewUiAgentsCreateSubmitUiAgentsCreatePostRequestWithBody(server string, con
 	return req, nil
 }
 
+// NewUiAgentsRunsListUiAgentsRunsGetRequest generates requests for UiAgentsRunsListUiAgentsRunsGet
+func NewUiAgentsRunsListUiAgentsRunsGetRequest(server string, params *UiAgentsRunsListUiAgentsRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRunDetailUiAgentsRunsHandleGetRequest generates requests for RunDetailUiAgentsRunsHandleGet
+func NewRunDetailUiAgentsRunsHandleGetRequest(server string, handle openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAgentsDetailUiAgentsNameGetRequest calls the generic UiAgentsDetailUiAgentsNameGet builder with application/json body
 func NewUiAgentsDetailUiAgentsNameGetRequest(server string, name string, body UiAgentsDetailUiAgentsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -24002,6 +24137,12 @@ type ClientWithResponsesInterface interface {
 
 	UiAgentsCreateSubmitUiAgentsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiAgentsCreateSubmitUiAgentsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsCreateSubmitUiAgentsCreatePostResponse, error)
 
+	// UiAgentsRunsListUiAgentsRunsGetWithResponse request
+	UiAgentsRunsListUiAgentsRunsGetWithResponse(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*UiAgentsRunsListUiAgentsRunsGetResponse, error)
+
+	// RunDetailUiAgentsRunsHandleGetWithResponse request
+	RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with any body
 	UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error)
 
@@ -27131,6 +27272,50 @@ func (r UiAgentsCreateSubmitUiAgentsCreatePostResponse) StatusCode() int {
 	return 0
 }
 
+type UiAgentsRunsListUiAgentsRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentsRunsListUiAgentsRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentsRunsListUiAgentsRunsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunDetailUiAgentsRunsHandleGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunDetailUiAgentsRunsHandleGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunDetailUiAgentsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAgentsDetailUiAgentsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -30204,6 +30389,24 @@ func (c *ClientWithResponses) UiAgentsCreateSubmitUiAgentsCreatePostWithFormdata
 		return nil, err
 	}
 	return ParseUiAgentsCreateSubmitUiAgentsCreatePostResponse(rsp)
+}
+
+// UiAgentsRunsListUiAgentsRunsGetWithResponse request returning *UiAgentsRunsListUiAgentsRunsGetResponse
+func (c *ClientWithResponses) UiAgentsRunsListUiAgentsRunsGetWithResponse(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*UiAgentsRunsListUiAgentsRunsGetResponse, error) {
+	rsp, err := c.UiAgentsRunsListUiAgentsRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsRunsListUiAgentsRunsGetResponse(rsp)
+}
+
+// RunDetailUiAgentsRunsHandleGetWithResponse request returning *RunDetailUiAgentsRunsHandleGetResponse
+func (c *ClientWithResponses) RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error) {
+	rsp, err := c.RunDetailUiAgentsRunsHandleGet(ctx, handle, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunDetailUiAgentsRunsHandleGetResponse(rsp)
 }
 
 // UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with arbitrary body returning *UiAgentsDetailUiAgentsNameGetResponse
@@ -35098,6 +35301,58 @@ func ParseUiAgentsCreateSubmitUiAgentsCreatePostResponse(rsp *http.Response) (*U
 	}
 
 	response := &UiAgentsCreateSubmitUiAgentsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentsRunsListUiAgentsRunsGetResponse parses an HTTP response from a UiAgentsRunsListUiAgentsRunsGetWithResponse call
+func ParseUiAgentsRunsListUiAgentsRunsGetResponse(rsp *http.Response) (*UiAgentsRunsListUiAgentsRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentsRunsListUiAgentsRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunDetailUiAgentsRunsHandleGetResponse parses an HTTP response from a RunDetailUiAgentsRunsHandleGetWithResponse call
+func ParseRunDetailUiAgentsRunsHandleGetResponse(rsp *http.Response) (*RunDetailUiAgentsRunsHandleGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunDetailUiAgentsRunsHandleGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

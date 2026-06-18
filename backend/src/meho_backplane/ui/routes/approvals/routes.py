@@ -170,6 +170,15 @@ _HISTORY_TABS: Final[dict[str, str | None]] = {
 #: bare ``/ui/approvals`` lands the operator on the work that needs them.
 _DEFAULT_HISTORY_TAB: Final[str] = "pending"
 
+#: The ``partial`` discriminator on ``GET /ui/approvals/list``. The empty
+#: default returns the full ``_history.html`` console block (the tab / filter
+#: swap target); ``rows`` returns ONLY the page's ``<li>`` rows plus an
+#: out-of-band pager re-render -- the "Load more" append response that must
+#: NOT carry a second nested console (the #1827 B1 defect). A foreign value is
+#: rejected (422) rather than silently coerced.
+_HISTORY_PARTIAL_ROWS: Final[str] = "rows"
+_HISTORY_PARTIALS: Final[frozenset[str]] = frozenset({"", _HISTORY_PARTIAL_ROWS})
+
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
 #: parse against a paste-from-clipboard accident.
@@ -344,9 +353,17 @@ def build_approvals_router() -> APIRouter:
         tab: str = Query(default=_DEFAULT_HISTORY_TAB),
         work_ref: str = Query(default="", max_length=_MAX_WORK_REF_LENGTH),
         offset: int = Query(default=0, ge=0),
+        partial: str = Query(default=""),
     ) -> HTMLResponse:
-        """Render the decision-history list partial (delegates below)."""
-        return await _render_history(request, session, tab, work_ref, offset)
+        """Render the decision-history list partial (delegates below).
+
+        ``partial=rows`` returns ONLY the bare ``<li>`` rows for the page
+        plus an out-of-band pager re-render -- the "Load more" append
+        response. Any other value returns the full ``_history.html`` console
+        block (the tab / filter / pager swap target). A query value outside
+        the known set is rejected as a 422 rather than silently coerced.
+        """
+        return await _render_history(request, session, tab, work_ref, offset, partial)
 
     @router.get("/ui/approvals", response_class=HTMLResponse)
     async def approvals_index(
@@ -497,10 +514,28 @@ async def _render_history(
     tab: str,
     work_ref: str,
     offset: int,
+    partial: str = "",
 ) -> HTMLResponse:
-    """Render the decision-history list partial for the HTMX tab/pager swap."""
+    """Render the decision-history list partial for the HTMX tab/pager swap.
+
+    ``partial=rows`` (the "Load more" append fetch) renders ONLY the page's
+    ``<li>`` rows plus an out-of-band pager re-render -- never the full
+    ``_history.html`` console, which would nest a second console + duplicate
+    ids when appended into the rows ``<ul>`` (#1827 B1). The empty default
+    renders the full console block (the tab / filter swap target).
+    """
+    if partial not in _HISTORY_PARTIALS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown approvals list partial '{partial}'.",
+        )
     context = await _build_history_context(session, tab, work_ref, offset)
-    return get_templates().TemplateResponse(request, "approvals/_history.html", context)
+    template = (
+        "approvals/_history_rows_oob.html"
+        if partial == _HISTORY_PARTIAL_ROWS
+        else "approvals/_history.html"
+    )
+    return get_templates().TemplateResponse(request, template, context)
 
 
 async def _render_detail_modal(

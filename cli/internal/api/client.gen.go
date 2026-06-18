@@ -6042,6 +6042,21 @@ type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ApprovalsIndexUiApprovalsGetParams defines parameters for ApprovalsIndexUiApprovalsGet.
+type ApprovalsIndexUiApprovalsGetParams struct {
+	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// ApprovalsHistoryUiApprovalsListGetParams defines parameters for ApprovalsHistoryUiApprovalsListGet.
+type ApprovalsHistoryUiApprovalsListGetParams struct {
+	Tab     *string `form:"tab,omitempty" json:"tab,omitempty"`
+	WorkRef *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Offset  *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Partial *string `form:"partial,omitempty" json:"partial,omitempty"`
+}
+
 // UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
 type UiAuthCallbackUiAuthCallbackGetParams struct {
 	Code             *string `form:"code,omitempty" json:"code,omitempty"`
@@ -7645,11 +7660,14 @@ type ClientInterface interface {
 	// UiDashboardUiGet request
 	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ApprovalsPanelUiApprovalsGet request
-	ApprovalsPanelUiApprovalsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// ApprovalsIndexUiApprovalsGet request
+	ApprovalsIndexUiApprovalsGet(ctx context.Context, params *ApprovalsIndexUiApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ApprovalsBadgeUiApprovalsBadgeGet request
 	ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApprovalsHistoryUiApprovalsListGet request
+	ApprovalsHistoryUiApprovalsListGet(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ApprovalDetailUiApprovalsRequestIdGet request
 	ApprovalDetailUiApprovalsRequestIdGet(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9773,8 +9791,8 @@ func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEdit
 	return c.Client.Do(req)
 }
 
-func (c *Client) ApprovalsPanelUiApprovalsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewApprovalsPanelUiApprovalsGetRequest(c.Server)
+func (c *Client) ApprovalsIndexUiApprovalsGet(ctx context.Context, params *ApprovalsIndexUiApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsIndexUiApprovalsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -9787,6 +9805,18 @@ func (c *Client) ApprovalsPanelUiApprovalsGet(ctx context.Context, reqEditors ..
 
 func (c *Client) ApprovalsBadgeUiApprovalsBadgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApprovalsBadgeUiApprovalsBadgeGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApprovalsHistoryUiApprovalsListGet(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApprovalsHistoryUiApprovalsListGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18645,8 +18675,8 @@ func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewApprovalsPanelUiApprovalsGetRequest generates requests for ApprovalsPanelUiApprovalsGet
-func NewApprovalsPanelUiApprovalsGetRequest(server string) (*http.Request, error) {
+// NewApprovalsIndexUiApprovalsGetRequest generates requests for ApprovalsIndexUiApprovalsGet
+func NewApprovalsIndexUiApprovalsGetRequest(server string, params *ApprovalsIndexUiApprovalsGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -18662,6 +18692,60 @@ func NewApprovalsPanelUiApprovalsGetRequest(server string) (*http.Request, error
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Tab != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tab", runtime.ParamLocationQuery, *params.Tab); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -18689,6 +18773,103 @@ func NewApprovalsBadgeUiApprovalsBadgeGetRequest(server string) (*http.Request, 
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewApprovalsHistoryUiApprovalsListGetRequest generates requests for ApprovalsHistoryUiApprovalsListGet
+func NewApprovalsHistoryUiApprovalsListGetRequest(server string, params *ApprovalsHistoryUiApprovalsListGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/approvals/list")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Tab != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tab", runtime.ParamLocationQuery, *params.Tab); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Partial != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "partial", runtime.ParamLocationQuery, *params.Partial); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -22215,11 +22396,14 @@ type ClientWithResponsesInterface interface {
 	// UiDashboardUiGetWithResponse request
 	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
 
-	// ApprovalsPanelUiApprovalsGetWithResponse request
-	ApprovalsPanelUiApprovalsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsPanelUiApprovalsGetResponse, error)
+	// ApprovalsIndexUiApprovalsGetWithResponse request
+	ApprovalsIndexUiApprovalsGetWithResponse(ctx context.Context, params *ApprovalsIndexUiApprovalsGetParams, reqEditors ...RequestEditorFn) (*ApprovalsIndexUiApprovalsGetResponse, error)
 
 	// ApprovalsBadgeUiApprovalsBadgeGetWithResponse request
 	ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsBadgeUiApprovalsBadgeGetResponse, error)
+
+	// ApprovalsHistoryUiApprovalsListGetWithResponse request
+	ApprovalsHistoryUiApprovalsListGetWithResponse(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*ApprovalsHistoryUiApprovalsListGetResponse, error)
 
 	// ApprovalDetailUiApprovalsRequestIdGetWithResponse request
 	ApprovalDetailUiApprovalsRequestIdGetWithResponse(ctx context.Context, requestId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ApprovalDetailUiApprovalsRequestIdGetResponse, error)
@@ -25186,13 +25370,14 @@ func (r UiDashboardUiGetResponse) StatusCode() int {
 	return 0
 }
 
-type ApprovalsPanelUiApprovalsGetResponse struct {
+type ApprovalsIndexUiApprovalsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r ApprovalsPanelUiApprovalsGetResponse) Status() string {
+func (r ApprovalsIndexUiApprovalsGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -25200,7 +25385,7 @@ func (r ApprovalsPanelUiApprovalsGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r ApprovalsPanelUiApprovalsGetResponse) StatusCode() int {
+func (r ApprovalsIndexUiApprovalsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25222,6 +25407,28 @@ func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ApprovalsBadgeUiApprovalsBadgeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApprovalsHistoryUiApprovalsListGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApprovalsHistoryUiApprovalsListGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApprovalsHistoryUiApprovalsListGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -27892,13 +28099,13 @@ func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, 
 	return ParseUiDashboardUiGetResponse(rsp)
 }
 
-// ApprovalsPanelUiApprovalsGetWithResponse request returning *ApprovalsPanelUiApprovalsGetResponse
-func (c *ClientWithResponses) ApprovalsPanelUiApprovalsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ApprovalsPanelUiApprovalsGetResponse, error) {
-	rsp, err := c.ApprovalsPanelUiApprovalsGet(ctx, reqEditors...)
+// ApprovalsIndexUiApprovalsGetWithResponse request returning *ApprovalsIndexUiApprovalsGetResponse
+func (c *ClientWithResponses) ApprovalsIndexUiApprovalsGetWithResponse(ctx context.Context, params *ApprovalsIndexUiApprovalsGetParams, reqEditors ...RequestEditorFn) (*ApprovalsIndexUiApprovalsGetResponse, error) {
+	rsp, err := c.ApprovalsIndexUiApprovalsGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseApprovalsPanelUiApprovalsGetResponse(rsp)
+	return ParseApprovalsIndexUiApprovalsGetResponse(rsp)
 }
 
 // ApprovalsBadgeUiApprovalsBadgeGetWithResponse request returning *ApprovalsBadgeUiApprovalsBadgeGetResponse
@@ -27908,6 +28115,15 @@ func (c *ClientWithResponses) ApprovalsBadgeUiApprovalsBadgeGetWithResponse(ctx 
 		return nil, err
 	}
 	return ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp)
+}
+
+// ApprovalsHistoryUiApprovalsListGetWithResponse request returning *ApprovalsHistoryUiApprovalsListGetResponse
+func (c *ClientWithResponses) ApprovalsHistoryUiApprovalsListGetWithResponse(ctx context.Context, params *ApprovalsHistoryUiApprovalsListGetParams, reqEditors ...RequestEditorFn) (*ApprovalsHistoryUiApprovalsListGetResponse, error) {
+	rsp, err := c.ApprovalsHistoryUiApprovalsListGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApprovalsHistoryUiApprovalsListGetResponse(rsp)
 }
 
 // ApprovalDetailUiApprovalsRequestIdGetWithResponse request returning *ApprovalDetailUiApprovalsRequestIdGetResponse
@@ -32453,17 +32669,27 @@ func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetRespons
 	return response, nil
 }
 
-// ParseApprovalsPanelUiApprovalsGetResponse parses an HTTP response from a ApprovalsPanelUiApprovalsGetWithResponse call
-func ParseApprovalsPanelUiApprovalsGetResponse(rsp *http.Response) (*ApprovalsPanelUiApprovalsGetResponse, error) {
+// ParseApprovalsIndexUiApprovalsGetResponse parses an HTTP response from a ApprovalsIndexUiApprovalsGetWithResponse call
+func ParseApprovalsIndexUiApprovalsGetResponse(rsp *http.Response) (*ApprovalsIndexUiApprovalsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &ApprovalsPanelUiApprovalsGetResponse{
+	response := &ApprovalsIndexUiApprovalsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil
@@ -32480,6 +32706,32 @@ func ParseApprovalsBadgeUiApprovalsBadgeGetResponse(rsp *http.Response) (*Approv
 	response := &ApprovalsBadgeUiApprovalsBadgeGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseApprovalsHistoryUiApprovalsListGetResponse parses an HTTP response from a ApprovalsHistoryUiApprovalsListGetWithResponse call
+func ParseApprovalsHistoryUiApprovalsListGetResponse(rsp *http.Response) (*ApprovalsHistoryUiApprovalsListGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApprovalsHistoryUiApprovalsListGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

@@ -1,0 +1,55 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approvals decision-history PAGER partial (G10.8-T #1827).
+
+  Just the "showing N-M" range + the "Load more" / "No more" affordance for
+  one page. Extracted from ``_history.html`` so the same markup is rendered
+  two ways:
+
+    * Included inline by ``_history.html`` for the first page (the in-page
+      pager beneath the rows list).
+    * Re-rendered on its own as an out-of-band swap (``hx-swap-oob``) in the
+      ``partial=rows`` "Load more" response, so each append REPLACES the old
+      pager with one whose "Load more" URL carries the ADVANCED
+      ``next_offset``. Without the OOB re-render the button would re-request
+      the same page forever (the offset-never-advances defect).
+
+  ``oob`` (bool) selects the mode: when true the wrapper carries
+  ``hx-swap-oob="outerHTML"`` so HTMX replaces the existing pager by id
+  rather than appending; the rows themselves still swap into the list via
+  the request's own ``beforeend`` target.
+
+  Context variables (subset of the history context):
+    active_tab  -- str: the selected tab key (kept in the Load-more URL)
+    offset      -- int: current page offset (drives the "showing N-M" label)
+    requests    -- list[dict]: this page's rows (its length closes the range)
+    next_offset -- int: offset for the next "Load more" fetch
+    has_more    -- bool: whether a further page exists
+    oob         -- bool: render as an hx-swap-oob replacement (default false)
+-#}
+<div
+  id="approvals-history-pager"
+  class="flex items-center justify-between gap-2"
+  {% if oob | default(false) %}hx-swap-oob="outerHTML"{% endif %}
+>
+  <span class="text-sm opacity-60">
+    Showing {{ offset + 1 }}&ndash;{{ offset + requests | length }}
+  </span>
+  {% if has_more %}
+    <button
+      type="button"
+      class="btn btn-sm btn-ghost"
+      hx-get="/ui/approvals/list?tab={{ active_tab }}&offset={{ next_offset }}&partial=rows"
+      hx-target="#approvals-history-rows"
+      hx-swap="beforeend"
+      hx-include="[name='work_ref']"
+      aria-label="Load more approval requests"
+    >
+      Load more
+    </button>
+  {% else %}
+    <span class="text-xs opacity-40">No more requests</span>
+  {% endif %}
+</div>

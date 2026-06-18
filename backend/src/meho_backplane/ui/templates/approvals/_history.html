@@ -14,11 +14,15 @@
       swaps ``#approvals-history`` in place. ``hx-include`` carries the
       live work_ref box so switching tabs preserves the filter.
     * The work_ref input fires the same fetch on a debounced ``keyup``.
-    * ``hx-push-url`` keeps the browser URL in sync so a filtered view is
-      bookmarkable / shareable.
-    * "Load more" advances ``offset`` and APPENDS the next page
-      (``hx-swap="beforeend"`` onto the rows list) rather than replacing
-      the region, so paging never loses the rows already shown.
+    * ``hx-push-url`` keeps the browser URL in sync (tab + the live
+      ``work_ref``) so a filtered view is bookmarkable / shareable.
+    * "Load more" fetches ``/ui/approvals/list?...&partial=rows``, which
+      returns ONLY the bare ``<li>`` rows for the next page (appended via
+      ``hx-swap="beforeend"`` onto the rows list, so paging never loses the
+      rows already shown) plus an out-of-band re-render of the pager so the
+      button's ``offset`` advances to the next page. It must NOT re-fetch the
+      whole ``_history.html`` console -- that would nest a second console and
+      duplicate ids inside the ``<ul>``.
     * The whole region re-fetches the ACTIVE tab on the body-wide
       ``meho:approval-bump`` / ``meho:approval-decided`` events the
       app-shell bell dispatches, so a decision made elsewhere (or in this
@@ -62,7 +66,7 @@
         hx-target="#approvals-history"
         hx-swap="outerHTML"
         hx-include="[name='work_ref']"
-        hx-push-url="/ui/approvals?tab={{ tab }}"
+        hx-push-url="/ui/approvals?tab={{ tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
       >
         {{ tab | capitalize }}
       </button>
@@ -86,7 +90,7 @@
       hx-target="#approvals-history"
       hx-swap="outerHTML"
       hx-trigger="keyup changed delay:300ms, search"
-      hx-push-url="/ui/approvals?tab={{ active_tab }}"
+      hx-push-url="/ui/approvals?tab={{ active_tab }}{% if work_ref %}&work_ref={{ work_ref | urlencode }}{% endif %}"
     />
   </label>
 
@@ -101,27 +105,9 @@
       {% include "approvals/_history_rows.html" %}
     </ul>
 
-    {# ---------- Pager ---------- #}
-    <div class="flex items-center justify-between gap-2">
-      <span class="text-sm opacity-60">
-        Showing {{ offset + 1 }}&ndash;{{ offset + requests | length }}
-      </span>
-      {% if has_more %}
-        <button
-          type="button"
-          class="btn btn-sm btn-ghost"
-          hx-get="/ui/approvals/list?tab={{ active_tab }}&offset={{ next_offset }}"
-          hx-target="#approvals-history-rows"
-          hx-swap="beforeend"
-          hx-include="[name='work_ref']"
-          aria-label="Load more approval requests"
-        >
-          Load more
-        </button>
-      {% else %}
-        <span class="text-xs opacity-40">No more requests</span>
-      {% endif %}
-    </div>
+    {# ---------- Pager (extracted: rendered inline here, re-rendered OOB
+         on each "Load more" append so next_offset advances -- #1827 B1) ---------- #}
+    {% include "approvals/_history_pager.html" %}
   {% else %}
     {# ---------- Empty state (per active tab) ---------- #}
     <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">

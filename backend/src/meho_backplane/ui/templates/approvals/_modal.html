@@ -32,7 +32,9 @@
     T" / "Expired at T") and the Approve/Deny actions are NOT rendered --
     there is nothing to act on. Only a pending row offers the decision
     forms. This is what lets the history view's "View" button reuse the
-    same modal for a closed request.
+    same modal for a closed request. An expired row has a null ``decided_at``
+    (it was closed by timeout, not a decision), so the "at T" falls back to
+    ``expires_at`` for that branch.
 
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
@@ -88,15 +90,19 @@
         {% set decision_alert = "alert-info" %}
         {% set decision_verb = "Expired" %}
       {% endif %}
+      {# An expired row is closed by timeout, not a decision: it carries
+         ``expires_at`` and a null ``decided_at``, so fall back to the
+         expiry deadline for the "Expired at T" timestamp (#1827 m1). #}
+      {% set decision_ts = request.expires_at if request.status == "expired" else request.decided_at %}
       <div class="alert {{ decision_alert }} mt-4" role="status" aria-live="polite">
         <div>
           <h4 class="font-semibold">
             {{ decision_verb }}
             {% if request.reviewed_by %}by <span class="font-mono">{{ request.reviewed_by }}</span>{% endif %}
           </h4>
-          {% if request.decided_at %}
+          {% if decision_ts %}
             <p class="text-sm opacity-90">
-              <time datetime="{{ request.decided_at }}" class="font-mono text-xs">{{ request.decided_at }}</time>
+              <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
           {% endif %}
         </div>

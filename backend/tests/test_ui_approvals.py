@@ -195,6 +195,7 @@ def _seed_request(
     reviewed_by: str | None = None,
     decided_at: datetime | None = None,
     work_ref: str | None = None,
+    expires_at: datetime | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -220,7 +221,7 @@ def _seed_request(
                     decided_at=decided_at,
                     work_ref=work_ref,
                     created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
-                    expires_at=None,
+                    expires_at=expires_at,
                 ),
             )
         return rid
@@ -945,7 +946,7 @@ def test_history_work_ref_filter_narrows_results() -> None:
     """A work_ref filter narrows the list to that change ticket."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_request(tenant_id=_TENANT_A, op_id="ticketed.op", work_ref="gh:evoila/meho#1")
-    _seed_request(tenant_id=_TENANT_A, op_id="untickled.op", work_ref=None)
+    _seed_request(tenant_id=_TENANT_A, op_id="unticketed.op", work_ref=None)
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
 
     with respx.mock(assert_all_called=False):
@@ -958,7 +959,55 @@ def test_history_work_ref_filter_narrows_results() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "ticketed.op" in body
-    assert "untickled.op" not in body
+    assert "unticketed.op" not in body
+
+
+def test_history_push_url_preserves_work_ref_filter() -> None:
+    """``hx-push-url`` carries the active ``work_ref`` so the filtered view round-trips.
+
+    Regression guard for #1827 M1: the tab buttons and the work_ref input
+    pushed ``/ui/approvals?tab=...`` WITHOUT the active filter, so switching
+    tabs / bookmarking lost it. ``GET /ui/approvals`` already accepts
+    ``work_ref``, so the restored URL must carry the url-encoded value.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="ticketed.op", work_ref="gh:evoila/meho#1")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(
+            "/ui/approvals/list?tab=all&work_ref=gh:evoila/meho%231",
+            headers=_HX_HEADERS,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The pushed URL preserves the (url-encoded) work_ref alongside the tab,
+    # so a tab switch / bookmark keeps the filter. ``#`` -> ``%23``.
+    assert "work_ref=gh%3Aevoila/meho%231" in body
+    # And it is not pushed bare (would drop the filter on navigation).
+    assert 'hx-push-url="/ui/approvals?tab=all"' not in body
+
+
+def test_history_push_url_is_filter_free_when_no_work_ref() -> None:
+    """With no ``work_ref`` filter the pushed URL is the bare tab URL.
+
+    The work_ref segment is conditional, so an unfiltered view does not push
+    an empty ``&work_ref=`` that would round-trip as a blank filter box.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="ticketed.op")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=all", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'hx-push-url="/ui/approvals?tab=all"' in body
+    assert "work_ref=" not in body.split('hx-push-url="/ui/approvals?tab=all"')[1].split('"')[0]
 
 
 def test_history_offset_pager_is_not_capped_at_the_badge_limit() -> None:
@@ -978,16 +1027,114 @@ def test_history_offset_pager_is_not_capped_at_the_badge_limit() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         page1 = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
-        page2 = client.get("/ui/approvals/list?tab=pending&offset=25", headers=_HX_HEADERS)
+        page2 = client.get(
+            "/ui/approvals/list?tab=pending&offset=25&partial=rows", headers=_HX_HEADERS
+        )
 
     assert page1.status_code == 200, page1.text
     assert page2.status_code == 200, page2.text
-    # Page 1 offers "Load more" (a further page exists).
+    # Page 1 offers "Load more" whose URL advances the offset to the next page.
     assert "Load more" in page1.text
     assert "offset=25" in page1.text
     # Page 2 is the tail: exactly one row, no further "Load more".
     assert page2.text.count("<li ") == 1
     assert "Load more" not in page2.text
+
+
+def test_history_load_more_partial_returns_rows_only_not_a_nested_console() -> None:
+    """The ``partial=rows`` append response is rows + an OOB pager, never a console.
+
+    Regression guard for the #1827 B1 defect: the "Load more" button targets
+    the rows ``<ul>`` with ``hx-swap="beforeend"``. If the offset fetch
+    returned the full ``_history.html`` console (tabs + filter + a nested
+    ``<ul id="approvals-history-rows">`` + pager), HTMX would append a whole
+    second console *inside* the list and duplicate every id. The
+    ``partial=rows`` response must therefore carry ONLY the page's ``<li>``
+    rows plus an out-of-band pager re-render -- no second
+    ``id="approvals-history"`` and no second ``id="approvals-history-rows"``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    for i in range(26):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op.{i:02d}")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # Page 1 (full console) then the "Load more" append fetch.
+        page1 = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
+        rows = client.get(
+            "/ui/approvals/list?tab=pending&offset=25&partial=rows", headers=_HX_HEADERS
+        )
+
+    assert page1.status_code == 200, page1.text
+    assert rows.status_code == 200, rows.text
+    body = rows.text
+    # No nested console / list region -- the defect would leak these ids in.
+    assert 'id="approvals-history"' not in body
+    assert 'id="approvals-history-rows"' not in body
+    # No tabs / filter leak into the append payload either.
+    assert 'role="tablist"' not in body
+    assert "Change ticket" not in body
+    # Exactly one page-2 <li> row IS present (it appends onto the existing
+    # list). All 26 rows share a constant created_at in the seed, so the
+    # second page's identity is order-dependent -- assert the count, not a
+    # particular op_id.
+    assert body.count("<li ") == 1
+    # The pager is re-rendered out of band so the button updates by id.
+    assert 'id="approvals-history-pager"' in body
+    assert 'hx-swap-oob="outerHTML"' in body
+    # The first page's full console DID carry the list region (sanity).
+    assert 'id="approvals-history-rows"' in page1.text
+
+
+def test_history_load_more_partial_advances_offset_then_ends() -> None:
+    """Each ``partial=rows`` append re-renders the pager with the NEXT offset.
+
+    The #1827 B1 fix moves the pager out of the rows ``<ul>`` and re-renders
+    it out of band on every append, so repeated "Load more" clicks advance
+    the offset (page 2 -> page 3) instead of re-requesting the same page
+    forever, and the affordance collapses to "No more requests" on the last
+    page.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # 60 rows -> 3 pages of 25 / 25 / 10.
+    for i in range(60):
+        _seed_request(tenant_id=_TENANT_A, op_id=f"op.{i:02d}")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # Append page 2 (offset 25): its OOB pager must point at offset 50.
+        page2 = client.get(
+            "/ui/approvals/list?tab=pending&offset=25&partial=rows", headers=_HX_HEADERS
+        )
+        # Append page 3 (offset 50): the tail, no further "Load more".
+        page3 = client.get(
+            "/ui/approvals/list?tab=pending&offset=50&partial=rows", headers=_HX_HEADERS
+        )
+
+    assert page2.status_code == 200, page2.text
+    assert page3.status_code == 200, page3.text
+    # Page 2's re-rendered pager advances the Load-more URL to offset 50.
+    assert "Load more" in page2.text
+    assert "offset=50" in page2.text
+    assert "offset=25" not in page2.text
+    # Page 3 is the tail: 10 rows, the pager collapses to "No more requests".
+    assert page3.text.count("<li ") == 10
+    assert "Load more" not in page3.text
+    assert "No more requests" in page3.text
+
+
+def test_history_unknown_partial_is_422() -> None:
+    """An unknown ``partial`` query value fails loud (422), not a silent default."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=pending&partial=bogus", headers=_HX_HEADERS)
+
+    assert response.status_code == 422, response.text
 
 
 def test_history_unknown_tab_is_422() -> None:
@@ -1115,6 +1262,45 @@ def test_detail_modal_decided_row_is_read_only() -> None:
     assert "Approved" in body
     assert _REVIEWER_SUB in body
     # No decision forms on a closed request.
+    assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
+
+
+def test_detail_modal_expired_row_shows_expiry_timestamp() -> None:
+    """An expired request's banner renders the ``expires_at`` deadline as its "when".
+
+    Regression guard for #1827 m1: an expired row is closed by timeout, not a
+    decision, so ``decided_at`` is null and ``expires_at`` carries the time.
+    The banner previously checked only ``decided_at``, so the expired branch
+    read "Expired" with no timestamp. The fix falls back to ``expires_at``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    expiry = datetime(2026, 6, 17, 8, 30, tzinfo=UTC)
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="expired.op",
+        status_value=ApprovalRequestStatus.EXPIRED.value,
+        decided_at=None,
+        expires_at=expiry,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The banner names the outcome AND its time (the expiry deadline). The
+    # date+time-of-day substring is asserted (not the full isoformat) so the
+    # test is robust to whether the SQLite round-trip preserves the tz offset.
+    assert "Expired" in body
+    assert "2026-06-17T08:30:00" in body
+    # The timestamp is rendered inside a <time> element for the expired branch.
+    assert 'datetime="2026-06-17T08:30:00' in body
+    # Read-only: no decision forms on a closed request.
     assert f'hx-post="/ui/approvals/{rid}/approve"' not in body
     assert f'hx-post="/ui/approvals/{rid}/reject"' not in body
 

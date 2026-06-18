@@ -460,7 +460,15 @@ in-process (same in-process-audit binding the REST routes get).
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
 
 The console is **read-only over substrate that already exists** — it adds
-no REST/API/CLI/migration surface. The internal `params` / `params_hash`
+no new service call, no `api/v1` Bearer route, no CLI verb, and no
+migration. It does, however, register its `/ui/*` routes into the FastAPI
+OpenAPI document (the UI routers are not `include_in_schema=False`), so a
+new or changed `/ui/approvals*` route — e.g. the `partial=rows` query the
+"Load more" pager added — DOES enter `cli/api/openapi.json` and the
+generated client. Re-snapshot the OpenAPI doc (`cd cli && make
+snapshot-openapi && make generate`) whenever a `/ui/approvals*` route is
+added or its signature changes, or the "CLI API snapshot freshness" check
+goes red. The internal `params` / `params_hash`
 columns are **never** projected onto any UI view, the badge, or a
 broadcast frame: the `render.project_request_to_view` projection omits
 them by construction. Live updates ride the app-shell bell's body-wide

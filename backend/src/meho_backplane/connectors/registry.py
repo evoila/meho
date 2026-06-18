@@ -243,11 +243,14 @@ def product_impl_id_round_trips(*, product: str, version: str, impl_id: str) -> 
 
     The non-raising predicate behind the product↔impl_id invariant
     (G0.27 / T2 #1816). :func:`_assert_product_impl_id_round_trips` raises
-    on it at registration; the ingest route boundary
-    (:func:`~meho_backplane.api.v1.connectors_ingest.ingest_endpoint`)
-    translates a ``False`` into a 422 so a divergent ingest is rejected
-    before the pipeline runs (G0.27 / T3 #1817), rather than scaffolding a
-    non-dispatchable shim. One parse rule, two enforcement points.
+    on it at registration; the ingest pipeline service
+    (:meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`)
+    raises :class:`~meho_backplane.operations.ingest.ProductImplIdMismatch`
+    on a ``False`` at the one chokepoint every entry point (REST / MCP /
+    CLI) traverses, so a divergent ingest is rejected before any DB write
+    rather than scaffolding a non-dispatchable shim — the REST route maps
+    that to a 422 and the MCP tool to a ``-32602`` (G0.27 / T3 #1817).
+    One parse rule, two enforcement points.
 
     Returns ``True`` (the round-trip holds, nothing to enforce) when:
 

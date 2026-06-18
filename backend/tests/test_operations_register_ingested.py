@@ -57,6 +57,7 @@ import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -69,8 +70,11 @@ from meho_backplane.operations._lookup import connector_exists, parse_connector_
 from meho_backplane.operations.ingest import (
     EndpointDescriptorProto,
     GenericRestConnector,
+    IngestionPipelineService,
     IngestionResult,
     OpIdCollision,
+    ProductImplIdMismatch,
+    SpecSource,
     UncoveredVersionLabel,
     check_version_covered_by_registered_class,
     parse_openapi,
@@ -1181,6 +1185,77 @@ async def test_divergent_product_ingest_trips_registration_hard_fail(
     snapshot = all_connectors_v2()
     assert ("drift", "9.1", "drift-impl") not in snapshot
     assert ("drift-test", "9.1", "drift-impl") not in snapshot
+
+
+@pytest.mark.asyncio
+async def test_service_ingest_rejects_divergent_product_with_handrolled_impl_no_rows() -> None:
+    """The service layer rejects a divergent product whose impl_id is hand-coded.
+
+    G0.27 / T3 (#1817) — the hole #1851 closes. ``register_connector_v2``'s
+    #1816 hard-fail is the backstop for a divergent product with **no**
+    hand-coded class (see
+    ``test_divergent_product_ingest_trips_registration_hard_fail``), but it
+    never fires when a hand-coded class already covers the ``impl_id``: the
+    ingest guard in
+    :func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
+    defers to the hand-coded class and returns ``False`` *without* calling
+    ``register_connector_v2``, so a bare
+    ``register_ingested_operations(product='vcf-logs', impl_id='vrli-rest')``
+    would persist rows under ``vcf-logs`` (the silent non-dispatchable
+    shadow #1810 exists to eliminate). The REST 422 guard covered this for
+    the route, but the ``meho.connector.ingest`` MCP tool reaches
+    ``register_ingested_operations`` directly and bypassed it.
+
+    Moving the round-trip enforcement into
+    :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`
+    closes the hole for every entry point: the divergent product is
+    rejected with :class:`ProductImplIdMismatch` *before any DB write*, so
+    no rows persist. ``VcfLogsConnector`` registers under the canonical
+    ``vrli`` (matching the real post-#1814 state); the operator supplying
+    ``product='vcf-logs'`` is the divergence.
+    """
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+
+    # The hand-coded class covers impl_id ``vrli-rest`` under ``vrli`` —
+    # exactly the post-#1814 production registration.
+    register_connector_v2(
+        product="vrli",
+        version="9.0",
+        impl_id="vrli-rest",
+        cls=VcfLogsConnector,
+    )
+    operator = Operator(
+        sub="tenant-admin",
+        raw_jwt="test-jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    service = IngestionPipelineService(operator=operator)
+
+    with pytest.raises(ProductImplIdMismatch) as excinfo:
+        await service.ingest(
+            product="vcf-logs",  # diverges from the parser-derived "vrli"
+            version="9.0",
+            impl_id="vrli-rest",
+            specs=[SpecSource(uri="https://example.test/vrli.yaml")],
+            tenant_id=None,
+            dry_run=False,
+        )
+    err = excinfo.value
+    assert err.product == "vcf-logs"
+    assert err.derived_product == "vrli"
+    # The message names both spellings so the agent driving the MCP tool
+    # knows the fix.
+    rendered = str(err)
+    assert "vcf-logs" in rendered
+    assert "vrli" in rendered
+
+    # The guard runs before any spec fetch or DB write, so the divergent
+    # ingest persisted nothing under either spelling.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert rows == [], f"divergent ingest must persist no rows; got {rows!r}"
 
 
 @pytest.mark.asyncio

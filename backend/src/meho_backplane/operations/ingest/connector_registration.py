@@ -375,8 +375,9 @@ def ensure_connector_class_registered(
     vs "subsequent ingest reused the existing connector".
 
     The shim is synthesised under the supplied ``product``. The ingest
-    route boundary rejects a product that does not round-trip its
-    connector_id (G0.27 / T3 #1817), so the supplied product is the
+    pipeline service rejects a product that does not round-trip its
+    connector_id (G0.27 / T3 #1817) at the one chokepoint every entry
+    point (REST / MCP / CLI) traverses, so the supplied product is the
     dispatch-canonical token (the spelling the rows persist under and
     every dispatch probe queries); the shim is therefore dispatchable by
     construction and satisfies
@@ -398,8 +399,11 @@ def ensure_connector_class_registered(
     """
     from meho_backplane.connectors.registry import all_connectors_v2
 
-    # ``canonical_product`` is a local alias of ``product`` (the boundary
-    # guard guarantees they are equal) kept only for the log fields below.
+    # ``canonical_product`` is a local alias of ``product`` (the
+    # service-layer round-trip guard in IngestionPipelineService.ingest
+    # rejects a divergent product before any caller reaches here, so the
+    # supplied product already equals the dispatch-canonical spelling)
+    # kept only for the log fields below.
     canonical_product = product
 
     existing = all_connectors_v2()
@@ -428,9 +432,11 @@ def ensure_connector_class_registered(
                 f"not scaffolding a GenericRestConnector shim for "
                 f"({canonical_product!r}, {version!r}, {impl_id!r}): hand-coded "
                 f"{handrolled.__name__} already covers impl_id {impl_id!r} "
-                f"under product {handrolled.product!r}. Ingested rows "
-                f"reconcile to the dispatch-canonical product and dispatch "
-                f"through the hand-coded connector."
+                f"under product {handrolled.product!r}. Rows persist under the "
+                f"supplied, round-trip-validated product {canonical_product!r} "
+                f"(no reconciliation — divergent products are rejected upstream "
+                f"by the service-layer round-trip guard, #1817); dispatch "
+                f"resolves them through the hand-coded connector."
             ),
         )
         return False

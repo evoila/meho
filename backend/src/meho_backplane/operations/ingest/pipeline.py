@@ -83,6 +83,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._llm_grouping_internals import (
     DEFAULT_GROUPING_BATCH_SIZE,
@@ -102,7 +103,10 @@ from meho_backplane.operations.ingest.catalog import (
 from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
 )
-from meho_backplane.operations.ingest.exceptions import VersionMismatchError
+from meho_backplane.operations.ingest.exceptions import (
+    ProductImplIdMismatch,
+    VersionMismatchError,
+)
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
@@ -589,9 +593,14 @@ class IngestionPipelineService:
         REST response.
 
         Raises :class:`PermissionError` when the operator's tenancy
-        doesn't permit writes to *tenant_id*. The parser, registrar,
-        and grouping pass propagate their own domain exceptions
-        verbatim — the router catches them at the HTTP boundary.
+        doesn't permit writes to *tenant_id*, and
+        :class:`ProductImplIdMismatch` when the supplied ``product``
+        does not round-trip its ``connector_id`` (checked here, at the
+        single chokepoint every entry point traverses, before any DB
+        write or spec fetch — see :meth:`_assert_product_round_trips`).
+        The parser, registrar, and grouping pass propagate their own
+        domain exceptions verbatim — the router catches them at the HTTP
+        boundary.
 
         ``spec_info_versions_compatible`` (G0.16-T5 #1307) is the
         catalog row's opt-in compatibility range. The route resolver
@@ -602,6 +611,12 @@ class IngestionPipelineService:
         operator's ``version`` label.
         """
         self._authorize(tenant_id)
+        # Round-trip guard runs first — before the spec-vs-label
+        # cross-check (which fetches each spec's ``info.version``) and
+        # before either dispatch path — so a divergent product is
+        # rejected before any spec I/O or DB write, on every entry point
+        # that reaches this method (REST / MCP / CLI).
+        self._assert_product_round_trips(product=product, version=version, impl_id=impl_id)
         connector_id = build_connector_id(product, version, impl_id)
         log = _log.bind(
             connector_id=connector_id,
@@ -645,6 +660,54 @@ class IngestionPipelineService:
         )
 
     # ----- private helpers ------------------------------------------------
+
+    def _assert_product_round_trips(self, *, product: str, version: str, impl_id: str) -> None:
+        """Reject a supplied ``product`` that does not round-trip its connector_id.
+
+        G0.27 / T3 (#1817). The ingest write path persists rows and
+        scaffolds the auto-shim under the supplied ``product``, but the
+        dispatch / discovery surface recovers the product from the
+        rendered ``connector_id`` via
+        :func:`~meho_backplane.operations._lookup.parse_connector_id`
+        (the first hyphen-segment of ``impl_id``). When the two diverge
+        the rows land in a namespace no dispatch probe queries — the
+        silent non-dispatchable-shadow #1810 exists to eliminate.
+
+        Enforcing it **here** — at the one service-layer chokepoint every
+        ingest entry point traverses (the REST route, the
+        ``meho.connector.ingest`` MCP tool, the CLI verb) — is what makes
+        every caller fail closed identically. The earlier shape guarded
+        only the REST boundary, so the MCP tool persisted a divergent
+        product whose ``impl_id`` was already served by a hand-coded
+        class (``ensure_connector_class_registered``'s deferral branch
+        returns without reaching
+        :func:`~meho_backplane.connectors.registry.register_connector_v2`'s
+        #1816 hard-fail). Raising upstream of that branch closes the hole
+        for good.
+
+        Reuses
+        :func:`~meho_backplane.connectors.registry.product_impl_id_round_trips`
+        so the parse rule is shared with the registration hard-fail: the
+        guard is a no-op when ``version`` / ``impl_id`` is empty or the
+        parse is lossy (non-digit-leading version), and fires only on a
+        lossless parse whose recovered product disagrees.
+
+        ``parse_connector_id`` is imported call-locally (only on the
+        raise path) to keep the ``operations.ingest.pipeline`` ->
+        ``operations._lookup`` edge off module-import time, mirroring the
+        deferral the predicate itself uses.
+        """
+        if product_impl_id_round_trips(product=product, version=version, impl_id=impl_id):
+            return
+        from meho_backplane.operations._lookup import parse_connector_id
+
+        derived_product = parse_connector_id(f"{impl_id}-{version}")[0]
+        raise ProductImplIdMismatch(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            derived_product=derived_product,
+        )
 
     async def _dispatch_dry_run(
         self,

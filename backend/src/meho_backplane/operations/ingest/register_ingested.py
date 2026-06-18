@@ -261,10 +261,11 @@ async def register_ingested_operations(
     semantics, transaction-boundary discipline).
 
     Persisted rows carry the supplied ``product`` directly. The ingest
-    route boundary (G0.27 / T3 #1817) rejects a supplied product that
-    does not round-trip its connector_id, so the supplied product always
-    equals the dispatch-canonical (parser-derived) spelling here — no
-    long↔short row reconciliation is needed or performed.
+    pipeline service (G0.27 / T3 #1817) rejects a supplied product that
+    does not round-trip its connector_id at the one chokepoint every
+    entry point (REST / MCP / CLI) traverses, so the supplied product
+    always equals the dispatch-canonical (parser-derived) spelling here —
+    no long↔short row reconciliation is needed or performed.
 
     Args:
         product, version, impl_id: Connector triple. The persisted row's
@@ -352,11 +353,11 @@ def _preflight_and_register_class(
     no class is registered yet (the v0.4-staging path).
 
     Both calls take the supplied ``product``, which — since the ingest
-    route boundary rejects a non-round-tripping product (G0.27 / T3
-    #1817) — is the dispatch-canonical spelling the rows persist under
-    and the connector class registers under. So the coverage check finds
-    the real registered class and the auto-shim, when synthesised, lands
-    in the dispatchable namespace.
+    pipeline service rejects a non-round-tripping product (G0.27 / T3
+    #1817) upstream of every entry point — is the dispatch-canonical
+    spelling the rows persist under and the connector class registers
+    under. So the coverage check finds the real registered class and the
+    auto-shim, when synthesised, lands in the dispatchable namespace.
 
     Returns the ``connector_registered`` flag (``True`` when a fresh
     auto-shim was registered).

@@ -6737,6 +6737,9 @@ type UiAgentsRunSubmitUiAgentsNameRunPostFormdataRequestBody = BodyUiAgentsRunSu
 // UiAgentsRunStreamUiAgentsNameRunStreamGetJSONRequestBody defines body for UiAgentsRunStreamUiAgentsNameRunStreamGet for application/json ContentType.
 type UiAgentsRunStreamUiAgentsNameRunStreamGetJSONRequestBody = UISessionContext
 
+// UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody defines body for UiAgentsRunCancelUiAgentsNameRunHandleCancelPost for application/json ContentType.
+type UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody = UISessionContext
+
 // UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody defines body for UiAgentsToggleUiAgentsNameTogglePost for application/x-www-form-urlencoded ContentType.
 type UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody = BodyUiAgentsToggleUiAgentsNameTogglePost
 
@@ -8249,6 +8252,11 @@ type ClientInterface interface {
 	UiAgentsRunStreamUiAgentsNameRunStreamGetWithBody(ctx context.Context, name string, params *UiAgentsRunStreamUiAgentsNameRunStreamGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiAgentsRunStreamUiAgentsNameRunStreamGet(ctx context.Context, name string, params *UiAgentsRunStreamUiAgentsNameRunStreamGetParams, body UiAgentsRunStreamUiAgentsNameRunStreamGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBody request with any body
+	UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBody(ctx context.Context, name string, handle openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentsRunCancelUiAgentsNameRunHandleCancelPost(ctx context.Context, name string, handle openapi_types.UUID, body UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsToggleUiAgentsNameTogglePostWithBody request with any body
 	UiAgentsToggleUiAgentsNameTogglePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11023,6 +11031,30 @@ func (c *Client) UiAgentsRunStreamUiAgentsNameRunStreamGetWithBody(ctx context.C
 
 func (c *Client) UiAgentsRunStreamUiAgentsNameRunStreamGet(ctx context.Context, name string, params *UiAgentsRunStreamUiAgentsNameRunStreamGetParams, body UiAgentsRunStreamUiAgentsNameRunStreamGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentsRunStreamUiAgentsNameRunStreamGetRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBody(ctx context.Context, name string, handle openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequestWithBody(c.Server, name, handle, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsRunCancelUiAgentsNameRunHandleCancelPost(ctx context.Context, name string, handle openapi_types.UUID, body UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequest(c.Server, name, handle, body)
 	if err != nil {
 		return nil, err
 	}
@@ -21442,6 +21474,60 @@ func NewUiAgentsRunStreamUiAgentsNameRunStreamGetRequestWithBody(server string, 
 	return req, nil
 }
 
+// NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequest calls the generic UiAgentsRunCancelUiAgentsNameRunHandleCancelPost builder with application/json body
+func NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequest(server string, name string, handle openapi_types.UUID, body UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequestWithBody(server, name, handle, "application/json", bodyReader)
+}
+
+// NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequestWithBody generates requests for UiAgentsRunCancelUiAgentsNameRunHandleCancelPost with any type of body
+func NewUiAgentsRunCancelUiAgentsNameRunHandleCancelPostRequestWithBody(server string, name string, handle openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/%s/run/%s/cancel", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiAgentsToggleUiAgentsNameTogglePostRequestWithFormdataBody calls the generic UiAgentsToggleUiAgentsNameTogglePost builder with application/x-www-form-urlencoded body
 func NewUiAgentsToggleUiAgentsNameTogglePostRequestWithFormdataBody(server string, name string, body UiAgentsToggleUiAgentsNameTogglePostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -25694,6 +25780,11 @@ type ClientWithResponsesInterface interface {
 
 	UiAgentsRunStreamUiAgentsNameRunStreamGetWithResponse(ctx context.Context, name string, params *UiAgentsRunStreamUiAgentsNameRunStreamGetParams, body UiAgentsRunStreamUiAgentsNameRunStreamGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunStreamUiAgentsNameRunStreamGetResponse, error)
 
+	// UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBodyWithResponse request with any body
+	UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBodyWithResponse(ctx context.Context, name string, handle openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse, error)
+
+	UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithResponse(ctx context.Context, name string, handle openapi_types.UUID, body UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse, error)
+
 	// UiAgentsToggleUiAgentsNameTogglePostWithBodyWithResponse request with any body
 	UiAgentsToggleUiAgentsNameTogglePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsToggleUiAgentsNameTogglePostResponse, error)
 
@@ -29304,6 +29395,29 @@ func (r UiAgentsRunStreamUiAgentsNameRunStreamGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAgentsToggleUiAgentsNameTogglePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -32642,6 +32756,23 @@ func (c *ClientWithResponses) UiAgentsRunStreamUiAgentsNameRunStreamGetWithRespo
 		return nil, err
 	}
 	return ParseUiAgentsRunStreamUiAgentsNameRunStreamGetResponse(rsp)
+}
+
+// UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBodyWithResponse request with arbitrary body returning *UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse
+func (c *ClientWithResponses) UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBodyWithResponse(ctx context.Context, name string, handle openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse, error) {
+	rsp, err := c.UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithBody(ctx, name, handle, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithResponse(ctx context.Context, name string, handle openapi_types.UUID, body UiAgentsRunCancelUiAgentsNameRunHandleCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse, error) {
+	rsp, err := c.UiAgentsRunCancelUiAgentsNameRunHandleCancelPost(ctx, name, handle, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse(rsp)
 }
 
 // UiAgentsToggleUiAgentsNameTogglePostWithBodyWithResponse request with arbitrary body returning *UiAgentsToggleUiAgentsNameTogglePostResponse
@@ -38054,6 +38185,39 @@ func ParseUiAgentsRunStreamUiAgentsNameRunStreamGetResponse(rsp *http.Response) 
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse parses an HTTP response from a UiAgentsRunCancelUiAgentsNameRunHandleCancelPostWithResponse call
+func ParseUiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse(rsp *http.Response) (*UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentsRunCancelUiAgentsNameRunHandleCancelPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

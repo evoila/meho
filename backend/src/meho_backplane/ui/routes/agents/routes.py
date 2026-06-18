@@ -41,7 +41,9 @@ extra literal trailing segment, so their ordering relative to the bare
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+import uuid
+
+from fastapi import APIRouter, Depends, Form, Query, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from meho_backplane.auth.operator import Operator
@@ -82,6 +84,7 @@ from meho_backplane.ui.routes.agents.principals_views import (
 from meho_backplane.ui.routes.agents.run import (
     INPUT_MAX,
     WORK_REF_MAX,
+    cancel_run,
     render_run_console,
     stream_run_events,
     submit_run,
@@ -168,6 +171,24 @@ async def _run_stream_handler(
         operator,
         name=name,
         token=token,
+    )
+
+
+async def _run_cancel_handler(
+    request: Request,
+    name: str,
+    handle: uuid.UUID,
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_run_operator_dep,
+) -> Response:
+    """``POST /ui/agents/{name}/run/{handle}/cancel`` -- cancel a live run."""
+    validate_name(name)
+    return await cancel_run(
+        request,
+        session_ctx,
+        operator,
+        name=name,
+        handle=handle,
     )
 
 
@@ -429,11 +450,16 @@ def _register_run_routes(router: APIRouter) -> None:
     * ``POST /ui/agents/{name}/run`` -- authorise a run (CSRF-gated).
     * ``GET  /ui/agents/{name}/run/stream`` -- the cookie-authed SSE
       bridge that proxies ``invoker.stream_events``.
+    * ``POST /ui/agents/{name}/run/{handle}/cancel`` -- the Stop button's
+      cookie-authed cancel proxy (T9 #1833) over ``invoker.cancel``.
 
     The ``/run`` literal segment sits one level below ``{name}`` and the
     ``/run/stream`` segment one below that, so neither collides with the
     bare ``/ui/agents/{name}`` detail route or the ``/edit`` / ``/delete``
-    modal routes; ``{name}`` cannot consume the literal ``run`` token.
+    modal routes; ``{name}`` cannot consume the literal ``run`` token. The
+    cancel route's ``{handle}`` is typed ``uuid.UUID``, so the literal
+    ``stream`` segment never matches it (a non-UUID 422s) and the two
+    ``/run/...`` routes do not collide.
     """
     router.add_api_route(
         "/ui/agents/{name}/run",
@@ -455,6 +481,12 @@ def _register_run_routes(router: APIRouter) -> None:
         methods=["GET"],
         name="ui_agents_run_stream",
         response_class=StreamingResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/{name}/run/{handle}/cancel",
+        _run_cancel_handler,
+        methods=["POST"],
+        name="ui_agents_run_cancel",
     )
 
 

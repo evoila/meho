@@ -28,6 +28,7 @@ SSE bridge streams known frames without a live model / DB run row.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Iterator
@@ -44,6 +45,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentNotFoundError,
+    AgentRunNotFoundError,
     BudgetExceededError,
     reset_agent_invoker_for_testing,
 )
@@ -260,12 +262,15 @@ class _FakeInvoker:
         ensure_error: Exception | None = None,
         events: list[AgentRunEvent] | None = None,
         run_id: uuid.UUID | None = None,
+        cancel_error: Exception | None = None,
     ) -> None:
         self._ensure_error = ensure_error
         self._events = events or []
         self._run_id = run_id or uuid.uuid4()
+        self._cancel_error = cancel_error
         self.stream_calls: list[tuple[str, str]] = []
         self.stream_operators: list[Operator] = []
+        self.cancel_calls: list[tuple[uuid.UUID, Operator]] = []
 
     async def ensure_runnable(self, operator: Operator, name: str) -> None:
         if self._ensure_error is not None:
@@ -281,6 +286,17 @@ class _FakeInvoker:
         self.stream_operators.append(operator)
         for event in self._events:
             yield self._run_id, event
+
+    async def cancel(self, operator: Operator, run_id: uuid.UUID) -> object:
+        """Record the cancel + raise the configured error, else return a sentinel.
+
+        The BFF cancel route discards the returned summary (it replies
+        204), so a non-error path only has to not raise.
+        """
+        self.cancel_calls.append((run_id, operator))
+        if self._cancel_error is not None:
+            raise self._cancel_error
+        return object()
 
 
 # ---------------------------------------------------------------------------
@@ -618,3 +634,238 @@ def test_stream_bridge_not_found_is_404() -> None:
     finally:
         mock.stop()
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Cancel proxy (Stop button BFF -- T9 #1833)
+# ---------------------------------------------------------------------------
+
+
+def test_run_cancel_without_csrf_is_403() -> None:
+    """The cancel proxy is a state-changing POST -- a submit without CSRF is 403."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    handle = uuid.uuid4()
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403
+
+
+def test_run_cancel_read_only_operator_is_403() -> None:
+    """A read_only operator cannot cancel a run (operator-floor gate)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair, role=TenantRole.READ_ONLY)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    handle = uuid.uuid4()
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403
+
+
+def test_run_cancel_success_returns_204() -> None:
+    """A valid cancel drives invoker.cancel for the lifted operator and 204s."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    fake = _FakeInvoker()
+    reset_agent_invoker_for_testing(fake)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    handle = uuid.uuid4()
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    # The cancel ran for exactly this handle, scoped to the lifted operator.
+    assert len(fake.cancel_calls) == 1
+    cancelled_handle, cancel_operator = fake.cancel_calls[0]
+    assert cancelled_handle == handle
+    assert cancel_operator.tenant_id == _TENANT_A
+
+
+def test_run_cancel_already_terminal_is_409() -> None:
+    """An already-terminal run surfaces 409 (agent_run_not_cancellable)."""
+    from meho_backplane.db.models import AgentRunStatus
+    from meho_backplane.operations.agent_run import IllegalTransitionError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(
+        _FakeInvoker(
+            cancel_error=IllegalTransitionError(
+                from_status=AgentRunStatus.SUCCEEDED,
+                to_status=AgentRunStatus.CANCELLED,
+            )
+        )
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    handle = uuid.uuid4()
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "agent_run_not_cancellable"
+
+
+def test_run_cancel_unknown_handle_is_404() -> None:
+    """An unknown / cross-tenant handle surfaces 404 (existence not leaked)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    handle = uuid.uuid4()
+    reset_agent_invoker_for_testing(_FakeInvoker(cancel_error=AgentRunNotFoundError(handle)))
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "agent_run_not_found"
+
+
+def test_run_cancel_role_backstop_is_403() -> None:
+    """The service's own role check (UnauthorizedCancellationError) maps to 403."""
+    from meho_backplane.operations.agent_run import UnauthorizedCancellationError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(
+        _FakeInvoker(
+            cancel_error=UnauthorizedCancellationError(operator_sub=_OP_A, role=TenantRole.OPERATOR)
+        )
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    handle = uuid.uuid4()
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            f"/ui/agents/a1/run/{handle}/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "agent_run_cancel_forbidden"
+
+
+def test_run_cancel_non_uuid_handle_is_422() -> None:
+    """A non-UUID handle 422s at the path boundary (never reaches the invoker)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    fake = _FakeInvoker()
+    reset_agent_invoker_for_testing(fake)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run/not-a-uuid/cancel",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422
+    assert fake.cancel_calls == []
+
+
+def test_run_transcript_carries_stop_wiring() -> None:
+    """The transcript fragment threads the cancel URL + CSRF token to Alpine."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run",
+            data={"input": "do the thing"},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The Stop button + native <dialog> confirm + cancel-URL placeholder
+    # all ship in the live transcript fragment.
+    assert 'data-action="stop"' in body
+    assert 'data-role="stop-confirm"' in body
+    assert "/run/__RUN_ID__/cancel" in body
+    assert "cancelUrlTemplate" in body
+
+
+def test_can_stop_stays_available_after_stream_drop() -> None:
+    """A dropped SSE stream must not disqualify a still-executing run from Stop.
+
+    The transcript controller's ``canStop()`` gates the Stop button. The SSE
+    bridge dying (``streamErrored``) does *not* terminate the backend run, so a
+    run with a known ``runId`` and no terminal frame must stay cancellable after
+    a stream drop -- otherwise the operator loses the only way to stop a run
+    that is still burning budget. ``canStop()`` therefore gates on
+    ``runId``/``finalStatus``/``cancelled``/``cancelUrlTemplate`` only, and must
+    not reference ``streamErrored``. The controller is client-side Alpine state
+    with no JS test runner in this repo, so we assert the source contract: the
+    ``streamErrored`` flag is still tracked for transcript messaging but is
+    absent from the ``canStop()`` predicate.
+    """
+    source = (static_root_dir() / "src" / "app" / "agent-run-console.js").read_text(
+        encoding="utf-8"
+    )
+
+    # The drop flag is still part of the controller (it drives the dropped /
+    # error transcript hints) -- this guards against asserting on a typo.
+    assert "streamErrored" in source
+
+    can_stop_match = re.search(r"canStop\(\)\s*\{(?P<body>.*?)\}", source, flags=re.DOTALL)
+    assert can_stop_match is not None, "canStop() not found in controller source"
+    can_stop_body = can_stop_match.group("body")
+
+    assert "streamErrored" not in can_stop_body, (
+        "canStop() must not gate on streamErrored: a dropped stream leaves a "
+        "non-terminal backend run cancellable (review M1, PR #1878)."
+    )
+    # The genuine non-terminal gates remain.
+    assert "this.runId" in can_stop_body
+    assert "this.finalStatus" in can_stop_body
+    assert "this.cancelled" in can_stop_body
+    assert "this.cancelUrlTemplate" in can_stop_body

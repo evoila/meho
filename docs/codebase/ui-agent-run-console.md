@@ -10,19 +10,35 @@ the run executes. It sits under the `/ui/agents` surface that Task #1825
 
 ## Overview
 
-Three routes, all under the per-agent `/run` sub-path:
+Four routes, all under the per-agent `/run` sub-path:
 
 | Method · path | Role | Purpose |
 |---|---|---|
 | `GET /ui/agents/{name}/run` | operator (any authenticated session reaches the page) | The console page: run form (prompt + optional `work_ref`) + the transcript mount. |
 | `POST /ui/agents/{name}/run` | operator | The CSRF-gated run-initiation action. Validates the prompt, confirms the agent is runnable (404 / 409 / 429 surface here), mints a run token, returns the transcript fragment. |
 | `GET /ui/agents/{name}/run/stream?token=…` | operator | The cookie-authed SSE bridge: verifies the token, lifts the operator, proxies `invoker.stream_events`. |
+| `POST /ui/agents/{name}/run/{handle}/cancel` | operator | The Stop button's CSRF-gated cancel proxy (T9 [#1833](https://github.com/evoila/meho/issues/1833)): lifts the operator and drives `invoker.cancel` — the same service path the REST cancel route uses. 204 / 404 / 409 / 403. |
 
-The console ships **without** a Stop button. "Stop watching" merely closes
-the `EventSource`; it does not cancel the run. The operator run-cancel
-backend (T8 [#1828](https://github.com/evoila/meho/issues/1828)) and its
-Stop button (T9 [#1833](https://github.com/evoila/meho/issues/1833)) are
-separate Tasks.
+The console carries a **Stop button** (T9
+[#1833](https://github.com/evoila/meho/issues/1833)) over the operator
+run-cancel backend (T8
+[#1828](https://github.com/evoila/meho/issues/1828)). Because
+`EventSource` cannot carry a JWT, the browser holds a cookie session, not
+the Bearer token the REST cancel route
+(`POST /api/v1/agents/runs/{handle}/cancel`) requires — so the Stop button
+posts to a cookie-authed BFF proxy, `POST /ui/agents/{name}/run/{handle}/cancel`,
+which lifts the operator (operator floor) and drives the *same* in-process
+`invoker.cancel` the REST route does. The `run_id` it cancels is the one
+the SSE stream surfaces (the Alpine controller learns it from the first
+frame's `run_id`), so the affordance only appears once a run is live and
+vanishes the moment a terminal frame lands (a terminal run is not
+cancellable — the proxy would 409 it). The cancel POST is CSRF-double-
+submit-gated; the Alpine controller echoes the token in the `X-CSRF-Token`
+header explicitly because the page-level `hx-headers` directive is an HTMX
+construct and is **not** inherited by an Alpine `fetch`. Outcomes map to
+inline feedback: 409 (already terminal) transitions the console to
+`cancelled` silently, 404 means the run no longer exists, 403 means the
+operator may not cancel it.
 
 ## Why a cookie-authed GET SSE bridge
 
@@ -137,13 +153,22 @@ rather than re-implementing decide).
   `AgentInvoker.stream_events` (the generator the bridge proxies).
 - `api/v1/agent_runs.py` — `AgentRunRequest` (prompt validation) +
   `_events_generator` (frame formatting reuse).
-- `ui/csrf.py` — the double-submit middleware that gates the run POST.
+- `agent/invocation.py` — `AgentInvoker.cancel` (the cancel proxy's
+  service path); `operations.agent_run` — `IllegalTransitionError` (409) /
+  `UnauthorizedCancellationError` (403) mapped by the cancel proxy.
+- `ui/csrf.py` — the double-submit middleware that gates the run POST and
+  the cancel POST.
 - `ui/auth/middleware.py` — `UISessionMiddleware` / `require_ui_session`.
 
 ## Known issues / out of scope
 
-- No operator run-cancel from this surface (Stop button is T9 over the T8
-  backend).
+- The cancel is not synchronous: the proxy records the durable cancel
+  intent (via `invoker.cancel`) and the run's loop observes the
+  `cancelled` status on its next turn boundary. The console flips to the
+  `cancelled` pill and closes the `EventSource` immediately; the run's own
+  termination follows on the backend.
+- Bulk-cancel / cancel-from-runs-list is a possible follow-up, not in
+  scope here (the runs-list surface is T3 #1830).
 - Cross-agent run history (work_ref / status filters, poll-after-the-fact)
   is T3 [#1830](https://github.com/evoila/meho/issues/1830); the
   transcript's `run_id` deep-links to a run-detail page T3 owns.

@@ -10913,6 +10913,68 @@
         }
       }
     },
+    "/ui/agents/{name}/run/{handle}/cancel": {
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Run Cancel",
+        "description": "``POST /ui/agents/{name}/run/{handle}/cancel`` -- cancel a live run.",
+        "operationId": "ui_agents_run_cancel_ui_agents__name__run__handle__cancel_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/{name}/toggle": {
       "post": {
         "tags": [

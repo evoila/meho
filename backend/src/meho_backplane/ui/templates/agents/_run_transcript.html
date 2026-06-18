@@ -28,18 +28,29 @@
   EventSource (the controller does not cancel the run). T9 #1833 adds the
   Stop button over the T8 #1828 cancel backend.
 
-  XSS hardening: ``x-data`` is SINGLE-quoted and the token rides through
-  ``| tojson`` (which escapes ``'`` to ``'`` and never emits a raw
-  single quote), so a crafted token cannot break out of the attribute --
-  the same posture broadcast/_feed.html documents for its reflected
-  ``op_id`` filter.
+  XSS hardening: ``x-data`` is SINGLE-quoted and every interpolated value
+  rides through ``| tojson`` (which escapes ``'`` to ``'`` and never
+  emits a raw single quote), so a crafted token / name cannot break out
+  of the attribute -- the same posture broadcast/_feed.html documents for
+  its reflected ``op_id`` filter.
+
+  Stop button (T9 #1833): the cancel POST targets the cookie-authed BFF
+  proxy ``POST /ui/agents/{name}/run/{run_id}/cancel``. The run_id is not
+  known at render time (it lands on the first SSE frame), so the template
+  hands the controller a URL with a ``__RUN_ID__`` placeholder it
+  substitutes client-side. The CSRF token is threaded in explicitly --
+  the page-level ``hx-headers`` is HTMX-only and is NOT inherited by the
+  Alpine ``fetch`` the Stop button issues.
 -#}
 {% from "_icons.html" import icon %}
 <div
   id="agent-run-transcript-live"
   class="card bg-base-100 border-base-300 border shadow-sm"
   x-data='agentRunConsole({
-    streamUrl: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode)) | tojson }}
+    streamUrl: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode)) | tojson }},
+    agentName: {{ agent_name | tojson }},
+    csrfToken: {{ csrf_token | tojson }},
+    cancelUrlTemplate: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/__RUN_ID__/cancel") | tojson }}
   })'
 >
   {# ---------- SSE sink ----------
@@ -84,8 +95,73 @@
           x-text="finalStatus"
           data-role="final-pill"
         ></span>
+        {# Cancelled pill -- the operator-stop terminal (muted/ghost),
+           distinct from the success/failure final pill above. #}
+        <span
+          x-show="cancelled"
+          class="badge badge-sm badge-ghost"
+          data-role="cancelled-pill"
+        >cancelled</span>
+        {# ---------- Stop button ----------
+           Shown only while the run is live (controller ``canStop()``).
+           Destructive + terminal, so it opens a native <dialog> confirm
+           rather than firing the cancel directly. The token is carried by
+           the controller's fetch, not the button, so no CSRF wiring is
+           needed on the element itself. -#}
+        <button
+          type="button"
+          x-show="canStop()"
+          class="btn btn-xs btn-error btn-outline"
+          data-action="stop"
+          @click="$refs.stopConfirm.showModal()"
+          :disabled="cancelling"
+        >
+          {{ icon("circle-stop", class="size-3.5") }}
+          <span x-text="cancelling ? 'Stopping…' : 'Stop'"></span>
+        </button>
       </span>
     </div>
+
+    {# ---------- Cancel error (404 / 403) ----------
+       A 409 (already terminal) is not surfaced here -- it transitions the
+       console to cancelled silently. Only an actionable failure shows. -#}
+    <div
+      x-show="cancelError"
+      role="alert"
+      class="alert alert-warning text-xs"
+      data-role="cancel-error"
+    >
+      <span x-text="cancelError"></span>
+    </div>
+
+    {# ---------- Stop confirm dialog ----------
+       Native <dialog> (the console's destructive-action confirm pattern).
+       The run id is interpolated client-side so the operator sees exactly
+       which run halts. The agent stops after its current step (the cancel
+       is observed on the next turn boundary, not a synchronous tear-down). -#}
+    <dialog x-ref="stopConfirm" class="modal" data-role="stop-confirm">
+      <div class="modal-box max-w-md">
+        <h3 class="text-base font-semibold">Stop this run?</h3>
+        <p class="py-3 text-sm opacity-80">
+          Stop run
+          <span class="font-mono" x-text="runId ? runId.slice(0, 8) : ''"></span>?
+          The agent halts after its current step; partial work is kept.
+        </p>
+        <div class="modal-action">
+          <form method="dialog" class="flex gap-2">
+            <button class="btn btn-sm btn-ghost" data-action="stop-cancel">Keep running</button>
+            <button
+              class="btn btn-sm btn-error"
+              data-action="stop-confirm"
+              @click="cancel()"
+            >Stop run</button>
+          </form>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button aria-label="Close">close</button>
+      </form>
+    </dialog>
 
     {# ---------- awaiting_approval banner ----------
        A run that hits awaiting_approval pauses for an operator decision;

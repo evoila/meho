@@ -312,13 +312,25 @@ The per-op preview is opt-in via a builder registry in
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
   `build_proposed_effect`. The result — wrapped as
-  `{op_class, preview}` — is passed to `create_pending_request` as
-  `proposed_effect`; `None` falls back to the identifier-only default.
+  `{op_class, preview}` — becomes the base envelope; when the builder
+  declines (returns `None`) the dispatcher's `_build_proposed_effect`
+  seam substitutes the identifier-only base. Onto whichever base it has,
+  the seam stamps the catalog `descriptor.safety_level` (#1855) before
+  handing the envelope to `create_pending_request` as `proposed_effect`
+  (see "Catalog `safety_level` on every envelope" below). `_build_proposed_effect`
+  returns `None` — and the caller stores its own bare identifier-only
+  default — only when connector resolution / hook execution itself
+  raises.
 
 Three invariants make the hook safe to wire on the park path:
 
-1. **Opt-in / no regression.** An op with no registered builder yields
-   `None` and parks exactly as before.
+1. **Opt-in / no regression for the preview.** An op with no registered
+   builder gets no `{op_class, preview}` envelope — the per-op
+   `build_proposed_effect` returns `None`. As of #1855 the durable row
+   is no longer byte-identical to the pre-#1855 identifier-only default,
+   though: the dispatcher seam layers `safety_level` on top of the
+   identifier base (below), so the parked row always names its severity.
+   The *preview* itself is still strictly opt-in.
 2. **Fail-soft, never silent.** A builder that raises (a dry-run that
    hits the API and errors, a preview listing read that can't execute)
    never blocks the park — the safety-relevant action always proceeds.
@@ -363,6 +375,31 @@ composites echo their params; see
 approval previews". Further connectors register their own builders as
 needed.
 
+## Catalog `safety_level` on every envelope (#1855)
+
+The per-op preview hook is opt-in, so before #1855 a parked op with no
+registered builder carried only `{op_id, connector_id, target_id}` — a
+reviewer could not tell a `dangerous` op (e.g. `keycloak.realm.create`)
+from a `caution` op (e.g. `keycloak.user.create`) on the row alone.
+
+`dispatcher._build_proposed_effect` now stamps the catalog
+`descriptor.safety_level` onto **every** parked op's `proposed_effect`,
+alongside `op_class` / `preview` (and `permission_preflight` when that
+hook fired). The value (`safe` / `caution` / `dangerous`) is read
+straight off the operation descriptor — op-identity metadata, never
+recomputed — so the severity on the durable row is exactly what the
+catalog declares.
+
+It is layered at the **dispatcher seam**, not inside the per-op
+`build_proposed_effect` builder, so it rides three bases uniformly: the
+built `{op_class, preview}` envelope, the identifier-only default for
+no-builder / declined ops, and the `preview_unavailable` fail-soft
+marker. The `op_class` / `preview` / marker envelope built by
+`build_proposed_effect` itself is unchanged; `safety_level` is added on
+top. The only path that does **not** carry it is the bare identifier
+default the caller stores when `_build_proposed_effect` returns `None`
+(connector-resolution / hook fault) — that degraded path is unchanged.
+
 ## Permission preflight hook (#1504)
 
 The `proposed_effect` *preview* above is suppressed for credential-class
@@ -386,10 +423,11 @@ A permission preflight is distinct from a preview:
 
 At the park point, `dispatcher._build_proposed_effect` runs **both**
 hooks and merges them: the preview (or the identifier-only default when
-there is no preview) is the base, and the preflight result is attached
-under `proposed_effect["permission_preflight"]`. Both are opt-in and
-fail-soft — a preflight that raises degrades to no banner; the park
-always proceeds.
+there is no preview) is the base, the preflight result is attached
+under `proposed_effect["permission_preflight"]` when it fired, and the
+catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
+opt-in and fail-soft — a preflight that raises degrades to no banner;
+the park always proceeds.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes

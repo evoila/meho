@@ -467,6 +467,7 @@ async def test_power_bulk_park_carries_action_filter_and_resolved_set(
             ],
             "total_resolved": 2,
         },
+        "safety_level": "dangerous",
     }
     # The filter reached the listing read in the handler's wire shape.
     assert _CALLS == [("GET:/vcenter/vm", {"filter.names": ["web-*"]})]
@@ -600,6 +601,7 @@ async def test_host_evacuate_park_resolves_vm_set_on_host(
             "resolved": [{"vm": "vm-a", "name": "app-a"}],
             "total_resolved": 1,
         },
+        "safety_level": "dangerous",
     }
     # Only the listing read fired — no recursive migrate, no maintenance.
     assert _CALLS == [("GET:/vcenter/vm", {"filter.hosts": ["host-1"]})]
@@ -625,6 +627,7 @@ async def test_host_detach_from_vds_park_resolves_vm_set_on_host(
             "resolved": [{"vm": "vm-a", "name": "app-a"}],
             "total_resolved": 1,
         },
+        "safety_level": "dangerous",
     }
     assert _ops_in_calls() == ["GET:/vcenter/vm"]
 
@@ -653,6 +656,7 @@ async def test_cluster_patch_park_resolves_host_set(
             ],
             "total_resolved": 2,
         },
+        "safety_level": "dangerous",
     }
     # Only the host listing fired — no maintenance / patch sub-ops.
     assert _ops_in_calls() == ["GET:/vcenter/cluster/{cluster}/host"]
@@ -685,5 +689,6 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
             "networks": [],
             "power_on_after_create": False,
         },
+        "safety_level": "dangerous",
     }
     assert _CALLS == []

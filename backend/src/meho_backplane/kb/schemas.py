@@ -51,6 +51,8 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "KB_KIND_ENTRY",
     "KB_SOURCE",
+    "META_CREATED_BY_SUB",
+    "META_LAST_UPDATED_BY_SUB",
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
@@ -64,6 +66,24 @@ __all__ = [
 #: filter for hybrid retrieval scoping; changing the string is a
 #: data-migration event.
 KB_SOURCE: Final[str] = "kb"
+
+#: Metadata keys that carry per-entry write attribution. Stored inside
+#: ``documents.doc_metadata`` (not as new columns) so attribution rides
+#: the existing JSONB shape and surfaces on every read surface that
+#: already returns ``metadata`` -- ``GET /api/v1/kb/{slug}``, the list
+#: preview, ``POST /api/v1/kb``, and ``POST /api/v1/retrieve`` hits --
+#: with no schema migration. The service writes these keys; callers
+#: that pass them in a create-body ``metadata`` are stripped (the OIDC
+#: ``sub`` is the trust boundary, not caller-supplied JSON) so an
+#: operator cannot forge authorship.
+#:
+#: ``created_by_sub`` is set once on first index and preserved verbatim
+#: across every subsequent overwrite (even a cross-principal one);
+#: ``last_updated_by_sub`` is rewritten to the acting principal on
+#: every write. Together they make a kb row self-describing about who
+#: wrote it and who last mutated it without an audit-log correlation.
+META_CREATED_BY_SUB: Final[str] = "created_by_sub"
+META_LAST_UPDATED_BY_SUB: Final[str] = "last_updated_by_sub"
 
 #: The ``documents.kind`` value every kb entry carries. Distinct from
 #: future kb-adjacent rows (kb-index, kb-collection) that would each

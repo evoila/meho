@@ -199,7 +199,7 @@ $ meho targets import targets.yaml
 Verify with:
 
 ```console
-$ meho targets probe --name rdc-gcp-dev
+$ meho targets probe rdc-gcp-dev
 ```
 
 A green probe confirms: ADC credentials valid, impersonation chain

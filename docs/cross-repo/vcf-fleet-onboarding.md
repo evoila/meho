@@ -133,22 +133,29 @@ What this means for the credentials in Vault:
   (the in-process credential cache clears on `aclose`). There is no per-target
   credential refresh hook in v0.5.
 
-To register a new target via the CLI:
+To register a new target, write a descriptor and import it. `meho targets
+import` takes a `targets.yaml` **file** (there is no `meho targets create`
+verb in v0.5 — `import` is the CLI's only write path):
+
+```yaml
+# rdc-fleet.yaml
+targets:
+  - name: rdc-fleet
+    product: fleet
+    host: vcf-fleet.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/vcf-fleet/rdc
+    auth_model: shared_service_account
+```
 
 ```bash
-meho targets import \
-  --name rdc-fleet \
-  --product fleet \
-  --host vcf-fleet.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/vcf-fleet/rdc \
-  --auth-model shared_service_account
+meho targets import rdc-fleet.yaml   # add --update to PATCH an existing target
 ```
 
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-fleet --json | jq '{product, version, reachable, extras}'
+meho targets probe rdc-fleet --json | jq '{product, version, reachable, extras}'
 # expected: {"product": "fleet", "version": "8.0", "reachable": true,
 #            "extras": {"lcm_api_version": "8.0", "datacenter_count": N, ...}}
 # Note: `version` carries the LCM API version (the only working version source

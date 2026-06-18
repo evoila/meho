@@ -355,18 +355,102 @@ async def test_create_entry_writes_new_row(stub_embedding: AsyncMock) -> None:
     """``create_entry`` inserts a row; ``get_entry`` round-trips it."""
     tenant_id = uuid.uuid4()
     service = KbService()
-    created = await service.create_entry(
+    created, was_created = await service.create_entry(
         tenant_id=tenant_id,
         slug="net-policy",
         body="NetworkPolicy default-deny baseline.",
         metadata={"author": "ops"},
     )
+    assert was_created is True
     assert created.slug == "net-policy"
     assert created.metadata == {"author": "ops"}
 
     fetched = await service.get_entry(tenant_id, "net-policy")
     assert fetched is not None
     assert fetched.body == "NetworkPolicy default-deny baseline."
+
+
+@pytest.mark.asyncio
+async def test_create_entry_stamps_attribution_on_create(stub_embedding: AsyncMock) -> None:
+    """A genuine create stamps both ``created_by_sub`` and ``last_updated_by_sub`` (#1845)."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    entry, created = await service.create_entry(
+        tenant_id=tenant_id,
+        slug="net-policy",
+        body="baseline",
+        metadata={"author": "ops"},
+        actor_sub="user-a",
+    )
+    assert created is True
+    assert entry.metadata["created_by_sub"] == "user-a"
+    assert entry.metadata["last_updated_by_sub"] == "user-a"
+    # Caller metadata survives alongside the attribution keys.
+    assert entry.metadata["author"] == "ops"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_overwrite_preserves_creator_updates_mutator(
+    stub_embedding: AsyncMock,
+) -> None:
+    """Cross-principal overwrite keeps ``created_by_sub``, bumps ``last_updated_by_sub`` (#1845).
+
+    A's create is overwritten by B (a different principal). The wiki-like
+    model means the overwrite succeeds (no ownership gate); attribution
+    must record that A authored the row but B last touched it.
+    """
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    first, created_a = await service.create_entry(
+        tenant_id=tenant_id, slug="shared", body="A body", actor_sub="user-a"
+    )
+    assert created_a is True
+
+    second, created_b = await service.create_entry(
+        tenant_id=tenant_id, slug="shared", body="B body", actor_sub="user-b"
+    )
+    assert created_b is False  # overwrite, not create → route returns 200
+    assert second.id == first.id  # same row
+    assert second.body == "B body"
+    assert second.metadata["created_by_sub"] == "user-a"  # preserved
+    assert second.metadata["last_updated_by_sub"] == "user-b"  # bumped
+
+
+@pytest.mark.asyncio
+async def test_create_entry_strips_caller_forged_attribution(stub_embedding: AsyncMock) -> None:
+    """Caller-supplied attribution keys are ignored; the OIDC sub wins (#1845).
+
+    An operator cannot forge authorship by smuggling ``created_by_sub``
+    through the create body -- the verified ``actor_sub`` is the trust
+    boundary.
+    """
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    entry, _ = await service.create_entry(
+        tenant_id=tenant_id,
+        slug="forge-attempt",
+        body="body",
+        metadata={"created_by_sub": "victim", "last_updated_by_sub": "victim"},
+        actor_sub="real-actor",
+    )
+    assert entry.metadata["created_by_sub"] == "real-actor"
+    assert entry.metadata["last_updated_by_sub"] == "real-actor"
+
+
+@pytest.mark.asyncio
+async def test_create_entry_unattributed_leaves_no_attribution(stub_embedding: AsyncMock) -> None:
+    """``actor_sub=None`` (unattended re-index) writes no attribution keys (#1845)."""
+    tenant_id = uuid.uuid4()
+    service = KbService()
+    entry, _ = await service.create_entry(
+        tenant_id=tenant_id,
+        slug="unattributed",
+        body="body",
+        metadata={"author": "ops"},
+    )
+    assert "created_by_sub" not in entry.metadata
+    assert "last_updated_by_sub" not in entry.metadata
+    assert entry.metadata["author"] == "ops"
 
 
 @pytest.mark.asyncio

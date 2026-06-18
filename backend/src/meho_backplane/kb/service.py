@@ -68,6 +68,7 @@ from sqlalchemy import delete, select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
+from meho_backplane.kb.attribution import merge_attribution
 from meho_backplane.kb.file_walker import walk_kb_directory
 from meho_backplane.kb.schemas import (
     KB_KIND_ENTRY,
@@ -371,8 +372,10 @@ class KbService:
         slug: str,
         body: str,
         metadata: dict[str, object] | None = None,
-    ) -> KbEntry:
-        """Insert (or re-index) one kb entry under *tenant_id*.
+        *,
+        actor_sub: str | None = None,
+    ) -> tuple[KbEntry, bool]:
+        """Insert (or re-index) one kb entry; return ``(entry, created)``.
 
         Validates *slug* before touching the substrate. Delegates to
         :func:`~meho_backplane.retrieval.indexer.index_document` so
@@ -384,35 +387,51 @@ class KbService:
         ``add_to_knowledge`` meta-tool (T3). RBAC (``tenant_admin``)
         enforced by the route layer.
 
-        Parameters
-        ----------
-        tenant_id
-            The owning tenant.
-        slug
-            Operator-facing identifier. Validated against
-            :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`; invalid
-            input raises :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`.
-        body
-            Markdown content. Stored as-is; no chunking, no
-            normalisation. The retrieval substrate (G0.4-T4)
-            consumes both BM25-over-tsvector and a 384-dim
-            embedding.
-        metadata
-            Optional JSON-shaped dict. ``None`` keeps the existing
-            row's metadata on re-index; ``{}`` clears it. Matches
-            the contract on
-            :func:`~meho_backplane.retrieval.indexer.index_document`.
+        Cross-principal writes are wiki-like (any ``tenant_admin`` may
+        overwrite any other principal's slug in-tenant -- intended, no
+        ownership gate); this method only adds attribution via
+        :func:`~meho_backplane.kb.attribution.merge_attribution`:
+        ``created_by_sub`` set once and preserved across overwrites,
+        ``last_updated_by_sub`` rewritten each write, both in
+        ``doc_metadata`` and un-forgeable from caller ``metadata``.
+
+        Returns ``(entry, created)`` where ``created`` is ``True`` only
+        when no row existed for ``(tenant_id, slug)`` -- the route maps
+        it to HTTP ``201`` vs ``200`` (#1845 ask 1). *actor_sub* is the
+        writing principal's OIDC ``sub`` (``Operator.sub``); ``None``
+        leaves the row unattributed. *metadata* ``None`` keeps the
+        existing caller-metadata, ``{}`` clears it; *slug* is validated
+        (raises :class:`~meho_backplane.kb.schemas.InvalidKbSlugError`).
         """
         validate_slug(slug)
+
+        # One natural-key SELECT, ahead of the substrate upsert. It
+        # serves two purposes: (1) the created-vs-overwrite signal for
+        # the route's 201/200 decision, and (2) the prior
+        # ``created_by_sub`` to preserve across an overwrite. The
+        # substrate's own SELECT inside ``index_document`` is a second
+        # round-trip; collapsing the two is a v0.2.next optimisation
+        # (index_document would have to return the action + prior
+        # metadata), not worth the wider blast radius here.
+        existing = await self.get_entry(tenant_id=tenant_id, slug=slug)
+        created = existing is None
+
+        merged = merge_attribution(
+            caller_metadata=metadata,
+            existing_metadata=existing.metadata if existing is not None else None,
+            actor_sub=actor_sub,
+            created=created,
+        )
+
         doc = await index_document(
             tenant_id=tenant_id,
             source=KB_SOURCE,
             source_id=slug,
             kind=KB_KIND_ENTRY,
             body=body,
-            metadata=metadata,
+            metadata=merged,
         )
-        return _doc_to_entry(doc)
+        return _doc_to_entry(doc), created
 
     async def delete_entry(self, tenant_id: uuid.UUID, slug: str) -> bool:
         """Delete the kb entry matching *(tenant_id, slug)*. Return whether it existed.

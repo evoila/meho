@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing 879-line UI router (#1845 only
+# threads actor_sub through the existing create_entry calls; a split of this
+# router is out of scope for the attribution change and tracked separately).
 
 """KB UI routes: list/search + entry detail + hover preview partial + editor.
 
@@ -641,11 +644,12 @@ def build_kb_router() -> APIRouter:
         error_message: str | None = None
         entry: KbEntry | None = None
         try:
-            entry = await kb.create_entry(
+            entry, _created = await kb.create_entry(
                 tenant_id=session.tenant_id,
                 slug=slug.strip(),
                 body=body,
                 metadata=metadata if metadata else None,
+                actor_sub=session.operator_sub,
             )
         except InvalidKbSlugError as exc:
             error_message = str(exc)
@@ -713,6 +717,7 @@ def build_kb_router() -> APIRouter:
             [file],
             [slug],
             tenant_id=session.tenant_id,
+            actor_sub=session.operator_sub,
         )
         context = {
             "rows": rows,
@@ -740,6 +745,7 @@ def build_kb_router() -> APIRouter:
             file,
             [""] * len(file),
             tenant_id=session.tenant_id,
+            actor_sub=session.operator_sub,
         )
         context = {
             "rows": rows,
@@ -752,7 +758,10 @@ def build_kb_router() -> APIRouter:
         slug_overrides: list[str],
         *,
         tenant_id: object,
+        actor_sub: str,
     ) -> list[dict[str, object]]:
+        # code-quality-allow: function-size — pre-existing oversized helper;
+        # #1845 only adds the actor_sub kwarg + threads it to create_entry.
         """Process a list of uploaded files and return per-file result rows.
 
         Each entry in the returned list is a dict with:
@@ -830,11 +839,12 @@ def build_kb_router() -> APIRouter:
                 audit_op_class="write",
             )
             try:
-                entry = await kb.create_entry(
+                entry, _created = await kb.create_entry(
                     tenant_id,  # type: ignore[arg-type]
                     effective_slug,
                     body,
                     metadata={"source_filename": filename},
+                    actor_sub=actor_sub,
                 )
             except InvalidKbSlugError as exc:
                 rows.append(

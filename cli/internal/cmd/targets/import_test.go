@@ -8,10 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -334,21 +336,55 @@ func TestEntryToUpdateBodySparseShape(t *testing.T) {
 	}
 }
 
-// --- buildOfflinePlan ---------------------------------------------------
+// --- dry-run plan (existence-aware, read-only) -------------------------
 
-func TestBuildOfflinePlanEveryEntryIsCreate(t *testing.T) {
+// TestDryRunPlanExistingRendersUpdateNewRendersCreate pins the #1785
+// fix: dry-run now routes through buildLivePlan, so the plan it prints
+// is existence-accurate. An entry whose name already exists in the
+// tenant renders UPDATE (with a sparse-PATCH body via
+// entryToUpdateBody); a brand-new name renders CREATE. Crucially the
+// planning step issues only the listing GET and zero POST/PATCH —
+// dry-run is a read-only preview. (runImport returns right after
+// buildLivePlan in dry-run mode, so this asserts the planner directly
+// against the same fakeDoer the apply path uses.)
+func TestDryRunPlanExistingRendersUpdateNewRendersCreate(t *testing.T) {
 	t.Parallel()
+	f := &fakeDoer{existing: []string{"rdc-vault"}}
 	entries := []map[string]any{
-		{"name": "a", "product": "vault", "host": "1.1.1.1"},
-		{"name": "b", "product": "vault", "host": "2.2.2.2"},
+		// Existing target → UPDATE. Carries only `notes` (name/product
+		// stripped on the PATCH path) so the body is a 1-key sparse
+		// shape, matching what apply would PATCH.
+		{"name": "rdc-vault", "product": "vault", "host": "v1", "notes": "patched"},
+		// Brand-new target → CREATE.
+		{"name": "rdc-vcenter", "product": "vcenter", "host": "vc1"},
 	}
-	p := buildOfflinePlan(entries, false)
-	if len(p.Create) != 2 || len(p.Update) != 0 || len(p.Skip) != 0 {
-		t.Errorf("plan: create=%d update=%d skip=%d; want 2/0/0",
-			len(p.Create), len(p.Update), len(p.Skip))
+	p, err := buildLivePlan(context.Background(), f.do, entries, true)
+	if err != nil {
+		t.Fatalf("buildLivePlan (dry-run): %v", err)
+	}
+	if len(p.Update) != 1 || p.Update[0].Name != "rdc-vault" {
+		t.Errorf("update: %v; want one UPDATE entry for rdc-vault", p.Update)
+	}
+	if p.Update[0].Action != actionUpdate {
+		t.Errorf("existing-target action: got %q; want UPDATE", p.Update[0].Action)
+	}
+	if _, ok := p.Update[0].Body["name"]; ok {
+		t.Errorf("dry-run UPDATE body should use the sparse PATCH shape (no `name`): %v", p.Update[0].Body)
+	}
+	if len(p.Create) != 1 || p.Create[0].Name != "rdc-vcenter" {
+		t.Errorf("create: %v; want one CREATE entry for rdc-vcenter", p.Create)
 	}
 	if p.Create[0].Action != actionCreate {
-		t.Errorf("action: got %q; want CREATE", p.Create[0].Action)
+		t.Errorf("new-target action: got %q; want CREATE", p.Create[0].Action)
+	}
+	// Read-only contract: planning issued the listing GET (recorded as
+	// a page fetch) and zero writes.
+	if f.listPages == 0 {
+		t.Errorf("dry-run planning should issue the listing GET; listPages=%d", f.listPages)
+	}
+	if len(f.creates) != 0 || len(f.updates) != 0 {
+		t.Errorf("dry-run planning must not write: POSTs=%d PATCHes=%d",
+			len(f.creates), len(f.updates))
 	}
 }
 
@@ -467,7 +503,7 @@ func TestExecutePlanIssuesPostAndPatch(t *testing.T) {
 // --- runImport end-to-end (dry-run path; offline; no fake server) -----
 
 func TestRunImportDryRunPrintsPlan(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "targets.yaml")
 	yaml := []byte(`
@@ -480,14 +516,23 @@ targets:
 	if err := os.WriteFile(path, yaml, 0o600); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
-	cmd := &cobra.Command{}
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	cmd.SetOut(stdout)
-	cmd.SetErr(stderr)
-	cmd.SetContext(context.Background())
 
-	err := runImport(cmd, importOptions{File: path, DryRun: true})
+	// Tenant has no targets → rdc-vault is new → CREATE. The listing
+	// GET is the only call dry-run may make.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("dry-run issued a %s; want only GET", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runImport(cmd, importOptions{File: path, DryRun: true, BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runImport: %v\nstderr=%s", err, stderr.String())
 	}
@@ -499,8 +544,57 @@ targets:
 	}
 }
 
+// TestRunImportDryRunExistingTargetRendersUpdate is the end-to-end
+// counterpart to the #1785 acceptance criterion: against a tenant
+// where the target already exists, `--update --dry-run` must preview
+// UPDATE (matching the real apply's "updated"), not CREATE.
+func TestRunImportDryRunExistingTargetRendersUpdate(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yaml")
+	yaml := []byte(`
+targets:
+  - name: rdc-vault
+    product: vault
+    host: vault.evba.lab
+    notes: patched
+`)
+	if err := os.WriteFile(path, yaml, 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("dry-run issued a %s; want only GET", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Existing tenant target with the same name → must plan UPDATE.
+		_, _ = w.Write([]byte(`[{"name":"rdc-vault"}]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runImport(cmd, importOptions{File: path, Update: true, DryRun: true, BackplaneOverride: srv.URL})
+	if err != nil {
+		t.Fatalf("runImport --update --dry-run: %v\nstderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "UPDATE") || !strings.Contains(out, "rdc-vault") {
+		t.Errorf("dry-run for existing target should preview UPDATE rdc-vault:\n%s", out)
+	}
+	if strings.Contains(out, "CREATE") {
+		t.Errorf("dry-run for existing target must not show CREATE:\n%s", out)
+	}
+	if !strings.Contains(out, "1 to update") {
+		t.Errorf("dry-run summary should report 1 to update:\n%s", out)
+	}
+}
+
 func TestRunImportDryRunJSONStructuredPlan(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "targets.yaml")
 	yaml := []byte(`
@@ -515,14 +609,19 @@ targets:
 	if err := os.WriteFile(path, yaml, 0o600); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
-	cmd := &cobra.Command{}
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	cmd.SetOut(stdout)
-	cmd.SetErr(stderr)
-	cmd.SetContext(context.Background())
 
-	err := runImport(cmd, importOptions{File: path, DryRun: true, JSONOut: true})
+	// Empty tenant → both entries are new → CREATE.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runImport(cmd, importOptions{File: path, DryRun: true, JSONOut: true, BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runImport: %v\nstderr=%s", err, stderr.String())
 	}
@@ -540,12 +639,13 @@ targets:
 	}
 }
 
-func TestRunImportDryRunSkipsBackplaneCalls(t *testing.T) {
-	// Note: no t.Parallel() — this test calls t.Setenv, which
-	// testing forbids inside a parallel test (env is process-wide).
-	// Sanity check: --dry-run must not hit any HTTP endpoint, even
-	// the listing one, so it works on an air-gapped machine with no
-	// `meho login` artifact present.
+// TestRunImportDryRunIssuesGetButNoWrites replaces the old
+// "dry-run makes no API call / air-gapped" contract (#1785): dry-run
+// now routes through the live planner, so it issues exactly the
+// listing GET(s) and zero POST/PATCH. This is what makes the preview
+// existence-accurate while staying read-only.
+func TestRunImportDryRunIssuesGetButNoWrites(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
@@ -556,15 +656,42 @@ targets:
 `), 0o600); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
-	// Point XDG_CONFIG_HOME at a dir with NO config / NO token —
-	// resolveBackplane would error if the codepath touched it.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	cmd := &cobra.Command{}
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-	if err := runImport(cmd, importOptions{File: path, DryRun: true}); err != nil {
-		t.Fatalf("dry-run with no auth config should succeed: %v", err)
+
+	var gets, writes atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			gets.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			// Any POST/PATCH on the collection is a write — dry-run
+			// must never reach here.
+			writes.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	})
+	mux.HandleFunc("/api/v1/targets/", func(w http.ResponseWriter, _ *http.Request) {
+		// PATCH /api/v1/targets/{name} — a write.
+		writes.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	if err := runImport(cmd, importOptions{File: path, DryRun: true, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("dry-run: %v\nstderr=%s", err, stderr.String())
+	}
+	if gets.Load() == 0 {
+		t.Errorf("dry-run should issue at least one listing GET; got %d", gets.Load())
+	}
+	if writes.Load() != 0 {
+		t.Errorf("dry-run must not issue any POST/PATCH; got %d writes", writes.Load())
 	}
 }
 

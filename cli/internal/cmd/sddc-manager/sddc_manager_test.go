@@ -552,8 +552,8 @@ func TestSearchSendsConnectorIDPreBaked(t *testing.T) {
 			if got := r.URL.Query().Get("connector_id"); got != "sddc-rest-9.0" {
 				t.Errorf("connector_id: got %q", got)
 			}
-			if got := r.URL.Query().Get("query"); got != "list domains" {
-				t.Errorf("query: got %q", got)
+			if got := r.URL.Query().Get("q"); got != "list domains" {
+				t.Errorf("q: got %q", got)
 			}
 			writeJSON(t, w, 200, searchResponse{
 				Hits: []searchHit{{OpID: "GET:/v1/domains", FusedScore: 1.0}},

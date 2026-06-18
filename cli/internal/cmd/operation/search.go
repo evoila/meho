@@ -144,14 +144,16 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 
 // getSearch issues the typed GET via the generated client. The
 // generated GetSearchApiV1OperationsSearchGetParams carries typed
-// pointer fields for the optional query params (Group, Limit) — the
+// pointer fields for the optional query params (Q, Group, Limit) — the
 // generator emits them as *string / *int so a nil value omits the
-// param from the URL. ConnectorId and Query are required and stay
-// plain string.
+// param from the URL. ConnectorId is required and stays a plain
+// string; the free-text query is sent via the canonical `q` param
+// (#1854; the legacy `query` alias is deprecated). `q` is a pointer on
+// the wire but the CLI always supplies a non-empty value.
 func getSearch(ctx context.Context, client operationsAPI, opts searchOptions) (*SearchResponse, error) {
 	params := &api.GetSearchApiV1OperationsSearchGetParams{
 		ConnectorId: opts.ConnectorID,
-		Query:       opts.Query,
+		Q:           &opts.Query,
 	}
 	if opts.GroupKey != "" {
 		gk := opts.GroupKey

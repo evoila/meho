@@ -283,6 +283,80 @@ async def test_full_lifecycle_through_all_five_routes(
 
 
 # ---------------------------------------------------------------------------
+# Test 1b -- cross-principal overwrite: 201→200 + attribution (#1845)
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+async def test_cross_principal_overwrite_status_and_attribution(
+    kb_integration_app: FastAPI,
+) -> None:
+    """Same-slug cross-principal overwrite returns 200 and records attribution.
+
+    #1845: principal A creates a slug (201, ``created_by_sub=A``);
+    principal B overwrites the same slug in the same tenant -- the
+    wiki-like model lets the write land (no ownership gate) but the
+    status is now **200** (not the REST-incorrect 201-on-overwrite),
+    and the entry carries ``created_by_sub=A`` (preserved) +
+    ``last_updated_by_sub=B`` (bumped) so it is self-describing about
+    who authored and who last mutated it.
+    """
+    from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
+
+    fake_embed = _make_stub_embedding_service()
+    a_key, a_token = _admin_token(tenant_id=TENANT_A_ID, sub="principal-a")
+    b_key, b_token = _admin_token(tenant_id=TENANT_A_ID, sub="principal-b")
+
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.retrieval.indexer.get_embedding_service",
+            return_value=fake_embed,
+        ),
+    ):
+        mock_discovery_and_jwks(mock_router, public_jwks(a_key, b_key))
+
+        async with _make_async_client(kb_integration_app) as client:
+            # A creates a fresh slug → 201, attributed to A.
+            a_create = await client.post(
+                "/api/v1/kb",
+                json={"slug": "shared-runbook", "body": "A's version."},
+                headers=_authed(a_token),
+            )
+            assert a_create.status_code == 201, a_create.text
+            a_body = a_create.json()
+            assert a_body["metadata"]["created_by_sub"] == "principal-a"
+            assert a_body["metadata"]["last_updated_by_sub"] == "principal-a"
+            original_id = a_body["id"]
+            original_created_at = a_body["created_at"]
+
+            # B overwrites the same slug → 200 (in-place mutation, not a
+            # create), created_by preserved, last_updated bumped.
+            b_overwrite = await client.post(
+                "/api/v1/kb",
+                json={"slug": "shared-runbook", "body": "B's different version."},
+                headers=_authed(b_token),
+            )
+            assert b_overwrite.status_code == 200, b_overwrite.text
+            b_body = b_overwrite.json()
+            assert b_body["id"] == original_id  # same row
+            assert b_body["created_at"] == original_created_at  # preserved
+            assert b_body["body"] == "B's different version."
+            assert b_body["metadata"]["created_by_sub"] == "principal-a"
+            assert b_body["metadata"]["last_updated_by_sub"] == "principal-b"
+
+            # The read surface (GET /{slug}) carries the same attribution.
+            show = await client.get(
+                "/api/v1/kb/shared-runbook",
+                headers=_authed(a_token),
+            )
+            assert show.status_code == 200
+            show_meta = show.json()["metadata"]
+            assert show_meta["created_by_sub"] == "principal-a"
+            assert show_meta["last_updated_by_sub"] == "principal-b"
+
+
+# ---------------------------------------------------------------------------
 # Test 2 -- tenant boundary holds across the HTTP surface
 # ---------------------------------------------------------------------------
 

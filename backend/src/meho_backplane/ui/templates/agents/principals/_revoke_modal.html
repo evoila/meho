@@ -1,0 +1,114 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded revoke (kill-switch) confirm modal for the Agent
+  principals console (Initiative #1824 Task #1831). Loaded into
+  ``#principals-modal-container`` by a table row's "Revoke" button's
+  ``hx-get`` to ``/ui/agents/principals/{name}/revoke``. The shared
+  app-shell modal controller opens the inserted ``<dialog>`` via
+  ``showModal()`` on ``htmx:afterSwap`` and dismisses on close / ESC /
+  backdrop (#1803).
+
+  Revoke is the Keycloak KILL SWITCH: it is **terminal** and destructive
+  -- it disables the Keycloak client, which blocks all new token grants
+  for this identity (tokens already minted stay valid until their
+  ``exp``). There is no un-revoke path. Because a too-easy kill switch is
+  a footgun (#1831 risk note), the dialog demands a **type-to-confirm of
+  the principal name**: the destructive submit stays disabled until the
+  operator types the name verbatim. The handler re-checks the typed value
+  server-side, so a crafted POST cannot skip the confirm.
+
+  The gate is an inline Alpine ``x-data`` (the chassis "zero inline
+  script" CSP posture allows Alpine attributes; Alpine is vendored in
+  base.html). ``x-model`` binds the input to ``typed``; ``:disabled``
+  keeps the submit inert until ``typed.trim() === expected``.
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/agents/principals/{name}/revoke``, swapping
+  ``#principals-modal-container``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/principals`` (the row
+      swaps to its revoked state on reload).
+    * 422 (typed-name mismatch) / 503 (Keycloak unconfigured) / 502
+      (Keycloak API failure) -> this dialog re-rendered with the banner.
+
+  CSRF: the form carries its own ``hx-headers`` echo of the token; the
+  route re-mints + re-sets the ``meho_csrf`` cookie on render (#1693).
+-#}
+<dialog id="principals-revoke-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg text-error" id="principals-revoke-modal-title">
+      Revoke agent principal
+      <span class="font-mono">{{ principal.name }}</span>?
+    </h3>
+
+    {% if banner %}
+      <div role="alert" class="alert alert-error text-sm mt-2" data-revoke-banner>
+        <span class="break-words">{{ banner }}</span>
+      </div>
+    {% endif %}
+
+    <div class="py-2 space-y-2 text-sm">
+      <div role="alert" class="alert alert-warning text-xs">
+        <span>
+          <strong>This is a kill switch.</strong> Revoking disables the
+          Keycloak client
+          <span class="font-mono">{{ principal.keycloak_client_id }}</span>
+          and blocks all new token grants for this identity. It is
+          terminal -- there is no un-revoke. Tokens already issued stay
+          valid until they expire.
+        </span>
+      </div>
+    </div>
+
+    <form
+      id="principals-revoke-form"
+      hx-post="/ui/agents/principals/{{ principal.name | urlencode }}/revoke"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#principals-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3"
+      aria-labelledby="principals-revoke-modal-title"
+      x-data='{ typed: "", expected: {{ principal.name | tojson }} }'
+    >
+      <label class="form-control">
+        <span class="label-text text-sm">
+          Type <span class="font-mono font-semibold">{{ principal.name }}</span> to confirm:
+        </span>
+        <input
+          type="text"
+          name="confirm_name"
+          required
+          autocomplete="off"
+          x-model="typed"
+          class="input input-bordered input-sm font-mono"
+          aria-label="Type the principal name to confirm revoke"
+          placeholder="{{ principal.name }}"
+        />
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-revoke"
+          onclick="document.getElementById('principals-revoke-modal').close()"
+        >
+          Keep principal
+        </button>
+        <button
+          type="submit"
+          class="btn btn-sm btn-error"
+          data-action="revoke-submit"
+          :disabled="typed.trim() !== expected"
+        >
+          Revoke (kill switch)
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

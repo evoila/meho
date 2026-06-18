@@ -1005,3 +1005,75 @@ The pack of regression tests in
 exercises every convention above. A future drift on any of them
 fails CI rather than surfacing as the next RDC dogfood-cycle
 finding.
+
+## 15. Free-text filter param named `q` on every list/search surface
+
+**Every REST list/search endpoint names its free-text filter `q`. The
+per-surface v0.x name survives as a `deprecated: true` alias; supplying
+both with conflicting values is a 422, never a silent pick.**
+
+This is the REST-side analogue of §14.2's MCP-cursor reconciliation.
+The free-text filter on the three operator list/search surfaces was
+spelled three different ways, so an operator's reasonable `?q=` (or
+reuse of one surface's name on another) was **silently ignored**:
+
+| Endpoint | v0.x param | Semantics |
+|---|---|---|
+| `GET /api/v1/kb` | `filter` | SQL `LIKE` pattern |
+| `GET /api/v1/memory` | `slug_pattern` | slug substring match |
+| `GET /api/v1/operations/search` | `query` | hybrid BM25 + cosine query |
+
+### The convention
+
+The canonical name is **`q`** — the lexically shortest, surface-neutral
+spelling, and the one an operator types first (the `?q=` the #1854
+problem statement names). Every list/search endpoint with a free-text
+filter accepts `q`. The per-surface v0.x name (`filter` / `slug_pattern`
+/ `query`) stays accepted but is declared `deprecated=True` in the
+OpenAPI param so Swagger / ReDoc and the generated CLI client render the
+deprecation; the legacy param keeps functioning (FastAPI's `deprecated`
+flag is docs-only).
+
+Resolution when both are supplied is XOR-with-equality-tolerance,
+shared in
+[`backend/src/meho_backplane/api/v1/_freetext_filter.py`](../../backend/src/meho_backplane/api/v1/_freetext_filter.py)
+(`free_text_q_query` builds the canonical param; `resolve_free_text_filter`
+collapses the pair):
+
+- only one set → that value;
+- both set to the **same** string → that value (a caller mirroring `q`
+  onto the legacy name is unambiguous);
+- both set to **different** strings → `422 ambiguous_free_text_filter`.
+
+The 422 is the load-bearing replacement for the silent-ignore foot-gun:
+the operator learns at the boundary that the two disagree, instead of
+having one quietly win.
+
+`operations/search`'s `q` is *required-via-either-name* — the search has
+nothing to match without one — so the handler raises
+`422 missing_query` when neither `q` nor `query` is supplied (the prior
+shape made `query` a framework-required param; the typed 422 preserves
+that contract while letting either name satisfy it). The kb / memory
+list surfaces treat a missing filter as "no filter" (full page).
+
+### Migration shape
+
+Mirrors §2 and §14.2: `q` is canonical now, the legacy names survive as
+`deprecated` params through the next two release cycles, and a later
+sweep drops them. Adding `q` is backward-compatible — it widens what's
+accepted — so no `?envelope=v2`-style gate is needed.
+
+### Code reference
+
+The shared helper is
+[`_freetext_filter.py`](../../backend/src/meho_backplane/api/v1/_freetext_filter.py);
+the three adopting handlers are `list_kb`
+([`kb.py`](../../backend/src/meho_backplane/api/v1/kb.py)),
+`list_memories`
+([`memory.py`](../../backend/src/meho_backplane/api/v1/memory.py)), and
+`get_search`
+([`operations.py`](../../backend/src/meho_backplane/api/v1/operations.py)).
+Per-surface regression tests live in `test_api_v1_kb.py`,
+`test_api_v1_memory.py`, and `test_api_v1_operations.py`. A new
+list/search surface declares `q` via `free_text_q_query(...)` rather
+than re-inventing a filter name.

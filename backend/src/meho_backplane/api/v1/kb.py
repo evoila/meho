@@ -13,17 +13,34 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/kb`` -- paginated list of kb entries for the operator's
-  tenant. Query params: ``filter`` (SQL ``LIKE`` pattern), ``limit``,
+  tenant. Query params: ``q`` (the canonical free-text SQL ``LIKE``
+  pattern; ``filter`` is the deprecated alias, #1854), ``limit``,
   ``offset``. Returns :class:`KbListResponse`. Role: ``operator``.
 * ``GET /api/v1/kb/{slug}`` -- fetch one entry by slug. Returns
   :class:`KbEntry`. 404 when absent. Role: ``operator``.
 * ``POST /api/v1/kb`` -- create / re-index one entry. Body:
-  :class:`KbEntryCreate`. Returns :class:`KbEntry` with HTTP 201. Role:
-  ``tenant_admin``.
+  :class:`KbEntryCreate`. Returns :class:`KbEntry` with HTTP **201**
+  for a genuinely-new slug and **200** for an in-place overwrite of an
+  existing slug (#1845 -- ``201`` on overwrite is REST-incorrect).
+  Role: ``tenant_admin``.
 * ``DELETE /api/v1/kb/{slug}`` -- delete an entry. Returns 204 on
   success **and** when the row was already absent (idempotent
   semantics per the acceptance criteria; T6 documents the
   "delete-already-missing is 204" contract). Role: ``tenant_admin``.
+
+Cross-principal write & delete model (#1845)
+--------------------------------------------
+
+kb rows are tenant-shared with **no per-row ownership check**: any
+``tenant_admin`` may overwrite or delete **any** other principal's slug
+in the same tenant. This is **wiki-like and intentional** -- there is
+no ``403``/``409`` on a same-slug cross-principal write, and ``DELETE``
+is not principal-scoped. Operators must not assume per-author
+ownership. (This differs from ``memory`` DELETE, which *is*
+principal-scoped.) Writes stamp ``created_by_sub`` /
+``last_updated_by_sub`` into the entry's ``metadata`` so a row is
+self-describing about authorship without an audit-log join; see
+:func:`meho_backplane.kb.attribution.merge_attribution`.
 * ``POST /api/v1/kb/ingest`` -- server-side bulk ingest. Body:
   :class:`IngestKbRequest`. Returns :class:`KbIngestionResult`. Role:
   ``tenant_admin``.
@@ -105,6 +122,10 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from meho_backplane.api.v1._freetext_filter import (
+    free_text_q_query,
+    resolve_free_text_filter,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb import KbEntry, KbIngestionResult, KbService
@@ -286,7 +307,13 @@ class IngestKbRequest(BaseModel):
 
 @router.get("", response_model=KbListResponse)
 async def list_kb(
-    filter: str | None = Query(default=None, max_length=_SLUG_MAX_LENGTH),  # noqa: A002 - public API field name
+    q: str | None = free_text_q_query(max_length=_SLUG_MAX_LENGTH),
+    filter: str | None = Query(  # noqa: A002 - public API field name
+        default=None,
+        max_length=_SLUG_MAX_LENGTH,
+        deprecated=True,
+        description="Deprecated alias for `q`; still honoured.",
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     operator: Operator = _require_operator,
@@ -298,17 +325,26 @@ async def list_kb(
     via :func:`require_role` before reaching this handler;
     ``operator`` and ``tenant_admin`` both pass.
 
-    ``filter`` is forwarded to :meth:`KbService.list_entries` as a SQL
-    ``LIKE`` pattern; the operator is the trust boundary for pattern
-    shape. ``limit`` is capped at 500 (the substrate's
-    :data:`DEFAULT_LIST_LIMIT` is 100; the API surface allows higher
-    explicit values so a one-shot dump of a 200-entry corpus
-    completes in one round trip).
+    ``q`` is the canonical free-text filter param across the kb /
+    memory / operations-search list surfaces (#1854); ``filter`` is its
+    deprecated alias, kept working for back-compat. The resolved value
+    is forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``
+    pattern; the operator is the trust boundary for pattern shape.
+    Supplying both ``q`` and ``filter`` with different values is a 422
+    rather than a silent pick. ``limit`` is capped at 500 (the
+    substrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface
+    allows higher explicit values so a one-shot dump of a 200-entry
+    corpus completes in one round trip).
 
     Binds ``audit_op_id="kb.list"`` + ``audit_op_class="read"`` before
     the substrate call so a handler exception still produces an
     audit row classified under the canonical op id.
     """
+    filter_pattern = resolve_free_text_filter(
+        q=q,
+        legacy_value=filter,
+        legacy_name="filter",
+    )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["list"],
         audit_op_class="read",
@@ -316,7 +352,7 @@ async def list_kb(
     service = KbService()
     entries = await service.list_entries(
         tenant_id=operator.tenant_id,
-        filter_pattern=filter,
+        filter_pattern=filter_pattern,
         limit=limit,
         offset=offset,
     )
@@ -360,9 +396,20 @@ async def show_kb(
     "",
     response_model=KbEntry,
     status_code=http_status.HTTP_201_CREATED,
+    responses={
+        http_status.HTTP_200_OK: {
+            "model": KbEntry,
+            "description": (
+                "An existing entry with this slug was overwritten in "
+                "place (id + created_at preserved, updated_at bumped). "
+                "201 is returned only for a genuinely-new slug."
+            ),
+        },
+    },
 )
 async def create_kb(
     body: KbEntryCreate,
+    response: Response,
     operator: Operator = _require_admin,
 ) -> KbEntry:
     """Create / re-index one kb entry under the operator's tenant.
@@ -373,6 +420,24 @@ async def create_kb(
     failures so callers can branch on 4xx uniformly. The substrate's
     body-hash short-circuit means re-creating an entry with an
     unchanged body pays only an ``updated_at`` bump.
+
+    Status code (#1845 ask 1): the service reports whether the slug
+    was genuinely new. This handler returns **201 Created** only for a
+    fresh slug and **200 OK** when an existing row was overwritten in
+    place -- ``201`` for an in-place mutation is REST-incorrect, and
+    the response body already differentiates the two cases (preserved
+    ``id`` + ``created_at`` on overwrite). The decorator declares
+    ``201`` as the default so OpenAPI advertises the create path;
+    ``response.status_code`` is reset to ``200`` on the overwrite path
+    (FastAPI lets an injected :class:`Response` override the declared
+    code while still applying ``response_model``).
+
+    Cross-principal overwrite is wiki-like and intentional (any
+    ``tenant_admin`` may replace any other's row in-tenant); this
+    handler adds no ownership gate. It does pass ``operator.sub`` as
+    ``actor_sub`` so the service stamps ``created_by_sub`` /
+    ``last_updated_by_sub`` into the entry's ``metadata`` -- the entry
+    is then self-describing about authorship on every read surface.
 
     Binds ``audit_op_id="kb.create"`` + ``audit_op_class="write"``
     before the substrate call. ``audit_slug`` is bound so the audit
@@ -388,17 +453,22 @@ async def create_kb(
     )
     service = KbService()
     try:
-        return await service.create_entry(
+        entry, created = await service.create_entry(
             tenant_id=operator.tenant_id,
             slug=body.slug,
             body=body.body,
             metadata=body.metadata,
+            actor_sub=operator.sub,
         )
     except InvalidKbSlugError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+    if not created:
+        response.status_code = http_status.HTTP_200_OK
+    structlog.contextvars.bind_contextvars(audit_created=created)
+    return entry
 
 
 @router.delete(

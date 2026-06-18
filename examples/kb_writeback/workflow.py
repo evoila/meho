@@ -242,12 +242,19 @@ async def persist_finding_to_kb(
     validate_slug(finding.slug)  # raises InvalidKbSlugError if malformed
     body = build_finding_body(finding)
     kb_service = service or KbService()
-    return await kb_service.create_entry(
+    # ``create_entry`` returns ``(entry, created)`` so the HTTP layer can
+    # map fresh-create vs in-place re-index to 201 vs 200; this sample
+    # only needs the persisted entry. ``actor_sub`` stamps the
+    # ``last_updated_by_sub`` / ``created_by_sub`` attribution from the
+    # investigating operator so the written finding is self-describing.
+    entry, _created = await kb_service.create_entry(
         tenant_id=operator.tenant_id,
         slug=finding.slug,
         body=body,
         metadata={PROVENANCE_METADATA_KEY: PROVENANCE_METADATA_VALUE},
+        actor_sub=operator.sub,
     )
+    return entry
 
 
 async def retrieve_as_context(

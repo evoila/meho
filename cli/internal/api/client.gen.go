@@ -1268,6 +1268,59 @@ type BodyUiAgentGrantsElevateSubmitUiAgentsGrantsElevatePost struct {
 	Verdict     *string           `json:"verdict,omitempty"`
 }
 
+// BodyUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost defines model for Body_ui_agent_principals_register_submit_ui_agents_principals_register_post.
+type BodyUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost struct {
+	Name     *string `json:"name,omitempty"`
+	OwnerSub *string `json:"owner_sub"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
+// BodyUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost defines model for Body_ui_agent_principals_revoke_submit_ui_agents_principals__name__revoke_post.
+type BodyUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost struct {
+	ConfirmName *string `json:"confirm_name,omitempty"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
 // BodyUiAgentsCreateSubmitUiAgentsCreatePost defines model for Body_ui_agents_create_submit_ui_agents_create_post.
 type BodyUiAgentsCreateSubmitUiAgentsCreatePost struct {
 	Enabled     *bool   `json:"enabled,omitempty"`
@@ -5907,6 +5960,10 @@ type AuthenticatedHealthApiV1HealthGetParams struct {
 
 // ListKbApiV1KbGetParams defines parameters for ListKbApiV1KbGet.
 type ListKbApiV1KbGetParams struct {
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Filter Deprecated alias for `q`; still honoured.
 	Filter        *string `form:"filter,omitempty" json:"filter,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
@@ -5935,12 +5992,17 @@ type ShowKbApiV1KbSlugGetParams struct {
 
 // ListMemoriesApiV1MemoryGetParams defines parameters for ListMemoriesApiV1MemoryGet.
 type ListMemoriesApiV1MemoryGetParams struct {
-	Scope          *MemoryScope `form:"scope,omitempty" json:"scope,omitempty"`
-	SlugPattern    *string      `form:"slug_pattern,omitempty" json:"slug_pattern,omitempty"`
-	Tag            *string      `form:"tag,omitempty" json:"tag,omitempty"`
-	IncludeExpired *bool        `form:"include_expired,omitempty" json:"include_expired,omitempty"`
-	Limit          *int         `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization  *string      `json:"authorization,omitempty"`
+	Scope *MemoryScope `form:"scope,omitempty" json:"scope,omitempty"`
+
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// SlugPattern Deprecated alias for `q`; still honoured.
+	SlugPattern    *string `form:"slug_pattern,omitempty" json:"slug_pattern,omitempty"`
+	Tag            *string `form:"tag,omitempty" json:"tag,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
 }
 
 // RememberApiV1MemoryPostParams defines parameters for RememberApiV1MemoryPost.
@@ -5991,8 +6053,13 @@ type PostPreviewApiV1OperationsPreviewPostParams struct {
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
-	ConnectorId   string  `form:"connector_id" json:"connector_id"`
-	Query         string  `form:"query" json:"query"`
+	ConnectorId string `form:"connector_id" json:"connector_id"`
+
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Query Deprecated alias for `q`; still honoured.
+	Query         *string `form:"query,omitempty" json:"query,omitempty"`
 	Group         *string `form:"group,omitempty" json:"group,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
@@ -6288,6 +6355,17 @@ type McpDispatchMcpPostParams struct {
 type UiAgentGrantsListUiAgentsGrantsGetParams struct {
 	PrincipalSub   *string `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
 	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+}
+
+// UiAgentPrincipalsListUiAgentsPrincipalsGetParams defines parameters for UiAgentPrincipalsListUiAgentsPrincipalsGet.
+type UiAgentPrincipalsListUiAgentsPrincipalsGetParams struct {
+	IncludeRevoked *bool `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+}
+
+// UiAgentsRunsListUiAgentsRunsGetParams defines parameters for UiAgentsRunsListUiAgentsRunsGet.
+type UiAgentsRunsListUiAgentsRunsGetParams struct {
+	Status  *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
+	WorkRef *string         `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 }
 
 // ApprovalsIndexUiApprovalsGetParams defines parameters for ApprovalsIndexUiApprovalsGet.
@@ -6587,6 +6665,21 @@ type UiAgentGrantsRevokeModalUiAgentsGrantsGrantIdRevokeGetJSONRequestBody = UIS
 
 // UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody defines body for UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePost for application/json ContentType.
 type UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody = UISessionContext
+
+// UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody defines body for UiAgentPrincipalsListUiAgentsPrincipalsGet for application/json ContentType.
+type UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody = UISessionContext
+
+// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody defines body for UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet for application/json ContentType.
+type UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody = UISessionContext
+
+// UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody defines body for UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost for application/x-www-form-urlencoded ContentType.
+type UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody = BodyUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost
+
+// UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody defines body for UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet for application/json ContentType.
+type UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody = UISessionContext
+
+// UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody defines body for UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost for application/x-www-form-urlencoded ContentType.
+type UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody = BodyUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost
 
 // UiAgentsDetailUiAgentsNameGetJSONRequestBody defines body for UiAgentsDetailUiAgentsNameGet for application/json ContentType.
 type UiAgentsDetailUiAgentsNameGetJSONRequestBody = UISessionContext
@@ -8044,6 +8137,37 @@ type ClientInterface interface {
 	UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostWithBody(ctx context.Context, grantId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePost(ctx context.Context, grantId string, body UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody request with any body
+	UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody request with any body
+	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet(ctx context.Context, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBody request with any body
+	UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithFormdataBody(ctx context.Context, body UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBody request with any body
+	UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet(ctx context.Context, name string, body UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBody request with any body
+	UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithFormdataBody(ctx context.Context, name string, body UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAgentsRunsListUiAgentsRunsGet request
+	UiAgentsRunsListUiAgentsRunsGet(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunDetailUiAgentsRunsHandleGet request
+	RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAgentsDetailUiAgentsNameGetWithBody request with any body
 	UiAgentsDetailUiAgentsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10507,6 +10631,150 @@ func (c *Client) UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostWithBod
 
 func (c *Client) UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePost(ctx context.Context, grantId string, body UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostRequest(c.Server, grantId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet(ctx context.Context, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithFormdataBody(ctx context.Context, body UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet(ctx context.Context, name string, body UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithFormdataBody(ctx context.Context, name string, body UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithFormdataBody(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAgentsRunsListUiAgentsRunsGet(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAgentsRunsListUiAgentsRunsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunDetailUiAgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunDetailUiAgentsRunsHandleGetRequest(c.Server, handle)
 	if err != nil {
 		return nil, err
 	}
@@ -15583,6 +15851,22 @@ func NewListKbApiV1KbGetRequest(server string, params *ListKbApiV1KbGetParams) (
 	if params != nil {
 		queryValues := queryURL.Query()
 
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.Filter != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "filter", runtime.ParamLocationQuery, *params.Filter); err != nil {
@@ -15890,6 +16174,22 @@ func NewListMemoriesApiV1MemoryGetRequest(server string, params *ListMemoriesApi
 		if params.Scope != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -16509,16 +16809,36 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 			}
 		}
 
-		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "query", runtime.ParamLocationQuery, params.Query); err != nil {
-			return nil, err
-		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-			return nil, err
-		} else {
-			for k, v := range parsed {
-				for _, v2 := range v {
-					queryValues.Add(k, v2)
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
 				}
 			}
+
+		}
+
+		if params.Query != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "query", runtime.ParamLocationQuery, *params.Query); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
 		}
 
 		if params.Group != nil {
@@ -20257,6 +20577,341 @@ func NewUiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostRequestWithBody(
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequest calls the generic UiAgentPrincipalsListUiAgentsPrincipalsGet builder with application/json body
+func NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequest(server string, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody generates requests for UiAgentPrincipalsListUiAgentsPrincipalsGet with any type of body
+func NewUiAgentPrincipalsListUiAgentsPrincipalsGetRequestWithBody(server string, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest calls the generic UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet builder with application/json body
+func NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequest(server string, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequestWithBody generates requests for UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet with any type of body
+func NewUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/register")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithFormdataBody calls the generic UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost builder with application/x-www-form-urlencoded body
+func NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithFormdataBody(server string, body UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithBody generates requests for UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPost with any type of body
+func NewUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/register")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequest calls the generic UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet builder with application/json body
+func NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequest(server string, name string, body UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequestWithBody generates requests for UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet with any type of body
+func NewUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithFormdataBody calls the generic UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost builder with application/x-www-form-urlencoded body
+func NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithFormdataBody(server string, name string, body UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithBody(server, name, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithBody generates requests for UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePost with any type of body
+func NewUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiAgentsRunsListUiAgentsRunsGetRequest generates requests for UiAgentsRunsListUiAgentsRunsGet
+func NewUiAgentsRunsListUiAgentsRunsGetRequest(server string, params *UiAgentsRunsListUiAgentsRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRunDetailUiAgentsRunsHandleGetRequest generates requests for RunDetailUiAgentsRunsHandleGet
+func NewRunDetailUiAgentsRunsHandleGetRequest(server string, handle openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/agents/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -24677,6 +25332,37 @@ type ClientWithResponsesInterface interface {
 
 	UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostWithResponse(ctx context.Context, grantId string, body UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse, error)
 
+	// UiAgentPrincipalsListUiAgentsPrincipalsGetWithBodyWithResponse request with any body
+	UiAgentPrincipalsListUiAgentsPrincipalsGetWithBodyWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error)
+
+	UiAgentPrincipalsListUiAgentsPrincipalsGetWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error)
+
+	// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with any body
+	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error)
+
+	UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithResponse(ctx context.Context, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error)
+
+	// UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBodyWithResponse request with any body
+	UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse, error)
+
+	UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithFormdataBodyWithResponse(ctx context.Context, body UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse, error)
+
+	// UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBodyWithResponse request with any body
+	UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse, error)
+
+	UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithResponse(ctx context.Context, name string, body UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse, error)
+
+	// UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBodyWithResponse request with any body
+	UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse, error)
+
+	UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithFormdataBodyWithResponse(ctx context.Context, name string, body UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse, error)
+
+	// UiAgentsRunsListUiAgentsRunsGetWithResponse request
+	UiAgentsRunsListUiAgentsRunsGetWithResponse(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*UiAgentsRunsListUiAgentsRunsGetResponse, error)
+
+	// RunDetailUiAgentsRunsHandleGetWithResponse request
+	RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error)
+
 	// UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with any body
 	UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error)
 
@@ -26386,6 +27072,7 @@ func (r ListKbApiV1KbGetResponse) StatusCode() int {
 type CreateKbApiV1KbPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON200      *KbEntry
 	JSON201      *KbEntry
 	JSON422      *HTTPValidationError
 }
@@ -27975,6 +28662,160 @@ func (r UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse) Status
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentPrincipalsListUiAgentsPrincipalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentPrincipalsListUiAgentsPrincipalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentPrincipalsListUiAgentsPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAgentsRunsListUiAgentsRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAgentsRunsListUiAgentsRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAgentsRunsListUiAgentsRunsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunDetailUiAgentsRunsHandleGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunDetailUiAgentsRunsHandleGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunDetailUiAgentsRunsHandleGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -31192,6 +32033,109 @@ func (c *ClientWithResponses) UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevo
 	return ParseUiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse(rsp)
 }
 
+// UiAgentPrincipalsListUiAgentsPrincipalsGetWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsListUiAgentsPrincipalsGetResponse
+func (c *ClientWithResponses) UiAgentPrincipalsListUiAgentsPrincipalsGetWithBodyWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsListUiAgentsPrincipalsGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentPrincipalsListUiAgentsPrincipalsGetWithResponse(ctx context.Context, params *UiAgentPrincipalsListUiAgentsPrincipalsGetParams, body UiAgentPrincipalsListUiAgentsPrincipalsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsListUiAgentsPrincipalsGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp)
+}
+
+// UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse
+func (c *ClientWithResponses) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithResponse(ctx context.Context, body UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse(rsp)
+}
+
+// UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse
+func (c *ClientWithResponses) UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithFormdataBodyWithResponse(ctx context.Context, body UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse(rsp)
+}
+
+// UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse
+func (c *ClientWithResponses) UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithResponse(ctx context.Context, name string, body UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGet(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse(rsp)
+}
+
+// UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBodyWithResponse request with arbitrary body returning *UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse
+func (c *ClientWithResponses) UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithFormdataBodyWithResponse(ctx context.Context, name string, body UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse, error) {
+	rsp, err := c.UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithFormdataBody(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse(rsp)
+}
+
+// UiAgentsRunsListUiAgentsRunsGetWithResponse request returning *UiAgentsRunsListUiAgentsRunsGetResponse
+func (c *ClientWithResponses) UiAgentsRunsListUiAgentsRunsGetWithResponse(ctx context.Context, params *UiAgentsRunsListUiAgentsRunsGetParams, reqEditors ...RequestEditorFn) (*UiAgentsRunsListUiAgentsRunsGetResponse, error) {
+	rsp, err := c.UiAgentsRunsListUiAgentsRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAgentsRunsListUiAgentsRunsGetResponse(rsp)
+}
+
+// RunDetailUiAgentsRunsHandleGetWithResponse request returning *RunDetailUiAgentsRunsHandleGetResponse
+func (c *ClientWithResponses) RunDetailUiAgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunDetailUiAgentsRunsHandleGetResponse, error) {
+	rsp, err := c.RunDetailUiAgentsRunsHandleGet(ctx, handle, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunDetailUiAgentsRunsHandleGetResponse(rsp)
+}
+
 // UiAgentsDetailUiAgentsNameGetWithBodyWithResponse request with arbitrary body returning *UiAgentsDetailUiAgentsNameGetResponse
 func (c *ClientWithResponses) UiAgentsDetailUiAgentsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsDetailUiAgentsNameGetResponse, error) {
 	rsp, err := c.UiAgentsDetailUiAgentsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
@@ -34149,6 +35093,13 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
 		var dest KbEntry
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -36285,6 +37236,188 @@ func ParseUiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse(rsp *
 	}
 
 	response := &UiAgentGrantsRevokeSubmitUiAgentsGrantsGrantIdRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse parses an HTTP response from a UiAgentPrincipalsListUiAgentsPrincipalsGetWithResponse call
+func ParseUiAgentPrincipalsListUiAgentsPrincipalsGetResponse(rsp *http.Response) (*UiAgentPrincipalsListUiAgentsPrincipalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentPrincipalsListUiAgentsPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse parses an HTTP response from a UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetWithResponse call
+func ParseUiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse(rsp *http.Response) (*UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentPrincipalsRegisterModalUiAgentsPrincipalsRegisterGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse parses an HTTP response from a UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostWithResponse call
+func ParseUiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse(rsp *http.Response) (*UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentPrincipalsRegisterSubmitUiAgentsPrincipalsRegisterPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse parses an HTTP response from a UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetWithResponse call
+func ParseUiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse(rsp *http.Response) (*UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentPrincipalsRevokeModalUiAgentsPrincipalsNameRevokeGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse parses an HTTP response from a UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostWithResponse call
+func ParseUiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse(rsp *http.Response) (*UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentPrincipalsRevokeSubmitUiAgentsPrincipalsNameRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAgentsRunsListUiAgentsRunsGetResponse parses an HTTP response from a UiAgentsRunsListUiAgentsRunsGetWithResponse call
+func ParseUiAgentsRunsListUiAgentsRunsGetResponse(rsp *http.Response) (*UiAgentsRunsListUiAgentsRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAgentsRunsListUiAgentsRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunDetailUiAgentsRunsHandleGetResponse parses an HTTP response from a RunDetailUiAgentsRunsHandleGetWithResponse call
+func ParseRunDetailUiAgentsRunsHandleGetResponse(rsp *http.Response) (*RunDetailUiAgentsRunsHandleGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunDetailUiAgentsRunsHandleGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

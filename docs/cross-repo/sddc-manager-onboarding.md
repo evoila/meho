@@ -102,35 +102,64 @@ What this means for the credentials in Vault:
   (the in-process credential cache clears on `aclose`). There is no per-target
   credential refresh hook in v0.2.
 
-To register a new target via the CLI:
+To register a new target, write a descriptor and import it. `meho targets
+import` takes a `targets.yaml` **file** (there is no `meho targets create`
+verb in v0.2 — `import` is the CLI's only write path):
 
-```bash
-meho targets import \
-  --name rdc-sddc-manager \
-  --product sddc \
-  --host sddc-manager.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/sddc-manager/rdc \
-  --auth-model shared_service_account
+```yaml
+# rdc-sddc-manager.yaml
+targets:
+  - name: rdc-sddc-manager
+    product: sddc
+    host: sddc-manager.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/sddc-manager/rdc
+    auth_model: shared_service_account
 ```
 
-If your VCF deployment uses a custom SSO realm:
-
 ```bash
-meho targets import \
-  --name rdc-sddc-manager \
-  --product sddc \
-  --host sddc-manager.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/sddc-manager/rdc \
-  --auth-model shared_service_account \
-  --extras '{"sso_realm": "vsphere.custom.domain"}'
+meho targets import rdc-sddc-manager.yaml   # add --update to PATCH an existing target
+```
+
+If your VCF deployment uses a custom SSO realm, add `sso_realm` to the same
+entry — it is not a typed column, so it spills into the target's `extras`
+(the connector reads it from there and formats the Basic auth header as
+`username@sso_realm`):
+
+```yaml
+# rdc-sddc-manager.yaml
+targets:
+  - name: rdc-sddc-manager
+    product: sddc
+    host: sddc-manager.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/sddc-manager/rdc
+    auth_model: shared_service_account
+    sso_realm: vsphere.custom.domain
+```
+
+**Self-signed / internal-CA appliance.** A nested-lab or freshly-deployed
+SDDC Manager commonly presents a self-signed cert, which otherwise fails the
+probe and dispatch with `connector_tls_verify_failed`. Add a per-target
+TLS-trust field to the same entry — prefer pinning the appliance CA
+(verification stays on); use `verify_tls: false` only as an audited last
+resort (the two are mutually exclusive — see the
+[per-target TLS-trust guide](../../deploy/values-examples/README.md)):
+
+```yaml
+    # secure — trust this CA; chain + hostname verification stay ON:
+    tls_ca_pin: |
+      -----BEGIN CERTIFICATE-----
+      ...appliance CA PEM...
+      -----END CERTIFICATE-----
+    # last resort instead of tls_ca_pin (verification OFF for this target; MITM risk):
+    # verify_tls: false
 ```
 
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-sddc-manager --json | jq '{product, version, reachable}'
+meho targets probe rdc-sddc-manager --json | jq '{product, version, reachable}'
 # expected: {"product": "sddc", "version": "9.0", "reachable": true}
 ```
 

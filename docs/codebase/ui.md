@@ -2176,6 +2176,104 @@ a 500.
 * `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
 * `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
 
+## Agents surface (G10.8-T1 #1825)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824) (G10.8
+Agents console). The console surface over the G11.1 agent-definition
+layer (`api/v1/agents.py`, `agents/service.py`, `agents/schemas.py`).
+Task #1825 stands up `/ui/agents` as a **top-level sidebar surface** and
+the anchor scaffold subsequent agent-console Tasks hang off (run console
+T2 #1829, run history T3 #1830, principals T4 #1831, grants T5 #1832).
+
+`meho_backplane.ui.routes.agents` ships:
+
+- `GET /ui/agents` — the per-tenant agent-definitions list. One handler
+  serves both shapes (branch on `HX-Request`): the full `agents/index.html`
+  page on a browser nav, the `agents/_cards.html` fragment on a re-render
+  swap. One DaisyUI card per definition: name → detail link, `model_tier`
+  badge, `enabled` pill, `identity_ref`, `turn_budget`, tool count,
+  created-by, updated-at, and a **first-line-only** system-prompt summary.
+  The sensitive `system_prompt` / `toolset` are never dumped here — only
+  summarised — mirroring the audit trail keeping them out (`api/v1/agents.py`).
+- `GET /ui/agents/{name}` — the per-agent detail page (or HTMX body
+  fragment). Renders the full `AgentDefinitionRead`: metadata header, the
+  read-only `system_prompt` in a monospace block, and `toolset` /
+  `output_schema` as collapsible pretty-printed JSON. A non-existent /
+  cross-tenant name → 404 (the service returns `None` for both — the
+  existence-leak collapse the REST surface holds). Entry points to Run
+  (T2) and a recent-runs strip (T3) land here once those Tasks ship.
+- `POST/GET /ui/agents/create`, `GET/PATCH /ui/agents/{name}` (edit),
+  `POST /ui/agents/{name}/toggle` (enable/disable), `GET/POST
+  /ui/agents/{name}/delete` — the write surface, **tenant_admin only**.
+
+### RBAC posture
+
+The role split mirrors the connectors surface (`connectors/operator.py`):
+
+- **Read** (`resolve_role_probe`) — fails *soft*: a JWT-validation hiccup
+  projects to a "no privileges" probe rather than 5xx-ing the page. The
+  probe's `is_tenant_admin` flag is the *UX hint* that hides the create /
+  edit / toggle / delete affordances from operators who can't use them.
+- **Write** (`resolve_operator_or_403`) — the *hard* gate: lifts the full
+  `Operator` from the BFF session, re-validates the access token through
+  the chassis JWT chain, and raises 403 for any non-`tenant_admin` caller.
+  A crafted POST/PATCH that bypasses the hidden affordance still hits the
+  403; the template hiding is never the security boundary.
+
+The write handlers delegate to `AgentDefinitionService` **in-process**
+(the same pattern the memory surface uses for `MemoryService`) rather than
+to the REST routes, because the service is RBAC-free by design (the caller
+gates the role) — so the UI write and the REST write share one validation
++ identity-ref-check + persist code path, and the 403 gate lives on the
+UI route deps.
+
+### Create / edit error surfacing
+
+Both modals are HTMX-injected native `<dialog class="modal">` fragments
+opened by the shared app-shell controller (`app/modal-dialogs.js`) on
+`htmx:afterSwap` (#1803). The submit handler builds an
+`AgentDefinitionCreate` / `AgentDefinitionUpdate` and persists via the
+service; failures re-render the **same modal inline** (not a generic
+error page) with per-field messages and the operator's typed values
+echoed back:
+
+- Pydantic `ValidationError` (e.g. `turn_budget` outside 1..1000) → 422
+  with the field error under the offending input.
+- `AgentDefinitionExistsError` (duplicate `(tenant, name)`) → 409 with a
+  `name` field error.
+- `AgentIdentityRefInvalidError` (unknown / revoked / cross-tenant
+  `identity_ref`) → 422 with an `identity_ref` field error.
+
+The `identity_ref` field is **free-text** for this scaffold; the picker
+over registered non-revoked principals (from `api/v1/agent_principals.py`)
+is T4 (#1832). Until it lands, the free-text field with inline 422
+surfacing is the accepted shape per the #1825 issue body.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` — thin FastAPI
+  route wrappers (path / method / dependency wiring); the static-prefix
+  `/ui/agents/create` route registers before `/ui/agents/{name}`.
+* `backend/src/meho_backplane/ui/routes/agents/views.py` — read renders
+  (list + detail) + the row projections (system-prompt summary, tool
+  count, pretty-printed JSON).
+* `backend/src/meho_backplane/ui/routes/agents/forms.py` — write renders
+  (create / edit / delete modal) + submit handlers (create / edit /
+  toggle / delete), with the 409 / 422 inline error mapping.
+* `backend/src/meho_backplane/ui/routes/agents/operator.py` — the role
+  lift: `resolve_role_probe` (soft, read) + `resolve_operator_or_403`
+  (hard tenant_admin gate, write).
+* `backend/src/meho_backplane/ui/templates/agents/index.html`,
+  `_cards.html`, `detail.html`, `_detail_body.html`,
+  `_agent_form_fields.html`, `_create_modal.html`, `_edit_modal.html`,
+  `_delete_modal.html` — the surface templates.
+* Nav + dashboard wiring: the `('agents', '/ui/agents', 'bot', 'Agents')`
+  entry in `base.html`'s `nav_surfaces`, the `bot` icon in `_icons.html`,
+  and the Agents tile in `dashboard.py`'s `_SURFACE_TILES`.
+
+This is a UI-only surface — it touches no `api/v1` schema, so the OpenAPI
+snapshot is unchanged.
+
 ## Runbooks surface (G10.6)
 
 Initiative [#1381](https://github.com/evoila/meho/issues/1381) (G10.6

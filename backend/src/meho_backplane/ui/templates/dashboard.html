@@ -77,11 +77,12 @@
      signal-washed card face. -#}
   {#- One span per surface tile (``loop.index0`` indexes this list), tuned
      so each lg row sums to 12 across the 12-col bento grid: row 1 = 5+4+3,
-     row 2 = 3+4+5, row 3 = 6+6 (the 7th + 8th tiles -- Runbooks +
+     row 2 = 3+4+5, row 3 = 4+4+4 (the 7th-9th tiles -- Agents + Runbooks +
      Approvals). The deploy cell drops to its own full-width row below.
-     #1777 grew this to 7 entries; #1778 adds the 8th (Approvals). Keep the
-     entry count in lock-step with ``_SURFACE_TILES`` in ``dashboard.py``
-     -- a tile without a span trips ``StrictUndefined``. -#}
+     #1777 grew this to 7 entries; #1778 added the 8th (Approvals); #1825
+     adds the 9th (Agents). Keep the entry count in lock-step with
+     ``_SURFACE_TILES`` in ``dashboard.py`` -- a tile without a span trips
+     ``StrictUndefined``. -#}
   {% set tile_spans = [
     "md:col-span-6 lg:col-span-5",
     "md:col-span-6 lg:col-span-4",
@@ -89,8 +90,9 @@
     "md:col-span-6 lg:col-span-3",
     "md:col-span-6 lg:col-span-4",
     "md:col-span-6 lg:col-span-5",
-    "md:col-span-6 lg:col-span-6",
-    "md:col-span-6 lg:col-span-6",
+    "md:col-span-6 lg:col-span-4",
+    "md:col-span-6 lg:col-span-4",
+    "md:col-span-6 lg:col-span-4",
   ] %}
   <div
     class="meho-stagger grid grid-cols-1 gap-4 md:grid-cols-12"

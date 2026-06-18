@@ -1,0 +1,74 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Agent detail view (Initiative #1824 Task
+  #1825). Extends ``base.html``. Renders a breadcrumb, the full
+  ``AgentDefinitionRead`` body (``agents/_detail_body.html``), the
+  HTMX modal mount, and the disable-confirm dialog.
+
+  Entry points to "Run" (T2 #1829) and a recent-runs strip (T3 #1830)
+  land on this page once those Tasks ship; the scaffold leaves the
+  layout room for them.
+
+  HTMX wiring: the page-level ``hx-headers`` directive echoes the CSRF
+  token for the edit / toggle / delete state-changing requests.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agent: {{ agent.name }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/agents" class="link link-hover">Agents</a>
+    <span aria-hidden="true">/</span>
+    <span class="font-mono">{{ agent.name }}</span>
+  </nav>
+
+  {# Body slot -- full agent projection. #}
+  {% include "agents/_detail_body.html" %}
+
+  {# Mount point for HTMX-loaded modals (edit, delete). #}
+  <div id="agents-modal-container"></div>
+
+  {# Disable-confirm modal -- native ``<dialog>``. Confirming POSTs the
+     toggle with ``enabled=false`` and HX-Redirects back to the detail
+     page with the flipped pill. Only rendered for tenant_admins. #}
+  {% if agent.can_write and agent.enabled %}
+    <dialog id="agent-disable-modal" class="modal">
+      <div class="modal-box">
+        <h3 class="font-semibold text-lg">Disable agent
+          <span class="font-mono">{{ agent.name }}</span>?</h3>
+        <p class="text-sm py-2 opacity-80">
+          A disabled agent stays defined but cannot be run. Re-enable it
+          any time from this page.
+        </p>
+        <div class="modal-action">
+          <form method="dialog">
+            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+          </form>
+          <button
+            type="button"
+            class="btn btn-sm btn-warning"
+            hx-post="/ui/agents/{{ agent.name | urlencode }}/toggle"
+            hx-vals='{"enabled": "false"}'
+            hx-target="body"
+            hx-swap="none"
+            data-action="confirm-disable"
+            onclick="document.getElementById('agent-disable-modal').close()"
+          >
+            Disable
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button>close</button>
+      </form>
+    </dialog>
+  {% endif %}
+</section>
+{% endblock %}

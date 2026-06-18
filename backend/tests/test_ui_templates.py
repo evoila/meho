@@ -44,6 +44,8 @@ _EXPECTED_SURFACE_HREFS = (
     "/ui/topology",
     "/ui/connectors",
     "/ui/memory",
+    # Agents console (G10.8-T1 #1825) -- a top-level sidebar surface.
+    "/ui/agents",
 )
 
 
@@ -301,6 +303,9 @@ _INJECTED_DIALOG_TEMPLATES = (
     "connectors/_create_modal.html",
     "connectors/_edit_modal.html",
     "connectors/_delete_modal.html",
+    "agents/_create_modal.html",
+    "agents/_edit_modal.html",
+    "agents/_delete_modal.html",
 )
 
 #: Re-find every opening ``<dialog ...>`` tag in a template source. Matches the

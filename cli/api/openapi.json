@@ -9516,6 +9516,447 @@
         }
       }
     },
+    "/ui/agents/create": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Create Modal",
+        "description": "``GET /ui/agents/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_agents_create_modal_ui_agents_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Create Submit",
+        "description": "``POST /ui/agents/create`` -- create one agent definition.\n\nAn unchecked ``enabled`` checkbox is omitted from the form body\nentirely (HTML checkbox semantics), so ``Form(default=False)`` lands\nthe correct ``False``; a checked box posts the value and coerces to\n``True``.",
+        "operationId": "ui_agents_create_submit_ui_agents_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agents_create_submit_ui_agents_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents List",
+        "description": "``GET /ui/agents`` -- list page or HTMX card-list fragment.",
+        "operationId": "ui_agents_list_ui_agents_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/{name}": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Detail",
+        "description": "``GET /ui/agents/{name}`` -- detail page or HTMX body fragment.",
+        "operationId": "ui_agents_detail_ui_agents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Edit Submit",
+        "description": "``PATCH /ui/agents/{name}`` -- update one agent definition.",
+        "operationId": "ui_agents_edit_submit_ui_agents__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agents_edit_submit_ui_agents__name__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/{name}/edit": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Edit Modal",
+        "description": "``GET /ui/agents/{name}/edit`` -- pre-populated edit modal fragment.",
+        "operationId": "ui_agents_edit_modal_ui_agents__name__edit_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/{name}/delete": {
+      "get": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Delete Modal",
+        "description": "``GET /ui/agents/{name}/delete`` -- HTMX-loaded delete-confirm modal.",
+        "operationId": "ui_agents_delete_modal_ui_agents__name__delete_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Delete Submit",
+        "description": "``POST /ui/agents/{name}/delete`` -- delete one agent definition.",
+        "operationId": "ui_agents_delete_submit_ui_agents__name__delete_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/agents/{name}/toggle": {
+      "post": {
+        "tags": [
+          "ui-agents"
+        ],
+        "summary": "Ui Agents Toggle",
+        "description": "``POST /ui/agents/{name}/toggle`` -- enable / disable the agent.",
+        "operationId": "ui_agents_toggle_ui_agents__name__toggle_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_agents_toggle_ui_agents__name__toggle_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/kb": {
       "get": {
         "tags": [
@@ -12147,6 +12588,103 @@
         },
         "type": "object",
         "title": "Body_runbooks_publish_ui_runbooks__slug__publish_post"
+      },
+      "Body_ui_agents_create_submit_ui_agents_create_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Name",
+            "default": ""
+          },
+          "identity_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Ref",
+            "default": ""
+          },
+          "model_tier": {
+            "type": "string",
+            "title": "Model Tier",
+            "default": "standard"
+          },
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "System Prompt",
+            "default": ""
+          },
+          "turn_budget": {
+            "type": "string",
+            "maxLength": 8,
+            "nullable": true,
+            "title": "Turn Budget"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agents_create_submit_ui_agents_create_post"
+      },
+      "Body_ui_agents_edit_submit_ui_agents__name__patch": {
+        "properties": {
+          "identity_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Ref",
+            "default": ""
+          },
+          "model_tier": {
+            "type": "string",
+            "title": "Model Tier",
+            "default": "standard"
+          },
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "System Prompt",
+            "default": ""
+          },
+          "turn_budget": {
+            "type": "string",
+            "maxLength": 8,
+            "nullable": true,
+            "title": "Turn Budget"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agents_edit_submit_ui_agents__name__patch"
+      },
+      "Body_ui_agents_toggle_ui_agents__name__toggle_post": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_agents_toggle_ui_agents__name__toggle_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

@@ -1,0 +1,93 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agents card-list fragment (Initiative #1824 Task #1825). Rendered both
+  inside ``index.html`` (full page) and standalone on an HTMX swap. The
+  outer ``#agents-cards`` id is the swap target so a re-render replaces
+  the grid in place.
+
+  One card per agent definition. The sensitive ``system_prompt`` is
+  shown only as its first line and the ``toolset`` only as a tool count
+  -- never dumped here (mirrors the audit trail keeping them out, see
+  ``meho_backplane.api.v1.agents``). Clicking the card heading navigates
+  to the per-agent detail page.
+-#}
+{% from "_icons.html" import icon %}
+<div id="agents-cards">
+  {% if agents %}
+    <ul class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" role="list">
+      {% for agent in agents %}
+        <li>
+          <article
+            class="card bg-base-100 border-base-300 border shadow-sm h-full"
+            data-agent-name="{{ agent.name }}"
+          >
+            <div class="card-body p-4 space-y-2">
+              <div class="flex items-start justify-between gap-2">
+                <a
+                  href="/ui/agents/{{ agent.name | urlencode }}"
+                  class="link link-hover font-mono font-semibold break-all"
+                >
+                  {{ agent.name }}
+                </a>
+                <span
+                  class="badge badge-sm {% if agent.enabled %}badge-success{% else %}badge-ghost{% endif %}"
+                  data-enabled="{{ 'true' if agent.enabled else 'false' }}"
+                >
+                  {% if agent.enabled %}enabled{% else %}disabled{% endif %}
+                </span>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                <span class="badge badge-outline badge-sm" data-model-tier="{{ agent.model_tier }}">
+                  {{ agent.model_tier }}
+                </span>
+                <span class="opacity-70" title="Turn budget">
+                  {{ icon("activity", class="inline size-3 align-text-bottom") }}
+                  {{ agent.turn_budget }} turns
+                </span>
+                <span class="opacity-70" title="Tools in toolset">
+                  {{ agent.tool_count }} tool{{ "" if agent.tool_count == 1 else "s" }}
+                </span>
+              </div>
+
+              <dl class="text-xs opacity-70 space-y-0.5">
+                <div class="flex gap-1">
+                  <dt class="font-medium">identity:</dt>
+                  <dd class="font-mono break-all">{{ agent.identity_ref }}</dd>
+                </div>
+                <div class="flex gap-1">
+                  <dt class="font-medium">by:</dt>
+                  <dd class="break-all">{{ agent.created_by_sub }}</dd>
+                </div>
+              </dl>
+
+              {% if agent.system_prompt_summary %}
+                <p class="text-sm opacity-80 line-clamp-2">{{ agent.system_prompt_summary }}</p>
+              {% endif %}
+
+              <div
+                class="text-xs opacity-60"
+                data-updated-at="{{ agent.updated_at.isoformat() }}"
+              >
+                updated {{ agent.updated_at.isoformat() }}
+              </div>
+            </div>
+          </article>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body items-center py-10 text-center">
+        <p class="opacity-70">No agents defined yet for this tenant.</p>
+        {% if can_write %}
+          <p class="text-sm opacity-60">
+            Use the "New agent" button above to define one.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

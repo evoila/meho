@@ -1,0 +1,60 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded edit-agent modal for the Agents console (Initiative #1824
+  Task #1825). Loaded into ``#agents-modal-container`` by the detail
+  page's "Edit" button (``hx-get`` to ``/ui/agents/{name}/edit``). The
+  shared app-shell modal controller opens the inserted ``<dialog>`` via
+  ``showModal()`` on ``htmx:afterSwap`` (#1803).
+
+  Submit contract: the form ``hx-patch``es ``/ui/agents/{name}``,
+  swapping ``#agents-modal-container`` (``hx-swap="innerHTML"``).
+    * Success -> 204 + ``HX-Redirect: /ui/agents`` (reloads the list).
+    * Validation failure (422) or unknown / revoked identity_ref (422)
+      -> the handler returns this modal re-rendered with ``errors``
+      and the operator's typed values echoed back.
+
+  ``name`` renders read-only (it is the per-tenant natural key, not
+  updatable; rename = delete + recreate).
+
+  CSRF posture matches the create modal -- the form declares its own
+  ``hx-headers`` echo and the route re-sets the ``meho_csrf`` cookie.
+-#}
+<dialog id="agents-edit-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="agents-edit-modal-title">
+      Edit agent <span class="font-mono">{{ values.name }}</span>
+    </h3>
+
+    <form
+      id="agents-edit-form"
+      hx-patch="/ui/agents/{{ values.name | urlencode }}"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#agents-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="agents-edit-modal-title"
+    >
+      {% include "agents/_agent_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-edit"
+          onclick="document.getElementById('agents-edit-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="edit-submit">
+          Save
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

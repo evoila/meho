@@ -102,6 +102,13 @@ async def _approval_test_recording_handler(
     return {"executed": True, "params": params}
 
 
+async def _approval_test_severity_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Module-level handler for the ``safety_level`` legibility test (#1855)."""
+    return {"executed": True}
+
+
 async def _approval_test_target_reading_handler(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2093,6 +2100,130 @@ async def test_decide_approve_does_not_redispatch_agent_run_request(
     assert response.dispatch_status is None
     assert response.dispatch_op_id is None
     assert _RECORDED_EXECUTIONS == [], "agent-run op must NOT execute from /decide"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# proposed_effect carries catalog safety_level (#1855)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_proposed_effect_carries_catalog_safety_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked op's ``proposed_effect`` echoes its catalog ``safety_level`` (#1855).
+
+    Two approval-gated ops with no registered preview builder — one
+    ``dangerous``, one ``caution`` — are parked through the full dispatch
+    path. Their durable ``ApprovalRequest.proposed_effect`` envelopes must
+    differ on a ``safety_level`` field read straight off the catalog
+    :class:`EndpointDescriptor` (the same value surfaces over
+    ``GET /api/v1/approvals/{id}``, which serializes ``proposed_effect``
+    verbatim). This makes orders-of-magnitude-different blast radii
+    legible to the reviewer even for ops outside k8s/vmware/argocd, which
+    register no bespoke preview.
+    """
+    from unittest.mock import AsyncMock
+
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+    class _SeverityConnector(Connector):
+        product = "sevtest"
+        version = "1.x"
+        impl_id = "sevtest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="sevtest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="sevtest", version="", impl_id="", cls=_SeverityConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    for op_id, severity in (
+        ("sevtest.realm.create", "dangerous"),
+        ("sevtest.user.create", "caution"),
+    ):
+        await register_typed_operation(
+            product="sevtest",
+            version="1.x",
+            impl_id="sevtest",
+            op_id=op_id,
+            handler=_approval_test_severity_handler,
+            summary=f"{severity} write op requiring approval.",
+            description="Test.",
+            parameter_schema={"type": "object"},
+            safety_level=severity,  # type: ignore[arg-type]
+            requires_approval=True,
+            when_to_use=None,
+            embedding_service=stub_emb,
+        )
+
+    # A human (USER) principal hitting a ``requires_approval`` op is
+    # routed to the approval queue regardless of ``safety_level``
+    # (``_non_agent_verdict``), so both severities park rather than the
+    # ``dangerous`` op being default-denied on the agent permission path.
+    requester = _make_operator(sub="ops-human-sev", principal_kind=PrincipalKind.USER)
+
+    parked: dict[str, str] = {}
+    for op_id, expected in (
+        ("sevtest.realm.create", "dangerous"),
+        ("sevtest.user.create", "caution"),
+    ):
+        result = await dispatch(
+            operator=requester,
+            connector_id="sevtest-1.x",
+            op_id=op_id,
+            target=None,
+            params={},
+        )
+        assert result.status == "awaiting_approval", result.error
+        approval_request_id = uuid.UUID(result.extras["approval_request_id"])
+        async with get_sessionmaker()() as s:
+            row = await s.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            # Read straight off the descriptor, not recomputed.
+            assert row.proposed_effect["safety_level"] == expected
+            # The identifier base is preserved alongside the new field.
+            assert row.proposed_effect["op_id"] == op_id
+            parked[op_id] = row.proposed_effect["safety_level"]
+
+    # The two severities are distinguishable on the reviewer-facing row.
+    assert parked["sevtest.realm.create"] != parked["sevtest.user.create"]
 
     reset_dispatcher_caches()
     clear_registry()

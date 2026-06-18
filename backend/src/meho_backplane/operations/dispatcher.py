@@ -1264,17 +1264,29 @@ async def _build_proposed_effect(
       for credential-class ops and is merged under the
       ``"permission_preflight"`` key.
 
-    Returns the merged envelope, or ``None`` when neither hook produced
-    anything (the caller then stores the identifier-only default). When
-    only the preflight fired, its result is merged onto the identifier
-    default-shaped base so the reviewer still sees the denial banner.
-    A *failed* preview (the hook's ``preview_unavailable`` marker,
-    #1628) is likewise merged onto the identifier base — the reviewer
-    keeps the op identity and additionally sees that the blast radius
-    could not be resolved, instead of a bare identifier default
-    indistinguishable from a small action.
-    Never raises: connector-resolution faults degrade to "no preview" so
-    the park always proceeds.
+    Always returns a dict on the normal path: the merged envelope when a
+    hook produced one, otherwise the identifier-only base shaped exactly
+    like the :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+    default. Onto that base it stamps the catalog
+    ``descriptor.safety_level`` (#1855) so *every* parked op carries its
+    severity (``safe`` / ``caution`` / ``dangerous``) — a ``dangerous``
+    op and a ``caution`` op are distinguishable on the reviewer-facing
+    row even when neither registers a preview builder. The severity is
+    read straight off the descriptor, never recomputed.
+
+    When only the preflight fired, its result is merged onto the
+    identifier base so the reviewer still sees the denial banner. A
+    *failed* preview (the hook's ``preview_unavailable`` marker, #1628)
+    is likewise merged onto the identifier base — the reviewer keeps the
+    op identity and additionally sees that the blast radius could not be
+    resolved, instead of a bare identifier default indistinguishable
+    from a small action. The ``op_class`` / ``preview`` / fail-soft-marker
+    envelope built by :func:`build_proposed_effect` itself is unchanged;
+    ``safety_level`` is layered on here.
+
+    Returns ``None`` only when connector resolution / hook execution
+    raises: those faults degrade to "no preview" (the caller stores its
+    own identifier-only default) so the park always proceeds.
     """
     try:
         connector_instance, resolution_error, _ = await _resolve_connector_instance(
@@ -1300,20 +1312,29 @@ async def _build_proposed_effect(
             marked.update(preview)
             preview = marked
         preflight = await build_permission_preflight(ctx)
-        if preflight is None:
-            # No permission preflight ran -- preserve the prior contract
-            # (builder result, or ``None`` → identifier-only default).
-            return preview
         # The preflight fired; attach it to whatever base the preview
         # produced. When there is no preview (the common case: a
-        # suppressed credential-class write), use the same identifier-only
-        # shape ``create_pending_request`` would default to so the row
-        # still names the op alongside the denial banner.
+        # suppressed credential-class write, or an op with no registered
+        # builder), use the same identifier-only shape
+        # ``create_pending_request`` would default to so the row still
+        # names the op alongside the severity / denial banner.
         if preview is not None:
             base = dict(preview)
         else:
             base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
-        base["permission_preflight"] = preflight
+        if preflight is not None:
+            base["permission_preflight"] = preflight
+        # Promote the catalog severity onto every parked op's envelope
+        # (#1855). ``safety_level`` is op-identity metadata read straight
+        # off the descriptor -- not recomputed -- so a parked ``dangerous``
+        # op (e.g. ``keycloak.realm.create``) and a ``caution`` op (e.g.
+        # ``keycloak.user.create``) produce severity-distinguishable
+        # approval rows even when neither registers a preview builder.
+        # Stamped here (rather than in the per-op preview hook) so it
+        # rides the identifier-only default too, keeping the
+        # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
+        # :func:`build_proposed_effect` itself unchanged.
+        base["safety_level"] = descriptor.safety_level
         return base
     except Exception:
         import structlog as _structlog

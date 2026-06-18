@@ -41,8 +41,8 @@ extra literal trailing segment, so their ordering relative to the bare
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -63,6 +63,14 @@ from meho_backplane.ui.routes.agents.operator import (
     OperatorRoleProbe,
     resolve_operator_or_403,
     resolve_role_probe,
+    resolve_run_operator_or_403,
+)
+from meho_backplane.ui.routes.agents.run import (
+    INPUT_MAX,
+    WORK_REF_MAX,
+    render_run_console,
+    stream_run_events,
+    submit_run,
 )
 from meho_backplane.ui.routes.agents.views import render_detail, render_index, validate_name
 
@@ -74,6 +82,7 @@ __all__ = ["build_agents_router"]
 _require_session_dep = Depends(require_ui_session)
 _role_probe_dep = Depends(resolve_role_probe)
 _require_admin_dep = Depends(resolve_operator_or_403)
+_require_run_operator_dep = Depends(resolve_run_operator_or_403)
 
 
 async def _list_handler(
@@ -95,6 +104,56 @@ async def _detail_handler(
     validate_name(name)
     return await render_detail(
         request, session_ctx, name=name, is_tenant_admin=role_probe.is_tenant_admin
+    )
+
+
+async def _run_console_handler(
+    request: Request,
+    name: str,
+    session_ctx: UISessionContext = _require_session_dep,
+    role_probe: OperatorRoleProbe = _role_probe_dep,
+) -> HTMLResponse:
+    """``GET /ui/agents/{name}/run`` -- the run console page (operator read)."""
+    del role_probe  # the page is reachable by any authenticated session.
+    validate_name(name)
+    return await render_run_console(request, session_ctx, name=name)
+
+
+async def _run_submit_handler(
+    request: Request,
+    name: str,
+    input_: str = Form(default="", alias="input", max_length=INPUT_MAX),
+    work_ref: str | None = Form(default=None, max_length=WORK_REF_MAX),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_run_operator_dep,
+) -> HTMLResponse:
+    """``POST /ui/agents/{name}/run`` -- authorise a run (CSRF-gated, operator)."""
+    validate_name(name)
+    return await submit_run(
+        request,
+        session_ctx,
+        operator,
+        name=name,
+        input_=input_,
+        work_ref=work_ref,
+    )
+
+
+async def _run_stream_handler(
+    request: Request,
+    name: str,
+    token: str = Query(default="", max_length=4096),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_run_operator_dep,
+) -> StreamingResponse:
+    """``GET /ui/agents/{name}/run/stream`` -- cookie-authed SSE bridge."""
+    validate_name(name)
+    return await stream_run_events(
+        request,
+        session_ctx,
+        operator,
+        name=name,
+        token=token,
     )
 
 
@@ -271,6 +330,44 @@ def _register_read_routes(router: APIRouter) -> None:
     )
 
 
+def _register_run_routes(router: APIRouter) -> None:
+    """Wire the run-console routes (T2 #1829) onto *router*.
+
+    Three routes under the per-agent ``/run`` sub-path:
+
+    * ``GET  /ui/agents/{name}/run`` -- the console page (operator read).
+    * ``POST /ui/agents/{name}/run`` -- authorise a run (CSRF-gated).
+    * ``GET  /ui/agents/{name}/run/stream`` -- the cookie-authed SSE
+      bridge that proxies ``invoker.stream_events``.
+
+    The ``/run`` literal segment sits one level below ``{name}`` and the
+    ``/run/stream`` segment one below that, so neither collides with the
+    bare ``/ui/agents/{name}`` detail route or the ``/edit`` / ``/delete``
+    modal routes; ``{name}`` cannot consume the literal ``run`` token.
+    """
+    router.add_api_route(
+        "/ui/agents/{name}/run",
+        _run_console_handler,
+        methods=["GET"],
+        name="ui_agents_run_console",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/{name}/run",
+        _run_submit_handler,
+        methods=["POST"],
+        name="ui_agents_run_submit",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/agents/{name}/run/stream",
+        _run_stream_handler,
+        methods=["GET"],
+        name="ui_agents_run_stream",
+        response_class=StreamingResponse,
+    )
+
+
 def _register_write_routes(router: APIRouter) -> None:
     """Wire the PATCH + POST (edit / toggle / delete) routes onto *router*.
 
@@ -312,5 +409,6 @@ def build_agents_router() -> APIRouter:
     router = APIRouter(tags=["ui-agents"])
     _register_static_prefix_routes(router)
     _register_read_routes(router)
+    _register_run_routes(router)
     _register_write_routes(router)
     return router

@@ -57,6 +57,7 @@ __all__ = [
     "OperatorRoleProbe",
     "resolve_operator_or_403",
     "resolve_role_probe",
+    "resolve_run_operator_or_403",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -188,5 +189,32 @@ async def resolve_operator_or_403(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="agent_write_requires_tenant_admin",
+        )
+    return operator
+
+
+async def resolve_run_operator_or_403(
+    request: Request,
+    session_ctx: UISessionContext | None = None,
+) -> Operator:
+    """FastAPI dependency: lift the operator + gate to operator-or-above.
+
+    Used by the run console's run-initiation ``POST`` and SSE bridge
+    (T2 #1829). Running an agent is an **operator**-level action -- the
+    same floor the REST surface applies
+    (``POST /api/v1/agents/{name}/run`` requires
+    :class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`); it is
+    *not* a tenant_admin-only write like definition CRUD. A ``read_only``
+    operator is rejected with 403. The lifted :class:`Operator` is the
+    tenant-isolation lever: the invoker call the run / stream handlers
+    make is tenant-scoped through it, never through a request parameter.
+    """
+    if session_ctx is None:
+        session_ctx = await require_ui_session(request)
+    operator = await _lift_operator(session_ctx)
+    if operator.tenant_role not in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="agent_run_requires_operator",
         )
     return operator

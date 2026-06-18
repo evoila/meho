@@ -1,0 +1,112 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent run-console body fragment (Initiative #1824 Task #1829). The run
+  form + the transcript mount. Shared by ``run_console.html`` (full page)
+  and returned standalone on an HTMX body swap.
+
+  The run form ``hx-post``s to ``POST /ui/agents/{name}/run`` (CSRF-gated)
+  and swaps the response into ``#agent-run-transcript`` -- either the
+  transcript fragment (which opens the live SSE stream) on success, or an
+  inline error alert on a 404 / 409 / 429 / 422.
+
+  Running an agent executes real tool-calls against live targets and
+  incurs provider cost -- the form surfaces the agent's turn budget so the
+  operator sees the cost ceiling before pressing Run.
+-#}
+{% from "_icons.html" import icon %}
+<div id="agent-run-console" class="space-y-4">
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/agents" class="link link-hover">Agents</a>
+    <span aria-hidden="true">/</span>
+    <a href="/ui/agents/{{ agent_name | urlencode }}" class="link link-hover font-mono">{{ agent_name }}</a>
+    <span aria-hidden="true">/</span>
+    <span>Run</span>
+  </nav>
+
+  <header class="space-y-1">
+    <h1 class="flex items-center gap-2 text-2xl font-semibold">
+      {{ icon("bot", class="size-6 opacity-80") }}
+      Run <span class="font-mono">{{ agent_name }}</span>
+    </h1>
+    <p class="text-sm opacity-70">
+      Invoke the agent and watch it reason live. Each turn, tool call,
+      tool result, and the final output stream into the transcript below.
+    </p>
+  </header>
+
+  {# ---------- Run form ----------
+     Posts the prompt + optional work_ref. The Run button is disabled for
+     a disabled definition (a run would 409); the operator re-enables the
+     agent from its detail page first. -#}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-post="/ui/agents/{{ agent_name | urlencode }}/run"
+    hx-target="#agent-run-transcript"
+    hx-swap="innerHTML"
+    data-form="agent-run"
+  >
+    <div class="card-body p-4 space-y-3">
+      {% if not enabled %}
+        <div role="alert" class="alert alert-warning text-sm" data-state="disabled">
+          {{ icon("ban", class="size-4") }}
+          <span>This agent is disabled and cannot be run. Enable it from the
+            <a class="link" href="/ui/agents/{{ agent_name | urlencode }}">agent detail page</a> first.</span>
+        </div>
+      {% endif %}
+
+      <label class="form-control">
+        <span class="label-text font-medium">Prompt</span>
+        <textarea
+          name="input"
+          class="textarea textarea-bordered min-h-28 font-mono text-sm"
+          placeholder="What should this agent do?"
+          required
+          {% if not enabled %}disabled{% endif %}
+          aria-label="Agent prompt"
+        ></textarea>
+      </label>
+
+      <label class="form-control max-w-md">
+        <span class="label-text font-medium">Work ref <span class="opacity-60">(optional)</span></span>
+        <input
+          type="text"
+          name="work_ref"
+          class="input input-bordered input-sm font-mono"
+          placeholder="gh:evoila/meho#123"
+          {% if not enabled %}disabled{% endif %}
+          aria-label="External change-ticket reference"
+        />
+        <span class="label-text-alt opacity-60">
+          Stamps the run with an external change-ticket reference for later filtering.
+        </span>
+      </label>
+
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span class="text-xs opacity-70" aria-live="polite">
+          Turn budget: <span class="badge badge-outline badge-sm font-mono">{{ turn_budget }}</span>
+          &mdash; the maximum model turns this run may take.
+        </span>
+        <button
+          type="submit"
+          class="btn btn-sm btn-primary"
+          data-action="run"
+          {% if not enabled %}disabled{% endif %}
+        >
+          {{ icon("zap", class="size-4") }}
+          Run
+        </button>
+      </div>
+    </div>
+  </form>
+
+  {# ---------- Transcript mount ----------
+     The run POST swaps the transcript fragment (live SSE) or an inline
+     error alert in here. Empty until the operator presses Run. -#}
+  <div id="agent-run-transcript" aria-live="polite">
+    <p class="px-1 py-6 text-center text-sm opacity-60" data-state="idle">
+      Enter a prompt and press Run to start a live agent run.
+    </p>
+  </div>
+</div>

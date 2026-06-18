@@ -192,7 +192,7 @@ def _seed_kb_entry(
             return_value=fake_service,
         ):
             service = KbService()
-            created_entry = await service.create_entry(
+            created_entry, _ = await service.create_entry(
                 tenant_id,
                 slug,
                 body,

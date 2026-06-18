@@ -3603,7 +3603,7 @@
           "knowledge"
         ],
         "summary": "Create Kb",
-        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
+        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nStatus code (#1845 ask 1): the service reports whether the slug\nwas genuinely new. This handler returns **201 Created** only for a\nfresh slug and **200 OK** when an existing row was overwritten in\nplace -- ``201`` for an in-place mutation is REST-incorrect, and\nthe response body already differentiates the two cases (preserved\n``id`` + ``created_at`` on overwrite). The decorator declares\n``201`` as the default so OpenAPI advertises the create path;\n``response.status_code`` is reset to ``200`` on the overwrite path\n(FastAPI lets an injected :class:`Response` override the declared\ncode while still applying ``response_model``).\n\nCross-principal overwrite is wiki-like and intentional (any\n``tenant_admin`` may replace any other's row in-tenant); this\nhandler adds no ownership gate. It does pass ``operator.sub`` as\n``actor_sub`` so the service stamps ``created_by_sub`` /\n``last_updated_by_sub`` into the entry's ``metadata`` -- the entry\nis then self-describing about authorship on every read surface.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
         "operationId": "create_kb_api_v1_kb_post",
         "parameters": [
           {
@@ -3630,6 +3630,16 @@
         "responses": {
           "201": {
             "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbEntry"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An existing entry with this slug was overwritten in place (id + created_at preserved, updated_at bumped). 201 is returned only for a genuinely-new slug.",
             "content": {
               "application/json": {
                 "schema": {

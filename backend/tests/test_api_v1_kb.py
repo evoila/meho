@@ -527,10 +527,12 @@ def test_show_cross_tenant_returns_404(client: TestClient) -> None:
 
 
 def test_create_returns_201_and_entry(client: TestClient) -> None:
-    """Tenant_admin POST → 201 + the created entry."""
+    """Tenant_admin POST of a fresh slug → 201 + the created entry."""
     tenant_a = uuid.uuid4()
     key, token = _admin_token(tenant_id=tenant_a)
-    fake_create = AsyncMock(return_value=_make_entry("k8s-ingress", "new body"))
+    # ``create_entry`` returns ``(entry, created)``; a fresh slug is
+    # ``created=True`` → the route returns 201.
+    fake_create = AsyncMock(return_value=(_make_entry("k8s-ingress", "new body"), True))
     with (
         respx.mock as mock_router,
         patch("meho_backplane.api.v1.kb.KbService.create_entry", fake_create),
@@ -556,6 +558,38 @@ def test_create_returns_201_and_entry(client: TestClient) -> None:
     assert call_kwargs["slug"] == "k8s-ingress"
     assert call_kwargs["body"] == "new body"
     assert call_kwargs["metadata"] == {"author": "ops"}
+    # The operator's OIDC sub is forwarded so the service can stamp
+    # attribution (#1845).
+    assert call_kwargs["actor_sub"] == "op-admin"
+
+
+def test_create_overwrite_returns_200(client: TestClient) -> None:
+    """POST of an existing slug (overwrite) → 200, not 201 (#1845 ask 1).
+
+    ``201 Created`` is REST-incorrect for an in-place mutation of an
+    existing row; the service reports ``created=False`` for an
+    overwrite and the route maps that to ``200 OK``. The response body
+    is still the (overwritten) entry.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    # ``created=False`` → overwrite of an existing slug.
+    fake_create = AsyncMock(return_value=(_make_entry("k8s-ingress", "B body"), False))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.create_entry", fake_create),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb",
+            json={"slug": "k8s-ingress", "body": "B body"},
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slug"] == "k8s-ingress"
+    assert body["body"] == "B body"
 
 
 def test_create_invalid_slug_returns_422(client: TestClient) -> None:
@@ -873,7 +907,7 @@ async def test_create_writes_audit_row_with_kb_create_op_id_and_slug(
     """POST /api/v1/kb → audit row ``op_id="kb.create"`` + ``slug``; body NOT in payload."""
     tenant_a = uuid.uuid4()
     key, token = _admin_token(tenant_id=tenant_a)
-    fake_create = AsyncMock(return_value=_make_entry("k8s-ingress", "FULL BODY"))
+    fake_create = AsyncMock(return_value=(_make_entry("k8s-ingress", "FULL BODY"), True))
     with (
         respx.mock as mock_router,
         patch("meho_backplane.api.v1.kb.KbService.create_entry", fake_create),
@@ -895,6 +929,10 @@ async def test_create_writes_audit_row_with_kb_create_op_id_and_slug(
     assert payload["op_id"] == "kb.create"
     assert payload["op_class"] == "write"
     assert payload["slug"] == "k8s-ingress"
+    # The created-vs-overwrite signal is bound into the audit payload
+    # (#1845) so a forensic read can tell a fresh create from an
+    # in-place overwrite without diffing timestamps.
+    assert payload["created"] is True
     # Body MUST NOT appear anywhere in the audit payload.
     serialised = json.dumps(payload)
     assert "FULL BODY" not in serialised

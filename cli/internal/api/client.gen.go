@@ -25645,6 +25645,7 @@ func (r ListKbApiV1KbGetResponse) StatusCode() int {
 type CreateKbApiV1KbPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON200      *KbEntry
 	JSON201      *KbEntry
 	JSON422      *HTTPValidationError
 }
@@ -33096,6 +33097,13 @@ func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostR
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
 		var dest KbEntry
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

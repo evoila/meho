@@ -184,7 +184,7 @@ def _seed_kb_entry(
             return_value=fake_service,
         ):
             service = KbService()
-            created_entry = await service.create_entry(
+            created_entry, _ = await service.create_entry(
                 tenant_id,
                 slug,
                 body,
@@ -366,7 +366,7 @@ def test_editor_save_creates_entry_and_redirects() -> None:
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
                 new_callable=AsyncMock,
-                return_value=fake_entry,
+                return_value=(fake_entry, True),
             ),
         ):
             response = client.post(
@@ -467,11 +467,13 @@ def test_editor_save_is_tenant_scoped() -> None:
 
     captured_tenant: list[uuid.UUID] = []
 
-    async def _capture_create(tenant_id: object, slug: str, body: str, **_: object) -> KbEntry:
+    async def _capture_create(
+        tenant_id: object, slug: str, body: str, **_: object
+    ) -> tuple[KbEntry, bool]:
         captured_tenant.append(tenant_id)  # type: ignore[arg-type]
         entry = MagicMock(spec=KbEntry)
         entry.slug = slug
-        return entry
+        return entry, True
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id_a)

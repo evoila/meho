@@ -22,7 +22,7 @@ read-only ops are stored as `EndpointDescriptor` rows seeded from
 [`VRLI_CORE_OPS`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="vcf-logs", version="9.0", impl_id="vrli-rest")` registry
+`(product="vrli", version="9.0", impl_id="vrli-rest")` registry
 triple — the connector id `vrli-rest-9.0`. Auth is **session-token
 Bearer** (not HTTP Basic on every request): the connector POSTs
 credentials once to `/api/v2/sessions`, caches the returned `sessionId`
@@ -69,7 +69,7 @@ a separate data path and is **not** mirrored on the MCP surface
   (the default) and `ActiveDirectory`; `vIDM` is documented by the
   appliance but not supported in this release.
 - **A registered vRLI target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-vrli`). The target carries `product="vcf-logs"`,
+  (e.g. `--target rdc-vrli`). The target carries `product="vrli"`,
   `host` (the vRLI FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials), and
   `auth_model="shared_service_account"`.
@@ -118,7 +118,7 @@ verb in v0.2 — `import` is the CLI's only write path):
 # rdc-vrli.yaml
 targets:
   - name: rdc-vrli
-    product: vcf-logs
+    product: vrli
     host: vrli.rdc.evoila.io
     port: 443
     secret_ref: kv/data/vrli/rdc-vrli
@@ -150,7 +150,7 @@ Verify the fingerprint resolved correctly:
 
 ```bash
 meho targets probe rdc-vrli --json | jq '{product, version, reachable}'
-# expected: {"product": "vcf-logs", "version": "9.0", "reachable": true}
+# expected: {"product": "vrli", "version": "9.0", "reachable": true}
 ```
 
 ## Quick-start
@@ -323,7 +323,7 @@ To retire `scripts/vcf-logs.sh` in favour of `meho vcf-logs ...`:
    # rdc-vrli.yaml
    targets:
      - name: rdc-vrli
-       product: vcf-logs
+       product: vrli
        host: vrli.rdc.evoila.io
        port: 443
        secret_ref: kv/data/vrli/rdc-vrli

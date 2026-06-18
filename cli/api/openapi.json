@@ -10958,14 +10958,58 @@
         }
       }
     },
-    "/ui/approvals": {
+    "/ui/approvals/list": {
       "get": {
         "tags": [
           "ui-approvals"
         ],
-        "summary": "Approvals Panel",
-        "description": "Render the pending-requests panel modal fragment (delegates below).",
-        "operationId": "approvals_panel_ui_approvals_get",
+        "summary": "Approvals History",
+        "description": "Render the decision-history list partial (delegates below).\n\n``partial=rows`` returns ONLY the bare ``<li>`` rows for the page\nplus an out-of-band pager re-render -- the \"Load more\" append\nresponse. Any other value returns the full ``_history.html`` console\nblock (the tab / filter / pager swap target). A query value outside\nthe known set is rejected as a 422 rather than silently coerced.",
+        "operationId": "approvals_history_ui_approvals_list_get",
+        "parameters": [
+          {
+            "name": "tab",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "pending",
+              "title": "Tab"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "default": "",
+              "title": "Work Ref"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "partial",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Partial"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -10973,6 +11017,82 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/approvals": {
+      "get": {
+        "tags": [
+          "ui-approvals"
+        ],
+        "summary": "Approvals Index",
+        "description": "Render the approvals surface, content-negotiated by ``HX-Request``.\n\nThe bell's modal-open ``hx-get`` (``HX-Request: true``) gets the\nexisting pending **panel** fragment unchanged; a normal navigation\ngets the full-page **console** with the status tabs + history.",
+        "operationId": "approvals_index_ui_approvals_get",
+        "parameters": [
+          {
+            "name": "tab",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "pending",
+              "title": "Tab"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "default": "",
+              "title": "Work Ref"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }

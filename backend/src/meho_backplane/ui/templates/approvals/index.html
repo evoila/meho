@@ -1,0 +1,44 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approvals console page: a full-page, status-filterable decision history
+  over the same approval-request substrate the bell modal acts on.
+
+  Initiative #1824 (G10.8), Task #1827. Upgrades the chrome-less
+  pending-only panel into a browsable console: status tabs (Pending /
+  Approved / Rejected / Expired / All), a work_ref filter, and an offset
+  pager -- so an operator can answer "who approved that Vault write" / "why
+  was X rejected", not only "what is waiting on me".
+
+  Content negotiation: ``GET /ui/approvals`` returns THIS page on a normal
+  navigation (no ``HX-Request``); the bell's ``hx-get`` (``HX-Request:
+  true``) still gets the pending ``_panel`` modal fragment, so the
+  bell-click flow is unchanged.
+
+  Read-only surface: the decision POSTs live on the detail modal (opened by
+  a row's Review/View button into the shared app-shell modal container), so
+  no CSRF token is minted here. The detail modal mints its own.
+
+  Context: see ``approvals/_history.html`` (the included list partial owns
+  the tab/filter/pager context).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Approvals &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Approvals</h1>
+      <p class="text-sm opacity-70">
+        Review pending agent actions and browse the decision history for this tenant.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Status tabs + work_ref filter + history list ---------- #}
+  {% include "approvals/_history.html" %}
+</section>
+{% endblock %}

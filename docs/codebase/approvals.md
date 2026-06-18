@@ -442,6 +442,43 @@ tools from non-admins in `tools/list`, and the dispatcher re-checks
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
 
+### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
+
+A session-BFF surface (cookie session + CSRF double-submit, not the
+Bearer REST routes — a browser carrying only the BFF cookie cannot auth
+those). Every read + decision derives `tenant_id` from the validated
+`UISessionContext` only, and calls the `approval_queue` service
+in-process (same in-process-audit binding the REST routes get).
+
+| Verb | Path | Purpose |
+|---|---|---|
+| `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
+| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
+| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). |
+| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
+| `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
+
+The console is **read-only over substrate that already exists** — it adds
+no new service call, no `api/v1` Bearer route, no CLI verb, and no
+migration. It does, however, register its `/ui/*` routes into the FastAPI
+OpenAPI document (the UI routers are not `include_in_schema=False`), so a
+new or changed `/ui/approvals*` route — e.g. the `partial=rows` query the
+"Load more" pager added — DOES enter `cli/api/openapi.json` and the
+generated client. Re-snapshot the OpenAPI doc (`cd cli && make
+snapshot-openapi && make generate`) whenever a `/ui/approvals*` route is
+added or its signature changes, or the "CLI API snapshot freshness" check
+goes red. The internal `params` / `params_hash`
+columns are **never** projected onto any UI view, the badge, or a
+broadcast frame: the `render.project_request_to_view` projection omits
+them by construction. Live updates ride the app-shell bell's body-wide
+`meho:approval-bump` / `meho:approval-decided` events — the history list
+re-fetches its active tab on them, so a decision made elsewhere drops out
+of the open Pending tab without a reload. The decision **reason** lives on
+the `audit_log` decision row, not the `ApprovalRequest` row, so the
+history view shows who/when (`reviewed_by` / `decided_at`) but not the
+free-text reason (an `audit_log` read deferred to a follow-up).
+
 ## Broadcast events (T5)
 
 `approval_queue.publish_approval_event` publishes one event per

@@ -1,0 +1,69 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approvals decision-history ROWS partial (G10.8-T #1827).
+
+  Just the ``<li>`` rows for one page of requests -- no surrounding ``<ul>``
+  or tabs. Included by ``_history.html`` for the first page, and returned on
+  its own by the "Load more" pager (``hx-swap="beforeend"`` appends these
+  onto the existing ``#approvals-history-rows`` list, so paging never drops
+  the rows already shown).
+
+  Each row links to the existing detail modal (``hx-get /ui/approvals/{id}``
+  into the shared ``#meho-approvals-modal-container``): a pending row offers
+  Approve/Deny there; a decided row renders read-only.
+
+  No ``params`` / ``params_hash`` are projected onto these rows.
+
+  Context variables:
+    requests          -- list[dict]: projected rows
+    status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
+-#}
+{% for req in requests %}
+  <li class="flex items-center justify-between gap-3 px-4 py-3">
+    <div class="min-w-0 space-y-1">
+      <div class="flex items-center gap-2">
+        <span
+          class="badge badge-sm {{ status_pill_class.get(req.status, 'badge-ghost') }}"
+          aria-label="Status {{ req.status }}"
+        >{{ req.status }}</span>
+        <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
+      </div>
+      <p class="truncate text-xs text-base-content/55">
+        <span>{{ req.connector_id }}</span>
+        <span aria-hidden="true">&middot;</span>
+        <span>requested by {{ req.principal_sub }}</span>
+        {% if req.status == "pending" %}
+          {% if req.created_at %}
+            <span aria-hidden="true">&middot;</span>
+            <time datetime="{{ req.created_at }}">{{ req.created_at }}</time>
+          {% endif %}
+        {% else %}
+          {% if req.reviewed_by %}
+            <span aria-hidden="true">&middot;</span>
+            <span>by {{ req.reviewed_by }}</span>
+          {% endif %}
+          {% if req.decided_at %}
+            <span aria-hidden="true">&middot;</span>
+            <time datetime="{{ req.decided_at }}">{{ req.decided_at }}</time>
+          {% endif %}
+        {% endif %}
+        {% if req.work_ref %}
+          <span aria-hidden="true">&middot;</span>
+          <span class="font-mono">{{ req.work_ref }}</span>
+        {% endif %}
+      </p>
+    </div>
+    <button
+      type="button"
+      class="btn btn-sm shrink-0 {% if req.status == 'pending' %}btn-primary{% else %}btn-ghost{% endif %}"
+      hx-get="/ui/approvals/{{ req.id }}"
+      hx-target="#meho-approvals-modal-container"
+      hx-swap="innerHTML"
+      aria-label="{% if req.status == 'pending' %}Review{% else %}View{% endif %} approval request for {{ req.op_id }}"
+    >
+      {% if req.status == "pending" %}Review{% else %}View{% endif %}
+    </button>
+  </li>
+{% endfor %}

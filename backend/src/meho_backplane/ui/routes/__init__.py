@@ -39,10 +39,14 @@ ships the umbrella :func:`build_router` that aggregates:
   ``GET /ui/runbooks/<slug>`` -- runbooks read surface, catalog +
   opacity-floor-aware template detail (G10.6-T1 #1382).
 * :mod:`~meho_backplane.ui.routes.approvals` -- ``GET /ui/approvals/badge``,
-  ``GET /ui/approvals``, ``GET /ui/approvals/<id>``,
+  ``GET /ui/approvals`` (content-negotiated: full-page console on a normal
+  navigation, pending panel fragment on the bell's ``HX-Request``),
+  ``GET /ui/approvals/list`` (status-filterable decision-history partial,
+  G10.8-T #1827), ``GET /ui/approvals/<id>``,
   ``POST /ui/approvals/<id>/approve`` + ``.../reject`` -- the approvals
-  bell/badge + approve/deny modal over a session BFF that calls the
-  ``approval_queue`` service in-process (G10.7-T3 #1778).
+  bell/badge + approve/deny modal + full-page history over a session BFF
+  that calls the ``approval_queue`` service in-process (G10.7-T3 #1778,
+  G10.8-T #1827).
 * :mod:`~meho_backplane.ui.routes.stubs` -- now empty. All seven
   surfaces (broadcast #867, topology #880, memory #877, connectors
   #873, kb #870, runbooks #1382, approvals #1778) ship real routers;

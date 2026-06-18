@@ -32,9 +32,21 @@
 //     status pill (``succeeded`` / ``failed`` from ``final`` / ``error``),
 //     and the ``awaiting_approval`` pause (which deep-links to the
 //     approvals console, T7, rather than re-implementing decide here).
-//   * No Stop affordance: closing the page closes the EventSource but does
-//     not cancel the run. T9 #1833 adds the Stop button over the T8 #1828
-//     cancel backend.
+//   * Stop affordance (T9 #1833): a Stop button cancels the in-flight run
+//     over the cookie-authed BFF proxy
+//     ``POST /ui/agents/{name}/run/{run_id}/cancel`` (which drives the same
+//     ``invoker.cancel`` the T8 #1828 REST route does). The button is
+//     visible only while the run is live (a ``run_id`` has landed and no
+//     terminal frame has). Confirmation is a native ``<dialog>`` (the
+//     destructive-action pattern the console's siblings use). The cancel
+//     POST carries the CSRF double-submit token in the ``X-CSRF-Token``
+//     header explicitly -- the page-level ``hx-headers`` directive is an
+//     HTMX construct and is NOT inherited by an Alpine ``fetch``, so the
+//     token is threaded into the component via ``x-data`` and echoed here.
+//     The proxy's 404 / 409 / 403 map to inline feedback: a 409 means the
+//     run already reached a terminal state (the controller flips to
+//     ``cancelled``/done rather than erroring), a 404 means the run no
+//     longer exists, a 403 means the operator may not cancel it.
 //
 // Frame wire-shape (from ``api/v1/agent_runs._format_event``)
 //   Each SSE frame is ``event: <kind>`` with ``data:`` a single-line JSON
@@ -61,6 +73,24 @@ document.addEventListener("alpine:init", () => {
     // (a normal end-of-stream close) vs. before (a genuine transport
     // drop) -- distinguishes "done" from "lost the connection".
     streamErrored: false,
+
+    // ---- Stop / cancel state (T9 #1833) ----
+    // Threaded in via x-data so the cancel POST can build its URL + carry
+    // the CSRF double-submit header (NOT inherited from the page-level
+    // hx-headers, which is HTMX-only). Defaults keep the component working
+    // if a caller omits them (the button just stays hidden / inert).
+    agentName: (opts && opts.agentName) || "",
+    csrfToken: (opts && opts.csrfToken) || "",
+    cancelUrlTemplate: (opts && opts.cancelUrlTemplate) || "",
+    // Operator-cancelled: set once the BFF proxy confirms the transition
+    // (204) or reports the run already terminal (409). Hides the Stop
+    // button and shows the cancelled pill.
+    cancelled: false,
+    // In-flight guard so a double-click cannot fire two cancel POSTs.
+    cancelling: false,
+    // Inline feedback for a 404 / 403 (an actionable message, not a torn
+    // surface). A 409 is not an error -- it just means "already done".
+    cancelError: "",
 
     // Append one frame as a typed transcript entry. Cancels the raw swap,
     // then routes by kind. A bad frame (mid-stream truncation, upstream
@@ -159,9 +189,103 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    // ---- Stop / cancel (T9 #1833) ----
+
+    // The Stop affordance shows only while the run is live: a run_id has
+    // landed (so there is something to cancel), no terminal frame has
+    // arrived (final / error), the stream has not dropped, and we have
+    // not already cancelled. A terminal run is not cancellable -- the BFF
+    // proxy would 409 it -- so the button must vanish the moment a
+    // terminal frame lands.
+    canStop() {
+      return (
+        !!this.runId &&
+        !this.finalStatus &&
+        !this.cancelled &&
+        !this.streamErrored &&
+        !!this.cancelUrlTemplate
+      );
+    },
+
+    // Cancel the in-flight run over the cookie-authed BFF proxy. Confirmed
+    // by the host element's native <dialog> before this runs. POSTs with
+    // the CSRF double-submit header; on 204 (cancelled) or 409 (already
+    // terminal) the console transitions to cancelled and closes the
+    // stream. A 404 / 403 surfaces as inline feedback.
+    async cancel() {
+      if (this.cancelling || !this.canStop()) {
+        return;
+      }
+      this.cancelling = true;
+      this.cancelError = "";
+      const url = this.cancelUrlTemplate.replace(
+        "__RUN_ID__",
+        encodeURIComponent(this.runId),
+      );
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "X-CSRF-Token": this.csrfToken },
+        });
+      } catch (e) {
+        this.cancelling = false;
+        this.cancelError = "Could not reach the server to stop the run. Try again.";
+        return;
+      }
+      this.cancelling = false;
+      // 204 (cancelled) or 409 (already terminal) both mean "this run is
+      // no longer running" -- transition the console and stop streaming.
+      if (response.ok || response.status === 409) {
+        this.markCancelled();
+        return;
+      }
+      if (response.status === 404) {
+        this.cancelError = "This run no longer exists.";
+        this.markCancelled();
+        return;
+      }
+      if (response.status === 403) {
+        this.cancelError = "You do not have permission to stop this run.";
+        return;
+      }
+      this.cancelError = "Could not stop the run. Refresh and try again.";
+    },
+
+    // Transition the console to cancelled: stop the connection-state dot
+    // pulsing "live" and close the EventSource so no further frames swap.
+    markCancelled() {
+      this.cancelled = true;
+      this.connected = false;
+      this.closeStream();
+    },
+
+    // Close the EventSource the HTMX sse extension opened on the sink
+    // element. The extension stores the connection on the element under
+    // ``__htmx_internal_data`` (an internal contract), so we fall back to
+    // dispatching ``htmx:abort`` -- the documented way to tell the sse
+    // extension to close -- when the internal handle is not reachable.
+    closeStream() {
+      const sink = this.$root.querySelector('[hx-ext="sse"], [data-hx-ext="sse"]');
+      if (!sink) {
+        return;
+      }
+      const internal = sink.__htmx_internal_data;
+      const source = internal && internal.sseEventSource;
+      if (source && typeof source.close === "function") {
+        source.close();
+        return;
+      }
+      sink.dispatchEvent(new CustomEvent("htmx:abort"));
+    },
+
     // ---- Render helpers (presentation only) ----
 
     statusLabel() {
+      if (this.cancelled) {
+        return "cancelled";
+      }
       if (this.finalStatus) {
         return "complete";
       }
@@ -172,6 +296,9 @@ document.addEventListener("alpine:init", () => {
     },
 
     statusDotClass() {
+      if (this.cancelled) {
+        return "bg-base-300";
+      }
       if (this.finalStatus) {
         return "bg-success";
       }

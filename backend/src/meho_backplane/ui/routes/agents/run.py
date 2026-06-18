@@ -62,13 +62,33 @@ can only GET):
   frame flushes immediately (SSE buffering #1389 is fixed, so the console
   paints turn-by-turn rather than only at completion).
 
-No Stop button
-==============
+Stop button
+===========
 
-This console ships **without** a Stop affordance. "Stop watching" merely
-closes the ``EventSource`` -- it does not cancel the run. The operator
-run-cancel REST endpoint (T8 #1828) and its Stop button (T9 #1833) are
-separate Tasks; wiring a Stop control here would be a no-op cancel.
+The console carries a **Stop** control (T9 #1833) over the operator
+run-cancel path (T8 #1828). The browser holds a cookie session, not a
+JWT, so it cannot call the Bearer-authed REST cancel route
+(``POST /api/v1/agents/runs/{handle}/cancel``) directly; instead the
+console posts to a cookie-authed BFF proxy,
+``POST /ui/agents/{name}/run/{handle}/cancel``, which lifts the operator
+from the session (operator floor, the same gate the run POST uses) and
+drives the *same* in-process
+:meth:`~meho_backplane.agent.invocation.AgentInvoker.cancel` the REST
+route does -- so the durable ``cancelled`` transition runs through one
+service path regardless of caller. The proxy is CSRF-double-submit-gated
+(a state-changing ``/ui/*`` POST) and maps the cancel outcomes to the
+same statuses the REST route returns: 404 (unknown / cross-tenant
+handle), 409 (already-terminal -- ``agent_run_not_cancellable``), 403
+(role below the cancel floor). The Alpine controller turns those into
+inline feedback rather than a torn surface (a 409 means the run already
+reached a terminal state; the console refreshes the status pill instead
+of erroring).
+
+The ``run_id`` the Stop control cancels is the one the SSE stream
+surfaces (the controller learns it from the first frame's ``run_id``),
+so the affordance only appears once a run is live and disappears the
+moment the run reaches a terminal frame -- a terminal run is not
+cancellable and the proxy would 409 it.
 
 The sensitive ``system_prompt`` / ``toolset`` bodies are never logged or
 streamed by this surface -- the transcript carries only the runtime's
@@ -78,22 +98,28 @@ output, errors), the same vocabulary the REST SSE route emits.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Final
 
 import structlog
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import ValidationError
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentNotFoundError,
+    AgentRunNotFoundError,
     BudgetExceededError,
     get_agent_invoker,
 )
 from meho_backplane.api.v1.agent_runs import AgentRunRequest, _events_generator
 from meho_backplane.auth.operator import Operator
+from meho_backplane.operations.agent_run import (
+    IllegalTransitionError,
+    UnauthorizedCancellationError,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.agents.run_token import (
@@ -108,6 +134,7 @@ from meho_backplane.ui.templating import get_templates
 
 __all__ = [
     "WORK_REF_MAX",
+    "cancel_run",
     "render_run_console",
     "stream_run_events",
     "submit_run",
@@ -409,3 +436,70 @@ async def stream_run_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def cancel_run(
+    request: Request,
+    session_ctx: UISessionContext,
+    operator: Operator,
+    *,
+    name: str,
+    handle: uuid.UUID,
+) -> Response:
+    """``POST /ui/agents/{name}/run/{handle}/cancel`` -- cookie-authed cancel.
+
+    The Stop button's BFF proxy. ``EventSource`` cannot carry a JWT, so
+    the browser holds a cookie session, not the Bearer token the REST
+    cancel route (``POST /api/v1/agents/runs/{handle}/cancel``) requires.
+    This route lifts the operator from the session (operator floor, the
+    same :func:`resolve_run_operator_or_403` gate the run POST uses) and
+    drives the *same* in-process
+    :meth:`~meho_backplane.agent.invocation.AgentInvoker.cancel` the REST
+    route does, so the durable ``cancelled`` transition runs through one
+    service path. The CSRF double-submit middleware gates this POST; the
+    Alpine controller echoes the token in the ``X-CSRF-Token`` header.
+
+    The ``name`` path segment is the console's, not a cancel input -- the
+    invoker scopes the cancel by ``(tenant, run_id)``, so the run's
+    parent agent is irrelevant to the transition. It rides the path only
+    so the route nests under the per-agent console URL.
+
+    Outcomes mirror the REST route exactly:
+
+    * 204 on a successful cancel (no body -- the Alpine controller flips
+      to the ``cancelled`` pill and closes the stream client-side).
+    * 404 (``agent_run_not_found``) for an unknown / cross-tenant handle;
+      existence is not leaked across tenants.
+    * 409 (``agent_run_not_cancellable``) for an already-terminal run --
+      including one that raced to a terminal state between the click and
+      the write. The controller treats this as "already done", not an
+      error.
+    * 403 (``agent_run_cancel_forbidden``) if the operator's role ranks
+      below the cancel floor (defence-in-depth; the route gate already
+      rejects ``read_only``).
+    """
+    del request  # tenant + identity come from the lifted operator.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="agent.cancel_run",
+        audit_op_class="write",
+        audit_agent_name=name,
+    )
+    invoker = get_agent_invoker()
+    try:
+        await invoker.cancel(operator, handle)
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="agent_run_not_found",
+        ) from exc
+    except UnauthorizedCancellationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="agent_run_cancel_forbidden",
+        ) from exc
+    except IllegalTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="agent_run_not_cancellable",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

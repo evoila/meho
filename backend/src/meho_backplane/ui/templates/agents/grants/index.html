@@ -1,0 +1,143 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the agent permission-grants console (Initiative
+  #1824 Task #1832). Extends ``base.html`` so the chrome (sidebar,
+  footer) matches the rest of the operator console. ``active_surface``
+  is ``agents`` so the Agents sidebar entry stays highlighted -- grants
+  are a sub-surface of the agents console, not a top-level nav entry.
+
+  Layout (top-down):
+    * Breadcrumb back to ``/ui/agents``.
+    * Header -- title + grant count + "New grant" / "Elevate" buttons.
+      Both open an HTMX-loaded modal into ``#grants-modal-container``;
+      the shared app-shell modal controller (``app/modal-dialogs.js``)
+      opens the inserted ``<dialog>`` via ``showModal()`` on
+      ``htmx:afterSwap`` (#1803).
+    * Filter bar -- ``principal_sub`` text filter + ``include_expired``
+      toggle; both ``hx-get`` ``/ui/agents/grants`` and swap the tbody.
+    * Grants table (``#grants-rows`` tbody) -- one row per grant. The
+      verdict renders as a colour-coded badge (auto-execute = success,
+      needs-approval = warning, deny = error) so a deny grant can never
+      read as an allow.
+
+  RBAC: the whole surface is tenant_admin (a non-admin 403s the route);
+  ``can_write`` is always true here, kept for template-shape symmetry.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agent grants &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/agents" class="link link-hover">Agents</a>
+    <span aria-hidden="true">/</span>
+    <span>Grants</span>
+  </nav>
+
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Agent grants</h1>
+      <p class="text-sm opacity-70">
+        Least-privilege governance: which principal may run which op
+        pattern, with which verdict. Reading and changing grants is
+        tenant-admin only.
+      </p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-sm opacity-70" aria-live="polite">
+        {{ grant_count }} grant{{ "" if grant_count == 1 else "s" }}
+      </span>
+      {% if can_write %}
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost"
+        hx-get="/ui/agents/grants/elevate"
+        hx-target="#grants-modal-container"
+        hx-swap="innerHTML"
+        data-action="open-elevate-modal"
+        aria-label="Elevate (time-bounded grant)"
+      >
+        Elevate
+      </button>
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        hx-get="/ui/agents/grants/create"
+        hx-target="#grants-modal-container"
+        hx-swap="innerHTML"
+        data-action="open-create-modal"
+        aria-label="Create grant"
+      >
+        + New grant
+      </button>
+      {% endif %}
+    </div>
+  </header>
+
+  {# Filter bar -- HTMX swaps just the tbody on change. #}
+  <form
+    id="grants-filter"
+    class="flex flex-wrap items-end gap-3"
+    hx-get="/ui/agents/grants"
+    hx-target="#grants-rows"
+    hx-swap="outerHTML"
+    hx-trigger="submit, change from:#grants-include-expired, keyup changed delay:300ms from:#grants-principal-filter"
+  >
+    <label class="form-control">
+      <span class="label-text text-xs">Filter by principal</span>
+      <input
+        type="text"
+        id="grants-principal-filter"
+        name="principal_sub"
+        value="{{ filter_principal_sub }}"
+        maxlength="512"
+        class="input input-bordered input-sm font-mono"
+        placeholder="exact principal sub"
+        aria-label="Filter by principal sub"
+      />
+    </label>
+    <label class="label cursor-pointer justify-start gap-2">
+      <input
+        type="checkbox"
+        id="grants-include-expired"
+        name="include_expired"
+        value="true"
+        {% if include_expired %}checked{% endif %}
+        class="checkbox checkbox-sm"
+        aria-label="Include expired elevations"
+      />
+      <span class="label-text text-sm">Include expired</span>
+    </label>
+    <noscript>
+      <button type="submit" class="btn btn-sm">Apply</button>
+    </noscript>
+  </form>
+
+  {# Mount point for HTMX-loaded modals (create / elevate / revoke). #}
+  <div id="grants-modal-container"></div>
+
+  <div class="overflow-x-auto rounded-box border border-base-300">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Principal</th>
+          <th>Op pattern</th>
+          <th>Target scope</th>
+          <th>Verdict</th>
+          <th>Expiry</th>
+          <th>Created by</th>
+          <th>Created</th>
+          <th><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      {% include "agents/grants/_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

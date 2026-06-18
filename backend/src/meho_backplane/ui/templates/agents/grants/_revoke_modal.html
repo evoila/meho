@@ -1,0 +1,75 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded revoke-confirm modal for the agent-grants console
+  (Initiative #1824 Task #1832). Loaded into ``#grants-modal-container``
+  by the table / detail "Revoke" button (``hx-get`` to
+  ``/ui/agents/grants/{grant_id}/revoke``). The shared app-shell modal
+  controller opens the inserted ``<dialog>`` via ``showModal()`` on
+  ``htmx:afterSwap`` and dismisses it on close button / ESC / backdrop
+  (#1803).
+
+  Revoke is destructive: it drops the principal's explicit permission,
+  reverting it to the safety-level default. The native ``<dialog>``
+  confirm surfaces exactly which grant is being revoked so the operator
+  confirms the right one.
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/agents/grants/{grant_id}/revoke``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/grants`` (back to the
+      table with the revoked row gone).
+    * 404 (absent / cross-tenant id) -> the HTMX response carries the
+      error.
+
+  CSRF posture matches the create / elevate modals -- inherited from the
+  page-level ``hx-headers`` directive plus the route re-set cookie.
+-#}
+<dialog id="grants-revoke-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg" id="grants-revoke-modal-title">
+      Revoke grant?
+    </h3>
+
+    <p class="py-2 text-sm opacity-80">
+      Revoke
+      <span class="font-mono break-all">{{ grant.op_pattern }}</span>
+      (<span class="font-mono">{{ grant.verdict }}</span>)
+      for principal
+      <span class="font-mono break-all">{{ grant.principal_sub }}</span>?
+    </p>
+    <p class="text-xs opacity-60">
+      This removes the explicit grant; the principal reverts to its
+      safety-level default (a dangerous op is never auto-executed). This
+      cannot be undone -- re-create the grant to restore it.
+    </p>
+
+    <form
+      id="grants-revoke-form"
+      hx-post="/ui/agents/grants/{{ grant.id }}/revoke"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-2"
+      aria-labelledby="grants-revoke-modal-title"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-revoke"
+          onclick="document.getElementById('grants-revoke-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="revoke-submit">
+          Revoke grant
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

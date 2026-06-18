@@ -18,6 +18,15 @@ ships the umbrella :func:`build_router` that aggregates:
   detail (full row + fingerprint card + recent-ops SSE-live +
   available-operations matrix), ``POST /ui/connectors/<name>/probe``
   tenant_admin re-probe.
+* :mod:`~meho_backplane.ui.routes.agents` -- the agents console
+  surface (G10.8-T1 #1825): ``GET /ui/agents`` definitions list,
+  ``GET /ui/agents/<name>`` per-agent detail, and the
+  tenant_admin-gated create / edit / enable-disable / delete write
+  routes (``/ui/agents/create``, ``/ui/agents/<name>/edit``,
+  ``/ui/agents/<name>/toggle``, ``/ui/agents/<name>/delete``). The
+  write routes delegate to ``AgentDefinitionService`` in-process so the
+  UI and REST surfaces share one validation + identity-ref-check +
+  persist code path.
 * :mod:`~meho_backplane.ui.routes.kb` -- ``GET /ui/kb``,
   ``POST /ui/kb/search``, ``GET /ui/kb/<slug>``,
   ``GET /ui/kb/<slug>/preview`` -- KB read surface (G10.2-T1 #870).
@@ -61,6 +70,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
@@ -69,10 +79,12 @@ from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
+from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
 __all__ = [
+    "build_agents_router",
     "build_approvals_router",
     "build_broadcast_router",
     "build_connectors_router",
@@ -82,6 +94,7 @@ __all__ = [
     "build_memory_router",
     "build_router",
     "build_runbooks_router",
+    "build_scheduler_router",
     "build_stubs_router",
     "build_topology_router",
 ]
@@ -117,9 +130,16 @@ def build_router() -> APIRouter:
     router.include_router(build_topology_router())
     router.include_router(build_memory_router())
     router.include_router(build_connectors_router())
+    router.include_router(build_agents_router())
     router.include_router(build_kb_router())
     router.include_router(build_corpus_router())
     router.include_router(build_runbooks_router())
     router.include_router(build_approvals_router())
+    # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
+    # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``
+    # + ``/ui/scheduler/{id}/cancel`` write routes (G10.8-T6 #1826); the
+    # literal-prefix routes register before the ``{trigger_id}`` detail
+    # route inside that router so ``"create"`` is never bound as an id.
+    router.include_router(build_scheduler_router())
     router.include_router(build_stubs_router())
     return router

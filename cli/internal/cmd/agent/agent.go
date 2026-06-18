@@ -34,6 +34,13 @@
 //     run's events over SSE from POST /api/v1/agents/{name}/run/events.
 //     Role: operator.
 //
+// #1828 adds one operator-facing run-control verb:
+//
+//   - `meho agent run-cancel <handle> [--json]` — cancel a non-terminal
+//     run via POST /api/v1/agents/runs/{handle}/cancel. The run lands in
+//     cancelled; 404 for an unknown / cross-tenant handle, 409 for an
+//     already-terminal run. Role: operator.
+//
 // Authentication piggybacks on the token meho login wrote — same
 // pattern as `meho kb`, `meho broadcast`, `meho audit`. RBAC at the
 // backend rejects non-tenant_admin write callers with HTTP 403; the
@@ -98,6 +105,9 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRunStatusCmd())
 	cmd.AddCommand(newRunListCmd())
 	cmd.AddCommand(newRunEventsCmd())
+	// #1828: operator run-cancel — stop a non-terminal run via
+	// POST /api/v1/agents/runs/{handle}/cancel.
+	cmd.AddCommand(newRunCancelCmd())
 	// G11.2-T6 (#819): permission grant management sub-tree — grant list /
 	// show / create / elevate / revoke. All verbs require tenant_admin.
 	cmd.AddCommand(NewGrantRootCmd())

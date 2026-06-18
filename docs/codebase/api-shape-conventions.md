@@ -279,85 +279,45 @@ is named:
   on the operator's first POST (G0.16-T6 Finding B #1312;
   closes the residual surface of RDC #771 Finding 6).
 
-#### Aliases for split-token concepts
+#### One product identity per connector (no aliases)
 
-One identifier per concept is the rule; the **alias** is the
-escape valve for the case where a concept is *forced* to carry two
-spellings on two surfaces because each surface has an independent
-hard constraint. SDDC Manager is the lone instance: the v2
-registry, the spec catalog, and the `TargetCreate` validator all
-use `"sddc-manager"`, while `meho connector list` must emit
-`"sddc"` (the token `parse_connector_id("sddc-rest-9.0")` derives —
-the §11 connector_id round-trip contract pins
-`parse_connector_id(connector_id)[0]` to equal the emitted
-product, so the listing token cannot be changed without breaking
-dispatch resolution).
+One identifier per concept is the rule, and for connector products it
+is now the *only* rule: every connector registers under, and the
+catalog / `TargetCreate` validator / `meho connector list` all use, the
+**single** short, dispatch-canonical token
+`parse_connector_id(connector_id)[0]` derives (the §11 connector_id
+round-trip contract pins the listing token to that derived product, so
+it cannot be changed without breaking dispatch resolution).
 
-The reconciliation is a one-hop alias map, not a second canonical
-spelling:
+There is no write-time alias bridge. SDDC Manager was historically the
+lone split — the registry used `"sddc-manager"` while the listing
+emitted `"sddc"` — and was reconciled by a `PRODUCT_ALIASES` /
+`canonical_product_token` map that normalised the incoming `product` at
+`POST` / `PATCH /api/v1/targets`. #1814 (Initiative #1810) realigned
+`SddcManagerConnector` to register under `"sddc"` directly (and #1798
+did the same for vRLI), #1816 made a divergent registration a hard-fail,
+and **#1817 deleted the alias map and `canonical_product_token`
+entirely**. The write surfaces now validate the supplied `product`
+against `registered_product_tokens` and store it as-is.
 
-- [`PRODUCT_ALIASES`](../../backend/src/meho_backplane/connectors/registry.py)
-  maps the non-canonical token to the canonical registry token
-  (`{"sddc": "sddc-manager"}`).
-- [`canonical_product_token`](../../backend/src/meho_backplane/connectors/registry.py)
-  normalises a supplied token through that map (identity for every
-  non-alias token, so it is idempotent).
-- `POST /api/v1/targets`
-  ([`create_target`](../../backend/src/meho_backplane/api/v1/targets.py))
-  and `PATCH /api/v1/targets/{name}`
-  ([`update_target`](../../backend/src/meho_backplane/api/v1/targets.py))
-  canonicalise the incoming `product` **before** validating against
-  `registered_product_tokens` and **before** storing the row, so a
-  value copied straight out of `connector list` is accept-equivalent
-  and the persisted row always carries the canonical token.
-
-The alias is intentionally *not* surfaced in the OpenAPI
-`TargetCreate.product` enum (which stays the canonical set) — the
-enum advertises the one spelling tooling should generate against;
-the alias is a forgiving-input accommodation at the write boundary,
-not a second first-class value.
+Consequently, copying a token out of `meho connector list` into a
+create works because the listing token *is* a registered product token —
+not because an alias normalises it. The OpenAPI `TargetCreate.product`
+enum is that same single set.
 
 Code reference: the structural drift-guard
-:func:`test_list_emitted_product_token_accept_equivalent_at_targets_post`
-in
-[`backend/tests/test_api_v1_connectors_ingest.py`](../../backend/tests/test_api_v1_connectors_ingest.py)
-pins, for **every** registered connector, that the product token the
-listing emits canonicalises into the POST-accepted set — so a future
-SDDC-shaped split (a new connector whose listing token diverges from
-its registry token without an alias entry) fails at unit-test time
-rather than as a 422 on the operator's first copy-paste (G0.18-T2
-#1355; RDC #789 Finding 6, closing #1312 acceptance B — which the
-v0.8.1 dogfood re-verified as not actually done).
-
-  **Aliases (rare, narrow).** When a single concept already has two
-  established spellings the codebase can't merge without breaking a
-  load-bearing invariant elsewhere — the SDDC `sddc` / `sddc-manager`
-  case is the live precedent — the bridge is a `PRODUCT_ALIASES` map
-  in
-  [`backend/src/meho_backplane/connectors/registry.py`](../../backend/src/meho_backplane/connectors/registry.py),
-  consumed at the write surfaces (`POST` / `PATCH /api/v1/targets`)
-  via `canonical_product_token()`. The non-canonical spelling is
-  accept-equivalent on write; the canonical token is what gets
-  stored, so the resolver, the audit log, every list / detail read,
-  and the OpenAPI enum see one spelling regardless of which the
-  operator typed. The alias map is keyed by the non-canonical
-  spelling and valued by the canonical registry token, and an
-  alias key is never also a canonical token (so
-  `canonical_product_token` is idempotent). RDC #789 Finding 6 /
-  G0.18-T2 #1355 introduced the bridge and closes #1312 acceptance B
-  (which had marked Finding 6 "already aligned" without actually
-  reconciling).
-
-  This is a constrained exception, not an open invitation to add
-  more synonyms. The motivating constraint for `sddc` /
-  `sddc-manager` is that the `meho connector list` token is
-  parser-derived from the connector id (`parse_connector_id(
-  "sddc-rest-9.0")` → `"sddc"`) and round-trips through the
-  G0.9.1-T1 #773 contract; changing the listing token would
-  break that round-trip. Without a comparable structural
-  constraint on a new product, the right move is to reconcile
-  the spellings (catalog / connector class / docs) rather than
-  paper over them with an alias.
+`test_listing_product_round_trips_through_target_create_validator` in
+[`backend/tests/test_operations_ingest_catalog.py`](../../backend/tests/test_operations_ingest_catalog.py)
+pins, for **every** registered connector, that the listing-emitted
+product is a registered product token — so a future SDDC-shaped split (a
+new connector whose listing token diverges from its registry token)
+fails at unit-test time. With the alias bridge gone, the only fix for a
+real split is to rename the connector registration so it round-trips
+(G0.18-T2 #1355 introduced the bridge; #1814 / #1817 retired it once the
+family realigned). A divergent product supplied to the **ingest** route
+is likewise rejected up front with a `422 product_impl_id_mismatch` (see
+`docs/codebase/spec-ingestion.md` § "Product identity at the ingest
+boundary").
 - **Versioned vs base impl-ids** — pick one. The recommendation
   is **versioned** (`nsx-rest-4.2`) because:
   - Versioned is more specific (avoids ambiguity when multiple

@@ -55,7 +55,11 @@ T4 (#825) extends both with the in-flight-reclaim contract:
 What is **not** in T6 or T4 (other tasks own these):
 
 - The invocation surface (sync + async handle/poll/SSE on REST + MCP +
-  CLI) — G11.1-T4 (#811). T4 calls this service.
+  CLI) — G11.1-T4 (#811). T4 calls this service. The operator-facing
+  cancel entry point (`POST /api/v1/agents/runs/{handle}/cancel` +
+  `meho agent run-cancel`, #1828) also calls `cancel_run` here — it adds
+  the tenant-scoping check (cross-tenant handle -> 404) on top of the
+  service's role + state-machine checks.
 - The Pydantic-AI loop seam that actually runs the agent — G11.1-T1
   (#808). The agent loop must call `heartbeat()` at ≈ `ttl_seconds/2`
   cadence so the reaper does not reclaim a healthy run; the loop must

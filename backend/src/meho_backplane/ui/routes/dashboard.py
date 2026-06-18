@@ -125,6 +125,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "icon": "brain",
     },
     {
+        "title": "Agents",
+        "summary": "Define + manage the tenant's LLM agents.",
+        "href": "/ui/agents",
+        "icon": "bot",
+    },
+    {
         "title": "Runbooks",
         "summary": "Browse runbook templates + lifecycle state.",
         "href": "/ui/runbooks",

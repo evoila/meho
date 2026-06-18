@@ -109,6 +109,14 @@ The service-layer exceptions map to HTTP status codes uniformly:
   specs in the same bundle disagree on the major version. The
   structured detail names both versions so the operator's error
   message tells them exactly what to fix.
+* :class:`ProductImplIdMismatch` → 422 Unprocessable Entity. The
+  supplied ``product`` does not round-trip the ``connector_id``
+  rendered from ``impl_id`` / ``version`` (G0.27 / T3 #1817). Raised
+  at the service-layer chokepoint :meth:`IngestionPipelineService.ingest`
+  (so the MCP tool and CLI fail closed too, not just this route);
+  mapped here onto the ``product_impl_id_mismatch`` envelope via the
+  shared builder so the REST 422 body and the MCP -32602 ``data``
+  member can't drift.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService._authorize` when a service-layer
   caller bypasses the route gate) → 403.
@@ -194,6 +202,7 @@ from meho_backplane.operations.ingest import (
     LlmClientUnavailable,
     LlmOutputInvalid,
     OpIdCollision,
+    ProductImplIdMismatch,
     ReviewService,
     SpecSource,
     UncoveredVersionLabel,
@@ -209,6 +218,7 @@ from meho_backplane.operations.ingest import (
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -392,15 +402,18 @@ async def ingest_endpoint(
     the same spec under the other scope re-inserts every op as a
     shadow copy there — verify the scope matches your intent.
     """
-    # Remember the original ``catalog_entry`` (pre-resolution) so the
-    # ``UpstreamNotSpecError`` path -- raised deep inside the parser
-    # when an HTML developer-portal page comes back instead of an
-    # OpenAPI spec -- can include the catalog reference in its 422
-    # envelope. ``_resolve_catalog_entry_if_set`` returns an explicit-
-    # quadruple body with ``catalog_entry=None``, so we have to snapshot
-    # before resolution.
+    # Snapshot the original ``catalog_entry`` before resolution (which
+    # nulls it) so the ``UpstreamNotSpecError`` 422 — raised deep in the
+    # parser when an HTML developer-portal page comes back — can still
+    # name the catalog reference.
     catalog_entry = body.catalog_entry
     resolved, catalog_compatible = _resolve_catalog_entry_if_set(body)
+    # The round-trip product guard is no longer applied here: it moved to
+    # the service-layer chokepoint :meth:`IngestionPipelineService.ingest`
+    # (G0.27 / T3 #1817) so every entry point (REST / MCP / CLI) fails
+    # closed identically. The service raises :class:`ProductImplIdMismatch`,
+    # which :func:`_raise_ingest_http_error` maps onto the same 422
+    # ``product_impl_id_mismatch`` envelope this route returned before.
     # The catalog-driven shape resolves its opt-in band from the catalog
     # row (``catalog_compatible``); the explicit-quadruple shape carries
     # the operator-supplied band on the body itself (T1 #1646). The two
@@ -987,6 +1000,16 @@ def _raise_ingest_http_error(
         raise HTTPException(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             build_version_mismatch_detail(exc),
+        ) from exc
+    if isinstance(exc, ProductImplIdMismatch):
+        # G0.27 / T3 (#1817). The round-trip guard moved from this route
+        # into IngestionPipelineService.ingest so every entry point fails
+        # closed; here we map the service exception onto the same 422
+        # ``product_impl_id_mismatch`` envelope this route returned before.
+        # Shared builder with the MCP -32602 path so the two can't drift.
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_product_impl_id_mismatch_detail(exc),
         ) from exc
     if isinstance(exc, UncoveredVersionLabel):
         # G0.9-T9 (#741). Checked BEFORE the generic ValueError-family arm

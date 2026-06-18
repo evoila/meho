@@ -1,0 +1,134 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Scheduler trigger list (Initiative #1824,
+  Task #1826, G10.8-T6). Extends ``base.html`` so the chrome matches the
+  rest of the console.
+
+  Layout (top-down):
+    * Header -- title + a tenant_admin-only "Create trigger" button that
+      HTMX-loads the create modal into ``#scheduler-modal-container``.
+    * Filter bar -- kind + status <select>s (closed enums) and a
+      ``work_ref`` text input, HTMX-bound to ``/ui/scheduler`` with
+      ``hx-target`` swapping the <tbody> so re-renders skip the chrome.
+    * Table body (``_table_rows.html`` partial) -- one row per trigger.
+
+  HTMX wiring mirrors the connectors list: the filter form ``hx-get``s
+  ``/ui/scheduler`` with ``hx-include="closest form"`` so every filter
+  value rides along, ``hx-target="#scheduler-table-body"`` to swap only
+  the table body, and ``hx-push-url`` so the URL reflects the active
+  filter (copy/paste reproduces it).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Scheduler &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Scheduler</h1>
+      <p class="text-sm opacity-70">
+        Scheduled triggers that arm unattended, recurring autonomous agent
+        runs. Click a row to inspect a trigger's schedule, governance, and
+        next fire.
+      </p>
+    </div>
+    {# "Create trigger" button -- tenant_admin only. The create route
+       re-checks the role server-side via ``resolve_operator_or_403``
+       (403 for a non-admin); this hide is the UX affordance, not the
+       gate. #}
+    {% if is_tenant_admin %}
+      <button
+        type="button"
+        class="btn btn-primary btn-sm"
+        hx-get="/ui/scheduler/create"
+        hx-target="#scheduler-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Create trigger"
+      >
+        Create trigger
+      </button>
+    {% endif %}
+  </header>
+
+  {# HTMX modal mount point -- create + cancel modal fragments are swapped
+     in here; the shared modal controller opens the inserted
+     ``<dialog class="modal">`` via ``showModal()`` on swap (#1803). #}
+  <div id="scheduler-modal-container"></div>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/scheduler"
+    hx-target="#scheduler-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="change from:find select, input delay:400ms from:find input[name=work_ref]"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter triggers"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-3">
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        <select name="kind" class="select select-bordered select-sm" aria-label="Filter by kind">
+          <option value="">All kinds</option>
+          {% for option in kind_options %}
+            <option value="{{ option }}" {% if option == kind_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Status</span>
+        <select name="status" class="select select-bordered select-sm" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          {% for option in status_options %}
+            <option value="{{ option }}" {% if option == status_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Change ticket (work_ref)</span>
+        <input
+          type="text"
+          name="work_ref"
+          value="{{ work_ref_filter }}"
+          class="input input-bordered input-sm"
+          placeholder="exact match"
+          maxlength="256"
+          aria-label="Filter by work_ref"
+        />
+      </label>
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Kind</th>
+          <th>Status</th>
+          <th>Schedule</th>
+          <th>Next fire</th>
+          <th>Last fired</th>
+          <th>Agent</th>
+          <th>Change ticket</th>
+          <th class="w-24"></th>
+        </tr>
+      </thead>
+      {% include "scheduler/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

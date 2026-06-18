@@ -89,6 +89,17 @@ Ingest-pipeline failures (G0.9-T8) — raised from
   ``info.version``, or two specs in the same bundle declare
   incompatible ``info.version`` strings. Mapped onto HTTP 422 at the
   route layer to distinguish it from generic ``400`` parser failures.
+* :class:`ProductImplIdMismatch` — the operator-supplied ``product``
+  does not round-trip the ``connector_id`` rendered from
+  ``impl_id`` / ``version`` (the dispatch / discovery surface recovers
+  the product from that string), so rows ingested under it would be
+  invisible to every dispatch probe. Raised at the service-layer
+  chokepoint :meth:`IngestionPipelineService.ingest` before any DB
+  write, so every entry point (REST / MCP / CLI) fails closed
+  identically (G0.27 / T3 #1817). Mapped onto HTTP 422 at the REST
+  route and JSON-RPC ``-32602`` at the MCP tool, both via the shared
+  :func:`~meho_backplane.operations.ingest.error_envelopes.build_product_impl_id_mismatch_detail`
+  envelope.
 
 The parser, registration, and ingest-pipeline classes inherit from
 :class:`ValueError` so callers that already catch parsing errors via
@@ -112,6 +123,7 @@ __all__ = [
     "InvalidStateTransitionError",
     "LlmOutputInvalid",
     "OpIdCollision",
+    "ProductImplIdMismatch",
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
     "VersionMismatchError",
@@ -649,3 +661,77 @@ class VersionMismatchError(ValueError):
         if suggestion is not None:
             base = f"{base}; {suggestion}"
         super().__init__(base)
+
+
+class ProductImplIdMismatch(ValueError):  # noqa: N818 -- the mismatch *is* the condition; "Error" reads redundant
+    """The supplied ``product`` does not round-trip its ``connector_id``.
+
+    G0.27 / T3 (#1817). The ingest write path persists rows and
+    scaffolds the auto-shim under the operator-supplied ``product``.
+    The dispatch / discovery surface, however, never sees that triple
+    directly — it recovers the product from the rendered ``connector_id``
+    via :func:`~meho_backplane.operations._lookup.parse_connector_id`
+    (the first hyphen-segment of ``impl_id``). When the two diverge —
+    ``--product vcf-logs --impl-id vrli-rest`` renders ``vrli-rest-9.0``,
+    which parses to product ``vrli`` — rows land in a namespace no
+    dispatch probe queries: the silent non-dispatchable-shadow the
+    Initiative #1810 exists to eliminate.
+
+    Raised at the single service-layer chokepoint
+    :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`
+    **before any DB write or spec fetch**, so every ingest entry point —
+    the REST route, the ``meho.connector.ingest`` MCP tool, and the CLI
+    verb — fails closed identically rather than only the REST boundary
+    (the gap that #1816's registration hard-fail missed on the
+    hand-coded-deferral path). The REST route maps it onto HTTP 422 and
+    the MCP tool onto JSON-RPC ``-32602``, both through the shared
+    :func:`~meho_backplane.operations.ingest.error_envelopes.build_product_impl_id_mismatch_detail`
+    envelope so the two surfaces can't drift.
+
+    Reuses the parse rule of
+    :func:`~meho_backplane.connectors.registry.product_impl_id_round_trips`,
+    so the check is a no-op when ``version`` / ``impl_id`` is empty or the
+    parse is lossy (non-digit-leading version) and fires only on a
+    lossless parse whose recovered product disagrees — the same shape
+    :func:`~meho_backplane.connectors.registry.register_connector_v2`'s
+    hard-fail (#1816) rejects at registration.
+
+    Attributes
+    ----------
+    product, version, impl_id:
+        The connector triple the operator submitted.
+    derived_product:
+        The dispatch-canonical product token the ``connector_id`` parses
+        to — the spelling the rows would need to carry to be dispatchable.
+
+    Inherits from :class:`ValueError` so callers that already catch
+    ingest-shaped errors via ``except ValueError`` keep working; the
+    targeted class lets the REST router map it onto ``422`` (validation-
+    shaped client error) specifically rather than the ``400`` other
+    ValueError children land on.
+    """
+
+    def __init__(
+        self,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        derived_product: str,
+    ) -> None:
+        self.product = product
+        self.version = version
+        self.impl_id = impl_id
+        self.derived_product = derived_product
+        connector_id = f"{impl_id}-{version}"
+        super().__init__(
+            f"product={product!r} does not round-trip: connector_id "
+            f"{connector_id!r} derives product "
+            f"{derived_product!r}, the dispatch-canonical token the "
+            f"connector listing emits and every dispatch probe keys "
+            f"on. Rows ingested under {product!r} would be invisible "
+            f"to dispatch. Use product={derived_product!r}, or rename "
+            f"impl_id so it derives {product!r}. "
+            f"See docs/codebase/error-message-shape.md for the "
+            f"convention."
+        )

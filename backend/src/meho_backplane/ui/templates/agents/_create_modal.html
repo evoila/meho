@@ -1,0 +1,60 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded create-agent modal for the Agents console (Initiative
+  #1824 Task #1825). Loaded into ``#agents-modal-container`` on the list
+  page by the "New agent" button's ``hx-get`` to ``/ui/agents/create``.
+  The shared app-shell modal controller opens the inserted ``<dialog>``
+  via ``showModal()`` on ``htmx:afterSwap`` so it shows without an extra
+  click and dismisses on close button / ESC / backdrop (#1803).
+
+  Submit contract: the form ``hx-post``s to ``/ui/agents/create``,
+  swapping ``#agents-modal-container`` (``hx-swap="innerHTML"``).
+    * Success -> 204 + ``HX-Redirect: /ui/agents`` (reloads the list
+      with the new row).
+    * Validation failure (422), duplicate name (409), or unknown /
+      revoked identity_ref (422) -> the handler returns this same modal
+      re-rendered with ``errors`` populated and the operator's typed
+      values echoed back; HTMX replaces the container's dialog so the
+      operator fixes the field without losing their input.
+
+  CSRF: the form declares its own ``hx-headers`` echo of the token THIS
+  render minted; the route sets the matching ``meho_csrf`` cookie on the
+  same response so the double-submit pair lines up (#1693).
+-#}
+<dialog id="agents-create-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="agents-create-modal-title">Create agent</h3>
+
+    <form
+      id="agents-create-form"
+      hx-post="/ui/agents/create"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#agents-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="agents-create-modal-title"
+    >
+      {% include "agents/_agent_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-create"
+          onclick="document.getElementById('agents-create-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="create-submit">
+          Create
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

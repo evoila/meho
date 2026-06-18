@@ -44,7 +44,7 @@ Locked decisions:
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217 -- and the live `ready` verdict for the footer pill, read from `request.state.ui_ready` (stashed by the session middleware from `health.ui_readiness_verdict`, the stale-while-revalidate hot-path accessor that never sweeps probes on the request path); G10.7-T1 #1776. Context processors run *after* the route context and `update` over it, so the injected `ready` wins over any per-route literal. |
-| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real memory + connectors routes (G10.4-T1 #877 / G10.3-T1 #873), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), the real docs-corpus routes (`GET /ui/corpus` + `POST /ui/corpus/search` -- collection picker, default-if-one, + ask-the-corpus over the reused `search_docs` / `doc_collections` backends, G10.7-T1 #1777), the real runbooks routes (G10.6-T1 #1382), and the real approvals routes (`GET /ui/approvals/badge` + `GET /ui/approvals` panel + `GET /ui/approvals/{id}` detail modal + `POST .../approve` + `POST .../reject` -- the bell/badge + approve/deny modal over a session BFF that calls the `approval_queue` service in-process, G10.7-T3 #1778). All surfaces now ship real routers, so the stubs aggregate is empty; real routers are still included **before** the stubs so their concrete paths win the first-match-wins lookup (the literal `/ui/approvals/badge` is registered ahead of the `/ui/approvals/{request_id}` slug for the same reason). |
+| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real memory + connectors routes (G10.4-T1 #877 / G10.3-T1 #873), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), the real docs-corpus routes (`GET /ui/corpus` + `POST /ui/corpus/search` -- collection picker, default-if-one, + ask-the-corpus over the reused `search_docs` / `doc_collections` backends, G10.7-T1 #1777), the real runbooks routes (G10.6-T1 #1382), and the real approvals routes (`GET /ui/approvals/badge` + `GET /ui/approvals` panel + `GET /ui/approvals/{id}` detail modal + `POST .../approve` + `POST .../reject` -- the bell/badge + approve/deny modal over a session BFF that calls the `approval_queue` service in-process, G10.7-T3 #1778), and the real scheduler routes (`GET /ui/scheduler` list + `GET /ui/scheduler/{id}` detail + `GET`/`POST /ui/scheduler/create` create modal + live `POST /ui/scheduler/validate-cron` cron preview + `GET`/`POST /ui/scheduler/{id}/cancel` terminal-confirm cancel -- the trigger control plane over a session BFF that calls `SchedulerAdminService` in-process; reads `operator`, writes `tenant_admin`, cancel fronted by a strong native-`<dialog>` confirm since it is terminal, G10.8-T6 #1826). All surfaces now ship real routers, so the stubs aggregate is empty; real routers are still included **before** the stubs so their concrete paths win the first-match-wins lookup (the literal `/ui/approvals/badge` is registered ahead of the `/ui/approvals/{request_id}` slug for the same reason; the scheduler router registers its literal `/ui/scheduler/create` + `/ui/scheduler/validate-cron` ahead of the `/ui/scheduler/{trigger_id}` detail slug). |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
@@ -2175,6 +2175,104 @@ a 500.
 * `backend/src/meho_backplane/ui/templates/connectors/import.html` — full-page paste-box + upload form.
 * `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
 * `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
+
+## Agents surface (G10.8-T1 #1825)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824) (G10.8
+Agents console). The console surface over the G11.1 agent-definition
+layer (`api/v1/agents.py`, `agents/service.py`, `agents/schemas.py`).
+Task #1825 stands up `/ui/agents` as a **top-level sidebar surface** and
+the anchor scaffold subsequent agent-console Tasks hang off (run console
+T2 #1829, run history T3 #1830, principals T4 #1831, grants T5 #1832).
+
+`meho_backplane.ui.routes.agents` ships:
+
+- `GET /ui/agents` — the per-tenant agent-definitions list. One handler
+  serves both shapes (branch on `HX-Request`): the full `agents/index.html`
+  page on a browser nav, the `agents/_cards.html` fragment on a re-render
+  swap. One DaisyUI card per definition: name → detail link, `model_tier`
+  badge, `enabled` pill, `identity_ref`, `turn_budget`, tool count,
+  created-by, updated-at, and a **first-line-only** system-prompt summary.
+  The sensitive `system_prompt` / `toolset` are never dumped here — only
+  summarised — mirroring the audit trail keeping them out (`api/v1/agents.py`).
+- `GET /ui/agents/{name}` — the per-agent detail page (or HTMX body
+  fragment). Renders the full `AgentDefinitionRead`: metadata header, the
+  read-only `system_prompt` in a monospace block, and `toolset` /
+  `output_schema` as collapsible pretty-printed JSON. A non-existent /
+  cross-tenant name → 404 (the service returns `None` for both — the
+  existence-leak collapse the REST surface holds). Entry points to Run
+  (T2) and a recent-runs strip (T3) land here once those Tasks ship.
+- `POST/GET /ui/agents/create`, `GET/PATCH /ui/agents/{name}` (edit),
+  `POST /ui/agents/{name}/toggle` (enable/disable), `GET/POST
+  /ui/agents/{name}/delete` — the write surface, **tenant_admin only**.
+
+### RBAC posture
+
+The role split mirrors the connectors surface (`connectors/operator.py`):
+
+- **Read** (`resolve_role_probe`) — fails *soft*: a JWT-validation hiccup
+  projects to a "no privileges" probe rather than 5xx-ing the page. The
+  probe's `is_tenant_admin` flag is the *UX hint* that hides the create /
+  edit / toggle / delete affordances from operators who can't use them.
+- **Write** (`resolve_operator_or_403`) — the *hard* gate: lifts the full
+  `Operator` from the BFF session, re-validates the access token through
+  the chassis JWT chain, and raises 403 for any non-`tenant_admin` caller.
+  A crafted POST/PATCH that bypasses the hidden affordance still hits the
+  403; the template hiding is never the security boundary.
+
+The write handlers delegate to `AgentDefinitionService` **in-process**
+(the same pattern the memory surface uses for `MemoryService`) rather than
+to the REST routes, because the service is RBAC-free by design (the caller
+gates the role) — so the UI write and the REST write share one validation
++ identity-ref-check + persist code path, and the 403 gate lives on the
+UI route deps.
+
+### Create / edit error surfacing
+
+Both modals are HTMX-injected native `<dialog class="modal">` fragments
+opened by the shared app-shell controller (`app/modal-dialogs.js`) on
+`htmx:afterSwap` (#1803). The submit handler builds an
+`AgentDefinitionCreate` / `AgentDefinitionUpdate` and persists via the
+service; failures re-render the **same modal inline** (not a generic
+error page) with per-field messages and the operator's typed values
+echoed back:
+
+- Pydantic `ValidationError` (e.g. `turn_budget` outside 1..1000) → 422
+  with the field error under the offending input.
+- `AgentDefinitionExistsError` (duplicate `(tenant, name)`) → 409 with a
+  `name` field error.
+- `AgentIdentityRefInvalidError` (unknown / revoked / cross-tenant
+  `identity_ref`) → 422 with an `identity_ref` field error.
+
+The `identity_ref` field is **free-text** for this scaffold; the picker
+over registered non-revoked principals (from `api/v1/agent_principals.py`)
+is T4 (#1832). Until it lands, the free-text field with inline 422
+surfacing is the accepted shape per the #1825 issue body.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` — thin FastAPI
+  route wrappers (path / method / dependency wiring); the static-prefix
+  `/ui/agents/create` route registers before `/ui/agents/{name}`.
+* `backend/src/meho_backplane/ui/routes/agents/views.py` — read renders
+  (list + detail) + the row projections (system-prompt summary, tool
+  count, pretty-printed JSON).
+* `backend/src/meho_backplane/ui/routes/agents/forms.py` — write renders
+  (create / edit / delete modal) + submit handlers (create / edit /
+  toggle / delete), with the 409 / 422 inline error mapping.
+* `backend/src/meho_backplane/ui/routes/agents/operator.py` — the role
+  lift: `resolve_role_probe` (soft, read) + `resolve_operator_or_403`
+  (hard tenant_admin gate, write).
+* `backend/src/meho_backplane/ui/templates/agents/index.html`,
+  `_cards.html`, `detail.html`, `_detail_body.html`,
+  `_agent_form_fields.html`, `_create_modal.html`, `_edit_modal.html`,
+  `_delete_modal.html` — the surface templates.
+* Nav + dashboard wiring: the `('agents', '/ui/agents', 'bot', 'Agents')`
+  entry in `base.html`'s `nav_surfaces`, the `bot` icon in `_icons.html`,
+  and the Agents tile in `dashboard.py`'s `_SURFACE_TILES`.
+
+This is a UI-only surface — it touches no `api/v1` schema, so the OpenAPI
+snapshot is unchanged.
 
 ## Runbooks surface (G10.6)
 

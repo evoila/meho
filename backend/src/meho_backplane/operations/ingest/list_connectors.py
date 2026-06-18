@@ -194,11 +194,10 @@ def _next_step_for_registered(
     realigned the registry product is already the short, dispatch-
     canonical token, so the verb round-trips to a dispatchable connector
     directly. (Historically — before #1814 — the registry product was a
-    long token like ``vcf-automation`` while rows reconciled to the short
-    ``vcfa`` via ``register_ingested_operations`` → ``_reconciled_row_product``;
-    emitting the long product kept the pre-flight non-vacuous, and the
-    reconciliation kept the persisted rows dispatchable. That bridge is
-    now dormant — #1817 retires it.) The catalog-hit branches keep
+    long token like ``vcf-automation`` while ingest reconciled rows down
+    to the short ``vcfa`` before persisting; #1814 realigned the family
+    and #1817 retired the reconciliation, so the registry product is now
+    the only spelling in play.) The catalog-hit branches keep
     ``entry.product``.
 
     Three branches: **supported** catalog hit → ``--catalog`` verb;

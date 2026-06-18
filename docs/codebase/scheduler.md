@@ -388,11 +388,12 @@ each translate transport-shaped arguments into service calls.
 
 ### Verbs
 
-| Verb | REST | MCP | CLI | Role |
-|---|---|---|---|---|
-| Create | `POST /api/v1/scheduler/triggers` | `meho.scheduler.create` | `meho scheduler create` | `tenant_admin` |
-| List | `GET /api/v1/scheduler/triggers` | `meho.scheduler.list` | `meho scheduler list` | `operator` |
-| Cancel | `DELETE /api/v1/scheduler/triggers/{id}` | `meho.scheduler.cancel` | `meho scheduler cancel <id>` | `tenant_admin` |
+| Verb | REST | MCP | CLI | UI | Role |
+|---|---|---|---|---|---|
+| Create | `POST /api/v1/scheduler/triggers` | `meho.scheduler.create` | `meho scheduler create` | `POST /ui/scheduler/create` | `tenant_admin` |
+| List | `GET /api/v1/scheduler/triggers` | `meho.scheduler.list` | `meho scheduler list` | `GET /ui/scheduler` | `operator` |
+| Detail | `GET /api/v1/scheduler/triggers` (filtered) | — | — | `GET /ui/scheduler/{id}` | `operator` |
+| Cancel | `DELETE /api/v1/scheduler/triggers/{id}` | `meho.scheduler.cancel` | `meho scheduler cancel <id>` | `POST /ui/scheduler/{id}/cancel` | `tenant_admin` |
 
 The discriminated-union validator on `ScheduledTriggerCreate` enforces
 exactly one of `cron_expr` / `fire_at` / `event_filter` per kind. An
@@ -465,6 +466,43 @@ sibling on PR #1286). The wrapper re-binds every response body to
 `http.MaxBytesReader` so the generated `Parse*Response` helpers
 (which `io.ReadAll(rsp.Body)` into the typed envelope) can't be
 pinned by an adversarial / runaway backplane response.
+
+### Operator console (`/ui/scheduler`, G10.8-T6 #1826)
+
+The fourth transport. `backend/src/meho_backplane/ui/routes/scheduler/`
+adds the operator-console surface for the same verbs. Like every other
+write-bearing `/ui/*` surface it is a **session BFF**: the browser
+carries only the BFF session cookie + the CSRF double-submit token (it
+cannot authenticate the Bearer REST routes), so the UI routes are
+`require_ui_session` + CSRF-gated and call `SchedulerAdminService`
+**in-process** — the same `list_` / `get` / `create` / `cancel` the REST
+/ MCP / CLI surfaces share. The in-process call keeps the
+synchronous-audit binding (each handler binds `audit_op_id` =
+`scheduler.list` / `scheduler.create` / `scheduler.cancel` so the chassis
+audit + broadcast hooks classify the row, mirroring the REST route).
+
+Surface map:
+
+* `GET /ui/scheduler` — list (operator). Dual full-page / HTMX-fragment
+  table with kind + status + work_ref filters; soft-hides the
+  create / cancel affordances from non-`tenant_admin` sessions.
+* `GET /ui/scheduler/{id}` — detail (operator). Full trigger row +
+  governance fields; cancel button hidden on a terminal trigger.
+* `GET`/`POST /ui/scheduler/create` — create modal + submit
+  (`tenant_admin`). Alpine kind-switch; the `cron` branch live-validates
+  via `POST /ui/scheduler/validate-cron`, which reuses
+  `is_valid_cron_expr` + `next_fire_after` to render a `next_fire_at`
+  preview before submit — no free-text cron with no feedback.
+* `GET`/`POST /ui/scheduler/{id}/cancel` — terminal-confirm modal +
+  submit (`tenant_admin`). The confirm dialog spells out that cancel is
+  permanent (no un-cancel); the submit maps the service's 404
+  (`trigger_not_found`) and 409 (`trigger_already_fired`) edges the same
+  way the REST `DELETE` route does.
+
+The UI does **not** expose pause / resume (the service has no UPDATE
+path — only the dispatcher sets `paused`) or edit (triggers are
+immutable; "edit" is cancel + recreate); cross-tenant `tenant_filter` is
+platform_admin-only and waits on the tenant selector (T4 #865).
 
 ## References
 

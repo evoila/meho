@@ -1,0 +1,61 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded delete-agent confirm modal for the Agents console
+  (Initiative #1824 Task #1825). Loaded into ``#agents-modal-container``
+  by the detail page's "Delete" button (``hx-get`` to
+  ``/ui/agents/{name}/delete``). The shared app-shell modal controller
+  opens the inserted ``<dialog>`` via ``showModal()`` on
+  ``htmx:afterSwap`` and dismisses it on close button / ESC / backdrop
+  (#1803).
+
+  Submit contract: the form ``hx-post``s to ``/ui/agents/{name}/delete``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents`` (back to the list
+      with the deleted row gone).
+    * Failure (e.g. 403 from a non-admin caller -- the gate is
+      server-side) -> the HTMX response carries the error.
+
+  CSRF posture matches the create / edit modals -- inherited from the
+  page-level ``hx-headers`` directive plus the route re-set cookie.
+-#}
+<dialog id="agents-delete-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg" id="agents-delete-modal-title">
+      Delete agent <span class="font-mono">{{ agent.name }}</span>?
+    </h3>
+
+    <p class="py-2 text-sm opacity-80">
+      This permanently removes the agent definition. Any references to it
+      (runs, grants) must be re-pointed. This cannot be undone.
+    </p>
+
+    <form
+      id="agents-delete-form"
+      hx-post="/ui/agents/{{ agent.name | urlencode }}/delete"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-2"
+      aria-labelledby="agents-delete-modal-title"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-delete"
+          onclick="document.getElementById('agents-delete-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="delete-submit">
+          Delete agent
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

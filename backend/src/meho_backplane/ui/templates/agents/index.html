@@ -1,0 +1,69 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Agents console list surface (Initiative
+  #1824 Task #1825). Extends ``base.html`` so the chrome (sidebar,
+  footer) matches the rest of the operator console.
+
+  Layout (top-down):
+    * Header -- title + agent count + "New agent" button (tenant_admin
+      only). The button opens the HTMX-loaded create modal into the
+      dedicated ``#agents-modal-container`` mount; the shared app-shell
+      modal controller (``app/modal-dialogs.js``) opens the inserted
+      ``<dialog>`` via ``showModal()`` on ``htmx:afterSwap`` (#1803).
+    * Card grid (``#agents-cards``) -- one DaisyUI card per agent
+      definition: name, model-tier badge, enabled pill, identity_ref,
+      turn budget, first-line system-prompt summary, tool count,
+      created-by + updated-at. The sensitive system_prompt / toolset
+      are never dumped here -- only summarised.
+
+  HTMX wiring: the page-level ``hx-headers`` directive echoes the CSRF
+  token for any state-changing request triggered from this page.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agents &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Agents</h1>
+      <p class="text-sm opacity-70">
+        Tenant agent definitions: identity, model tier, system prompt,
+        toolset, and run budget.
+      </p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-sm opacity-70" aria-live="polite">
+        {{ agent_count }} agent{{ "" if agent_count == 1 else "s" }}
+      </span>
+      {% if can_write %}
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        hx-get="/ui/agents/create"
+        hx-target="#agents-modal-container"
+        hx-swap="innerHTML"
+        data-action="open-create-modal"
+        aria-label="Create agent"
+      >
+        + New agent
+      </button>
+      {% endif %}
+    </div>
+  </header>
+
+  {# Mount point for HTMX-loaded modals (create / edit / delete). The
+     empty wrapper persists across HTMX swaps so the modal markup always
+     has a stable target. #}
+  <div id="agents-modal-container"></div>
+
+  {# Card grid -- the HTMX swap target for re-renders. #}
+  {% include "agents/_cards.html" %}
+</section>
+{% endblock %}

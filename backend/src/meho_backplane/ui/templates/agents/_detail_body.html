@@ -1,0 +1,148 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent detail body fragment (Initiative #1824 Task #1825). The full
+  ``AgentDefinitionRead`` projection: metadata header, read-only
+  system prompt (monospace), and collapsible pretty-printed JSON for
+  the toolset + output schema. Shared by ``detail.html`` (full page)
+  and returned standalone on an HTMX body swap.
+
+  The sensitive system_prompt / toolset / output_schema render here in
+  the detail view (the operator explicitly navigated to this agent) but
+  are never logged client-side or broadcast (#1825 risk note).
+-#}
+{% from "_icons.html" import icon %}
+<div id="agent-detail-body" class="space-y-4">
+  <header
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    data-agent-name="{{ agent.name }}"
+  >
+    <div class="card-body p-4 space-y-3">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="space-y-1">
+          <h1 class="text-xl font-semibold font-mono break-all">{{ agent.name }}</h1>
+          <div class="flex flex-wrap items-center gap-1.5 text-xs">
+            <span class="badge badge-sm {% if agent.enabled %}badge-success{% else %}badge-ghost{% endif %}"
+                  data-enabled="{{ 'true' if agent.enabled else 'false' }}">
+              {% if agent.enabled %}enabled{% else %}disabled{% endif %}
+            </span>
+            <span class="badge badge-outline badge-sm" data-model-tier="{{ agent.model_tier }}">
+              {{ agent.model_tier }}
+            </span>
+            <span class="opacity-70">{{ agent.turn_budget }} turn budget</span>
+          </div>
+        </div>
+        {% if agent.can_write %}
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              hx-get="/ui/agents/{{ agent.name | urlencode }}/edit"
+              hx-target="#agents-modal-container"
+              hx-swap="innerHTML"
+              data-action="edit"
+            >
+              Edit
+            </button>
+            {# Enable / disable toggle. Disabling is the destructive-ish
+               direction, so a tiny confirm wraps the disable submit; the
+               enable submit fires directly. Both POST the new ``enabled``
+               value and HX-Redirect back to the detail page. #}
+            {% if agent.enabled %}
+              <button
+                type="button"
+                class="btn btn-sm btn-ghost"
+                data-action="disable"
+                onclick="document.getElementById('agent-disable-modal').showModal()"
+              >
+                Disable
+              </button>
+            {% else %}
+              <button
+                type="button"
+                class="btn btn-sm btn-ghost"
+                data-action="enable"
+                hx-post="/ui/agents/{{ agent.name | urlencode }}/toggle"
+                hx-vals='{"enabled": "true"}'
+                hx-target="body"
+                hx-swap="none"
+              >
+                Enable
+              </button>
+            {% endif %}
+            <button
+              type="button"
+              class="btn btn-sm btn-error btn-outline"
+              data-action="delete"
+              hx-get="/ui/agents/{{ agent.name | urlencode }}/delete"
+              hx-target="#agents-modal-container"
+              hx-swap="innerHTML"
+            >
+              Delete
+            </button>
+          </div>
+        {% endif %}
+      </div>
+
+      <dl class="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Identity ref</dt>
+          <dd class="font-mono break-all">{{ agent.identity_ref }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Tools</dt>
+          <dd>{{ agent.tool_count }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Created by</dt>
+          <dd class="break-all">{{ agent.created_by_sub }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Created</dt>
+          <dd data-created-at="{{ agent.created_at.isoformat() }}">{{ agent.created_at.isoformat() }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Updated</dt>
+          <dd data-updated-at="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.isoformat() }}</dd>
+        </div>
+      </dl>
+    </div>
+  </header>
+
+  {# System prompt -- read-only monospace block, never editable here
+     (edit goes through the modal). #}
+  <section class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body p-4 space-y-2">
+      <h2 class="text-sm font-semibold opacity-80">System prompt</h2>
+      <pre class="whitespace-pre-wrap break-words rounded-box bg-base-200 p-3 font-mono text-xs"
+           aria-label="System prompt (read-only)">{{ agent.system_prompt }}</pre>
+    </div>
+  </section>
+
+  {# Toolset + output schema -- collapsible pretty-printed JSON. #}
+  <section class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body p-4 space-y-3">
+      <details class="collapse collapse-arrow bg-base-200 rounded-box">
+        <summary class="collapse-title text-sm font-semibold">
+          Toolset ({{ agent.tool_count }})
+        </summary>
+        <div class="collapse-content">
+          <pre class="whitespace-pre-wrap break-words font-mono text-xs">{{ agent.toolset_json }}</pre>
+        </div>
+      </details>
+      <details class="collapse collapse-arrow bg-base-200 rounded-box">
+        <summary class="collapse-title text-sm font-semibold">
+          Output schema
+        </summary>
+        <div class="collapse-content">
+          {% if agent.output_schema_json %}
+            <pre class="whitespace-pre-wrap break-words font-mono text-xs">{{ agent.output_schema_json }}</pre>
+          {% else %}
+            <p class="text-xs opacity-60">No structured-output schema defined.</p>
+          {% endif %}
+        </div>
+      </details>
+    </div>
+  </section>
+</div>

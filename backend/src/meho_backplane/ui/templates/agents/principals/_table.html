@@ -1,0 +1,94 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent-principals table fragment (Initiative #1824 Task #1831). Rendered
+  both inside ``index.html`` (full page) and standalone on the
+  ``include_revoked`` toggle swap. The outer ``#principals-table`` id is
+  the swap target so a re-render replaces the table in place.
+
+  One row per principal: name, keycloak_client_id, revoked pill,
+  owner_sub, created_by_sub, created_at, and (tenant_admin only) a
+  Revoke kill-switch button. The ``keycloak_internal_id`` is never
+  surfaced -- it is an internal Keycloak handle with no operator value.
+
+  The Revoke button ``hx-get``s the confirm modal into the shared
+  ``#principals-modal-container``; the modal carries the type-to-confirm
+  gate. A revoked principal shows no Revoke button (the kill switch is a
+  one-way transition).
+-#}
+<div id="principals-table">
+  {% if principals %}
+    <div class="overflow-x-auto card bg-base-100 border-base-300 border shadow-sm">
+      <table class="table table-sm" role="table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Keycloak client</th>
+            <th>Status</th>
+            <th>Owner</th>
+            <th>Registered by</th>
+            <th>Created</th>
+            {% if can_write %}<th class="text-right">Actions</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for principal in principals %}
+            <tr data-principal-name="{{ principal.name }}">
+              <td class="font-mono font-medium break-all">{{ principal.name }}</td>
+              <td class="font-mono text-xs opacity-70 break-all">
+                {{ principal.keycloak_client_id }}
+              </td>
+              <td>
+                {% if principal.revoked %}
+                  <span class="badge badge-sm badge-error" data-revoked="true">revoked</span>
+                {% else %}
+                  <span class="badge badge-sm badge-success" data-revoked="false">active</span>
+                {% endif %}
+              </td>
+              <td class="text-xs opacity-70 break-all">{{ principal.owner_sub }}</td>
+              <td class="text-xs opacity-70 break-all">{{ principal.created_by_sub }}</td>
+              <td class="text-xs opacity-60" data-created-at="{{ principal.created_at.isoformat() }}">
+                {{ principal.created_at.isoformat() }}
+              </td>
+              {% if can_write %}
+                <td class="text-right">
+                  {% if not principal.revoked %}
+                    <button
+                      type="button"
+                      class="btn btn-xs btn-error btn-outline"
+                      hx-get="/ui/agents/principals/{{ principal.name | urlencode }}/revoke"
+                      hx-target="#principals-modal-container"
+                      hx-swap="innerHTML"
+                      data-action="open-revoke-modal"
+                      aria-label="Revoke principal {{ principal.name }}"
+                    >
+                      Revoke
+                    </button>
+                  {% endif %}
+                </td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body items-center py-10 text-center">
+        <p class="opacity-70">
+          {% if include_revoked %}
+            No agent principals (active or revoked) for this tenant.
+          {% else %}
+            No active agent principals for this tenant.
+          {% endif %}
+        </p>
+        {% if can_write %}
+          <p class="text-sm opacity-60">
+            Use the "Register principal" button above to define one.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

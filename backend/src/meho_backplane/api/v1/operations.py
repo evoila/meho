@@ -14,8 +14,9 @@ the agent transport.
 
 * ``GET /api/v1/operations/groups?connector_id=...`` -- list enabled groups.
   Operator role.
-* ``GET /api/v1/operations/search?connector_id=...&query=...&group=...&limit=...``
-  -- hybrid retrieval. Operator role.
+* ``GET /api/v1/operations/search?connector_id=...&q=...&group=...&limit=...``
+  -- hybrid retrieval. ``q`` is the canonical free-text query param
+  (``query`` is the deprecated alias, #1854). Operator role.
 * ``POST /api/v1/operations/call`` (body: ``CallOperationBody``) --
   invoke the dispatcher. Operator role.
 * ``GET /api/v1/operations/{descriptor_id}`` -- inspect a single
@@ -37,6 +38,10 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.openapi.models import Example
 
+from meho_backplane.api.v1._freetext_filter import (
+    FREE_TEXT_Q_DESCRIPTION,
+    resolve_free_text_filter,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.meta_tools import (
@@ -181,7 +186,17 @@ async def get_search(
         description=_CONNECTOR_ID_DESCRIPTION,
         openapi_examples=_CONNECTOR_ID_EXAMPLES,
     ),
-    query: str = Query(min_length=1),
+    q: str | None = Query(
+        default=None,
+        min_length=1,
+        description=FREE_TEXT_Q_DESCRIPTION,
+    ),
+    query: str | None = Query(
+        default=None,
+        min_length=1,
+        deprecated=True,
+        description="Deprecated alias for `q`; still honoured.",
+    ),
     group: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
     operator: Operator = _require_operator,
@@ -194,13 +209,33 @@ async def get_search(
     ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
     #1482); a known connector with no matching ops returns ``200`` with
     an empty list.
+
+    ``q`` is the canonical free-text query param across the kb / memory /
+    operations-search list surfaces (#1854); ``query`` is its deprecated
+    alias, kept working for back-compat. Exactly one of the two is
+    required: supplying neither is a ``422`` (the search has nothing to
+    match), and supplying both with different values is a ``422`` rather
+    than a silent pick.
     """
+    search_query = resolve_free_text_filter(
+        q=q,
+        legacy_value=query,
+        legacy_name="query",
+    )
+    if search_query is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "missing_query: provide a free-text query via 'q' "
+                "('query' is the deprecated alias)."
+            ),
+        )
     try:
         return await search_operations(
             operator,
             {
                 "connector_id": connector_id,
-                "query": query,
+                "query": search_query,
                 "group": group,
                 "limit": limit,
             },

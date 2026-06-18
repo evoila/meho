@@ -13,7 +13,8 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/kb`` -- paginated list of kb entries for the operator's
-  tenant. Query params: ``filter`` (SQL ``LIKE`` pattern), ``limit``,
+  tenant. Query params: ``q`` (the canonical free-text SQL ``LIKE``
+  pattern; ``filter`` is the deprecated alias, #1854), ``limit``,
   ``offset``. Returns :class:`KbListResponse`. Role: ``operator``.
 * ``GET /api/v1/kb/{slug}`` -- fetch one entry by slug. Returns
   :class:`KbEntry`. 404 when absent. Role: ``operator``.
@@ -105,6 +106,10 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from meho_backplane.api.v1._freetext_filter import (
+    free_text_q_query,
+    resolve_free_text_filter,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb import KbEntry, KbIngestionResult, KbService
@@ -286,7 +291,13 @@ class IngestKbRequest(BaseModel):
 
 @router.get("", response_model=KbListResponse)
 async def list_kb(
-    filter: str | None = Query(default=None, max_length=_SLUG_MAX_LENGTH),  # noqa: A002 - public API field name
+    q: str | None = free_text_q_query(max_length=_SLUG_MAX_LENGTH),
+    filter: str | None = Query(  # noqa: A002 - public API field name
+        default=None,
+        max_length=_SLUG_MAX_LENGTH,
+        deprecated=True,
+        description="Deprecated alias for `q`; still honoured.",
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     operator: Operator = _require_operator,
@@ -298,17 +309,26 @@ async def list_kb(
     via :func:`require_role` before reaching this handler;
     ``operator`` and ``tenant_admin`` both pass.
 
-    ``filter`` is forwarded to :meth:`KbService.list_entries` as a SQL
-    ``LIKE`` pattern; the operator is the trust boundary for pattern
-    shape. ``limit`` is capped at 500 (the substrate's
-    :data:`DEFAULT_LIST_LIMIT` is 100; the API surface allows higher
-    explicit values so a one-shot dump of a 200-entry corpus
-    completes in one round trip).
+    ``q`` is the canonical free-text filter param across the kb /
+    memory / operations-search list surfaces (#1854); ``filter`` is its
+    deprecated alias, kept working for back-compat. The resolved value
+    is forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``
+    pattern; the operator is the trust boundary for pattern shape.
+    Supplying both ``q`` and ``filter`` with different values is a 422
+    rather than a silent pick. ``limit`` is capped at 500 (the
+    substrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface
+    allows higher explicit values so a one-shot dump of a 200-entry
+    corpus completes in one round trip).
 
     Binds ``audit_op_id="kb.list"`` + ``audit_op_class="read"`` before
     the substrate call so a handler exception still produces an
     audit row classified under the canonical op id.
     """
+    filter_pattern = resolve_free_text_filter(
+        q=q,
+        legacy_value=filter,
+        legacy_name="filter",
+    )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["list"],
         audit_op_class="read",
@@ -316,7 +336,7 @@ async def list_kb(
     service = KbService()
     entries = await service.list_entries(
         tenant_id=operator.tenant_id,
-        filter_pattern=filter,
+        filter_pattern=filter_pattern,
         limit=limit,
         offset=offset,
     )

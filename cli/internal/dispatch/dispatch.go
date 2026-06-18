@@ -306,7 +306,11 @@ func (c Connector) Search(
 	}
 	params := &api.GetSearchApiV1OperationsSearchGetParams{
 		ConnectorId: c.ID,
-		Query:       query,
+		// `q` is the canonical free-text param (#1854); the legacy
+		// `query` alias is deprecated. `q` is a pointer (optional on
+		// the wire) but Search's contract requires a non-empty query,
+		// so the value is always present here.
+		Q: &query,
 	}
 	if groupKey != "" {
 		g := groupKey

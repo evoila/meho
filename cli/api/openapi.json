@@ -2625,7 +2625,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.\n\n``q`` is the canonical free-text query param across the kb / memory /\noperations-search list surfaces (#1854); ``query`` is its deprecated\nalias, kept working for back-compat. Exactly one of the two is\nrequired: supplying neither is a ``422`` (the search has nothing to\nmatch), and supplying both with different values is a ``422`` rather\nthan a silent pick.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {
@@ -2655,14 +2655,32 @@
             }
           },
           {
-            "name": "query",
+            "name": "q",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "minLength": 1,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Query"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "group",
@@ -3527,9 +3545,22 @@
           "knowledge"
         ],
         "summary": "List Kb",
-        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``filter`` is forwarded to :meth:`KbService.list_entries` as a SQL\n``LIKE`` pattern; the operator is the trust boundary for pattern\nshape. ``limit`` is capped at 500 (the substrate's\n:data:`DEFAULT_LIST_LIMIT` is 100; the API surface allows higher\nexplicit values so a one-shot dump of a 200-entry corpus\ncompletes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
+        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``filter`` is its\ndeprecated alias, kept working for back-compat. The resolved value\nis forwarded to :meth:`KbService.list_entries` as a SQL ``LIKE``\npattern; the operator is the trust boundary for pattern shape.\nSupplying both ``q`` and ``filter`` with different values is a 422\nrather than a silent pick. ``limit`` is capped at 500 (the\nsubstrate's :data:`DEFAULT_LIST_LIMIT` is 100; the API surface\nallows higher explicit values so a one-shot dump of a 200-entry\ncorpus completes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
         "operationId": "list_kb_api_v1_kb_get",
         "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
           {
             "name": "filter",
             "in": "query",
@@ -3538,8 +3569,12 @@
               "type": "string",
               "maxLength": 256,
               "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Filter"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "limit",
@@ -4645,7 +4680,7 @@
           "memory"
         ],
         "summary": "List Memories",
-        "description": "List memories visible to the operator in this tenant.\n\nTenant-scoped via ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler.\n\nFilters (``scope`` / ``slug_pattern`` / ``tag``) are forwarded\nverbatim to :meth:`MemoryService.list_memories`; the service is\nthe contract owner for filter semantics (slug ``in`` substring\nmatch, tag membership in metadata, etc.). ``include_expired``\ndefaults to ``False`` so expired entries are filtered out on\nthe read side until G5.2 #374's daily cleanup task physically\nremoves them.\n\nBinds ``audit_op_id=\"memory.list\"`` + ``audit_op_class=\"read\"``\nbefore the service call so a handler exception still produces\nan audit row classified under the canonical op id.",
+        "description": "List memories visible to the operator in this tenant.\n\nTenant-scoped via ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler.\n\n``q`` is the canonical free-text filter param across the kb /\nmemory / operations-search list surfaces (#1854); ``slug_pattern``\nis its deprecated alias, kept working for back-compat. The resolved\nvalue plus ``scope`` / ``tag`` are forwarded verbatim to\n:meth:`MemoryService.list_memories`; the service is the contract\nowner for filter semantics (slug ``in`` substring match, tag\nmembership in metadata, etc.). Supplying both ``q`` and\n``slug_pattern`` with different values is a 422 rather than a\nsilent pick. ``include_expired`` defaults to ``False`` so expired\nentries are filtered out on the read side until G5.2 #374's daily\ncleanup task physically removes them.\n\nBinds ``audit_op_id=\"memory.list\"`` + ``audit_op_class=\"read\"``\nbefore the service call so a handler exception still produces\nan audit row classified under the canonical op id.",
         "operationId": "list_memories_api_v1_memory_get",
         "parameters": [
           {
@@ -4659,6 +4694,19 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.",
+              "title": "Q"
+            },
+            "description": "Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated."
+          },
+          {
             "name": "slug_pattern",
             "in": "query",
             "required": false,
@@ -4666,8 +4714,12 @@
               "type": "string",
               "maxLength": 256,
               "nullable": true,
+              "description": "Deprecated alias for `q`; still honoured.",
+              "deprecated": true,
               "title": "Slug Pattern"
-            }
+            },
+            "description": "Deprecated alias for `q`; still honoured.",
+            "deprecated": true
           },
           {
             "name": "tag",

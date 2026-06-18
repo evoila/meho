@@ -5847,6 +5847,10 @@ type AuthenticatedHealthApiV1HealthGetParams struct {
 
 // ListKbApiV1KbGetParams defines parameters for ListKbApiV1KbGet.
 type ListKbApiV1KbGetParams struct {
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Filter Deprecated alias for `q`; still honoured.
 	Filter        *string `form:"filter,omitempty" json:"filter,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
@@ -5875,12 +5879,17 @@ type ShowKbApiV1KbSlugGetParams struct {
 
 // ListMemoriesApiV1MemoryGetParams defines parameters for ListMemoriesApiV1MemoryGet.
 type ListMemoriesApiV1MemoryGetParams struct {
-	Scope          *MemoryScope `form:"scope,omitempty" json:"scope,omitempty"`
-	SlugPattern    *string      `form:"slug_pattern,omitempty" json:"slug_pattern,omitempty"`
-	Tag            *string      `form:"tag,omitempty" json:"tag,omitempty"`
-	IncludeExpired *bool        `form:"include_expired,omitempty" json:"include_expired,omitempty"`
-	Limit          *int         `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization  *string      `json:"authorization,omitempty"`
+	Scope *MemoryScope `form:"scope,omitempty" json:"scope,omitempty"`
+
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// SlugPattern Deprecated alias for `q`; still honoured.
+	SlugPattern    *string `form:"slug_pattern,omitempty" json:"slug_pattern,omitempty"`
+	Tag            *string `form:"tag,omitempty" json:"tag,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
 }
 
 // RememberApiV1MemoryPostParams defines parameters for RememberApiV1MemoryPost.
@@ -5931,8 +5940,13 @@ type PostPreviewApiV1OperationsPreviewPostParams struct {
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
-	ConnectorId   string  `form:"connector_id" json:"connector_id"`
-	Query         string  `form:"query" json:"query"`
+	ConnectorId string `form:"connector_id" json:"connector_id"`
+
+	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// Query Deprecated alias for `q`; still honoured.
+	Query         *string `form:"query,omitempty" json:"query,omitempty"`
 	Group         *string `form:"group,omitempty" json:"group,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
@@ -15261,6 +15275,22 @@ func NewListKbApiV1KbGetRequest(server string, params *ListKbApiV1KbGetParams) (
 	if params != nil {
 		queryValues := queryURL.Query()
 
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.Filter != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "filter", runtime.ParamLocationQuery, *params.Filter); err != nil {
@@ -15568,6 +15598,22 @@ func NewListMemoriesApiV1MemoryGetRequest(server string, params *ListMemoriesApi
 		if params.Scope != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -16187,16 +16233,36 @@ func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearc
 			}
 		}
 
-		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "query", runtime.ParamLocationQuery, params.Query); err != nil {
-			return nil, err
-		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-			return nil, err
-		} else {
-			for k, v := range parsed {
-				for _, v2 := range v {
-					queryValues.Add(k, v2)
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
 				}
 			}
+
+		}
+
+		if params.Query != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "query", runtime.ParamLocationQuery, *params.Query); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
 		}
 
 		if params.Group != nil {

@@ -444,6 +444,67 @@ def test_list_forwards_filter_limit_offset(client: TestClient) -> None:
     assert call_kwargs["offset"] == 10
 
 
+def test_list_canonical_q_reaches_substrate(client: TestClient) -> None:
+    """The canonical ``q`` free-text filter (#1854) reaches the substrate."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.list_entries", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/kb?q=k8s-%25",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    assert fake_list.await_args.kwargs["filter_pattern"] == "k8s-%"
+
+
+def test_list_q_and_filter_conflict_returns_422(client: TestClient) -> None:
+    """``q`` and the deprecated ``filter`` disagreeing is a 422, not a silent pick (#1854)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.list_entries", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/kb?q=alpha&filter=beta",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 422
+    assert "ambiguous_free_text_filter" in response.json()["detail"]
+    fake_list.assert_not_awaited()
+
+
+def test_list_q_and_filter_same_value_is_accepted(client: TestClient) -> None:
+    """Mirroring ``q`` onto the legacy ``filter`` (same value) is unambiguous (#1854)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.list_entries", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/kb?q=same&filter=same",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    assert fake_list.await_args.kwargs["filter_pattern"] == "same"
+
+
 def test_list_truncates_long_body_to_preview(client: TestClient) -> None:
     """Bodies longer than 200 chars are truncated with a ``…`` suffix."""
     tenant_a = uuid.uuid4()

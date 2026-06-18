@@ -797,6 +797,45 @@ def test_list_forwards_filters_to_service(client: TestClient) -> None:
     assert call_kwargs["limit"] == 25
 
 
+def test_list_canonical_q_forwards_as_slug_pattern(client: TestClient) -> None:
+    """The canonical ``q`` free-text filter (#1854) reaches the service as ``slug_pattern``."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.list_memories", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/memory?q=k8s",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    assert fake_list.await_args.kwargs["slug_pattern"] == "k8s"
+
+
+def test_list_q_and_slug_pattern_conflict_returns_422(client: TestClient) -> None:
+    """``q`` and the deprecated ``slug_pattern`` disagreeing is a 422 (#1854)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_list = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.list_memories", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/memory?q=alpha&slug_pattern=beta",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 422
+    assert "ambiguous_free_text_filter" in response.json()["detail"]
+    fake_list.assert_not_awaited()
+
+
 def test_list_limit_zero_returns_422(client: TestClient) -> None:
     """``limit=0`` fails the ``ge=1`` validator (Query gate)."""
     tenant_a = uuid.uuid4()

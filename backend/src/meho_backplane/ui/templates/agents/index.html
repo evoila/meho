@@ -48,7 +48,21 @@
       <span class="text-sm opacity-70" aria-live="polite">
         {{ agent_count }} agent{{ "" if agent_count == 1 else "s" }}
       </span>
+      <a href="/ui/agents/principals" class="btn btn-sm btn-ghost" data-action="open-principals">
+        Principals
+      </a>
       {% if can_write %}
+      {# Permission grants are a tenant_admin-only sub-surface (reads
+         included), so the link only renders for admins -- a non-admin
+         would 403 the route (G10.8-T5 #1832). #}
+      <a
+        href="/ui/agents/grants"
+        class="btn btn-sm btn-ghost"
+        data-action="open-grants"
+        aria-label="Agent permission grants"
+      >
+        Grants
+      </a>
       <button
         type="button"
         class="btn btn-sm btn-primary"

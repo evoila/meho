@@ -2389,6 +2389,176 @@ first-match-wins lookup against the definition surface's
 every `/ui/*` surface this changes the CLI OpenAPI snapshot — re-snapshot
 + re-generate when touching it.
 
+## Agent principals surface (G10.8-T4 #1831)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824). The
+agent-identity inventory and the **Keycloak kill switch**, hung off the
+T1 agents scaffold as the `/ui/agents/principals` sub-surface. The console
+over the G11.2 agent-principal lifecycle (`api/v1/agent_principals.py`,
+`auth/agent_principals.py`, `auth/keycloak_admin.py`). Registered inside
+`build_agents_router` **before** the `/ui/agents/{name}` read route so the
+literal `principals` segment is not swallowed as an agent `{name}` (the
+same first-match discipline `/ui/agents/create` follows).
+
+`meho_backplane.ui.routes.agents.principals_*` ships:
+
+- `GET /ui/agents/principals` — the per-tenant principals list (operator).
+  One handler serves both shapes (branch on `HX-Request`): the full
+  `agents/principals/index.html` page on a browser nav, the
+  `agents/principals/_table.html` fragment on the `include_revoked` toggle
+  swap. One row per principal: name, `keycloak_client_id`, a revoked /
+  active pill, `owner_sub`, `created_by_sub`, `created_at`. The internal
+  `keycloak_internal_id` is never surfaced. The `include_revoked` toggle
+  flips the service query so revoked rows join the inventory for audit.
+- `GET/POST /ui/agents/principals/register` — register a new principal
+  (**tenant_admin**). An upstream side-effecting op: the service creates a
+  Keycloak client + writes its generated credential to Vault before the DB
+  row lands. Failures re-render the modal inline (not a generic error):
+  empty / bad-character `name` → 422 `name` field error; duplicate
+  `(tenant, name)` → 409 `name` field error; **Keycloak unconfigured →
+  503** banner carrying the gold-standard `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL`
+  three-clause text; other Keycloak API failure → 502 `keycloak_admin_error`
+  banner; Vault credential-write failure → 502 `scheduler_vault_write_error`
+  banner. The actionable backend detail is rendered verbatim, never
+  flattened to "something went wrong".
+- `GET/POST /ui/agents/principals/{name}/revoke` — revoke = the **Keycloak
+  kill switch** (**tenant_admin**): disables the Keycloak client, which
+  blocks all new token grants for the identity (tokens already minted stay
+  valid until their `exp`). It is terminal — there is no un-revoke. Because
+  a too-easy kill switch is a footgun (#1831 risk note), the confirm modal
+  demands a **type-to-confirm of the principal name**: an inline Alpine
+  `x-data` gate keeps the destructive submit `:disabled` until the typed
+  value equals the name, and the handler **re-checks the typed value
+  server-side** (a crafted POST cannot skip the confirm — a mismatch
+  re-renders the modal with a 422 banner and makes no service call). 404
+  on an absent / cross-tenant / already-revoked name; Keycloak
+  unconfigured / API failures render the same 503 / 502 actionable banners
+  as register.
+
+RBAC + service-delegation + CSRF posture is identical to the
+agent-definition surface: `resolve_role_probe` (soft, read) +
+`resolve_operator_or_403` (hard tenant_admin gate, write) from
+`agents/operator.py`; the write handlers call `AgentPrincipalService`
+**in-process** (the same path the REST routes + the `meho agent-principal`
+CLI use); `POST` is CSRF-double-submit-gated by the chassis
+`CSRFMiddleware`, with each modal render re-minting + re-setting the
+`meho_csrf` cookie.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/principals_views.py` — the
+  read render (`render_principals_index`) + the row projection +
+  `validate_principal_name` + `fetch_principal_or_404`.
+* `backend/src/meho_backplane/ui/routes/agents/principals_forms.py` — the
+  register + revoke modal renders + submit handlers, with the 503 / 502 /
+  422 / 409 inline error mapping and the server-side type-to-confirm check.
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` —
+  `_register_principals_routes`, wired into `build_agents_router` before
+  the `/ui/agents/{name}` read route.
+* `backend/src/meho_backplane/ui/templates/agents/principals/index.html`,
+  `_table.html`, `_register_modal.html`, `_revoke_modal.html` — the
+  surface templates. The principals surface keeps `active_surface="agents"`
+  (it is a sub-surface; the sidebar highlights Agents) and is reached via a
+  "Principals" link on the agents list header.
+
+## Agent grants surface (G10.8-T5 #1832)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824) (G10.8
+Agents console). The console surface over the G11.2 agent permission-grant
+layer (`api/v1/agent_grants.py`, `agents/grants.py`,
+`agents/grant_schemas.py`). Task #1832 layers `/ui/agents/grants` onto the
+agents console (`/ui/agents`, #1825) as a **tenant_admin-only** governance
+surface: which principal may run which op pattern with which verdict.
+
+### RBAC — the whole surface is tenant_admin, reads included
+
+Unlike the agent-definitions surface (where an `operator` can read and only
+writes are admin-gated), **every** grants route — list, detail, create,
+elevate, revoke — is `tenant_admin`. A grant listing reveals the tenant's
+least-privilege posture, so it is governance data, not operator data. This
+mirrors the REST surface (`api/v1/agent_grants.py`), whose every route
+carries `require_role(TenantRole.TENANT_ADMIN)`. The gate is
+`resolve_grants_admin_or_403` (`ui/routes/agents/grants/operator.py`),
+which reuses the shared operator lift the agents console ships
+(`ui/routes/agents/operator.py::_lift_operator`) and wires it onto the read
+paths too; a non-admin caller gets a 403 the page cannot bypass. The
+agents list links to `/ui/agents/grants` only for admins (a non-admin would
+403 the route).
+
+### Routes
+
+`meho_backplane.ui.routes.agents.grants` ships:
+
+- `GET /ui/agents/grants` — the per-tenant grants table (or the HTMX
+  `_rows.html` tbody fragment on a filter swap). Filters: `principal_sub`
+  (exact match) + `include_expired` (off by default, so expired elevations
+  are hidden). The verdict renders as a colour-coded badge whose colour AND
+  label both derive from the same verdict string
+  (`views.verdict_badge_class`): `auto-execute` = `badge-success`,
+  `needs-approval` = `badge-warning`, `deny` = `badge-error` — so a `deny`
+  grant can never read as an allow. The expiry column distinguishes a
+  permanent grant from a time-bounded elevation that auto-expires at T.
+- `GET /ui/agents/grants/{grant_id}` — the per-grant detail page (or HTMX
+  body fragment). An absent / malformed / cross-tenant id renders 404
+  (existence-leak avoidance, mirroring the REST 404 collapse).
+- `GET/POST /ui/agents/grants/create` — create a permanent or time-bounded
+  grant. The `verdict` `<select>` defaults to the conservative `deny`. A
+  Pydantic `ValidationError` or a service `GrantValidationError` (past /
+  naive `expires_at`, bad `target_scope` UUID, duplicate grant) re-renders
+  the modal inline with the matching field error + 422.
+- `GET/POST /ui/agents/grants/elevate` — create a time-bounded elevation;
+  `expires_at` is **required** (the `AgentElevationCreate` schema makes the
+  field non-optional, so an omitted value surfaces as the inline
+  `expires_at` field error).
+- `GET/POST /ui/agents/grants/{grant_id}/revoke` — revoke a grant. Revoke
+  is destructive (it drops the principal's explicit permission), so a
+  native-`<dialog>` confirm gates the submit. 204 + `HX-Redirect` on
+  success; 404 on an absent / cross-tenant id.
+
+All writes go through the chassis CSRF double-submit (`CSRFMiddleware` gates
+every non-safe method under `/ui/`; each modal re-mints + re-sets the
+`meho_csrf` cookie and echoes the matching `X-CSRF-Token` header). The
+writes call `AgentGrantService` in-process so the UI and REST surfaces share
+one validation + persist code path.
+
+The `principal_sub` field is free-text for now (the picker over registered
+principals is T4 #1831; until it lands a free-text field is the accepted
+shape — the same precedent #1825 set for `identity_ref`). The grant service
+does not validate `principal_sub` against registered principals, so a grant
+may be issued ahead of a principal's first login — the UI mirrors that
+backend contract.
+
+### Routing order
+
+`build_agent_grants_router()` is mounted **before** `build_agents_router()`
+in `build_router()` so the literal `/ui/agents/grants` wins the
+first-match-wins lookup against the agents surface's `/ui/agents/{name}`
+(which would otherwise bind `name="grants"`). Inside the grants router the
+literal `create` / `elevate` routes register before the `{grant_id}` detail
+route for the same reason.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/grants/routes.py` — thin
+  FastAPI handlers + the load-bearing registration order.
+* `.../grants/views.py` — read renders (table + detail), row projections,
+  the verdict-badge colour mapping, and the `grant_id` parse-or-404.
+* `.../grants/forms.py` — write renders (create / elevate / revoke modals)
+  + submit handlers; maps `GrantValidationError` messages to the offending
+  field for inline surfacing.
+* `.../grants/operator.py` — the all-paths `tenant_admin` gate.
+* `backend/src/meho_backplane/ui/templates/agents/grants/index.html`,
+  `_rows.html`, `detail.html`, `_detail_body.html`,
+  `_grant_form_fields.html`, `_create_modal.html`, `_elevate_modal.html`,
+  `_revoke_modal.html` — the surface templates.
+
+Unlike the agent-definitions surface's doc note above, the `/ui/*` routes
+**do** appear in the CLI OpenAPI snapshot (`cli/api/openapi.json`) — the
+FastAPI app the snapshot is generated from mounts the UI router, so a new
+`/ui/agents/grants*` path lands in the snapshot and the typed Go client.
+`cd cli && make snapshot-openapi && make generate` regenerates both after a
+route change.
+
 ## Runbooks surface (G10.6)
 
 Initiative [#1381](https://github.com/evoila/meho/issues/1381) (G10.6

@@ -1,0 +1,69 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded elevate modal for the agent-grants console (Initiative
+  #1824 Task #1832). Identical to the create modal except ``expires_at``
+  is REQUIRED -- an elevation is a time-bounded grant for a change
+  window, and the modal makes the auto-expiry plain. Loaded into
+  ``#grants-modal-container`` by the "Elevate" button's ``hx-get`` to
+  ``/ui/agents/grants/elevate``.
+
+  Submit contract: the form ``hx-post``s to ``/ui/agents/grants/elevate``.
+    * Success -> 204 + ``HX-Redirect: /ui/agents/grants``.
+    * An omitted / empty ``expires_at`` surfaces as the inline
+      ``expires_at`` field error (the ``AgentElevationCreate`` schema
+      makes the field non-optional); a past / naive value is rejected by
+      the service with a clear message. Other validation failures
+      re-render inline the same way as create.
+
+  CSRF posture matches the create modal -- the form's own ``hx-headers``
+  echo + the route-set cookie line up the double-submit pair (#1693).
+
+  Destructive-ness note: an elevation grants *additional* standing
+  permission for a window. It is confirm-gated by the explicit "Elevate"
+  submit + the required future expiry rather than a second dialog --
+  the auto-expiry is the safety rail.
+-#}
+<dialog id="grants-elevate-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="grants-elevate-modal-title">
+      Elevate (time-bounded grant)
+    </h3>
+    <p class="text-sm opacity-70 py-1">
+      A time-bounded grant for a change window. It auto-expires at the
+      timestamp below and the principal reverts to its baseline
+      permissions -- no manual revoke needed.
+    </p>
+
+    <form
+      id="grants-elevate-form"
+      hx-post="/ui/agents/grants/elevate"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#grants-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="grants-elevate-modal-title"
+    >
+      {% include "agents/grants/_grant_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-elevate"
+          onclick="document.getElementById('grants-elevate-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-warning" data-action="elevate-submit">
+          Create elevation
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

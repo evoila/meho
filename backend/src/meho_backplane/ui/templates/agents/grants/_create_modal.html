@@ -1,0 +1,66 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded create-grant modal for the agent-grants console
+  (Initiative #1824 Task #1832). Loaded into ``#grants-modal-container``
+  on the table page by the "New grant" button's ``hx-get`` to
+  ``/ui/agents/grants/create``. The shared app-shell modal controller
+  opens the inserted ``<dialog>`` via ``showModal()`` on
+  ``htmx:afterSwap`` so it shows without an extra click and dismisses on
+  close button / ESC / backdrop (#1803).
+
+  Submit contract: the form ``hx-post``s to ``/ui/agents/grants/create``,
+  swapping ``#grants-modal-container`` (``hx-swap="innerHTML"``).
+    * Success -> 204 + ``HX-Redirect: /ui/agents/grants`` (reloads the
+      table with the new row).
+    * Validation failure (422 -- empty op_pattern, unknown verdict,
+      past / naive expires_at, bad target_scope UUID, or a duplicate
+      grant) -> the handler returns this same modal re-rendered with
+      ``errors`` populated and the operator's typed values echoed back;
+      HTMX replaces the container's dialog so the operator fixes the
+      field without losing their input.
+
+  CSRF: the form declares its own ``hx-headers`` echo of the token THIS
+  render minted; the route sets the matching ``meho_csrf`` cookie on the
+  same response so the double-submit pair lines up (#1693).
+-#}
+<dialog id="grants-create-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="grants-create-modal-title">Create grant</h3>
+    <p class="text-sm opacity-70 py-1">
+      Grant a principal a verdict for an op pattern. Leave the expiry
+      blank for a permanent grant.
+    </p>
+
+    <form
+      id="grants-create-form"
+      hx-post="/ui/agents/grants/create"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#grants-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="grants-create-modal-title"
+    >
+      {% include "agents/grants/_grant_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-create"
+          onclick="document.getElementById('grants-create-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="create-submit">
+          Create grant
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

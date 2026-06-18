@@ -155,16 +155,133 @@ async def test_k8s_apply_preview_none_without_connector() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_builder_op_yields_none() -> None:
-    """An op without a registered builder parks with no preview."""
+async def test_no_builder_credential_class_op_yields_none() -> None:
+    """A credential-class op with no builder still parks with no preview.
+
+    Since #1856 a no-builder op gets the generic params-echo default, but
+    the credential-class suppression runs *first*: ``vault.kv.put`` is
+    ``credential_write``, so it collapses to the identifier-only default
+    (caller fallback) rather than echoing its (secret-bearing) params.
+    """
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="vault.kv.put"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"path": "secret/data/x"},
+        params={"path": "secret/data/x", "data": {"k": "v"}},
     )
     assert await build_proposed_effect(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_no_builder_op_echoes_params() -> None:
+    """A non-credential op with no builder echoes its params (#1856).
+
+    Every approval-gated op gets param-level legibility for free: the
+    requested params land under a ``params_echo`` envelope key (distinct
+    from a computed ``preview``) tagged with the op's sensitivity class.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={"realm": "master", "displayName": "Master Realm", "enabled": True},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect == {
+        "op_class": "write",
+        "params_echo": {
+            "realm": "master",
+            "displayName": "Master Realm",
+            "enabled": True,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_builder_op_empty_params_yields_none() -> None:
+    """Empty params collapse to the identifier-only default (no echo).
+
+    An empty params dict carries no more legibility than the bare
+    identifier default, so the generic echo declines (returns ``None``)
+    rather than storing an empty ``params_echo``.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={},
+    )
+    assert await build_proposed_effect(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
+    """The generic echo scrubs secret-by-name params (#1856 redaction).
+
+    The connector-boundary engine matches secret *value* shapes but walks
+    a params Mapping key-by-key without inspecting the key, so a
+    structured ``{"password": "hunter2"}`` would otherwise echo verbatim.
+    The key-name scrub closes that gap -- recursively, including nested
+    dicts and lists -- while leaving non-secret params legible.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={
+            "username": "alice",
+            "password": "hunter2",
+            "client_secret": "s3cr3t",
+            "profile": {"email": "alice@example.com", "token": "raw-token-value"},
+            "credentials": [{"type": "password", "value": "nested-secret"}],
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    echo = effect["params_echo"]
+    # Non-secret params stay legible.
+    assert echo["username"] == "alice"
+    assert echo["profile"]["email"] == "alice@example.com"
+    # Secret-by-name params are masked, including nested keys + the whole
+    # ``credentials`` subtree.
+    assert echo["password"] == "***REDACTED***"
+    assert echo["client_secret"] == "***REDACTED***"
+    assert echo["profile"]["token"] == "***REDACTED***"
+    assert echo["credentials"] == "***REDACTED***"
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secret_value_shapes() -> None:
+    """The generic echo runs the connector-boundary value-shape scrub too.
+
+    A JWT in an *un*-credential-named param (so the key-name scrub misses
+    it) is still caught by the connector-boundary redaction engine -- the
+    same pipeline the response path and the dispatch-request preview use.
+    """
+    # Built by concatenation so the literal never forms a single
+    # high-entropy token the secret scanner flags (it is a fake fixture).
+    jwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghij"
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={"username": "alice", "note": jwt},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    echo = effect["params_echo"]
+    assert echo["username"] == "alice"
+    # The raw JWT never lands verbatim in the durable row.
+    assert jwt not in str(echo["note"])
 
 
 @pytest.mark.asyncio

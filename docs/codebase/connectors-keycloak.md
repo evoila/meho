@@ -221,6 +221,33 @@ Three load-bearing properties:
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
 
+### Park-time approval preview (#1857)
+
+Three of the write ops register bespoke `proposed_effect` preview builders
+in `connectors/keycloak/ops_write_preview.py`, wired onto the per-op hook
+(`operations/_preview.py`, #1437) by an import side-effect in the package
+`__init__`. They give the approval reviewer a resource-centric view at park
+time — secrets scrubbed via the same `redact_secret_fields` the read ops
+use:
+
+| op_id | preview keys |
+|---|---|
+| `keycloak.realm.create` | `{resource, realm, representation}` |
+| `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
+| `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+
+`keycloak.user.create` classifies as `credential_write`, so the *generic*
+params-echo default (#1856) is suppressed for it — but a bespoke builder is
+the deliberate exception (it owns its field discipline), so the user-create
+builder runs and scrubs the inline password
+(`representation.credentials[].value`) to `***REDACTED***` while the
+username stays visible. A Vault-sourced password (`password_secret_ref`) is
+a path, not a secret, so it is surfaced as `password_source: "vault"` + the
+ref. The other six write ops fall through to the generic params-echo
+default. The builders are pure (no connector I/O) and so fail-soft by
+construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
+hook" for the registry contract.
+
 ## Target configuration
 
 Base URL is `https://{host}[:{port}]` from `HttpConnector._base_url`. The

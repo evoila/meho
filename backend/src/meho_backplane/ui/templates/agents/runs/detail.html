@@ -1,0 +1,33 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Per-run detail page (Initiative #1824, Task #1830, G10.8-T3). Extends
+  ``base.html``. Renders the durable run state read via the in-process
+  invoker ``poll``: run id, status, turns, provider + model, the structured
+  ``output`` blob, and the ``error`` reason on a failed run.
+
+  The status panel (``_status_panel.html``) self-polls while the run is
+  non-terminal and renders statically once terminal -- a poll-after-the-fact
+  view, not the live SSE run console (#1829). The panel owns the
+  ``hx-trigger`` poll directive (emitted only while non-terminal), so this
+  page just embeds it.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agent run &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="space-y-1">
+    <a href="/ui/agents/runs" class="link link-hover text-sm opacity-70">&larr; Agent runs</a>
+    <h1 class="text-xl font-semibold flex items-center gap-3">
+      <span>Run</span>
+      <span class="font-mono text-sm opacity-70">{{ run.run_id }}</span>
+    </h1>
+  </header>
+
+  {# Status panel -- self-polling while non-terminal (see the fragment). #}
+  {% include "agents/runs/_status_panel.html" %}
+</section>
+{% endblock %}

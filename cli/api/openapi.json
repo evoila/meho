@@ -6027,6 +6027,60 @@
         }
       }
     },
+    "/api/v1/agents/runs/{handle}/cancel": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Cancel Run",
+        "description": "Cancel a non-terminal run by handle (the run id).\n\nTransitions a ``pending`` / ``running`` / ``awaiting_approval`` run to\n``cancelled`` through the shared\n:func:`~meho_backplane.operations.agent_run.cancel_run` service path --\nthe same terminal-transition the reaper writes, so the durable state\nand the ``agent_run.completed`` lifecycle event are produced by one\ncode path (no second status-write). The async loop is not torn down\nsynchronously: the durable cancel intent is recorded and the loop\nobserves it on its next turn boundary.\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants, matching the poll route). An already-terminal run -- including\none that *raced* to ``succeeded`` / ``failed`` between the operator's\nrequest and the write -- is 409, not a 500. A ``read_only`` operator is\nrejected by the route's role gate; the service's own role check is a\ndefence-in-depth backstop mapped to 403 should it ever fire.",
+        "operationId": "cancel_run_api_v1_agents_runs__handle__cancel_post",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{name}/run/events": {
       "post": {
         "tags": [

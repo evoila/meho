@@ -23,6 +23,12 @@ Route inventory
 * ``GET /api/v1/agents/runs/{handle}`` — poll a run's durable status.
   Returns :class:`AgentRunStatusResponse`; 404 for an unknown /
   cross-tenant handle. Role: ``operator``.
+* ``POST /api/v1/agents/runs/{handle}/cancel`` — cancel a non-terminal
+  run. Transitions a ``pending`` / ``running`` / ``awaiting_approval`` run
+  to ``cancelled`` via the shared ``cancel_run`` service path and returns
+  the updated :class:`AgentRunSummaryResponse`. 404 for an unknown /
+  cross-tenant handle; 409 for an already-terminal run. Role:
+  ``operator``.
 * ``GET /api/v1/agents/runs/{handle}/events`` — Server-Sent Events stream
   of a *fresh* run's events. **Note:** the handle path segment names the
   agent definition, not an existing run — an SSE stream drives a new run
@@ -74,6 +80,10 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations.agent_run import (
+    IllegalTransitionError,
+    UnauthorizedCancellationError,
+)
 
 __all__ = ["router"]
 
@@ -92,6 +102,7 @@ _RUN_OP_IDS: Final[dict[str, str]] = {
     "run": "agent.run",
     "status": "agent.run_status",
     "events": "agent.run_events",
+    "cancel": "agent.cancel_run",
 }
 
 #: Max length of the ``{name}`` path parameter — same defence-in-depth cap
@@ -382,6 +393,54 @@ async def get_run_status(
         output=view.output,
         error=view.error,
     )
+
+
+@router.post("/runs/{handle}/cancel", response_model=AgentRunSummaryResponse)
+async def cancel_run(
+    handle: uuid.UUID,
+    operator: Operator = _require_operator,
+) -> AgentRunSummaryResponse:
+    """Cancel a non-terminal run by handle (the run id).
+
+    Transitions a ``pending`` / ``running`` / ``awaiting_approval`` run to
+    ``cancelled`` through the shared
+    :func:`~meho_backplane.operations.agent_run.cancel_run` service path --
+    the same terminal-transition the reaper writes, so the durable state
+    and the ``agent_run.completed`` lifecycle event are produced by one
+    code path (no second status-write). The async loop is not torn down
+    synchronously: the durable cancel intent is recorded and the loop
+    observes it on its next turn boundary.
+
+    An unknown / cross-tenant handle is 404 (existence is not leaked across
+    tenants, matching the poll route). An already-terminal run -- including
+    one that *raced* to ``succeeded`` / ``failed`` between the operator's
+    request and the write -- is 409, not a 500. A ``read_only`` operator is
+    rejected by the route's role gate; the service's own role check is a
+    defence-in-depth backstop mapped to 403 should it ever fire.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_RUN_OP_IDS["cancel"],
+        audit_op_class="write",
+    )
+    invoker = get_agent_invoker()
+    try:
+        summary = await invoker.cancel(operator, handle)
+    except AgentRunNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="agent_run_not_found",
+        ) from exc
+    except UnauthorizedCancellationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="agent_run_cancel_forbidden",
+        ) from exc
+    except IllegalTransitionError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="agent_run_not_cancellable",
+        ) from exc
+    return _summary_response(summary)
 
 
 def _format_event(run_id: uuid.UUID, event: AgentRunEvent) -> str:

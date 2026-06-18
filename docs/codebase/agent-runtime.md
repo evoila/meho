@@ -205,18 +205,24 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
 
 - **REST** (`api/v1/agent_runs.py`): `POST /api/v1/agents/{name}/run`
   (200 with the result for a terminal sync run; 202 with a handle for async
-  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll), and
+  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll),
+  `POST /api/v1/agents/runs/{handle}/cancel` (cancel — #1828: transitions a
+  non-terminal run to `cancelled` via the shared `cancel_run` service path,
+  returns the updated `AgentRunSummaryResponse`; 404 for an unknown /
+  cross-tenant handle, 409 for an already-terminal run), and
   `POST /api/v1/agents/{name}/run/events` (SSE — `text/event-stream`, the
-  G6 broadcast-feed transport shape). The poll/events sub-paths are two
-  segments deep so they never collide with the one-segment `/{name}`
-  definition-CRUD routes.
+  G6 broadcast-feed transport shape). The poll/cancel/events sub-paths are
+  two-or-more segments deep so they never collide with the one-segment
+  `/{name}` definition-CRUD routes.
 - **MCP** (`mcp/tools/agent_runs.py`): `meho.agents.run` (sync/async via an
   `async` arg) + `meho.agents.run_status` (poll). SSE is REST-only; an MCP
-  caller polls. Both drive the same `AgentInvoker` singleton, so a run
-  started over MCP is poll-able over REST and vice versa.
+  caller polls. Cancel is REST/CLI-only (no MCP verb). Both drive the same
+  `AgentInvoker` singleton, so a run started over MCP is poll-able over REST
+  and vice versa.
 - **CLI** (`cli/internal/cmd/agent/run.go`, `run_status.go`,
-  `run_events.go`): `meho agent run <name> --input … [--async]`,
-  `meho agent run-status <handle>`, `meho agent run-events <name> --input …`.
+  `run_cancel.go`, `run_events.go`): `meho agent run <name> --input …
+  [--async]`, `meho agent run-status <handle>`, `meho agent run-cancel
+  <handle>` (#1828), `meho agent run-events <name> --input …`.
 
 All fronts require the `operator` role and are tenant-scoped via the JWT.
 

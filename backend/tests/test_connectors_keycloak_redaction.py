@@ -54,6 +54,40 @@ def test_scrubs_credential_value_and_data_fields() -> None:
     assert out["type"] == "password"
 
 
+def test_scrubs_smtp_server_password() -> None:
+    """A ``RealmRepresentation.smtpServer`` password (Map<String,String>) is scrubbed.
+
+    The smtp relay password rides under the ``password`` key of the smtp
+    map; the read ops claim to scrub any nested secret, so ``password`` must
+    be covered alongside the camelCase representation fields.
+    """
+    realm = {"realm": "meho", "smtpServer": {"host": "smtp.test", "password": "smtp-pass"}}
+    out = redact_secret_fields(realm)
+    assert out["smtpServer"]["host"] == "smtp.test"
+    assert out["smtpServer"]["password"] == REDACTED
+
+
+def test_scrubs_generic_credential_keys_case_insensitively() -> None:
+    """The generic credential spellings are scrubbed regardless of casing.
+
+    A representation is ``additionalProperties: true``, so a credential can
+    arrive under any of the well-known spellings and under any casing.
+    """
+    blob = {
+        "Password": "p",
+        "client_secret": "cs",
+        "TOKEN": "t",
+        "private_key": "pk",
+        "keep": "visible",
+    }
+    out = redact_secret_fields(blob)
+    assert out["Password"] == REDACTED
+    assert out["client_secret"] == REDACTED
+    assert out["TOKEN"] == REDACTED
+    assert out["private_key"] == REDACTED
+    assert out["keep"] == "visible"
+
+
 def test_input_not_mutated() -> None:
     """The scrub returns a new structure; the input is left untouched."""
     client = {"secret": "keep-me-original"}

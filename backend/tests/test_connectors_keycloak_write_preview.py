@@ -182,12 +182,16 @@ async def test_realm_create_preview_shows_realm_name() -> None:
     assert preview["resource"] == "realm"
     assert preview["realm"] == "meho-prod", "realm name must be visible"
     assert preview["representation"]["enabled"] is True
-    # A `password` nested in the smtp config is keyed `password` -- the
-    # keycloak read-op scrub matches `secret`/`credentials`/`value`/... not
-    # `password`, so the bespoke builder leaves it; the connector boundary
-    # would not normally place an smtp password here, but assert the realm
-    # name is the load-bearing visible field regardless.
-    assert "realm" in preview
+    # A `RealmRepresentation.smtpServer` is a Map<String,String> that stores
+    # the SMTP relay password under the `password` key, and the
+    # representation is `additionalProperties: true`. The bespoke builder
+    # MUST scrub it -- the durable approval row never holds a cleartext
+    # secret (#1857 acceptance criterion / B1 fix). Non-secret smtp fields
+    # (host) pass through so the reviewer still reads the smtp config.
+    smtp = preview["representation"]["smtpServer"]
+    assert smtp["host"] == "smtp.test"
+    assert smtp["password"] == REDACTED, "smtpServer.password must be redacted"
+    _no_secret_anywhere(effect, "smtp-pass")
 
 
 @pytest.mark.asyncio
@@ -208,6 +212,45 @@ async def test_realm_create_preview_redacts_nested_secret_field() -> None:
     assert preview["representation"]["clients"][0]["clientId"] == "web"
     assert preview["representation"]["clients"][0]["secret"] == REDACTED
     _no_secret_anywhere(effect, "client-secret-value")
+
+
+@pytest.mark.asyncio
+async def test_realm_create_preview_redacts_generic_credential_keys() -> None:
+    """`password`-class keys land anywhere in the additionalProperties body.
+
+    A representation is ``additionalProperties: true``, so a credential can
+    arrive under any of the generic credential spellings and under any
+    casing. The bespoke builder must be at least as strict as the generic
+    params-echo default it bypasses, so every such key is scrubbed.
+    """
+    ctx = _ctx(
+        "keycloak.realm.create",
+        {
+            "representation": {
+                "realm": "meho",
+                "enabled": True,
+                # camelCase smtp map password (already covered) + a few of
+                # the generic credential spellings, including mixed casing
+                # to prove the match is case-insensitive.
+                "smtpServer": {"host": "smtp.test", "Password": "smtp-pass-mixed"},
+                "attributes": {
+                    "token": "tok-leak",
+                    "client_secret": "cs-leak",
+                    "private_key": "pk-leak",
+                },
+            }
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    assert preview["representation"]["smtpServer"]["host"] == "smtp.test"
+    assert preview["representation"]["smtpServer"]["Password"] == REDACTED
+    attrs = preview["representation"]["attributes"]
+    assert attrs["token"] == REDACTED
+    assert attrs["client_secret"] == REDACTED
+    assert attrs["private_key"] == REDACTED
+    _no_secret_anywhere(effect, "smtp-pass-mixed", "tok-leak", "cs-leak", "pk-leak")
 
 
 # ---------------------------------------------------------------------------

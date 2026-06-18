@@ -178,11 +178,17 @@ op first.
 Every handler runs its response through `redact_secret_fields` before
 returning, so the value of `secret` (confidential-client secret),
 `credentials` / `value` / `secretData` / `credentialData` (user
-credential material) is replaced with `***REDACTED***` — recursively,
-including secrets nested inside protocol mappers or identity-provider
-configs. The scrub happens at the connector boundary (not the broadcast
-layer) because these are config reads where the secret is incidental: it
-must never enter the synchronous `OperationResult` the caller receives.
+credential material), **and** the generic credential key spellings
+(`password` / `client_secret` / `token` / `private_key` / … — the same set
+the generic params-echo default scrubs) is replaced with `***REDACTED***`
+— recursively and case-insensitively, including secrets nested inside
+protocol mappers, identity-provider configs, or a `smtpServer` map. The
+`password` coverage matters because a `RealmRepresentation.smtpServer` is a
+`Map<String,String>` carrying the SMTP relay password under the `password`
+key, and a representation is `additionalProperties: true`. The scrub
+happens at the connector boundary (not the broadcast layer) because these
+are config reads where the secret is incidental: it must never enter the
+synchronous `OperationResult` the caller receives.
 The write surface redacts secret *inputs* at the classification layer per
 the general posture (see "Write ops" below).
 
@@ -241,9 +247,15 @@ params-echo default (#1856) is suppressed for it — but a bespoke builder is
 the deliberate exception (it owns its field discipline), so the user-create
 builder runs and scrubs the inline password
 (`representation.credentials[].value`) to `***REDACTED***` while the
-username stays visible. A Vault-sourced password (`password_secret_ref`) is
-a path, not a secret, so it is surfaced as `password_source: "vault"` + the
-ref. The other six write ops fall through to the generic params-echo
+username stays visible. Because `redact_secret_fields` also covers the
+generic credential key names (notably `password`, case-insensitively), the
+bespoke builders are at least as strict as the generic echo they bypass: a
+`RealmRepresentation.smtpServer.password` (or any `password`-keyed field
+anywhere in an `additionalProperties` representation) is scrubbed too, so no
+cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
+password (`password_secret_ref`) is a path, not a secret, so it is surfaced
+as `password_source: "vault"` + the ref. The other six write ops fall
+through to the generic params-echo
 default. The builders are pure (no connector I/O) and so fail-soft by
 construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
 hook" for the registry contract.

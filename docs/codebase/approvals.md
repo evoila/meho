@@ -405,7 +405,13 @@ populates `{resource, username, realm, representation}` (the inline
 password scrubbed to `***REDACTED***` via the connector's own
 `redact_secret_fields` — and it runs *despite* `keycloak.user.create`
 classifying as `credential_write`, the bespoke-builder exception to
-invariant 3), and `keycloak.role_mapping.assign` populates
+invariant 3). `redact_secret_fields` covers the Keycloak representation
+secret fields *and* the generic credential key spellings (notably
+`password`, case-insensitively), so the bespoke builders are at least as
+strict as the generic echo they bypass — a
+`RealmRepresentation.smtpServer.password` (or any `password`-keyed field
+in an `additionalProperties` representation) never reaches the durable
+row. `keycloak.role_mapping.assign` populates
 `{resource, username, id, realm, granted_roles}` (the granted realm role
 names). Further connectors register their own builders as needed.
 

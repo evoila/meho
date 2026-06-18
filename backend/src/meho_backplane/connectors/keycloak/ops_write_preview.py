@@ -44,12 +44,19 @@ Two of these ops carry secret material in their request params:
 
 Each builder runs the representation through
 :func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`
-— the *same* single-sourced scrub the read ops use — which replaces
-``secret`` / ``credentials`` / ``value`` / ``secretData`` /
-``credentialData`` (scalar or subtree) with ``***REDACTED***`` wherever they
-appear, recursively. So the durable approval row surfaces the resource
-shape (username, email, enabled, attributes, realm config) without any
-secret value ever landing in it.
+— the *same* single-sourced scrub the read ops use — which replaces the
+Keycloak representation secret fields (``secret`` / ``credentials`` /
+``value`` / ``secretData`` / ``credentialData``) **and** the generic
+credential param spellings (``password`` / ``client_secret`` / ``token`` /
+… — the same set the generic params-echo default scrubs) with
+``***REDACTED***`` wherever they appear, recursively and
+case-insensitively. The ``password`` coverage matters because a
+``RealmRepresentation.smtpServer`` is a ``Map<String,String>`` carrying the
+SMTP relay password under the ``password`` key, and a representation is
+``additionalProperties: true``. So the durable approval row surfaces the
+resource shape (username, email, enabled, attributes, realm config)
+without any secret value ever landing in it — and the bespoke builders are
+at least as strict as the generic echo they bypass.
 
 Because ``keycloak.user.create`` classifies as ``credential_write``
 (:data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`), the

@@ -65,6 +65,7 @@ from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
+from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
@@ -78,6 +79,7 @@ __all__ = [
     "build_memory_router",
     "build_router",
     "build_runbooks_router",
+    "build_scheduler_router",
     "build_stubs_router",
     "build_topology_router",
 ]
@@ -117,5 +119,11 @@ def build_router() -> APIRouter:
     router.include_router(build_corpus_router())
     router.include_router(build_runbooks_router())
     router.include_router(build_approvals_router())
+    # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +
+    # the literal ``/ui/scheduler/create`` + ``/ui/scheduler/validate-cron``
+    # + ``/ui/scheduler/{id}/cancel`` write routes (G10.8-T6 #1826); the
+    # literal-prefix routes register before the ``{trigger_id}`` detail
+    # route inside that router so ``"create"`` is never bound as an id.
+    router.include_router(build_scheduler_router())
     router.include_router(build_stubs_router())
     return router

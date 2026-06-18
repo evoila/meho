@@ -1,0 +1,82 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded terminal-cancel confirm modal for the Scheduler surface
+  (Initiative #1824 Task #1826 G10.8-T6). Loaded into
+  ``#scheduler-modal-container`` by a "Cancel" button's ``hx-get`` to
+  ``/ui/scheduler/{id}/cancel`` (list row or detail page). The shared
+  app-shell modal controller opens the inserted ``<dialog>`` via
+  ``showModal()`` on swap and dismisses on close / ESC / backdrop (#1803).
+
+  Cancel is the scheduler's emergency stop: the transition is **terminal**
+  and there is no un-cancel path. So the dialog spells out the
+  irreversibility explicitly before the operator commits -- the row is kept
+  for audit, but the schedule will never fire again.
+
+  Submit contract: the form ``hx-post``s to ``/ui/scheduler/{id}/cancel``,
+  swapping ``#scheduler-modal-container``.
+    * Success -> 204 + ``HX-Redirect: /ui/scheduler`` (back to the list
+      with the trigger now ``cancelled``).
+    * 409 (already fired) -> this dialog re-rendered with the typed banner.
+
+  CSRF: the form carries its own ``hx-headers`` echo of the token; the
+  route re-mints + re-sets the ``meho_csrf`` cookie on render (#1693).
+-#}
+<dialog id="scheduler-cancel-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg text-error" id="scheduler-cancel-modal-title">
+      Cancel scheduled trigger?
+    </h3>
+
+    {% if error_message %}
+      <div role="alert" class="alert alert-error text-sm mt-2">
+        <span>{{ error_message }}</span>
+      </div>
+    {% endif %}
+
+    <div class="py-2 space-y-2 text-sm">
+      <p>
+        You are about to cancel this trigger:
+      </p>
+      <p class="font-mono text-xs bg-base-200 rounded p-2">
+        {{ schedule_summary }} &middot; currently <strong>{{ status }}</strong>
+      </p>
+      <div role="alert" class="alert alert-warning text-xs">
+        <span>
+          <strong>This is permanent.</strong> Cancelling is terminal — there
+          is no un-cancel. The row is kept for audit, but the schedule will
+          never fire again.
+        </span>
+      </div>
+    </div>
+
+    <form
+      id="scheduler-cancel-form"
+      hx-post="/ui/scheduler/{{ trigger_id }}/cancel"
+      hx-target="#scheduler-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      class="space-y-2"
+      aria-labelledby="scheduler-cancel-modal-title"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-cancel"
+          onclick="document.getElementById('scheduler-cancel-modal').close()"
+        >
+          Keep trigger
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="cancel-submit">
+          Cancel permanently
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

@@ -1,0 +1,27 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Live cron-validation + next-fire preview fragment (Task #1826). Rendered
+  by ``POST /ui/scheduler/validate-cron`` and swapped into
+  ``#scheduler-cron-preview`` on each debounced keystroke in the create
+  modal's cron <input>.
+
+  Three states:
+    * empty expression -> a neutral hint (the operator is still typing).
+    * invalid expression / bad timezone -> the typed error so the operator
+      fixes it before submit.
+    * valid -> a success line with the computed ``next_fire_at`` (UTC, the
+      column's storage tz) so the operator confirms the schedule fires when
+      they expect.
+-#}
+{% if not cron_expr %}
+  <span class="opacity-60">Enter a 5-field cron expression to preview the next fire.</span>
+{% elif error %}
+  <span class="text-error" data-cron-valid="false">{{ error }}</span>
+{% elif valid %}
+  <span class="text-success" data-cron-valid="true">
+    Valid — next fire
+    {% if next_fire_at %}<span class="font-mono">{{ next_fire_at.isoformat() }}</span>{% endif %}
+  </span>
+{% endif %}

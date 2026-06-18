@@ -33,6 +33,7 @@ from meho_backplane.operations.ingest import (
     InvalidSpecError,
     LlmOutputInvalid,
     OpIdCollision,
+    ProductImplIdMismatch,
     UncoveredVersionLabel,
     UnsupportedSpecError,
     UpstreamNotSpecError,
@@ -41,6 +42,7 @@ from meho_backplane.operations.ingest import (
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -123,7 +125,11 @@ def _model_dump_json_safe(model: Any) -> dict[str, Any]:
 #: :mod:`meho_backplane.mcp.tools.connector_ingest` and the dispatch table
 #: can't fall out of sync — adding a sibling means touching both.
 #: ``VersionMismatchError`` / ``UncoveredVersionLabel`` are the #777
-#: originals; the remaining six complete the pattern (#1534).
+#: originals; the next six complete the pattern (#1534);
+#: ``ProductImplIdMismatch`` joins them (#1817) — when the round-trip
+#: guard moved into ``IngestionPipelineService.ingest`` so the MCP path
+#: fails closed too, surfacing the divergence as a structured ``-32602``
+#: rather than a silent persist (it never reached this tool before).
 SPEC_ERROR_TYPES: Final = (
     VersionMismatchError,
     UncoveredVersionLabel,
@@ -133,6 +139,7 @@ SPEC_ERROR_TYPES: Final = (
     InvalidSpecError,
     OpIdCollision,
     LlmOutputInvalid,
+    ProductImplIdMismatch,
 )
 
 
@@ -178,6 +185,8 @@ def raise_invalid_params_for_spec_error(exc: Exception) -> None:
         data = build_op_id_collision_detail(exc)
     elif isinstance(exc, LlmOutputInvalid):
         data = build_llm_output_invalid_detail(exc)
+    elif isinstance(exc, ProductImplIdMismatch):
+        data = build_product_impl_id_mismatch_detail(exc)
     else:  # pragma: no cover — defensive; caller funnels only SPEC_ERROR_TYPES
         raise exc
     raise McpInvalidParamsError(str(exc), data=data) from exc

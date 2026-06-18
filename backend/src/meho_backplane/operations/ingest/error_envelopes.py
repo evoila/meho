@@ -44,6 +44,7 @@ from meho_backplane.operations.ingest.exceptions import (
     InvalidSpecError,
     LlmOutputInvalid,
     OpIdCollision,
+    ProductImplIdMismatch,
     UncoveredVersionLabel,
     UnsupportedSpecError,
     VersionMismatchError,
@@ -59,6 +60,7 @@ __all__ = [
     "build_invalid_spec_detail",
     "build_llm_output_invalid_detail",
     "build_op_id_collision_detail",
+    "build_product_impl_id_mismatch_detail",
     "build_uncovered_version_label_detail",
     "build_unsupported_spec_detail",
     "build_upstream_not_spec_detail",
@@ -359,6 +361,36 @@ def build_uncovered_version_label_detail(
             }
             for cand_version, cand_impl_id, class_name, supported_range in exc.candidates
         ],
+        "message": str(exc),
+    }
+
+
+def build_product_impl_id_mismatch_detail(
+    exc: ProductImplIdMismatch,
+) -> dict[str, Any]:
+    """Structured detail for :class:`ProductImplIdMismatch`.
+
+    Body shape (load-bearing — the CLI, the REST 422 contract, and the
+    MCP-driving agent all parse it; the field set is the verbatim
+    envelope the REST boundary shipped before the guard moved to the
+    service layer in #1817, so the wire contract is unchanged):
+
+    * ``kind`` — the stable ``"product_impl_id_mismatch"`` classifier so
+      a client branches without re-parsing the message.
+    * ``product`` / ``version`` / ``impl_id`` — the connector triple the
+      operator submitted.
+    * ``derived_product`` — the dispatch-canonical product the
+      ``connector_id`` parses to; the spelling the operator must switch
+      to (or make ``impl_id`` derive) for the rows to be dispatchable.
+    * ``message`` — the rendered exception string, for clients that
+      ignore the structured fields.
+    """
+    return {
+        "kind": "product_impl_id_mismatch",
+        "product": exc.product,
+        "version": exc.version,
+        "impl_id": exc.impl_id,
+        "derived_product": exc.derived_product,
         "message": str(exc),
     }
 

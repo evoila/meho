@@ -755,73 +755,73 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
   `<p>` is the **registry** product (the spelling the connector class
-  registers under, e.g. `sddc-manager`), not the parser-derived short one.
-  Rationale calls out the missing catalog entry so the operator knows
-  they need to source the OpenAPI spec themselves. Manual mode is the
-  same path G0.7-T5 already supports for one-off / not-yet-curated specs
-  (see `ingest.go`'s mode dispatch). The registry product is the right
-  spelling because the ingest write path keys two safety steps on the
-  supplied `--product` — `check_version_covered_by_registered_class`
-  (the version-coverage pre-flight) and `ensure_connector_class_registered`
-  — so the registry product is what lets them find the real
-  `SddcManagerConnector`; the short `sddc` would miss it, synthesise a
-  redundant `AutoShim_sddc_*`, and make the coverage pre-flight vacuous.
-  Register-time row reconciliation then persists the rows under the
-  dispatch product regardless (see "Product-slug reconciliation" below),
-  so the verb still round-trips to a dispatchable ingest. (Emitting the
-  registry product while the row advertised `product="sddc"` *was* the
-  claude-rdc-hetzner-dc#1136 false-success **before** that reconciliation
-  existed — the reconciliation is what closes it, not switching the verb
-  to the short product.)
+  registers under, e.g. `sddc`). Rationale calls out the missing catalog
+  entry so the operator knows they need to source the OpenAPI spec
+  themselves. Manual mode is the same path G0.7-T5 already supports for
+  one-off / not-yet-curated specs (see `ingest.go`'s mode dispatch). The
+  registry product is the right spelling because the ingest write path
+  keys two safety steps on the supplied `--product` —
+  `check_version_covered_by_registered_class` (the version-coverage
+  pre-flight) and `ensure_connector_class_registered` — so it must find
+  the real `SddcManagerConnector`. Post-#1814 the registry product
+  *equals* the parser-derived product (the family was realigned to short,
+  dispatch-canonical tokens), so the emitted `--product` round-trips its
+  connector_id and the ingest is dispatchable directly — no register-time
+  reconciliation. (Before #1814 the registry product was a long token
+  like `sddc-manager` while rows reconciled down to `sddc`; #1817 retired
+  that bridge once the family realigned. A divergent `--product` is now
+  rejected at the ingest boundary with a `422`; see "Product identity at
+  the ingest boundary" below.)
 
-The **catalog lookup** uses the **registry's** `(product, version)`,
-not the parser-derived shortening. The SDDC case is canonical: the
-catalog stores `product="sddc-manager"`, the listing emits
-`product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
-because that is what `meho connector ingest --catalog ...` resolves
-against. Looking up the parsed product would always miss for SDDC. Both
-the catalog-hit and catalog-miss branches emit a registry-side
-`--product` (the catalog-native triple, or the registry product) so the
-operator's ingest matches the registered class; register-time row
-reconciliation is what keeps the resulting connector dispatchable.
+The **catalog lookup** uses the **registry's** `(product, version)`.
+Post-#1814 that equals the parser-derived product for every connector
+(the catalog stores `product="sddc"` and the listing emits `"sddc"`),
+so `--catalog sddc/9.0` resolves cleanly and the operator's ingest
+matches the registered class and dispatches without any reconciliation.
 
-#### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
+#### Product identity at the ingest boundary (claude-rdc-hetzner-dc#1136, Initiative #1810)
 
-The remaining VCF-family connectors register their class under a *long*
-product (`SddcManagerConnector.product = "sddc-manager"`) while the
-dispatch/query surface derives a *short* product from the connector_id
-(`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the registry and
-dispatch spellings diverge. The five splits are
+The dispatch/query surface derives the product from the connector_id
+(`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the only product
+spelling that dispatches is the one the connector_id round-trips to.
+Historically the VCF family registered under a *long* product
+(`SddcManagerConnector.product = "sddc-manager"`) that diverged from
+that derived spelling, so an ingest under the long product landed rows
+the dispatcher never queried — the listing's round-trip integrity gate
+dropped them and the catalog reported `registered, 0 ops` even though
+the rows existed. The six historical splits were
 `hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
-`vcf-fleet/fleet`, `vcf-operations/vrops`. vRLI (`vrli-rest`) used to
-be a sixth split (`vcf-logs/vrli`); #1798 realigned it to a single
-canonical `product="vrli"` so it round-trips without reconciliation,
-and realigning the remaining five is deferred to Initiative #1810.
+`vcf-fleet/fleet`, `vcf-operations/vrops`, and `vcf-logs/vrli`.
 
-A manual `--spec` ingest persists `endpoint_descriptor` /
-`operation_group` rows keyed on the **operator-supplied** product, but
-the dispatch/query surface (`connector_exists` /
-`search_operations` / `list_operation_groups`) keys on the short,
-parser-derived product. Ingesting under the long product therefore
-landed rows the dispatcher never queried — the listing's round-trip
-integrity gate dropped them and the catalog reported
-`registered, 0 ops` even though the rows existed.
+That divergence is now **closed at the source**, not bridged:
 
-`register_ingested_operations` reconciles this: it normalises the row
-product to the dispatch-canonical spelling
-(`_reconciled_row_product` → `dispatch_product` in
-`operations/_lookup.py`) before persisting descriptors, and the
-pipeline's grouping pass keys on the same spelling so descriptors and
-groups agree. The version-coverage pre-flight and the auto-shim
-registration deliberately stay on the **supplied** (registry) product
-so the coverage check finds the real `SddcManagerConnector` class and no
-redundant shim is synthesised. For aligned connectors
-(`vmware`/`vmware-rest`) the normalisation is a no-op. Regression
+- #1798 realigned vRLI and #1814 (Initiative #1810) realigned the other
+  five so every connector registers under its short, dispatch-canonical
+  product directly.
+- #1816 promoted `register_connector_v2`'s product↔impl_id round-trip
+  check to a hard-fail, so a connector can no longer register under a
+  divergent product at all.
+- #1817 added a round-trip guard at the ingest route boundary
+  (`_assert_product_round_trips` in `api/v1/connectors_ingest.py`) that
+  rejects a supplied product not equal to the connector_id's
+  parser-derived product with a `422 product_impl_id_mismatch`, before
+  any spec is fetched or row written. With divergent ingests rejected
+  up front, the old register-time row reconciliation
+  (`_reconciled_row_product` / `dispatch_product`) became dead and was
+  retired: `register_ingested_operations` now persists rows under the
+  supplied product verbatim, and the grouping pass keys on the same
+  spelling.
+
+So the supplied product is the dispatch-canonical product on every
+accepted ingest — descriptors, groups, the auto-shim, and the
+version-coverage pre-flight all key on one spelling. Regression
 coverage:
-`tests/test_operations_register_ingested.py::test_ingest_under_registry_product_persists_dispatchable_rows`
-(parametrised over all five splits) and
-`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`
-(the verb round-trip).
+`tests/test_operations_register_ingested.py::test_aligned_product_ingest_persists_supplied_product`,
+`::test_divergent_product_ingest_trips_registration_hard_fail` (the
+backstop), the boundary 422 in
+`tests/test_api_v1_connectors_ingest.py::test_ingest_divergent_product_rejected_with_422`,
+and the verb round-trip in
+`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`.
 
 #### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
 
@@ -1430,8 +1430,9 @@ Both delegate to `ReviewService.delete_connector`
   `state="registered"` listing row instead.
 * **Zero-op stubs are registry-only deletes.** No rows anywhere + a
   matching auto-shim → pop + audit + 204. The registry match uses the
-  parsed-natural-key round-trip, so the VCF-family long↔short product
-  splits resolve (`sddc` rows ↔ `sddc-manager`-registered shim).
+  parsed-natural-key round-trip; post-#1814 every connector (and its
+  auto-shim) registers under the short, dispatch-canonical product, so
+  the rows and the shim share one spelling (`sddc` rows ↔ `sddc` shim).
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.

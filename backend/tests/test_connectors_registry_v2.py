@@ -408,72 +408,56 @@ def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> No
     connector still did, this would raise :exc:`RuntimeError`, which is
     exactly the early-warning the promotion buys.
 
-    To make the assertion exercise the registration side effects
-    *deterministically regardless of import history*, the connector
-    subpackage modules are evicted from ``sys.modules`` and the registry
-    is cleared before the eager import, so every module body re-executes
-    its ``register_connector*`` call under the hard-fail in this test —
-    rather than being a no-op against the conftest-cached imports. The
-    modules are restored afterward so eviction does not leak into other
-    tests (autouse ``_clean_registry`` + conftest's
-    ``_isolate_global_registries`` restore the registry contents; this
-    restores the import cache the eviction touched).
+    Runs in a **fresh subprocess** rather than evicting + re-importing the
+    connector subpackages in-process. The re-import re-executes every
+    connector module body, which re-populates module-level aggregate
+    registries that live *outside* the connector subpackages — notably the
+    composite preview-builder maps (``vmware_rest``'s
+    ``_WRITE_PREVIEW_BUILDERS`` and the central ``_PREVIEW_BUILDERS``,
+    argocd's equivalents, …) — with FRESH function objects. An in-process
+    re-import therefore leaks those fresh builders into whichever connector
+    preview test xdist later schedules on the same worker, breaking its
+    ``builder is registered`` identity assertion (observed as the vmware
+    ``_vm_create_preview`` and argocd ``park_*`` preview flakes —
+    scheduling-dependent in which victim fires). A subprocess has its own
+    interpreter, so this one-time re-execution cannot mutate the worker's
+    globals at all — the boot path is exercised in true isolation, exactly
+    once, the way the chassis lifespan runs it.
     """
+    import subprocess
     import sys
+    import textwrap
 
-    import meho_backplane.connectors as conn_pkg
-    from meho_backplane.connectors.registry import _eager_import_connectors
-
-    prefix = f"{conn_pkg.__name__}."
-    # Evict the per-connector subpackage modules (not the registry / base /
-    # adapters modules) so their top-level register_connector* side effects
-    # re-fire on re-import.
-    evicted = {
-        name: module
-        for name, module in list(sys.modules.items())
-        if name.startswith(prefix)
-        and not name.startswith(
-            (
-                f"{prefix}registry",
-                f"{prefix}base",
-                f"{prefix}resolver",
-                f"{prefix}schemas",
-                f"{prefix}adapters",
-            )
+    # A divergent connector trips _assert_product_impl_id_round_trips at its
+    # module-level registration -> RuntimeError -> non-zero exit in the child.
+    script = textwrap.dedent(
+        """
+        from meho_backplane.connectors.registry import (
+            _eager_import_connectors,
+            registered_product_tokens,
         )
-    }
-    for name in evicted:
-        del sys.modules[name]
-    clear_registry()
-    try:
-        # Raises RuntimeError if any connector diverges — a clean return is
-        # the assertion. Every shipped connector's module-level registration
-        # re-runs here against the freshly-cleared registry.
+
         _eager_import_connectors()
 
-        # The registry is populated (the lifespan path produced a usable
-        # table) and the canonical split-family tokens are present under
-        # their short, round-tripping spelling — the realignment that makes
-        # the hard-fail safe.
         tokens = registered_product_tokens()
         assert tokens, "expected connectors to self-register at import"
-        assert {"sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"} <= tokens
-    finally:
-        # Restore the import cache so the eviction is invisible to later tests;
-        # the registry contents are restored by the autouse fixtures.
-        sys.modules.update(evicted)
-        # _eager_import_connectors re-imported the evicted subpackages, creating
-        # FRESH module objects that it also bound as child attributes on their
-        # parent packages. The update() above restores the ORIGINAL objects into
-        # sys.modules, but the parent-package attrs still point at the fresh ones
-        # — a desync that makes a later importlib.reload of any of these modules
-        # fail with "ImportError: module ... not in sys.modules". Rebind each
-        # original onto its parent package to fully undo the re-import.
-        for _name, _module in evicted.items():
-            _parent_name, _, _child = _name.rpartition(".")
-            _parent = sys.modules.get(_parent_name)
-            if _parent is not None and _child:
-                setattr(_parent, _child, _module)
+        required = {"sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"}
+        missing = required - tokens
+        assert not missing, f"canonical split-family tokens missing: {sorted(missing)}"
+        print("BOOT_CLEAN_OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0 and "BOOT_CLEAN_OK" in result.stdout, (
+        "eager import of all shipped connectors did not boot clean "
+        f"(exit={result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------

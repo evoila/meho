@@ -1026,6 +1026,28 @@ sibling `value="{{ op_id_filter }}"` is in an autoescaped attribute
 and parse the response to assert no handler grafts onto an `x-data`
 element.
 
+**The runbook editor island (G2.x #100, Goal #87 security review).** The
+runbook authoring editor (`runbooks/editor.html`) was the lone
+data-bearing `x-data` that never received the PR #1044 hardening: it
+interpolated `initialSteps: {{ initial_steps_json | safe }}` (the `safe`
+filter disables autoescape entirely, and the upstream `json.dumps` leaves
+`"` raw) plus `| tojson` scalars (`slug` / `title` / `description` /
+`target_kind`) inside a **double-quoted** `x-data="…"`. Any runbook field
+(`OperationCallStep`/`ManualStep` `title`/`body`, `RunbookTemplateBody`
+`title`/`description`) containing a `"` broke out — a stored XSS on
+`GET /ui/runbooks/{slug}/edit` and a reflected XSS on the
+`POST /ui/runbooks/new` 422 re-render, both in an authenticated
+`tenant_admin`'s session. The fix is the canonical one: single-quote the
+attribute (`x-data='runbookEditor({…})'`) and render the step tree with
+`{{ form_steps | tojson }}` over the raw list (`build_editor_context` no
+longer `json.dumps`-es it), so every field — `"` bytes included — stays
+inert inside the value. This was the last `| safe` in an HTML-attribute
+context under `ui/templates/`; the single-quoted `x-data` + `| tojson`
+pair is now the canonical UI output-encoding rule for any template
+binding untrusted data into Alpine. Regression coverage lives in
+`test_ui_runbooks_editor.py` (stored + reflected paths), reusing the
+`_assert_no_xss_breakout` parser harness from `test_ui_broadcast_filters.py`.
+
 ### Cross-tenant isolation
 
 The page carries no tenant data beyond the operator's own identity; live

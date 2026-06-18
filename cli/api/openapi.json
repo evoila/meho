@@ -10635,6 +10635,368 @@
         }
       }
     },
+    "/ui/scheduler": {
+      "get": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler List",
+        "description": "Serve ``GET /ui/scheduler``. See module docstring for the URL contract.",
+        "operationId": "ui_scheduler_list_ui_scheduler_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/KindFilterValue",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/StatusFilterValue",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/scheduler/create": {
+      "get": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler Create Modal",
+        "description": "``GET /ui/scheduler/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_scheduler_create_modal_ui_scheduler_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler Create Submit",
+        "description": "``POST /ui/scheduler/create`` -- create one trigger via the in-process service.",
+        "operationId": "ui_scheduler_create_submit_ui_scheduler_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_scheduler_create_submit_ui_scheduler_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/scheduler/validate-cron": {
+      "post": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler Validate Cron",
+        "description": "``POST /ui/scheduler/validate-cron`` -- live validate + next-fire preview.\n\nTenant_admin-gated (it is part of the create flow); the operator\nargument is the gate only. Reuses the same croniter-backed helpers the\nwire schema validates with so the preview is byte-exact with submit.",
+        "operationId": "ui_scheduler_validate_cron_ui_scheduler_validate_cron_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/scheduler/{trigger_id}/cancel": {
+      "get": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler Cancel Modal",
+        "description": "``GET /ui/scheduler/{id}/cancel`` -- HTMX-loaded terminal-confirm modal.",
+        "operationId": "ui_scheduler_cancel_modal_ui_scheduler__trigger_id__cancel_get",
+        "parameters": [
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Trigger Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Ui Scheduler Cancel Submit",
+        "description": "``POST /ui/scheduler/{id}/cancel`` -- cancel one trigger (terminal).",
+        "operationId": "ui_scheduler_cancel_submit_ui_scheduler__trigger_id__cancel_post",
+        "parameters": [
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Trigger Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/scheduler/{trigger_id}": {
+      "get": {
+        "tags": [
+          "ui-scheduler"
+        ],
+        "summary": "Scheduler Detail",
+        "description": "Render the per-trigger detail page (full row + cancel affordance).",
+        "operationId": "scheduler_detail_ui_scheduler__trigger_id__get",
+        "parameters": [
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Trigger Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",
@@ -12450,6 +12812,89 @@
           "to"
         ],
         "title": "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+      },
+      "Body_ui_scheduler_create_submit_ui_scheduler_create_post": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": "cron"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "title": "Agent Definition Id",
+            "default": ""
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "fire_at": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Fire At"
+          },
+          "event_filter": {
+            "type": "string",
+            "maxLength": 16384,
+            "nullable": true,
+            "title": "Event Filter"
+          },
+          "inputs": {
+            "type": "string",
+            "maxLength": 16384,
+            "nullable": true,
+            "title": "Inputs"
+          },
+          "in_flight_policy": {
+            "type": "string",
+            "title": "In Flight Policy",
+            "default": "fail_into_audit"
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_scheduler_create_submit_ui_scheduler_create_post"
+      },
+      "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post": {
+        "properties": {
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Cron Expr",
+            "default": ""
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
       },
       "BroadcastOverrideCreate": {
         "properties": {
@@ -14658,6 +15103,16 @@
         "title": "KbListResponse",
         "description": "Response envelope for ``GET /api/v1/kb``.\n\nWrapped in ``{\"entries\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.connectors_ingest` adopted for its\nlist response. Per-entry shape matches :class:`KbEntryPreview`;\nthe body is truncated to a 200-char preview so a casual\n``meho kb list`` does not stream every entry's full body."
       },
+      "KindFilterValue": {
+        "type": "string",
+        "enum": [
+          "cron",
+          "one_off",
+          "event"
+        ],
+        "title": "KindFilterValue",
+        "description": "Closed enum of the trigger ``kind`` values exposed in the filter URL.\n\nMirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`\nliteral (``cron`` / ``one_off`` / ``event``). The ``str`` mixin keeps\nthe template's ``{{ kind_filter }}`` rendering + ``selected`` matching\nstable, and an out-of-enum value fails Pydantic validation at the HTTP\nboundary with a 422 rather than silently filtering nothing."
+      },
       "ManualStep": {
         "properties": {
           "id": {
@@ -16567,6 +17022,17 @@
         ],
         "title": "StartRunRequest",
         "description": "Request body for ``meho.runbook.start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty.\n\n:attr:`work_ref` is the optional opaque external change-ticket\nreference (a GitHub issue ``\"gh:evoila/meho#9\"``, a Jira key, a CR\nid) the run executes under. It is pinned on the run row at start and\nbound onto the shared ``work_ref_var`` ContextVar around each step's\ndispatch so every ``operation_call`` step's audit row inherits it\n(work_ref I3-T1 #1661). ``None`` when the run is started without a\nchange ticket."
+      },
+      "StatusFilterValue": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "cancelled",
+          "fired"
+        ],
+        "title": "StatusFilterValue",
+        "description": "Closed enum of the trigger ``status`` values exposed in the filter URL.\n\nMirrors :data:`~meho_backplane.scheduler.schemas.StatusFilter`."
       },
       "StepBody": {
         "properties": {

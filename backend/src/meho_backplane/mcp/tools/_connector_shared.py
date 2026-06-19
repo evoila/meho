@@ -24,11 +24,12 @@ modules — the single-source discipline #407 called out for the
 from __future__ import annotations
 
 import json
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 from uuid import UUID
 
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     InvalidSchemaError,
     InvalidSpecError,
     LlmOutputInvalid,
@@ -38,6 +39,7 @@ from meho_backplane.operations.ingest import (
     UnsupportedSpecError,
     UpstreamNotSpecError,
     VersionMismatchError,
+    build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
@@ -190,3 +192,31 @@ def raise_invalid_params_for_spec_error(exc: Exception) -> None:
     else:  # pragma: no cover — defensive; caller funnels only SPEC_ERROR_TYPES
         raise exc
     raise McpInvalidParamsError(str(exc), data=data) from exc
+
+
+def raise_invalid_params_for_ambiguous_scope(
+    exc: AmbiguousConnectorScopeError,
+) -> NoReturn:
+    """Map :class:`AmbiguousConnectorScopeError` onto :class:`McpInvalidParamsError`.
+
+    The two scope-resolving curation tools (``meho.connector.review`` /
+    ``meho.connector.enable_reads``) raise this when one ``connector_id``
+    maps to **both** a tenant-curated row and a built-in row, so the
+    shared resolver cannot pick one without guessing (G0.26-T1 #1801).
+    The REST siblings already render it as a structured ``409 Conflict``
+    via :func:`build_connector_scope_ambiguous_detail`; without this the
+    MCP path falls through the dispatcher's generic ``except Exception``
+    and surfaces as a bare ``-32603 "internal error:
+    AmbiguousConnectorScopeError"`` with the candidate list discarded —
+    the same MCP↔REST asymmetry the spec-error siblings closed (#777 /
+    #1534). MCP's only structured handler-error channel is
+    ``-32602``/:class:`McpInvalidParamsError`, so the wire code differs
+    from REST's 409 while the ``data`` envelope is identical (one builder,
+    shared with the route), letting an agent read ``error.data.candidates``
+    and re-issue with the disambiguating ``tenant_id`` (the operator's own
+    UUID, or ``null`` for the built-in scope).
+    """
+    raise McpInvalidParamsError(
+        str(exc),
+        data=build_connector_scope_ambiguous_detail(exc),
+    ) from exc

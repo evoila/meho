@@ -11899,6 +11899,124 @@
         }
       }
     },
+    "/ui/runbooks/runs": {
+      "get": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Runs",
+        "operationId": "runbooks_runs_ui_runbooks_runs_get",
+        "parameters": [
+          {
+            "name": "assignee",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Assignee"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "in_progress",
+                "completed",
+                "abandoned"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Runs Start",
+        "operationId": "runbooks_runs_start_ui_runbooks_runs_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_runs_start_ui_runbooks_runs_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/runs/start": {
+      "get": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Runs Start Modal",
+        "operationId": "runbooks_runs_start_modal_ui_runbooks_runs_start_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks/{slug}": {
       "get": {
         "tags": [
@@ -14505,6 +14623,36 @@
         },
         "type": "object",
         "title": "Body_runbooks_publish_ui_runbooks__slug__publish_post"
+      },
+      "Body_runbooks_runs_start_ui_runbooks_runs_post": {
+        "properties": {
+          "template_slug": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Template Slug",
+            "default": ""
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Target",
+            "default": ""
+          },
+          "params": {
+            "type": "string",
+            "maxLength": 16384,
+            "title": "Params",
+            "default": ""
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Work Ref",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_runs_start_ui_runbooks_runs_post"
       },
       "Body_ui_agent_grants_create_submit_ui_agents_grants_create_post": {
         "properties": {

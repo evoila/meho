@@ -1,0 +1,75 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Disable-connector confirm modal (Initiative #1839 Task #1885 T1).
+
+  ``disable`` transitions every group to ``disabled`` (the dispatcher
+  stops resolving operations against the connector). It is the safe
+  direction on its own, but it is one half of the
+  disable&rarr;re-enable loosening cycle, so it carries an explicit
+  confirm showing the projected blast radius -- consistent with the
+  enable / enable-reads modals.
+
+  CSRF + double-fire guard + swap targets are identical to the enable
+  modal (see ``_registry_enable_modal.html``).
+
+  Context contract: ``row`` + ``csrf_token`` (see the enable modal).
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="registry-action-modal" class="modal" aria-label="Disable connector">
+  <div class="modal-box max-w-lg">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="font-mono text-lg font-semibold">Disable {{ row.connector_id }}</h3>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <div class="mt-4 text-sm" data-disable-confirm>
+      <p class="[overflow-wrap:anywhere]">
+        This transitions <span class="font-semibold">all {{ row.group_count }}
+        group(s)</span> of <span class="font-mono">{{ row.connector_id }}</span>
+        to <span class="font-semibold">disabled</span>. The dispatcher will
+        stop resolving operations against the connector until it is
+        re-enabled.
+      </p>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <span class="badge badge-ghost badge-sm">
+          {{ row.enabled_group_count }} enabled &rarr; disabled
+        </span>
+        <span class="badge badge-ghost badge-sm">
+          {{ row.enabled_operation_count }} / {{ row.operation_count }} ops enabled
+        </span>
+      </div>
+    </div>
+
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('registry-action-modal').close()"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        data-action="confirm-disable"
+        class="btn btn-primary btn-sm gap-1"
+        hx-post="/ui/connectors/registry/{{ row.connector_id }}/disable"
+        hx-target="#registry-result-{{ row.connector_id }}"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="this"
+        hx-on::after-request="if(event.detail.successful) document.getElementById('registry-action-modal').close()"
+      >
+        Confirm &amp; disable
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

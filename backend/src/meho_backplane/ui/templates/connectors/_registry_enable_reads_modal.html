@@ -1,0 +1,79 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Enable-reads confirm modal (Initiative #1839 Task #1885 T1).
+
+  ``enable-reads`` LOOSENS the safety boundary -- it flips ``is_enabled``
+  on every read-class (GET / HEAD) ingested operation in one pass, making
+  the connector's reads broadly dispatchable. Writes stay default-deny.
+  The modal spells out the projected blast radius before the operator
+  confirms.
+
+  CSRF + double-fire guard + swap targets are identical to the enable
+  modal (see ``_registry_enable_modal.html``). On a label that maps to
+  both a tenant row and a built-in row the action handler returns the
+  ``409 connector_scope_ambiguous`` panel (with ``candidates[]``) into the
+  row result slot rather than a 500.
+
+  Context contract: ``row`` + ``csrf_token`` (see the enable modal).
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="registry-action-modal" class="modal" aria-label="Enable reads for connector">
+  <div class="modal-box max-w-lg">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="font-mono text-lg font-semibold">Enable reads &middot; {{ row.connector_id }}</h3>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <div role="alert" class="alert alert-warning mt-4 items-start" data-loosening-confirm>
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Enabling reads loosens the safety boundary</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          This flips every read-class (GET / HEAD) ingested operation of
+          <span class="font-mono">{{ row.connector_id }}</span> to
+          <span class="font-semibold">enabled</span> in one pass, making
+          its reads broadly dispatchable. Write-shaped verbs (POST / PUT /
+          PATCH / DELETE) stay default-deny.
+        </p>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="badge badge-ghost badge-sm">
+            {{ row.enabled_operation_count }} / {{ row.operation_count }} ops currently enabled
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('registry-action-modal').close()"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        data-action="confirm-enable-reads"
+        class="btn btn-warning btn-sm gap-1"
+        hx-post="/ui/connectors/registry/{{ row.connector_id }}/enable-reads"
+        hx-target="#registry-result-{{ row.connector_id }}"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="this"
+        hx-on::after-request="if(event.detail.successful) document.getElementById('registry-action-modal').close()"
+      >
+        {{ icon("shield-check", class="size-4") }}
+        Confirm &amp; enable reads
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

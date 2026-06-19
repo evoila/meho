@@ -1,0 +1,40 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Inline action-error panel (Initiative #1839 Task #1885 T1).
+
+  Returned by a per-row action handler when the in-process REST verb
+  raised an ``HTTPException`` -- rendered into the row's result slot so a
+  failed action surfaces an actionable message in place of a 5xx / stack
+  trace. The ``409 connector_scope_ambiguous`` case enumerates the
+  ``candidates[]`` (tenant-vs-built-in rows the label mapped to).
+
+  Context contract:
+    * ``title``      -- str: the panel heading.
+    * ``message``    -- str: the actionable body copy.
+    * ``candidates`` -- list[dict]: optional; each {product, version,
+                        impl_id, tenant_id} from the ambiguous-scope
+                        envelope (empty for the non-ambiguous cases).
+-#}
+<div role="alert" class="alert alert-warning m-2 items-start" data-registry-error>
+  <div>
+    <h4 class="text-sm font-semibold">{{ title }}</h4>
+    <p class="text-xs [overflow-wrap:anywhere]">{{ message }}</p>
+    {% if candidates %}
+      <ul class="mt-2 list-disc pl-4 text-xs">
+        {% for candidate in candidates %}
+          <li class="font-mono">
+            {{ candidate.product }}/{{ candidate.version }}/{{ candidate.impl_id }}
+            &mdash;
+            {% if candidate.tenant_id is none %}
+              built-in (tenant_id=None)
+            {% else %}
+              tenant_id={{ candidate.tenant_id }}
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </div>
+</div>

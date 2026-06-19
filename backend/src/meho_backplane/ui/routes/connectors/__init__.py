@@ -72,6 +72,8 @@ from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
+from meho_backplane.ui.routes.connectors.registry_actions import build_registry_actions_router
+from meho_backplane.ui.routes.connectors.registry_list import build_registry_list_router
 
 __all__ = ["build_router"]
 
@@ -96,7 +98,13 @@ def build_router() -> APIRouter:
     reason -- its literal ``/ui/connectors/import`` /
     ``/ui/connectors/import/confirm`` routes must win the first-match
     lookup over ``GET /ui/connectors/{name}`` (otherwise ``"import"``
-    binds to ``name``). The probe route's path is fully literal
+    binds to ``name``). The G10.13-T1 (#1885) registry routers are
+    included for the same reason -- the literal ``/ui/connectors/registry``
+    list route and the literal-suffixed per-row action routes
+    (``/ui/connectors/registry/{connector_id}/enable`` etc.) must win the
+    first-match-wins lookup over ``GET /ui/connectors/{name}`` (otherwise
+    ``"registry"`` binds to ``name`` and the registry list 404s through
+    the detail handler). The probe route's path is fully literal
     (``/ui/connectors/{name}/probe``) so the ``POST`` verb plus the
     extra ``/probe`` segment makes it unambiguous regardless of order;
     we still include it last for the same readability convention the
@@ -108,6 +116,8 @@ def build_router() -> APIRouter:
     router.include_router(build_list_router())
     router.include_router(build_forms_router())
     router.include_router(build_import_router())
+    router.include_router(build_registry_list_router())
+    router.include_router(build_registry_actions_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())
     return router

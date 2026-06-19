@@ -115,9 +115,47 @@
               required
             />
           </label>
+          {# ---------- Mode toggle: Retrieve (search_docs) vs Ask (ask_docs) ----------
+             #1917: the surface offers two modes over the same query. "Retrieve"
+             (the default, original #1777 behaviour) returns the ranked cited
+             chunks via search_docs; "Ask" composes a grounded, cited ANSWER via
+             the ask_docs pipeline (and fails open to chunks on a synthesis
+             failure). A radio group rides the form, so the selected ``mode`` is
+             submitted with the query; the backend defaults to "search" for any
+             unrecognised value. ``aria-label`` on the fieldset names the choice
+             for assistive tech. #}
+          <fieldset class="form-control" aria-label="Result mode">
+            <div class="label">
+              <span class="label-text">Mode</span>
+            </div>
+            <div class="join" role="radiogroup" aria-label="Result mode">
+              <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">
+                <input
+                  type="radio"
+                  name="mode"
+                  value="search"
+                  class="sr-only"
+                  {% if mode != "ask" %}checked{% endif %}
+                  aria-label="Retrieve cited chunks"
+                />
+                Retrieve
+              </label>
+              <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">
+                <input
+                  type="radio"
+                  name="mode"
+                  value="ask"
+                  class="sr-only"
+                  {% if mode == "ask" %}checked{% endif %}
+                  aria-label="Ask for a grounded answer"
+                />
+                Ask
+              </label>
+            </div>
+          </fieldset>
           <button type="submit" class="btn btn-primary gap-1" aria-label="Search the corpus">
             {{ icon("search") }}
-            Search
+            Go
           </button>
         </form>
       {% elif entitlement_diagnostic %}

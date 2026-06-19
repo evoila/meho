@@ -1658,6 +1658,38 @@ type BodyUiConnectorsImportPreviewUiConnectorsImportPost struct {
 	Upload     *string           `json:"upload"`
 }
 
+// BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost defines model for Body_ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post.
+type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
+	CatalogEntry *string `json:"catalog_entry,omitempty"`
+	DryRun       *bool   `json:"dry_run,omitempty"`
+	ImplId       *string `json:"impl_id,omitempty"`
+	Mode         *string `json:"mode,omitempty"`
+	Product      *string `json:"product,omitempty"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	SpecUri    *[]string         `json:"spec_uri,omitempty"`
+	Version    *string           `json:"version,omitempty"`
+}
+
 // BodyUiConventionsCreateSubmitUiConventionsCreatePost defines model for Body_ui_conventions_create_submit_ui_conventions_create_post.
 type BodyUiConventionsCreateSubmitUiConventionsCreatePost struct {
 	Body     string `json:"body"`
@@ -7042,6 +7074,15 @@ type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody 
 // UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody defines body for UiConnectorsRegistryListUiConnectorsRegistryGet for application/json ContentType.
 type UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody = UISessionContext
 
+// UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody defines body for UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet for application/json ContentType.
+type UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody defines body for UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost for application/x-www-form-urlencoded ContentType.
+type UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody = BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost
+
+// UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody defines body for UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet for application/json ContentType.
+type UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody = UISessionContext
+
 // UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody defines body for UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete for application/json ContentType.
 type UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody = UISessionContext
 
@@ -8718,6 +8759,21 @@ type ClientInterface interface {
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsRegistryListUiConnectorsRegistryGet(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBody request with any body
+	UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet(ctx context.Context, body UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBody request with any body
+	UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithFormdataBody(ctx context.Context, body UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBody request with any body
+	UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBody(ctx context.Context, jobId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet(ctx context.Context, jobId string, body UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody request with any body
 	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12006,6 +12062,78 @@ func (c *Client) UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx con
 
 func (c *Client) UiConnectorsRegistryListUiConnectorsRegistryGet(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet(ctx context.Context, body UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithFormdataBody(ctx context.Context, body UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBody(ctx context.Context, jobId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequestWithBody(c.Server, jobId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet(ctx context.Context, jobId string, body UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequest(c.Server, jobId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24355,6 +24483,133 @@ func NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody(server st
 	return req, nil
 }
 
+// NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequest calls the generic UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet builder with application/json body
+func NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequest(server string, body UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequestWithBody generates requests for UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet with any type of body
+func NewUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/ingest")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithFormdataBody calls the generic UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost builder with application/x-www-form-urlencoded body
+func NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithFormdataBody(server string, body UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithBody generates requests for UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost with any type of body
+func NewUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/ingest")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequest calls the generic UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet builder with application/json body
+func NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequest(server string, jobId string, body UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequestWithBody(server, jobId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequestWithBody generates requests for UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet with any type of body
+func NewUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetRequestWithBody(server string, jobId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "job_id", runtime.ParamLocationPath, jobId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/ingest/jobs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequest calls the generic UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete builder with application/json body
 func NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequest(server string, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -29277,6 +29532,21 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryListUiConnectorsRegistryGetWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
 
+	// UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse, error)
+
+	UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithResponse(ctx context.Context, body UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse, error)
+
+	// UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBodyWithResponse request with any body
+	UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse, error)
+
+	UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithFormdataBodyWithResponse(ctx context.Context, body UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse, error)
+
+	// UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBodyWithResponse(ctx context.Context, jobId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse, error)
+
+	UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithResponse(ctx context.Context, jobId string, body UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse, error)
+
 	// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse request with any body
 	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error)
 
@@ -33519,6 +33789,72 @@ func (r UiConnectorsRegistryListUiConnectorsRegistryGetResponse) StatusCode() in
 	return 0
 }
 
+type UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -37551,6 +37887,57 @@ func (c *ClientWithResponses) UiConnectorsRegistryListUiConnectorsRegistryGetWit
 		return nil, err
 	}
 	return ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse(rsp)
+}
+
+// UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithResponse(ctx context.Context, body UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse(rsp)
+}
+
+// UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse
+func (c *ClientWithResponses) UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithFormdataBodyWithResponse(ctx context.Context, body UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse(rsp)
+}
+
+// UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBodyWithResponse(ctx context.Context, jobId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithBody(ctx, jobId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithResponse(ctx context.Context, jobId string, body UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGet(ctx, jobId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse(rsp)
 }
 
 // UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse
@@ -43929,6 +44316,84 @@ func ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse(rsp *http.Resp
 	}
 
 	response := &UiConnectorsRegistryListUiConnectorsRegistryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse parses an HTTP response from a UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetWithResponse call
+func ParseUiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse(rsp *http.Response) (*UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryIngestModalUiConnectorsRegistryIngestGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse parses an HTTP response from a UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostWithResponse call
+func ParseUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse(rsp *http.Response) (*UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse parses an HTTP response from a UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetWithResponse call
+func ParseUiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse(rsp *http.Response) (*UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryIngestJobUiConnectorsRegistryIngestJobsJobIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

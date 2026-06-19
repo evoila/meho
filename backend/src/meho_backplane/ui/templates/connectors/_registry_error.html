@@ -10,12 +10,23 @@
   trace. The ``409 connector_scope_ambiguous`` case enumerates the
   ``candidates[]`` (tenant-vs-built-in rows the label mapped to).
 
+  Reused by the G10.13-T2 (#1886) ingest modal for its catalog-resolution
+  / explicit-shape / 503 ``LlmClientUnavailable`` panels -- the renderer
+  is shape-generic. ``available_entries`` (a list of ``"<product>/
+  <version>"`` strings) is the optional T2 slot for the
+  ``catalog_entry_not_found`` 422; it is absent for every T1 caller, so
+  it is guarded with ``is defined``.
+
   Context contract:
-    * ``title``      -- str: the panel heading.
-    * ``message``    -- str: the actionable body copy.
-    * ``candidates`` -- list[dict]: optional; each {product, version,
-                        impl_id, tenant_id} from the ambiguous-scope
-                        envelope (empty for the non-ambiguous cases).
+    * ``title``             -- str: the panel heading.
+    * ``message``           -- str: the actionable body copy.
+    * ``candidates``        -- list[dict]: optional; each {product,
+                               version, impl_id, tenant_id} from the
+                               ambiguous-scope envelope (empty for the
+                               non-ambiguous cases).
+    * ``available_entries`` -- list[str]: optional (T2); the catalog
+                               ``"<product>/<version>"`` refs the
+                               ``catalog_entry_not_found`` 422 carries.
 -#}
 <div role="alert" class="alert alert-warning m-2 items-start" data-registry-error>
   <div>
@@ -33,6 +44,13 @@
               tenant_id={{ candidate.tenant_id }}
             {% endif %}
           </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if available_entries is defined and available_entries %}
+      <ul class="mt-2 list-disc pl-4 text-xs" data-available-entries>
+        {% for entry in available_entries %}
+          <li class="font-mono">{{ entry }}</li>
         {% endfor %}
       </ul>
     {% endif %}

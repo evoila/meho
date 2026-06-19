@@ -70,6 +70,7 @@ from fastapi import APIRouter
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
 from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
+from meho_backplane.ui.routes.connectors.ingest_router import build_ingest_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
 from meho_backplane.ui.routes.connectors.registry_actions import build_registry_actions_router
@@ -104,7 +105,15 @@ def build_router() -> APIRouter:
     (``/ui/connectors/registry/{connector_id}/enable`` etc.) must win the
     first-match-wins lookup over ``GET /ui/connectors/{name}`` (otherwise
     ``"registry"`` binds to ``name`` and the registry list 404s through
-    the detail handler). The probe route's path is fully literal
+    the detail handler). The G10.13-T2 (#1886) ingest router is included
+    **before** the registry-actions router (and the detail router) for the
+    same reason -- its three literal ``/ui/connectors/registry/ingest``
+    routes (the modal ``GET``/submit ``POST`` + the
+    ``/ingest/jobs/{job_id}`` poll ``GET``) must win the first-match-wins
+    lookup over both the ``/ui/connectors/registry/{connector_id}/...``
+    param routes (otherwise ``"ingest"`` binds to ``connector_id``) and
+    the ``GET /ui/connectors/{name}`` detail catch-all. The probe route's
+    path is fully literal
     (``/ui/connectors/{name}/probe``) so the ``POST`` verb plus the
     extra ``/probe`` segment makes it unambiguous regardless of order;
     we still include it last for the same readability convention the
@@ -117,6 +126,7 @@ def build_router() -> APIRouter:
     router.include_router(build_forms_router())
     router.include_router(build_import_router())
     router.include_router(build_registry_list_router())
+    router.include_router(build_ingest_router())
     router.include_router(build_registry_actions_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())

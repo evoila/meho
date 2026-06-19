@@ -1232,6 +1232,22 @@ type BodyRunbooksPublishUiRunbooksSlugPublishPost struct {
 	Version *string `json:"version,omitempty"`
 }
 
+// BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost defines model for Body_runbooks_run_abort_ui_runbooks_runs__run_id__abort_post.
+type BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost struct {
+	Reason *string `json:"reason,omitempty"`
+}
+
+// BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost defines model for Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post.
+type BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost struct {
+	Answer     *string `json:"answer,omitempty"`
+	VerifyType *string `json:"verify_type,omitempty"`
+}
+
+// BodyRunbooksRunReassignUiRunbooksRunsRunIdReassignPost defines model for Body_runbooks_run_reassign_ui_runbooks_runs__run_id__reassign_post.
+type BodyRunbooksRunReassignUiRunbooksRunsRunIdReassignPost struct {
+	NewAssignee *string `json:"new_assignee,omitempty"`
+}
+
 // BodyRunbooksRunsStartUiRunbooksRunsPost defines model for Body_runbooks_runs_start_ui_runbooks_runs_post.
 type BodyRunbooksRunsStartUiRunbooksRunsPost struct {
 	Params       *string `json:"params,omitempty"`
@@ -6942,6 +6958,15 @@ type RunbooksEditorPreviewUiRunbooksPreviewPostFormdataRequestBody = BodyRunbook
 // RunbooksRunsStartUiRunbooksRunsPostFormdataRequestBody defines body for RunbooksRunsStartUiRunbooksRunsPost for application/x-www-form-urlencoded ContentType.
 type RunbooksRunsStartUiRunbooksRunsPostFormdataRequestBody = BodyRunbooksRunsStartUiRunbooksRunsPost
 
+// RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody defines body for RunbooksRunAbortUiRunbooksRunsRunIdAbortPost for application/x-www-form-urlencoded ContentType.
+type RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody = BodyRunbooksRunAbortUiRunbooksRunsRunIdAbortPost
+
+// RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody defines body for RunbooksRunNextUiRunbooksRunsRunIdNextPost for application/x-www-form-urlencoded ContentType.
+type RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody = BodyRunbooksRunNextUiRunbooksRunsRunIdNextPost
+
+// RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody defines body for RunbooksRunReassignUiRunbooksRunsRunIdReassignPost for application/x-www-form-urlencoded ContentType.
+type RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody = BodyRunbooksRunReassignUiRunbooksRunsRunIdReassignPost
+
 // RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody defines body for RunbooksDeprecateUiRunbooksSlugDeprecatePost for application/x-www-form-urlencoded ContentType.
 type RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody = BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost
 
@@ -8634,6 +8659,24 @@ type ClientInterface interface {
 
 	// RunbooksRunsStartModalUiRunbooksRunsStartGet request
 	RunbooksRunsStartModalUiRunbooksRunsStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksRunDriverUiRunbooksRunsRunIdGet request
+	RunbooksRunDriverUiRunbooksRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBody request with any body
+	RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBody request with any body
+	RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksRunNextUiRunbooksRunsRunIdNextPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBody request with any body
+	RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RunbooksDetailUiRunbooksSlugGet request
 	RunbooksDetailUiRunbooksSlugGet(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12435,6 +12478,90 @@ func (c *Client) RunbooksRunsStartUiRunbooksRunsPostWithFormdataBody(ctx context
 
 func (c *Client) RunbooksRunsStartModalUiRunbooksRunsStartGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksRunsStartModalUiRunbooksRunsStartGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunDriverUiRunbooksRunsRunIdGet(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunDriverUiRunbooksRunsRunIdGetRequest(c.Server, runId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithBody(c.Server, runId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithFormdataBody(c.Server, runId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithBody(c.Server, runId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunNextUiRunbooksRunsRunIdNextPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithFormdataBody(c.Server, runId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBody(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithBody(c.Server, runId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithFormdataBody(ctx context.Context, runId openapi_types.UUID, body RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithFormdataBody(c.Server, runId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25217,6 +25344,181 @@ func NewRunbooksRunsStartModalUiRunbooksRunsStartGetRequest(server string) (*htt
 	return req, nil
 }
 
+// NewRunbooksRunDriverUiRunbooksRunsRunIdGetRequest generates requests for RunbooksRunDriverUiRunbooksRunsRunIdGet
+func NewRunbooksRunDriverUiRunbooksRunsRunIdGetRequest(server string, runId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithFormdataBody calls the generic RunbooksRunAbortUiRunbooksRunsRunIdAbortPost builder with application/x-www-form-urlencoded body
+func NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithFormdataBody(server string, runId openapi_types.UUID, body RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithBody(server, runId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithBody generates requests for RunbooksRunAbortUiRunbooksRunsRunIdAbortPost with any type of body
+func NewRunbooksRunAbortUiRunbooksRunsRunIdAbortPostRequestWithBody(server string, runId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/runs/%s/abort", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithFormdataBody calls the generic RunbooksRunNextUiRunbooksRunsRunIdNextPost builder with application/x-www-form-urlencoded body
+func NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithFormdataBody(server string, runId openapi_types.UUID, body RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithBody(server, runId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithBody generates requests for RunbooksRunNextUiRunbooksRunsRunIdNextPost with any type of body
+func NewRunbooksRunNextUiRunbooksRunsRunIdNextPostRequestWithBody(server string, runId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/runs/%s/next", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithFormdataBody calls the generic RunbooksRunReassignUiRunbooksRunsRunIdReassignPost builder with application/x-www-form-urlencoded body
+func NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithFormdataBody(server string, runId openapi_types.UUID, body RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithBody(server, runId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithBody generates requests for RunbooksRunReassignUiRunbooksRunsRunIdReassignPost with any type of body
+func NewRunbooksRunReassignUiRunbooksRunsRunIdReassignPostRequestWithBody(server string, runId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/runs/%s/reassign", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRunbooksDetailUiRunbooksSlugGetRequest generates requests for RunbooksDetailUiRunbooksSlugGet
 func NewRunbooksDetailUiRunbooksSlugGetRequest(server string, slug string, params *RunbooksDetailUiRunbooksSlugGetParams) (*http.Request, error) {
 	var err error
@@ -26982,6 +27284,24 @@ type ClientWithResponsesInterface interface {
 
 	// RunbooksRunsStartModalUiRunbooksRunsStartGetWithResponse request
 	RunbooksRunsStartModalUiRunbooksRunsStartGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RunbooksRunsStartModalUiRunbooksRunsStartGetResponse, error)
+
+	// RunbooksRunDriverUiRunbooksRunsRunIdGetWithResponse request
+	RunbooksRunDriverUiRunbooksRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunbooksRunDriverUiRunbooksRunsRunIdGetResponse, error)
+
+	// RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBodyWithResponse request with any body
+	RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse, error)
+
+	RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse, error)
+
+	// RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBodyWithResponse request with any body
+	RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse, error)
+
+	RunbooksRunNextUiRunbooksRunsRunIdNextPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse, error)
+
+	// RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBodyWithResponse request with any body
+	RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse, error)
+
+	RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse, error)
 
 	// RunbooksDetailUiRunbooksSlugGetWithResponse request
 	RunbooksDetailUiRunbooksSlugGetWithResponse(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*RunbooksDetailUiRunbooksSlugGetResponse, error)
@@ -31861,6 +32181,94 @@ func (r RunbooksRunsStartModalUiRunbooksRunsStartGetResponse) StatusCode() int {
 	return 0
 }
 
+type RunbooksRunDriverUiRunbooksRunsRunIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksRunDriverUiRunbooksRunsRunIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksRunDriverUiRunbooksRunsRunIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RunbooksDetailUiRunbooksSlugGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -34896,6 +35304,66 @@ func (c *ClientWithResponses) RunbooksRunsStartModalUiRunbooksRunsStartGetWithRe
 		return nil, err
 	}
 	return ParseRunbooksRunsStartModalUiRunbooksRunsStartGetResponse(rsp)
+}
+
+// RunbooksRunDriverUiRunbooksRunsRunIdGetWithResponse request returning *RunbooksRunDriverUiRunbooksRunsRunIdGetResponse
+func (c *ClientWithResponses) RunbooksRunDriverUiRunbooksRunsRunIdGetWithResponse(ctx context.Context, runId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RunbooksRunDriverUiRunbooksRunsRunIdGetResponse, error) {
+	rsp, err := c.RunbooksRunDriverUiRunbooksRunsRunIdGet(ctx, runId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunDriverUiRunbooksRunsRunIdGetResponse(rsp)
+}
+
+// RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBodyWithResponse request with arbitrary body returning *RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse
+func (c *ClientWithResponses) RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse, error) {
+	rsp, err := c.RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithBody(ctx, runId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunAbortUiRunbooksRunsRunIdAbortPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse, error) {
+	rsp, err := c.RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithFormdataBody(ctx, runId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse(rsp)
+}
+
+// RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBodyWithResponse request with arbitrary body returning *RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse
+func (c *ClientWithResponses) RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse, error) {
+	rsp, err := c.RunbooksRunNextUiRunbooksRunsRunIdNextPostWithBody(ctx, runId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunNextUiRunbooksRunsRunIdNextPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksRunNextUiRunbooksRunsRunIdNextPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunNextUiRunbooksRunsRunIdNextPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse, error) {
+	rsp, err := c.RunbooksRunNextUiRunbooksRunsRunIdNextPostWithFormdataBody(ctx, runId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunNextUiRunbooksRunsRunIdNextPostResponse(rsp)
+}
+
+// RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBodyWithResponse request with arbitrary body returning *RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse
+func (c *ClientWithResponses) RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse, error) {
+	rsp, err := c.RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithBody(ctx, runId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithFormdataBodyWithResponse(ctx context.Context, runId openapi_types.UUID, body RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse, error) {
+	rsp, err := c.RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithFormdataBody(ctx, runId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse(rsp)
 }
 
 // RunbooksDetailUiRunbooksSlugGetWithResponse request returning *RunbooksDetailUiRunbooksSlugGetResponse
@@ -41291,6 +41759,110 @@ func ParseRunbooksRunsStartModalUiRunbooksRunsStartGetResponse(rsp *http.Respons
 	response := &RunbooksRunsStartModalUiRunbooksRunsStartGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksRunDriverUiRunbooksRunsRunIdGetResponse parses an HTTP response from a RunbooksRunDriverUiRunbooksRunsRunIdGetWithResponse call
+func ParseRunbooksRunDriverUiRunbooksRunsRunIdGetResponse(rsp *http.Response) (*RunbooksRunDriverUiRunbooksRunsRunIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksRunDriverUiRunbooksRunsRunIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse parses an HTTP response from a RunbooksRunAbortUiRunbooksRunsRunIdAbortPostWithResponse call
+func ParseRunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse(rsp *http.Response) (*RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksRunAbortUiRunbooksRunsRunIdAbortPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksRunNextUiRunbooksRunsRunIdNextPostResponse parses an HTTP response from a RunbooksRunNextUiRunbooksRunsRunIdNextPostWithResponse call
+func ParseRunbooksRunNextUiRunbooksRunsRunIdNextPostResponse(rsp *http.Response) (*RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksRunNextUiRunbooksRunsRunIdNextPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse parses an HTTP response from a RunbooksRunReassignUiRunbooksRunsRunIdReassignPostWithResponse call
+func ParseRunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse(rsp *http.Response) (*RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksRunReassignUiRunbooksRunsRunIdReassignPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

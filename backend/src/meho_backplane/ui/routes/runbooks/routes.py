@@ -111,6 +111,7 @@ from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_sessi
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
+from meho_backplane.ui.routes.runbooks.driver import register_driver_routes
 from meho_backplane.ui.routes.runbooks.editor_routes import register_editor_routes
 from meho_backplane.ui.routes.runbooks.lifecycle import register_lifecycle_routes
 from meho_backplane.ui.routes.runbooks.runs import register_runs_routes
@@ -433,9 +434,18 @@ def build_runbooks_router() -> APIRouter:
     # ``GET /ui/runbooks/runs/start`` modal, ``POST /ui/runbooks/runs`` start)
     # -- registered here, BEFORE ``/ui/runbooks/{slug}`` so the literal
     # ``runs`` segment is not bound as a slug parameter, and ``runs/start``
-    # ahead of the future ``runs/{run_id}`` driver (T2 #1893). Their handlers
+    # ahead of the ``runs/{run_id}`` driver (T2 #1893, below). Their handlers
     # live in ``runbooks.runs``.
     register_runs_routes(router)
+
+    # The #1837-T2 (#1893) run *driver* (``GET /ui/runbooks/runs/{run_id}`` +
+    # ``POST .../next|abort|reassign``) -- registered here, AFTER
+    # ``register_runs_routes`` so T1's literal ``/ui/runbooks/runs/start`` is
+    # matched before the ``{run_id}`` param route (first-match-wins, else
+    # ``start`` would bind as a ``run_id``), and BEFORE ``/ui/runbooks/{slug}``
+    # so ``runs`` is not swallowed as a slug. Their handlers + the opacity-safe
+    # single-step render live in ``runbooks.driver``.
+    register_driver_routes(router)
 
     @router.get("/ui/runbooks/{slug}", response_class=HTMLResponse)
     async def runbooks_detail(

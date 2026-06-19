@@ -12142,6 +12142,205 @@
         }
       }
     },
+    "/ui/runbooks/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Run Driver",
+        "operationId": "runbooks_run_driver_ui_runbooks_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/runs/{run_id}/next": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Run Next",
+        "operationId": "runbooks_run_next_ui_runbooks_runs__run_id__next_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/runs/{run_id}/abort": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Run Abort",
+        "operationId": "runbooks_run_abort_ui_runbooks_runs__run_id__abort_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_run_abort_ui_runbooks_runs__run_id__abort_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/runs/{run_id}/reassign": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Run Reassign",
+        "operationId": "runbooks_run_reassign_ui_runbooks_runs__run_id__reassign_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_run_reassign_ui_runbooks_runs__run_id__reassign_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks/{slug}": {
       "get": {
         "tags": [
@@ -14748,6 +14947,48 @@
         },
         "type": "object",
         "title": "Body_runbooks_publish_ui_runbooks__slug__publish_post"
+      },
+      "Body_runbooks_run_abort_ui_runbooks_runs__run_id__abort_post": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_run_abort_ui_runbooks_runs__run_id__abort_post"
+      },
+      "Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post": {
+        "properties": {
+          "verify_type": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Verify Type",
+            "default": ""
+          },
+          "answer": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Answer",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_run_next_ui_runbooks_runs__run_id__next_post"
+      },
+      "Body_runbooks_run_reassign_ui_runbooks_runs__run_id__reassign_post": {
+        "properties": {
+          "new_assignee": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "New Assignee",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_run_reassign_ui_runbooks_runs__run_id__reassign_post"
       },
       "Body_runbooks_runs_start_ui_runbooks_runs_post": {
         "properties": {

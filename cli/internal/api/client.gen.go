@@ -1254,6 +1254,14 @@ type BodyOperationsPreviewUiOperationsPreviewPost struct {
 	Target      *string `json:"target,omitempty"`
 }
 
+// BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost defines model for Body_retrieval_diagnostics_ui_retrieval_diagnostics_post.
+type BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost struct {
+	Kind   *string `json:"kind,omitempty"`
+	Limit  *int    `json:"limit,omitempty"`
+	Query  *string `json:"query,omitempty"`
+	Source *string `json:"source,omitempty"`
+}
+
 // BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost defines model for Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post.
 type BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost struct {
 	Version *string `json:"version,omitempty"`
@@ -7192,6 +7200,9 @@ type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody = 
 // OperationsPreviewUiOperationsPreviewPostFormdataRequestBody defines body for OperationsPreviewUiOperationsPreviewPost for application/x-www-form-urlencoded ContentType.
 type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperationsPreviewUiOperationsPreviewPost
 
+// RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody defines body for RetrievalDiagnosticsUiRetrievalDiagnosticsPost for application/x-www-form-urlencoded ContentType.
+type RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody = BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost
+
 // RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody defines body for RunbooksEditorCreateUiRunbooksNewPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody = BodyRunbooksEditorCreateUiRunbooksNewPost
 
@@ -8997,6 +9008,14 @@ type ClientInterface interface {
 
 	// OperationsSearchUiOperationsSearchGet request
 	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetrievalIndexUiRetrievalGet request
+	RetrievalIndexUiRetrievalGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody request with any body
+	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RunbooksIndexUiRunbooksGet request
 	RunbooksIndexUiRunbooksGet(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13314,6 +13333,42 @@ func (c *Client) OperationsRunUiOperationsRunDescriptorIdGet(ctx context.Context
 
 func (c *Client) OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOperationsSearchUiOperationsSearchGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrievalIndexUiRetrievalGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrievalIndexUiRetrievalGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27151,6 +27206,73 @@ func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *Oper
 	return req, nil
 }
 
+// NewRetrievalIndexUiRetrievalGetRequest generates requests for RetrievalIndexUiRetrievalGet
+func NewRetrievalIndexUiRetrievalGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/retrieval")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithFormdataBody calls the generic RetrievalDiagnosticsUiRetrievalDiagnosticsPost builder with application/x-www-form-urlencoded body
+func NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithFormdataBody(server string, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithBody generates requests for RetrievalDiagnosticsUiRetrievalDiagnosticsPost with any type of body
+func NewRetrievalDiagnosticsUiRetrievalDiagnosticsPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/retrieval/diagnostics")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRunbooksIndexUiRunbooksGetRequest generates requests for RunbooksIndexUiRunbooksGet
 func NewRunbooksIndexUiRunbooksGetRequest(server string, params *RunbooksIndexUiRunbooksGetParams) (*http.Request, error) {
 	var err error
@@ -29555,6 +29677,14 @@ type ClientWithResponsesInterface interface {
 
 	// OperationsSearchUiOperationsSearchGetWithResponse request
 	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
+
+	// RetrievalIndexUiRetrievalGetWithResponse request
+	RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error)
+
+	// RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBodyWithResponse request with any body
+	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error)
+
+	RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error)
 
 	// RunbooksIndexUiRunbooksGetWithResponse request
 	RunbooksIndexUiRunbooksGetWithResponse(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*RunbooksIndexUiRunbooksGetResponse, error)
@@ -34858,6 +34988,49 @@ func (r OperationsSearchUiOperationsSearchGetResponse) StatusCode() int {
 	return 0
 }
 
+type RetrievalIndexUiRetrievalGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r RetrievalIndexUiRetrievalGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetrievalIndexUiRetrievalGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RunbooksIndexUiRunbooksGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -38484,6 +38657,32 @@ func (c *ClientWithResponses) OperationsSearchUiOperationsSearchGetWithResponse(
 		return nil, err
 	}
 	return ParseOperationsSearchUiOperationsSearchGetResponse(rsp)
+}
+
+// RetrievalIndexUiRetrievalGetWithResponse request returning *RetrievalIndexUiRetrievalGetResponse
+func (c *ClientWithResponses) RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error) {
+	rsp, err := c.RetrievalIndexUiRetrievalGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrievalIndexUiRetrievalGetResponse(rsp)
+}
+
+// RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBodyWithResponse request with arbitrary body returning *RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse
+func (c *ClientWithResponses) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error) {
+	rsp, err := c.RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error) {
+	rsp, err := c.RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse(rsp)
 }
 
 // RunbooksIndexUiRunbooksGetWithResponse request returning *RunbooksIndexUiRunbooksGetResponse
@@ -45485,6 +45684,48 @@ func ParseOperationsSearchUiOperationsSearchGetResponse(rsp *http.Response) (*Op
 	}
 
 	response := &OperationsSearchUiOperationsSearchGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRetrievalIndexUiRetrievalGetResponse parses an HTTP response from a RetrievalIndexUiRetrievalGetWithResponse call
+func ParseRetrievalIndexUiRetrievalGetResponse(rsp *http.Response) (*RetrievalIndexUiRetrievalGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetrievalIndexUiRetrievalGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse parses an HTTP response from a RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithResponse call
+func ParseRetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse(rsp *http.Response) (*RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetrievalDiagnosticsUiRetrievalDiagnosticsPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

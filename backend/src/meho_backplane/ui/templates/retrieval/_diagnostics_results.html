@@ -1,0 +1,133 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Retrieval-diagnostics results partial.
+
+  Initiative #1840 (G10.14 Retrieval diagnostics & quality console),
+  Task #1888. This fragment is swapped into ``#retrieval-diagnostics-results``
+  by the HTMX diagnostics POST; it is also included directly into
+  ``index.html`` for the initial (empty) page render so both paths share
+  identical markup.
+
+  Render branches (first match wins):
+    1. ``error_message`` set -> a plain error card.
+    2. ``hits`` non-empty -> one hit card each, with the fused_score + the
+       per-signal RRF score/rank breakdown table.
+    3. ``searched`` true (a query ran, no error, no hits) -> "no matches".
+    4. otherwise (initial render, no query yet) -> a quiet prompt.
+
+  Per-signal breakdown (the load-bearing render):
+    Each hit carries ``bm25_score`` / ``bm25_rank`` and ``cosine_score`` /
+    ``cosine_rank`` (float|None / int|None). A ``None`` rank means the
+    document was absent from that signal's top-``candidate_limit`` candidate
+    list -- it is rendered as an explicit "absent from this signal's top-N"
+    marker, NOT a blank cell, so an operator can tell "scored 0" apart from
+    "never appeared in that signal".
+
+  Context variables:
+    query           -- str: the submitted query (for the heading + empty state)
+    hits            -- list[RetrievalHit]: ranked hits (best first by fused_score)
+    searched        -- bool: whether a query actually ran
+    duration_ms     -- float | None: wall-clock retrieval duration
+    candidate_limit -- int: the per-signal candidate pull (CANDIDATE_LIMIT, 50)
+    error_message   -- str | None: a non-auth failure detail
+-#}
+{#- Per-signal breakdown row macro: renders one signal's (score, rank) pair,
+    or the explicit absent marker when the rank is None. -#}
+{% macro signal_row(label, score, rank, candidate_limit) %}
+  <tr>
+    <td class="font-medium">{{ label }}</td>
+    {% if rank is none %}
+      <td colspan="2" class="opacity-60 italic">
+        absent from this signal&rsquo;s top-{{ candidate_limit }}
+      </td>
+    {% else %}
+      <td class="font-mono">{% if score is not none %}{{ "%.4f" | format(score) }}{% else %}&mdash;{% endif %}</td>
+      <td class="font-mono">#{{ rank }}</td>
+    {% endif %}
+  </tr>
+{% endmacro %}
+<div id="retrieval-diagnostics-results" class="space-y-3">
+  {% set error_message = error_message | default(none) %}
+  {% set duration_ms = duration_ms | default(none) %}
+  {% if error_message %}
+    {# ---------- Error card ---------- #}
+    <div class="alert alert-error" role="alert" aria-live="assertive">
+      <div>
+        <h3 class="font-semibold">Diagnostics query failed</h3>
+        <p class="text-sm opacity-90">{{ error_message }}</p>
+      </div>
+    </div>
+
+  {% elif hits %}
+    {# ---------- Hit cards ---------- #}
+    <p class="text-sm opacity-70" aria-live="polite">
+      {{ hits | length }} hit{% if hits | length != 1 %}s{% endif %}
+      for <em>&ldquo;{{ query }}&rdquo;</em>{% if duration_ms is not none %}
+      &middot; <span class="font-mono">{{ "%.2f" | format(duration_ms) }}&nbsp;ms</span>{% endif %}
+    </p>
+    <ul class="space-y-3" role="list" aria-label="Retrieval hits">
+      {% for hit in hits %}
+      <li class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body py-3 space-y-2">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Hit provenance">
+              <span class="badge badge-ghost badge-outline" title="Source namespace">{{ hit.source }}</span>
+              <span class="badge badge-ghost badge-outline" title="Document kind">{{ hit.kind }}</span>
+              <span class="badge badge-ghost badge-outline font-mono" title="Source id">{{ hit.source_id }}</span>
+            </div>
+            <span
+              class="badge badge-primary badge-outline"
+              title="Fused RRF score (sorted by)"
+              aria-label="Fused score {{ '%.6f' | format(hit.fused_score) }}"
+            >
+              fused {{ "%.6f" | format(hit.fused_score) }}
+            </span>
+          </div>
+          <p class="text-sm whitespace-pre-wrap">{{ hit.body }}</p>
+          {# Per-signal RRF score/rank breakdown -- a None rank renders the
+             explicit absent marker, not a blank. #}
+          <div class="overflow-x-auto">
+            <table class="table table-xs" aria-label="Per-signal RRF breakdown">
+              <thead>
+                <tr>
+                  <th>Signal</th>
+                  <th>Score</th>
+                  <th>Rank</th>
+                </tr>
+              </thead>
+              <tbody>
+                {{ signal_row("BM25", hit.bm25_score, hit.bm25_rank, candidate_limit) }}
+                {{ signal_row("Cosine", hit.cosine_score, hit.cosine_rank, candidate_limit) }}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+
+  {% elif searched %}
+    {# ---------- No-matches state (a query ran, zero hits, not an error) ---------- #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body text-center py-10">
+        <p class="text-lg opacity-60">No hits for &ldquo;{{ query }}&rdquo;</p>
+        <p class="text-sm opacity-40">
+          Neither retrieval signal returned a candidate. Try a different query,
+          source, or kind.
+        </p>
+      </div>
+    </div>
+
+  {% else %}
+    {# ---------- Initial prompt (no query submitted yet) ---------- #}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body text-center py-10">
+        <p class="text-base opacity-50">
+          Enter a query to run retrieval and inspect the per-signal breakdown.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

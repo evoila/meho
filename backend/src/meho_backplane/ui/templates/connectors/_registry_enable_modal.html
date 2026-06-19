@@ -1,0 +1,88 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Enable-connector confirm modal (Initiative #1839 Task #1885 T1).
+
+  ``enable`` LOOSENS the safety boundary -- it transitions every group to
+  ``enabled`` (the dispatcher then resolves operations against the
+  connector). The modal spells out the projected blast radius (the group
+  counts that flip) before the operator confirms.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on
+  the confirm button's OWN ``hx-headers`` (HTMX does not inherit
+  ``hx-headers`` to a descendant form). The GET that rendered this modal
+  minted the token + re-set the matching ``meho_csrf`` cookie. The
+  confirm button disables itself during the request (``hx-disabled-elt``)
+  so the action cannot be double-fired. On success the action handler
+  returns an OOB swap of the row (``#registry-row-<id>``); on a 409 / 404
+  it returns the inline error panel into the row's result slot
+  (``#registry-result-<id>``), the ``hx-target`` below.
+
+  Context contract:
+    * ``row``        -- dict: connector_id / product / version / impl_id /
+                        *_group_count / operation_count etc.
+    * ``csrf_token`` -- str: minted double-submit token for the POST.
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="registry-action-modal" class="modal" aria-label="Enable connector">
+  <div class="modal-box max-w-lg">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="font-mono text-lg font-semibold">Enable {{ row.connector_id }}</h3>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <div role="alert" class="alert alert-warning mt-4 items-start" data-loosening-confirm>
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Enabling loosens the safety boundary</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          This transitions <span class="font-semibold">all
+          {{ row.group_count }} group(s)</span> of
+          <span class="font-mono">{{ row.connector_id }}</span> to
+          <span class="font-semibold">enabled</span>. The dispatcher will
+          resolve operations against the connector once enabled.
+        </p>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="badge badge-warning badge-sm">
+            {{ row.staged_group_count }} staged &rarr; enabled
+          </span>
+          <span class="badge badge-ghost badge-sm">
+            {{ row.enabled_operation_count }} / {{ row.operation_count }} ops enabled
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('registry-action-modal').close()"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        data-action="confirm-enable"
+        class="btn btn-warning btn-sm gap-1"
+        hx-post="/ui/connectors/registry/{{ row.connector_id }}/enable"
+        hx-target="#registry-result-{{ row.connector_id }}"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="this"
+        hx-on::after-request="if(event.detail.successful) document.getElementById('registry-action-modal').close()"
+      >
+        {{ icon("shield-check", class="size-4") }}
+        Confirm &amp; enable
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

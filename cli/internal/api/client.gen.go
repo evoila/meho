@@ -341,6 +341,14 @@ const (
 	Desc UnderscoreSortDirection = "desc"
 )
 
+// Defines values for UnderscoreStatusFilter.
+const (
+	UnderscoreStatusFilterAll      UnderscoreStatusFilter = "all"
+	UnderscoreStatusFilterDisabled UnderscoreStatusFilter = "disabled"
+	UnderscoreStatusFilterEnabled  UnderscoreStatusFilter = "enabled"
+	UnderscoreStatusFilterStaged   UnderscoreStatusFilter = "staged"
+)
+
 // Defines values for UnderscoreViewMode.
 const (
 	Graph UnderscoreViewMode = "graph"
@@ -366,10 +374,10 @@ const (
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
-	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
-	Disabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
-	Enabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
-	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
+	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
+	ListEndpointApiV1ConnectorsGetParamsStatusDisabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusEnabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusStaged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -5800,6 +5808,19 @@ type UnderscoreEdgeEndpoint struct {
 // UnderscoreSortDirection Sort direction -- “asc“ (default) or “desc“.
 type UnderscoreSortDirection string
 
+// UnderscoreStatusFilter Closed enum mirroring the backend “ConnectorStatusFilter“ literal.
+//
+// Wrapping the service's “Literal["staged", "enabled", "disabled",
+// "all"]“ in a “StrEnum“ gives the FastAPI query param a real enum
+// to validate against -- an out-of-range “?status=“ 422s at the HTTP
+// boundary (the issue's filter contract) rather than reaching the
+// service. “ALL“ is the default + the explicit no-narrowing sentinel:
+// the filter “<select>“ submits “status=all“ (never “value=""“),
+// which the handler maps to “status=None“ on the service call so the
+// full visible set returns. The “str“ mixin keeps “{{ status.value
+// }}“ rendering stable (“"all"“, not “"_StatusFilter.ALL"“).
+type UnderscoreStatusFilter string
+
 // UnderscoreVersionBody Request body for the publish / deprecate routes -- carries “version“ only.
 //
 // The slug is the URL's job (the route's “{slug}“ path parameter); the
@@ -6686,6 +6707,12 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
 
+// UiConnectorsRegistryListUiConnectorsRegistryGetParams defines parameters for UiConnectorsRegistryListUiConnectorsRegistryGet.
+type UiConnectorsRegistryListUiConnectorsRegistryGetParams struct {
+	Status  *UnderscoreStatusFilter `form:"status,omitempty" json:"status,omitempty"`
+	Product *string                 `form:"product,omitempty" json:"product,omitempty"`
+}
+
 // UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams defines parameters for UiConnectorsDeleteSubmitUiConnectorsNameDeletePost.
 type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 	Force *bool `form:"force,omitempty" json:"force,omitempty"`
@@ -7011,6 +7038,33 @@ type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyU
 
 // UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
 type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
+// UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody defines body for UiConnectorsRegistryListUiConnectorsRegistryGet for application/json ContentType.
+type UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody defines body for UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete for application/json ContentType.
+type UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody defines body for UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet for application/json ContentType.
+type UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody defines body for UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet for application/json ContentType.
+type UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody defines body for UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost for application/json ContentType.
+type UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody defines body for UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet for application/json ContentType.
+type UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody defines body for UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost for application/json ContentType.
+type UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody defines body for UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet for application/json ContentType.
+type UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody defines body for UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost for application/json ContentType.
+type UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody = UISessionContext
 
 // UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
 type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
@@ -8659,6 +8713,51 @@ type ClientInterface interface {
 
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBody request with any body
+	UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryListUiConnectorsRegistryGet(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody request with any body
+	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBody request with any body
+	UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBody request with any body
+	UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBody request with any body
+	UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBody request with any body
+	UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBody request with any body
+	UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBody request with any body
+	UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBody request with any body
+	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11883,6 +11982,222 @@ func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx con
 
 func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryListUiConnectorsRegistryGet(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequest(c.Server, connectorId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23962,6 +24277,460 @@ func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(se
 	return req, nil
 }
 
+// NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest calls the generic UiConnectorsRegistryListUiConnectorsRegistryGet builder with application/json body
+func NewUiConnectorsRegistryListUiConnectorsRegistryGetRequest(server string, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody generates requests for UiConnectorsRegistryListUiConnectorsRegistryGet with any type of body
+func NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody(server string, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Product != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, *params.Product); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequest calls the generic UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete builder with application/json body
+func NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequest(server string, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequestWithBody generates requests for UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete with any type of body
+func NewUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequest calls the generic UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet builder with application/json body
+func NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequest(server string, connectorId string, body UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequestWithBody generates requests for UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet with any type of body
+func NewUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/delete", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequest calls the generic UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet builder with application/json body
+func NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequest(server string, connectorId string, body UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequestWithBody generates requests for UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet with any type of body
+func NewUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequest calls the generic UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost builder with application/json body
+func NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequest(server string, connectorId string, body UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequestWithBody generates requests for UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost with any type of body
+func NewUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequest calls the generic UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet builder with application/json body
+func NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequest(server string, connectorId string, body UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequestWithBody generates requests for UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet with any type of body
+func NewUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequest calls the generic UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost builder with application/json body
+func NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequest(server string, connectorId string, body UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequestWithBody generates requests for UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost with any type of body
+func NewUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequest calls the generic UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet builder with application/json body
+func NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequest(server string, connectorId string, body UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequestWithBody generates requests for UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet with any type of body
+func NewUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/enable-reads", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequest calls the generic UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost builder with application/json body
+func NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequest(server string, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequestWithBody generates requests for UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost with any type of body
+func NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/enable-reads", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
 func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -28503,6 +29272,51 @@ type ClientWithResponsesInterface interface {
 	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
 	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
 
+	// UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
+
+	UiConnectorsRegistryListUiConnectorsRegistryGetWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error)
+
+	// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse request with any body
+	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error)
+
+	UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error)
+
+	// UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse, error)
+
+	UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse, error)
+
+	// UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse, error)
+
+	UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse, error)
+
+	// UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBodyWithResponse request with any body
+	UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse, error)
+
+	UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse, error)
+
+	// UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse, error)
+
+	UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse, error)
+
+	// UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBodyWithResponse request with any body
+	UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse, error)
+
+	UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse, error)
+
+	// UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse, error)
+
+	UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse, error)
+
+	// UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBodyWithResponse request with any body
+	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error)
+
+	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error)
+
 	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
@@ -32683,6 +33497,204 @@ func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCo
 	return 0
 }
 
+type UiConnectorsRegistryListUiConnectorsRegistryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryListUiConnectorsRegistryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryListUiConnectorsRegistryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsDetailUiConnectorsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -36522,6 +37534,159 @@ func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirm
 		return nil, err
 	}
 	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
+}
+
+// UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryListUiConnectorsRegistryGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryListUiConnectorsRegistryGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryListUiConnectorsRegistryGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryListUiConnectorsRegistryGetWithResponse(ctx context.Context, params *UiConnectorsRegistryListUiConnectorsRegistryGetParams, body UiConnectorsRegistryListUiConnectorsRegistryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryListUiConnectorsRegistryGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse(rsp)
+}
+
+// UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse
+func (c *ClientWithResponses) UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDelete(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse(rsp)
+}
+
+// UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGet(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse(rsp)
+}
+
+// UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGet(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse(rsp)
+}
+
+// UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse
+func (c *ClientWithResponses) UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePost(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse(rsp)
+}
+
+// UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGet(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse(rsp)
+}
+
+// UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse
+func (c *ClientWithResponses) UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePost(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse(rsp)
+}
+
+// UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGet(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse(rsp)
+}
+
+// UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse
+func (c *ClientWithResponses) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error) {
+	rsp, err := c.UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse(rsp)
 }
 
 // UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
@@ -42738,6 +43903,240 @@ func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *ht
 	}
 
 	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse parses an HTTP response from a UiConnectorsRegistryListUiConnectorsRegistryGetWithResponse call
+func ParseUiConnectorsRegistryListUiConnectorsRegistryGetResponse(rsp *http.Response) (*UiConnectorsRegistryListUiConnectorsRegistryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryListUiConnectorsRegistryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse parses an HTTP response from a UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteWithResponse call
+func ParseUiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse(rsp *http.Response) (*UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryDeleteUiConnectorsRegistryConnectorIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse parses an HTTP response from a UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetWithResponse call
+func ParseUiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse(rsp *http.Response) (*UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryDeleteModalUiConnectorsRegistryConnectorIdDeleteGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse parses an HTTP response from a UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetWithResponse call
+func ParseUiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse(rsp *http.Response) (*UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryDisableModalUiConnectorsRegistryConnectorIdDisableGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse parses an HTTP response from a UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostWithResponse call
+func ParseUiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse(rsp *http.Response) (*UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryDisableUiConnectorsRegistryConnectorIdDisablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse parses an HTTP response from a UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetWithResponse call
+func ParseUiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse(rsp *http.Response) (*UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryEnableModalUiConnectorsRegistryConnectorIdEnableGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse parses an HTTP response from a UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostWithResponse call
+func ParseUiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse(rsp *http.Response) (*UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryEnableUiConnectorsRegistryConnectorIdEnablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse parses an HTTP response from a UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetWithResponse call
+func ParseUiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse(rsp *http.Response) (*UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableReadsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse parses an HTTP response from a UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithResponse call
+func ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse(rsp *http.Response) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -1,0 +1,102 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Delete-connector type-to-confirm modal (Initiative #1839 Task #1885 T1).
+
+  ``delete`` removes the connector's descriptor + group rows (and pops the
+  auto-registered shim when no rows remain). It is the highest-impact
+  registry verb, so it is TYPE-TO-CONFIRM: the operator must retype the
+  ``connector_id`` to arm the delete button. The copy surfaces that
+  ENABLED operations will be removed -- the ``enabled_operations_deleted``
+  advisory (a connector with live ops is deleted anyway; the removal is
+  deliberate, not an error).
+
+  The delete is an HTMX ``hx-delete`` carrying the OWASP signed
+  double-submit CSRF token on the confirm button's OWN ``hx-headers``.
+  On success the action handler returns an OOB swap that removes the row
+  (the row is gone from the service read); on a 404 it returns the inline
+  error panel into the row result slot (``#registry-result-<id>``).
+
+  The arm-on-match guard is plain first-party inline JS (the CSP posture
+  the other console modals' ``onclick`` / ``oninput`` handlers use -- no
+  external script, no Alpine).
+
+  Context contract: ``row`` + ``csrf_token`` (see the enable modal).
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="registry-action-modal" class="modal" aria-label="Delete connector">
+  <div class="modal-box max-w-lg">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="font-mono text-lg font-semibold">Delete {{ row.connector_id }}</h3>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <div role="alert" class="alert alert-error mt-4 items-start" data-delete-confirm>
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">This removes the connector and its operations</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          Deleting <span class="font-mono">{{ row.connector_id }}</span>
+          removes its {{ row.group_count }} group(s) and
+          {{ row.operation_count }} operation(s).
+          {% if row.enabled_operation_count > 0 %}
+            <span class="font-semibold">{{ row.enabled_operation_count }}
+            enabled operation(s) will be removed</span> -- the connector is
+            currently dispatchable.
+          {% endif %}
+          Re-ingesting the same triple afterwards re-registers it from
+          scratch. This cannot be undone.
+        </p>
+      </div>
+    </div>
+
+    <label class="form-control mt-4">
+      <span class="label-text text-xs opacity-70">
+        Type <span class="font-mono">{{ row.connector_id }}</span> to confirm
+      </span>
+      <input
+        id="registry-delete-confirm-input"
+        type="text"
+        class="input input-bordered input-sm w-full font-mono"
+        autocomplete="off"
+        aria-label="Type the connector id to confirm deletion"
+        data-expected="{{ row.connector_id }}"
+        oninput="(function(el){var btn=document.getElementById('registry-delete-confirm-btn');btn.disabled=(el.value!==el.dataset.expected);})(this)"
+      />
+    </label>
+
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('registry-action-modal').close()"
+      >
+        Cancel
+      </button>
+      <button
+        id="registry-delete-confirm-btn"
+        type="button"
+        data-action="confirm-delete"
+        class="btn btn-error btn-sm gap-1"
+        disabled
+        hx-delete="/ui/connectors/registry/{{ row.connector_id }}"
+        hx-target="#registry-result-{{ row.connector_id }}"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="this"
+        hx-on::after-request="if(event.detail.successful) document.getElementById('registry-action-modal').close()"
+      >
+        {{ icon("x", class="size-4") }}
+        Delete connector
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

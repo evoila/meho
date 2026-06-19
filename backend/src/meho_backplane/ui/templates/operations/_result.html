@@ -1,0 +1,179 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operation run-result fragment (Initiative #1835 G10.9, Task #1881).
+
+  Swapped into ``#operations-run-result-region`` (inside the run-confirm
+  modal) by the modal's Confirm button (``hx-post /ui/operations/call``).
+  Renders the dispatched op's ``OperationResult`` envelope inline -- the
+  console's execution outcome surface.
+
+  The envelope is ``call_operation``'s ``OperationResult.model_dump(mode="json")``
+  (a dict). Render branches:
+
+    * ``error_message`` set (and no ``envelope``) -> an inline form error
+      (HTTP 400): a malformed ``params`` JSON, or the meta-tool's
+      missing-target-name ValueError. The operator stays in the modal.
+    * ``status == "ok"`` -> the result. ``result + handle`` is a TAGGED
+      UNION: when ``handle`` is present the full payload spilled out-of-band,
+      so render the handle metadata (handle_id / summary / row count / TTL)
+      and a "full payload available out-of-band" note rather than dumping a
+      huge blob into the modal. Otherwise render the inline ``result``.
+    * ``status == "awaiting_approval"`` -> the policy gate parked the op and
+      created a durable ApprovalRequest. Surface ``extras.approval_request_id``
+      with a DEEP-LINK into ``/ui/approvals/{id}`` -- so the operator is never
+      shown a silent / empty success.
+    * ``status in ("error", "denied")`` -> the structured ``extras.error_code``
+      + the human ``error`` string.
+
+  Context:
+    envelope      -- dict | None: the call_operation envelope (status / result /
+                     error / handle / extras / duration_ms), or None when a
+                     form error pre-empted the dispatch
+    error_message -- str | None: the inline form-error message (400 branch)
+    connector_id  -- str: the dispatched connector id (for the heading)
+    op_id         -- str: the dispatched op id (for the heading)
+-#}
+{% from "_icons.html" import icon %}
+
+{% if error_message %}
+  {#- Inline form error (400): malformed params or a missing target name.
+      The op was never dispatched. -#}
+  <div role="alert" class="alert alert-error" data-run-status="form_error">
+    <div>
+      <h4 class="text-sm font-semibold">Cannot run</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">{{ error_message }}</p>
+    </div>
+  </div>
+{% elif envelope.status == "awaiting_approval" %}
+  {#- The op requires approval: the policy gate parked it and created a
+      durable ApprovalRequest. NEVER render this as a silent success -- the
+      operator must see that a reviewer has to approve, with a deep-link into
+      the approvals surface (#1778). -#}
+  {%- set extras = envelope.get("extras") or {} -%}
+  {%- set approval_id = extras.get("approval_request_id") -%}
+  <div role="alert" class="alert alert-info items-start" data-run-status="awaiting_approval">
+    {{ icon("clock", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Awaiting approval</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">
+        This operation requires approval before it executes. A request has
+        been parked for a reviewer &mdash; it has <span class="font-semibold">not</span>
+        run yet.
+      </p>
+      {% if approval_id %}
+        <p class="mt-1 text-xs opacity-70">
+          Request id <code data-approval-request-id>{{ approval_id }}</code>
+        </p>
+        {#- Deep-link into /ui/approvals/{id}: hx-get the detail modal into the
+            shared app-shell approvals container so the reviewer can open it
+            without leaving the page. The plain href is the fallback for a
+            non-HTMX navigation / a new tab. -#}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals/{{ approval_id }}"
+          hx-get="/ui/approvals/{{ approval_id }}"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Review in approvals
+        </a>
+      {% else %}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals"
+          hx-get="/ui/approvals"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Open approvals
+        </a>
+      {% endif %}
+    </div>
+  </div>
+{% elif envelope.status == "ok" %}
+  {%- set handle = envelope.get("handle") -%}
+  <div class="space-y-3" data-run-status="ok">
+    <div class="flex items-center gap-2">
+      <span class="badge badge-success badge-sm">executed</span>
+      {% if envelope.get("duration_ms") is not none %}
+        <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
+      {% endif %}
+    </div>
+
+    {% if handle %}
+      {#- Tagged-union handle branch: the full payload spilled out-of-band.
+          Render the handle metadata + a note -- NEVER inline a huge blob. -#}
+      <div role="status" class="alert alert-info items-start" data-run-result="handle">
+        {{ icon("package", class="size-5 shrink-0") }}
+        <div class="min-w-0">
+          <h4 class="text-sm font-semibold">Result stored out-of-band</h4>
+          <p class="text-xs">
+            The full payload was large enough to spill to the read-back store;
+            the summary is below. Fetch windows with the result-query tooling.
+          </p>
+          <dl class="mt-2 space-y-1 text-xs">
+            <div class="flex gap-2">
+              <dt class="opacity-60">Handle id</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd>
+            </div>
+            {% if handle.total_rows is not none %}
+              <div class="flex gap-2">
+                <dt class="opacity-60">Rows</dt>
+                <dd data-handle-total-rows>{{ handle.total_rows }}</dd>
+              </div>
+            {% endif %}
+            {% if handle.ttl_seconds is not none %}
+              <div class="flex gap-2">
+                <dt class="opacity-60">TTL</dt>
+                <dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd>
+              </div>
+            {% endif %}
+          </dl>
+          {% if handle.summary_md %}
+            <pre class="mt-2 max-h-40 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-handle-summary><code>{{ handle.summary_md }}</code></pre>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      {#- Inline result. The reducer keeps inlined payloads small; the
+          ``max-h`` + scroll bounds an unexpectedly large one. -#}
+      <div>
+        <div class="meho-overline mb-1">Result</div>
+        {% if envelope.get("result") is none %}
+          <p class="text-xs opacity-60">No result payload (the operation returned no body).</p>
+        {% else %}
+          <pre class="max-h-72 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-run-result="inline"><code>{{ envelope.result | tojson(indent=2) }}</code></pre>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+{% else %}
+  {#- status in ("error", "denied") -- the dispatcher's structured fault,
+      surfaced inline (HTTP 200, not 4xx). Show extras.error_code + the human
+      error string. -#}
+  <div
+    role="alert"
+    class="alert {{ 'alert-warning' if envelope.status == 'denied' else 'alert-error' }} items-start"
+    data-run-status="{{ envelope.status }}"
+  >
+    {{ icon("ban", class="size-5 shrink-0") }}
+    <div>
+      {%- set extras = envelope.get("extras") or {} -%}
+      <h4 class="text-sm font-semibold">
+        {% if envelope.status == "denied" %}Operation denied{% else %}Operation failed{% endif %}
+        {% if extras.get("error_code") %}
+          <code class="ml-1 text-xs" data-run-error-code>{{ extras.get("error_code") }}</code>
+        {% endif %}
+      </h4>
+      {% if envelope.get("error") %}
+        <p class="text-xs [overflow-wrap:anywhere]">{{ envelope.get("error") }}</p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}

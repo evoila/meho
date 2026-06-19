@@ -80,6 +80,35 @@ def _write_openapi(tmp: Path, paths: list[str]) -> Path:
     return snapshot
 
 
+def _write_openapi_with_methods(tmp: Path, paths: dict[str, list[str]]) -> Path:
+    """Write an OpenAPI snapshot where each path carries an explicit method set.
+
+    Unlike :func:`_write_openapi` (which hardcodes every path to GET-only),
+    this lets a test pin the real per-path verbs so the verb-drift check has
+    something to disagree with — e.g. a GET-only ``/api/v1/operations/search``.
+    A ``parameters`` key is added alongside the verbs to confirm the loader
+    ignores non-operation path-item keys when deriving the method set.
+    """
+    snapshot = tmp / "openapi.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "openapi": "3.1.0",
+                "info": {"title": "test", "version": "0.0.0"},
+                "paths": {
+                    path: {
+                        **{verb: {"responses": {"200": {"description": "ok"}}} for verb in verbs},
+                        "parameters": [],
+                    }
+                    for path, verbs in paths.items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return snapshot
+
+
 def _write_release_body(tmp: Path, text: str) -> Path:
     body = tmp / "release-body.md"
     body.write_text(textwrap.dedent(text).strip() + "\n", encoding="utf-8")
@@ -380,4 +409,158 @@ def test_v060_real_release_body_after_amendment(tmp_path: Path) -> None:
     assert result.returncode == 0, (
         f"amended v0.6.0 body should pass against live OpenAPI; "
         f"got {result.returncode}.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_verb_drift_post_on_get_only_path_fails(tmp_path: Path) -> None:
+    """A body citing ``POST`` on a GET-only path fails the gate (#1914).
+
+    Reproduces the exact defect this Task closes: the v0.17.0 CHANGELOG
+    bullet advertised ``POST /api/v1/operations/search`` while the route
+    ships GET-only. The path *exists*, so the original path-existence-only
+    gate (#1136) was blind to it; the verb-aware extension flags the
+    method drift and names the verb the path actually exposes.
+    """
+    snapshot = _write_openapi_with_methods(
+        tmp_path,
+        {
+            "/api/v1/operations/search": ["get"],
+            "/api/v1/kb": ["get", "post"],
+            "/api/v1/memory": ["get", "post"],
+        },
+    )
+    body = _write_release_body(
+        tmp_path,
+        """
+        ## Free-text filter
+
+        Canonical `q` across `GET /api/v1/kb`, `GET /api/v1/memory`,
+        `POST /api/v1/operations/search`.
+        """,
+    )
+
+    result = _run_gate(
+        "--release-body",
+        str(body),
+        "--openapi-snapshot",
+        str(snapshot),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 1, (
+        f"expected exit 1 for POST-on-GET-only verb drift; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "release-body paths FAILED" in result.stderr
+    assert "POST /api/v1/operations/search" in result.stderr
+    # The diagnostic names the verb the path actually exposes.
+    assert "GET" in result.stderr
+
+
+def test_verb_match_get_on_get_only_path_passes(tmp_path: Path) -> None:
+    """The shipped phrasing — ``GET /api/v1/operations/search`` — passes (#1914).
+
+    The corrected CHANGELOG bullet cites the route with its real verb and
+    a query string (``?connector_id=…&q=…``); the gate strips the query
+    string and matches GET against the path's method set.
+    """
+    snapshot = _write_openapi_with_methods(
+        tmp_path,
+        {
+            "/api/v1/operations/search": ["get"],
+            "/api/v1/kb": ["get", "post"],
+            "/api/v1/memory": ["get", "post"],
+        },
+    )
+    body = _write_release_body(
+        tmp_path,
+        """
+        ## Free-text filter
+
+        Canonical `q` across `GET /api/v1/kb`, `GET /api/v1/memory`,
+        `GET /api/v1/operations/search?connector_id=…&q=…`.
+        """,
+    )
+
+    result = _run_gate(
+        "--release-body",
+        str(body),
+        "--openapi-snapshot",
+        str(snapshot),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, (
+        f"expected exit 0 for GET-on-GET-only match; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "release-body paths OK" in result.stdout
+
+
+def test_bare_path_citation_is_method_unchecked(tmp_path: Path) -> None:
+    """A bare path citation (no verb in the prose) is path-checked only (#1914).
+
+    The verb check only holds an *explicitly spelled* method to the
+    snapshot. A bare ``/api/v1/operations/search`` carries no verb to
+    validate, so it resolves on path existence alone — even though the
+    path is GET-only and the prose doesn't say so.
+    """
+    snapshot = _write_openapi_with_methods(
+        tmp_path,
+        {"/api/v1/operations/search": ["get"]},
+    )
+    body = _write_release_body(
+        tmp_path,
+        """
+        See `/api/v1/operations/search` for connector-scoped operation search.
+        """,
+    )
+
+    result = _run_gate(
+        "--release-body",
+        str(body),
+        "--openapi-snapshot",
+        str(snapshot),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, (
+        f"bare path citation should pass on path existence alone; "
+        f"got {result.returncode}.\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_verb_drift_does_not_double_report_missing_path(tmp_path: Path) -> None:
+    """A verb-prefixed citation of a *missing* path is reported once (#1914).
+
+    When the path itself doesn't resolve, the path-existence check already
+    flags it; the verb check must stay silent for that citation so the
+    diagnostic isn't duplicated. Guards the ``unresolved_paths`` skip in
+    ``check_release_body``.
+    """
+    snapshot = _write_openapi_with_methods(
+        tmp_path,
+        {"/api/v1/audit/sessions/{session_id}/replay": ["get"]},
+    )
+    body = _write_release_body(
+        tmp_path,
+        """
+        Surfaced as `GET /api/v1/audit/replay` with a 10k cap.
+        """,
+    )
+
+    result = _run_gate(
+        "--release-body",
+        str(body),
+        "--openapi-snapshot",
+        str(snapshot),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 1
+    # Exactly one bullet line for the single drifted citation.
+    bullet_lines = [line for line in result.stderr.splitlines() if "/api/v1/audit/replay" in line]
+    assert len(bullet_lines) == 1, (
+        f"expected the missing path to be reported once, not duplicated by "
+        f"the verb check.\nstderr: {result.stderr}"
     )

@@ -51,8 +51,14 @@ Mechanism
 4. For each template form, assert it exists in the OpenAPI snapshot
    passed via ``--openapi-snapshot``. The snapshot is the same
    ``cli/api/openapi.json`` the #928 freshness gate produces.
-5. Exit 0 on full match; exit 1 with a diagnostic listing every
-   path that didn't resolve.
+5. For each citation that *spells out an HTTP method*
+   (``POST /api/v1/operations/search``), additionally assert the
+   method is one the resolved path exposes in the snapshot. This
+   catches verb/method drift on a path that does exist — a class the
+   path-existence check (step 4) is blind to. A bare citation with no
+   leading verb is path-checked only.
+6. Exit 0 on full match; exit 1 with a diagnostic listing every
+   path that didn't resolve and every verb that doesn't match.
 
 The template-derivation step is what makes the gate useful: when a
 release body says
@@ -80,10 +86,12 @@ compatibility, or a path served by a sibling service).
 Exit codes
 ----------
 
-* ``0`` — every cited path resolves (or matches a whitelist entry).
-* ``1`` — at least one cited path failed to resolve; report on
-  stderr lists the cited token, the derived template, and the
-  closest OpenAPI prefix match (when one exists).
+* ``0`` — every cited path resolves (or matches a whitelist entry)
+  and every verb-prefixed citation names a method the path exposes.
+* ``1`` — at least one citation failed: a path that didn't resolve
+  (report lists the cited token and the closest OpenAPI prefix
+  match), or a verb-prefixed citation naming a method the resolved
+  path doesn't expose (report lists the path and the verbs it does).
 * ``2`` — argument / file / JSON parse error.
 
 Usage
@@ -144,6 +152,26 @@ _UUID_LIKE_RE: Final = re.compile(
 
 #: A pure-digit segment (length ≥ 1) is replaced by ``{id}``.
 _DIGITS_RE: Final = re.compile(r"^[0-9]+$")
+
+#: HTTP methods that count as operations on an OpenAPI path item. Other
+#: keys under a path-item object (``parameters``, ``summary``, ``$ref``,
+#: ``servers``, ``description``) are not verbs and are excluded when
+#: deriving a path's exposed method set.
+_OPENAPI_VERBS: Final = frozenset(
+    {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+)
+
+#: Matches a verb-prefixed citation: an uppercase HTTP method immediately
+#: before an ``/api/v<N>/...`` token (e.g. ``POST /api/v1/operations/search``).
+#: The verb and the path are captured separately so the path can be
+#: validated for existence (templatised, like a bare citation) *and* the
+#: verb checked against the path's actual method set. A bare citation
+#: with no leading verb does not match here and is method-unchecked —
+#: only the explicit verb in the prose is held to the snapshot.
+_VERB_PATH_RE: Final = re.compile(
+    r"\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)\s+"
+    r"(/api/v[0-9]+/[A-Za-z0-9_/{}\-.]*)"
+)
 
 
 def _strip_trailing_punct(token: str) -> str:
@@ -267,8 +295,39 @@ def extract_paths(release_body: str) -> list[str]:
     return list(seen.keys())
 
 
-def load_openapi_paths(snapshot_path: Path) -> set[str]:
-    """Load the ``paths`` keys from an OpenAPI snapshot JSON file.
+def extract_verb_paths(release_body: str) -> list[tuple[str, str]]:
+    """Return every ``<VERB> /api/v*`` citation as a ``(verb, path)`` pair.
+
+    The verb is lower-cased to match the OpenAPI method-key convention;
+    the path is stripped of trailing prose punctuation the same way
+    :func:`extract_paths` does. Order-preserving, deduped on the
+    ``(verb, path)`` pair so a path cited under two different verbs (a
+    ``GET`` and a ``POST`` of the same route) is checked once per verb.
+
+    Only citations that spell out an HTTP method are returned; a bare
+    ``/api/v1/...`` citation has no verb to validate and is covered by
+    the path-existence check alone.
+    """
+    seen: dict[tuple[str, str], None] = {}
+    for verb, raw in _VERB_PATH_RE.findall(release_body):
+        cleaned = _strip_trailing_punct(raw)
+        if not cleaned:
+            continue
+        pair = (verb.lower(), cleaned)
+        if pair not in seen:
+            seen[pair] = None
+    return list(seen.keys())
+
+
+def load_openapi_paths(snapshot_path: Path) -> dict[str, set[str]]:
+    """Load each ``paths`` entry and its method set from an OpenAPI snapshot.
+
+    Returns a mapping of ``path-template -> {lowercased HTTP method}`` so a
+    caller can validate both that a cited path exists *and* that a
+    verb-prefixed citation names a method the path actually exposes. The
+    method set is derived from each OpenAPI path-item object's keys,
+    filtered to the recognised HTTP verbs — ``parameters`` / ``summary`` /
+    ``$ref`` and other non-operation keys are excluded.
 
     Raises:
         FileNotFoundError: if ``snapshot_path`` doesn't exist.
@@ -284,7 +343,13 @@ def load_openapi_paths(snapshot_path: Path) -> set[str]:
     if not isinstance(paths, dict):
         raise ValueError(f"{snapshot_path}: missing or non-object 'paths' key")
 
-    return set(paths.keys())
+    methods_by_path: dict[str, set[str]] = {}
+    for path, item in paths.items():
+        verbs: set[str] = set()
+        if isinstance(item, dict):
+            verbs = {key.lower() for key in item if key.lower() in _OPENAPI_VERBS}
+        methods_by_path[path] = verbs
+    return methods_by_path
 
 
 def _closest_template(citation: str, openapi_templates: set[str]) -> str | None:
@@ -339,27 +404,60 @@ def _closest_template(citation: str, openapi_templates: set[str]) -> str | None:
     return best
 
 
+def _resolve_template(citation: str, openapi_templates: set[str]) -> str | None:
+    """Return the OpenAPI path-template a citation resolves to, if any.
+
+    A citation resolves when one of its templatised forms is a literal key
+    in the snapshot. Used by the verb check to find *which* path-item a
+    verb-prefixed citation lands on so its method set can be consulted.
+    Returns ``None`` when the path itself doesn't resolve (in which case
+    the path-existence check already reports it — the verb check stays
+    silent to avoid a duplicate diagnostic).
+    """
+    matched = _templatise(citation, openapi_templates) & openapi_templates
+    if not matched:
+        return None
+    # Deterministic pick when a concrete citation collides with multiple
+    # templates (rare): the shortest, then lexicographically-first, is
+    # the most specific literal match.
+    return sorted(matched, key=lambda t: (len(t), t))[0]
+
+
 def check_release_body(
     release_body: str,
-    openapi_templates: set[str],
+    openapi_paths: set[str] | dict[str, set[str]],
     allow_paths: set[str] | None = None,
 ) -> list[tuple[str, str | None]]:
     """Return the list of unresolved citations.
 
     Args:
         release_body: full markdown text of the proposed release.
-        openapi_templates: the set of templated paths from the
-            OpenAPI snapshot (e.g.
-            ``/api/v1/audit/sessions/{session_id}/replay``).
+        openapi_paths: the templated paths from the OpenAPI snapshot. A
+            bare ``set`` of templates validates path existence only; a
+            ``dict`` mapping each template to its method set
+            (as :func:`load_openapi_paths` returns) additionally validates
+            that a verb-prefixed citation names a method the path exposes
+            — catching verb/method drift on a path that does exist (e.g.
+            a body advertising ``POST /api/v1/operations/search`` for a
+            GET-only route).
         allow_paths: path patterns that should be treated as
-            resolved even when absent from ``openapi_templates``.
+            resolved even when absent from ``openapi_paths``.
 
     Returns:
-        A list of ``(citation, closest_match_or_None)`` pairs for
-        every citation that didn't resolve. Empty list = all good.
+        A list of ``(citation, hint_or_None)`` pairs for every citation
+        that didn't resolve — by missing path, or (when method info is
+        supplied) by naming a verb the resolved path doesn't expose. The
+        hint is the closest snapshot path for a missing-path failure, or
+        the list of methods the path *does* expose for a verb mismatch.
+        Empty list = all good.
     """
     allow = allow_paths or set()
+    methods_by_path: dict[str, set[str]] | None = (
+        openapi_paths if isinstance(openapi_paths, dict) else None
+    )
+    openapi_templates: set[str] = set(openapi_paths)
     unresolved: list[tuple[str, str | None]] = []
+    unresolved_paths: set[str] = set()
 
     for citation in extract_paths(release_body):
         if citation in allow:
@@ -370,6 +468,28 @@ def check_release_body(
         if candidates & allow:
             continue
         unresolved.append((citation, _closest_template(citation, openapi_templates)))
+        unresolved_paths.add(citation)
+
+    # Verb/method drift: a path that DOES exist but is cited under a
+    # method it doesn't expose. Only runs when method info is supplied,
+    # and only for citations whose path resolved above (an unresolved
+    # path is already reported — don't double-flag it).
+    if methods_by_path is not None:
+        for verb, citation in extract_verb_paths(release_body):
+            if citation in allow or citation in unresolved_paths:
+                continue
+            template = _resolve_template(citation, openapi_templates)
+            if template is None:
+                continue
+            exposed = methods_by_path.get(template, set())
+            if verb in exposed:
+                continue
+            exposed_hint = (
+                "exposes " + ", ".join(sorted(m.upper() for m in exposed))
+                if exposed
+                else "exposes no operations"
+            )
+            unresolved.append((f"{verb.upper()} {citation}", f"{template} {exposed_hint}"))
 
     return unresolved
 
@@ -417,12 +537,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        openapi_templates = load_openapi_paths(args.openapi_snapshot)
+        openapi_paths = load_openapi_paths(args.openapi_snapshot)
     except (OSError, ValueError) as exc:
         print(f"error: cannot load OpenAPI snapshot: {exc}", file=sys.stderr)
         return 2
 
-    unresolved = check_release_body(body, openapi_templates, set(args.allow_path))
+    unresolved = check_release_body(body, openapi_paths, set(args.allow_path))
 
     if not unresolved:
         cited = len(extract_paths(body))
@@ -436,13 +556,17 @@ def main(argv: list[str] | None = None) -> int:
         f"resolve in {args.openapi_snapshot}:",
         file=sys.stderr,
     )
-    for citation, closest in unresolved:
-        if closest is not None:
-            print(f"  - {citation}  (closest snapshot path: {closest})", file=sys.stderr)
-        else:
+    for citation, hint in unresolved:
+        if hint is None:
             print(f"  - {citation}  (no near match in snapshot)", file=sys.stderr)
+        elif " " in citation:
+            # Verb-prefixed citation whose path exists but method drifted:
+            # the hint already spells out the methods the path exposes.
+            print(f"  - {citation}  (snapshot path {hint})", file=sys.stderr)
+        else:
+            print(f"  - {citation}  (closest snapshot path: {hint})", file=sys.stderr)
     print(
-        "\nFix: amend the release body to cite the shipped path, "
+        "\nFix: amend the release body to cite the shipped path and method, "
         "or pass --allow-path if the citation is intentionally "
         "outside the snapshot's surface.",
         file=sys.stderr,

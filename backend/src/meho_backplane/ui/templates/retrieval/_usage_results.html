@@ -1,0 +1,135 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Retrieval Usage-Analytics results partial.
+
+  Initiative #1840 (G10.14 Retrieval diagnostics & quality console),
+  Task #1889. Swapped into ``#retrieval-usage-results`` by the HTMX
+  ``POST /ui/retrieval/usage``; also included into ``index.html`` for the
+  initial render so both paths share identical markup.
+
+  Render branches (first match wins):
+    1. ``error_message`` set -> an inline 400-class error card (a malformed
+       ``since`` rejected by ``parse_since`` -> ``SinceValueError``; never a
+       500).
+    2. ``report`` set -> the window header, the honesty-gap explainer (always
+       shown when ``total_searches == 0``), and either a per-(day, surface)
+       bucket table or a zero state.
+    3. otherwise (initial render) -> a quiet prompt.
+
+  Honesty-gap explainer (load-bearing -- must surface, not hide):
+    ``compute_usage`` counts only the audited ``/mcp`` search meta-tools; the
+    REST ``POST /api/v1/retrieve`` diagnostic queries (the very thing the
+    Diagnostics tab runs) are NOT counted (``rest_excluded``). So a
+    ``total_searches == 0`` with a non-empty ``counted_surfaces`` must read as
+    "REST excluded -- only audited /mcp search tools are counted", NOT as "no
+    retrieval activity". The badge renders whenever the count is zero.
+
+  Context variables:
+    since          -- str: the submitted lookback window (for the input value)
+    since_options  -- tuple[str]: the lookback presets the selector offers
+    report         -- UsageReport | None: the usage aggregate (None on error)
+    error_message  -- str | None: a ``SinceValueError`` detail (inline 400 card)
+    csrf_token     -- str: minted double-submit token (un-rendered here; the
+                      form lives in index.html)
+-#}
+<div id="retrieval-usage-results" class="space-y-3">
+  {% set error_message = error_message | default(none) %}
+  {% set report = report | default(none) %}
+  {% if error_message %}
+    {# ---------- Inline 400 error card (malformed since) ---------- #}
+    <div class="alert alert-error" role="alert" aria-live="assertive">
+      <div>
+        <h3 class="font-semibold">Invalid lookback window</h3>
+        <p class="text-sm opacity-90">{{ error_message }}</p>
+      </div>
+    </div>
+
+  {% elif report is not none %}
+    {# ---------- Window header ---------- #}
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <p class="text-sm opacity-70" aria-live="polite">
+        <span class="font-mono">{{ report.total_searches }}</span>
+        search{% if report.total_searches != 1 %}es{% endif %} counted
+        &middot; <span class="font-mono">{{ report.since.strftime("%Y-%m-%d %H:%M") }}</span>
+        &ndash; <span class="font-mono">{{ report.until.strftime("%Y-%m-%d %H:%M") }}</span> UTC
+      </p>
+    </div>
+
+    {# ---------- Honesty-gap explainer (shown whenever the count is zero) ----------
+       A zero is ambiguous: it could mean "no retrieval activity" OR "you only
+       dogfood through REST, which this counter deliberately excludes". The
+       badge disambiguates so the zero never reads as inactivity. #}
+    {% if report.total_searches == 0 and report.rest_excluded %}
+      <div class="alert alert-info" role="status">
+        <div>
+          <h3 class="font-semibold">REST excluded &mdash; only audited /mcp search tools are counted</h3>
+          <p class="text-sm opacity-90">
+            A zero here does <strong>not</strong> mean "no retrieval activity".
+            The REST <span class="font-mono">POST /api/v1/retrieve</span>
+            diagnostic queries (including this console's Diagnostics tab) audit
+            under their own path and are not counted. Only these audited
+            <span class="font-mono">/mcp</span> search meta-tools tick the
+            counter:
+          </p>
+          {% if report.counted_surfaces %}
+            <div class="mt-1 flex flex-wrap gap-1">
+              {% for surface in report.counted_surfaces %}
+                <span class="badge badge-ghost badge-outline font-mono">{{ surface }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    {# ---------- Per-(day, surface) bucket table ---------- #}
+    {% if report.buckets %}
+      <div class="overflow-x-auto">
+        <table class="table table-sm" aria-label="Per-day per-surface usage">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Surface</th>
+              <th class="text-right">Searches</th>
+              <th class="text-right">Distinct operators</th>
+              <th class="text-right">Action conversion</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for bucket in report.buckets %}
+              <tr>
+                <td class="font-mono">{{ bucket.date.isoformat() }}</td>
+                <td>
+                  <span class="badge badge-ghost badge-outline">{{ bucket.surface }}</span>
+                </td>
+                <td class="text-right font-mono">{{ bucket.search_count }}</td>
+                <td class="text-right font-mono">{{ bucket.distinct_operators }}</td>
+                <td class="text-right font-mono">{{ "%.2f" | format(bucket.action_conversion_pct) }}%</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% elif report.total_searches != 0 %}
+      {# total_searches > 0 but no buckets would be a contradiction; guard anyway. #}
+      <div class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body text-center py-8">
+          <p class="text-sm opacity-50">No per-day breakdown available for this window.</p>
+        </div>
+      </div>
+    {% endif %}
+
+  {% else %}
+    {# ---------- Initial prompt (no run yet) ---------- #}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body text-center py-10">
+        <p class="text-base opacity-50">
+          Pick a lookback window and run to read back audited search usage per
+          surface.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

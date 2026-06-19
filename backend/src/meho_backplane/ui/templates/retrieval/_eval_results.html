@@ -1,0 +1,107 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Retrieval Eval-Quality results partial.
+
+  Initiative #1840 (G10.14 Retrieval diagnostics & quality console),
+  Task #1889. Swapped into ``#retrieval-eval-results`` by the HTMX
+  ``POST /ui/retrieval/eval``; also included into ``index.html`` for the
+  initial render so both paths share identical markup.
+
+  Render branches (first match wins):
+    1. ``result`` set -> the ``overall_verdict`` pill + one row per surface
+       with ``precision_at_5`` / ``mrr`` / ``coverage`` and a verdict pill.
+    2. otherwise (initial render) -> a quiet prompt.
+
+  Verdict -> color mapping (lives here, NOT in the service):
+    The service returns a ``Verdict`` token (``green`` / ``yellow`` / ``red``)
+    verbatim -- an empty-corpus surface legitimately returns ``green``. The
+    template maps the token to a daisyUI badge color via ``_verdict_pill``; it
+    NEVER recomputes the verdict. ``red`` -> ``badge-error``, ``yellow`` ->
+    ``badge-warning``, ``green`` -> ``badge-success``.
+
+  No baseline:
+    There is deliberately NO baseline column and NO baseline toggle -- the
+    server-side baseline path is 501 today (v0.2 ships no checked-in corpus
+    snapshot). ``eval_all`` is called without a baseline, so the 501 path is
+    never reached.
+
+  Context variables:
+    result      -- EvalResult | None: per-surface metrics + overall_verdict
+    csrf_token  -- str: minted double-submit token (un-rendered here; the form
+                   lives in index.html)
+-#}
+{#- Verdict -> daisyUI badge-color pill. The verdict token is rendered
+    verbatim; only the color class is mapped here. -#}
+{% macro verdict_pill(verdict) %}
+  {%- if verdict == "red" -%}
+    {% set badge_class = "badge-error" %}
+  {%- elif verdict == "yellow" -%}
+    {% set badge_class = "badge-warning" %}
+  {%- else -%}
+    {% set badge_class = "badge-success" %}
+  {%- endif -%}
+  <span
+    class="badge {{ badge_class }} badge-outline uppercase"
+    data-verdict="{{ verdict }}"
+    aria-label="Verdict {{ verdict }}"
+  >{{ verdict }}</span>
+{% endmacro %}
+<div id="retrieval-eval-results" class="space-y-3">
+  {% set result = result | default(none) %}
+  {% if result is not none %}
+    {# ---------- Overall verdict header ---------- #}
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <p class="text-sm opacity-70" aria-live="polite">
+        Eval run &middot;
+        <span class="font-mono">{{ result.ran_at.strftime("%Y-%m-%d %H:%M") }}</span> UTC
+      </p>
+      <div class="flex items-center gap-2">
+        <span class="text-sm opacity-70">Overall</span>
+        {{ verdict_pill(result.overall_verdict) }}
+      </div>
+    </div>
+
+    {# ---------- Per-surface metrics table ---------- #}
+    <div class="overflow-x-auto">
+      <table class="table table-sm" aria-label="Per-surface eval metrics">
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th class="text-right">Queries</th>
+            <th class="text-right">precision@5</th>
+            <th class="text-right">MRR</th>
+            <th class="text-right">coverage</th>
+            <th class="text-right">Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for surface in result.surfaces %}
+            <tr>
+              <td>
+                <span class="badge badge-ghost badge-outline">{{ surface.surface }}</span>
+              </td>
+              <td class="text-right font-mono">{{ surface.query_count }}</td>
+              <td class="text-right font-mono">{{ "%.3f" | format(surface.precision_at_5) }}</td>
+              <td class="text-right font-mono">{{ "%.3f" | format(surface.mrr) }}</td>
+              <td class="text-right font-mono">{{ "%.3f" | format(surface.coverage) }}</td>
+              <td class="text-right">{{ verdict_pill(surface.verdict) }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+  {% else %}
+    {# ---------- Initial prompt (no run yet) ---------- #}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body text-center py-10">
+        <p class="text-base opacity-50">
+          Run the eval corpus to read back precision@5 / MRR / coverage and a
+          green/yellow/red verdict per surface.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

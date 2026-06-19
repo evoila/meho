@@ -107,6 +107,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "icon": "library",
     },
     {
+        "title": "Retrieval",
+        "summary": "Diagnose retrieval: per-signal RRF score & rank breakdown.",
+        "href": "/ui/retrieval",
+        "icon": "search",
+    },
+    {
         "title": "Topology",
         "summary": "Targets, clusters, and dependencies.",
         "href": "/ui/topology",

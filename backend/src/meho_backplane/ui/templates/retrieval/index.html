@@ -1,0 +1,213 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Retrieval diagnostics & quality console page.
+
+  Initiative #1840 (G10.14 Retrieval diagnostics & quality console),
+  Task #1888 -- the ANCHOR task. Stands up the ``/ui/retrieval`` page
+  scaffold (sidebar entry, tab strip, page chrome) + the default
+  Diagnostics tab. Sibling tasks nest in:
+    * T2 -- Usage Analytics + Eval Quality tab panels (placeholder here).
+    * T3 -- Retire-checklist tab panel (placeholder here).
+
+  Tab strip:
+    * A client-side Alpine toggle (``x-data`` holding the active tab; each
+      tab button flips it, each panel ``x-show``s on it). The Diagnostics
+      tab is the default-active panel; the other three render a "coming
+      soon" placeholder so the chrome reads as a real tabbed surface from
+      day one without 8 dead links.
+
+  Diagnostics tab HTMX wiring:
+    * The diagnostics form (``#retrieval-diagnostics-form``) declares its OWN
+      ``hx-headers`` ``X-CSRF-Token`` -- HTMX does NOT propagate ``hx-headers``
+      from an ancestor to a descendant form (#1693), so the token must ride
+      the form element that issues the request.
+    * Submit fires ``POST /ui/retrieval/diagnostics`` with the ``query`` +
+      optional ``source`` / ``kind`` + ``limit`` and swaps
+      ``#retrieval-diagnostics-results`` (``hx-target`` +
+      ``hx-swap="outerHTML"``).
+    * Results render server-side into ``retrieval/_diagnostics_results.html``;
+      the same partial is included here for the initial (empty) render so both
+      paths share identical markup.
+
+  Context variables:
+    query           -- str: current query (empty on first render)
+    source          -- str: current source filter (empty on first render)
+    kind            -- str: current kind filter (empty on first render)
+    limit           -- int: current limit selection
+    limit_options   -- tuple[int]: the limit selector's options
+    hits            -- list[RetrievalHit]: empty on first render
+    searched        -- bool: False on first render
+    candidate_limit -- int: the per-signal candidate pull (CANDIDATE_LIMIT, 50)
+    csrf_token      -- str: minted double-submit token
+
+  Note: ``ready`` is NOT passed here -- the chassis context processor injects
+  it globally from the session middleware's cached verdict; a route literal
+  would shadow the live value.
+-#}
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Retrieval &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  x-data="{ tab: 'diagnostics' }"
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Retrieval</h1>
+      <p class="text-sm opacity-70">
+        Run a query in-process and read back the ranked hits with the
+        per-signal RRF score &amp; rank breakdown the substrate carries.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Tab strip (client-side Alpine toggle) ---------- #}
+  {#- The Diagnostics tab is the only live panel in this anchor task; the
+      Usage / Eval / Retire tabs are placeholders T2/T3 fill in. Each button
+      flips ``tab``; each panel ``x-show``s on it. ``aria-selected`` mirrors
+      the active state for assistive tech. -#}
+  <div role="tablist" class="tabs tabs-bordered" aria-label="Retrieval console tabs">
+    <button
+      type="button"
+      role="tab"
+      class="tab"
+      x-bind:class="tab === 'diagnostics' ? 'tab-active' : ''"
+      x-bind:aria-selected="(tab === 'diagnostics').toString()"
+      x-on:click="tab = 'diagnostics'"
+    >Diagnostics</button>
+    <button
+      type="button"
+      role="tab"
+      class="tab"
+      x-bind:class="tab === 'usage' ? 'tab-active' : ''"
+      x-bind:aria-selected="(tab === 'usage').toString()"
+      x-on:click="tab = 'usage'"
+    >Usage Analytics</button>
+    <button
+      type="button"
+      role="tab"
+      class="tab"
+      x-bind:class="tab === 'eval' ? 'tab-active' : ''"
+      x-bind:aria-selected="(tab === 'eval').toString()"
+      x-on:click="tab = 'eval'"
+    >Eval Quality</button>
+    <button
+      type="button"
+      role="tab"
+      class="tab"
+      x-bind:class="tab === 'retire' ? 'tab-active' : ''"
+      x-bind:aria-selected="(tab === 'retire').toString()"
+      x-on:click="tab = 'retire'"
+    >Retire Checklist</button>
+  </div>
+
+  {# ---------- Diagnostics tab panel (default active) ---------- #}
+  <div role="tabpanel" x-show="tab === 'diagnostics'" class="space-y-4">
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-4">
+        <form
+          id="retrieval-diagnostics-form"
+          hx-post="/ui/retrieval/diagnostics"
+          hx-target="#retrieval-diagnostics-results"
+          hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="space-y-3"
+          role="search"
+          aria-label="Run a retrieval diagnostics query"
+        >
+          <label class="form-control w-full">
+            <div class="label">
+              <span class="label-text">Query</span>
+            </div>
+            <textarea
+              name="query"
+              rows="2"
+              maxlength="{{ 2000 }}"
+              placeholder="Enter a representative query&hellip;"
+              class="textarea textarea-bordered w-full"
+              aria-label="Retrieval query"
+              autocomplete="off"
+              required
+            >{{ query }}</textarea>
+          </label>
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label class="form-control w-full sm:w-48">
+              <div class="label">
+                <span class="label-text">Source <span class="opacity-50">(optional)</span></span>
+              </div>
+              <input
+                type="text"
+                name="source"
+                value="{{ source }}"
+                maxlength="64"
+                placeholder="e.g. kb, memory"
+                class="input input-bordered w-full"
+                aria-label="Source filter"
+                autocomplete="off"
+              />
+            </label>
+            <label class="form-control w-full sm:w-48">
+              <div class="label">
+                <span class="label-text">Kind <span class="opacity-50">(optional)</span></span>
+              </div>
+              <input
+                type="text"
+                name="kind"
+                value="{{ kind }}"
+                maxlength="64"
+                placeholder="e.g. kb-entry"
+                class="input input-bordered w-full"
+                aria-label="Kind filter"
+                autocomplete="off"
+              />
+            </label>
+            <label class="form-control w-full sm:w-32">
+              <div class="label">
+                <span class="label-text">Limit</span>
+              </div>
+              <select
+                name="limit"
+                class="select select-bordered w-full"
+                aria-label="Maximum hits to return"
+              >
+                {% for option in limit_options %}
+                  <option value="{{ option }}"{% if option == limit %} selected{% endif %}>{{ option }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary gap-1" aria-label="Run the diagnostics query">
+              {{ icon("search") }}
+              Run
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    {# ---------- Results region ---------- #}
+    {% include "retrieval/_diagnostics_results.html" %}
+  </div>
+
+  {# ---------- Placeholder tab panels (T2 / T3) ---------- #}
+  <div role="tabpanel" x-show="tab === 'usage'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+    <div class="card-body text-center py-10">
+      <p class="text-base opacity-50">Usage Analytics lands in a follow-up task.</p>
+    </div>
+  </div>
+  <div role="tabpanel" x-show="tab === 'eval'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+    <div class="card-body text-center py-10">
+      <p class="text-base opacity-50">Eval Quality lands in a follow-up task.</p>
+    </div>
+  </div>
+  <div role="tabpanel" x-show="tab === 'retire'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+    <div class="card-body text-center py-10">
+      <p class="text-base opacity-50">Retire Checklist lands in a follow-up task.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}

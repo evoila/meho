@@ -2703,3 +2703,107 @@ surface uses.
 * `backend/tests/test_ui_runbooks_lifecycle.py` — the T3 lifecycle controls: admin publish / deprecate flips status + swaps the OOB badge, operator forged POST → 403, missing-CSRF → 403, the typed-400 inline alerts (publishing a non-draft, deprecating a non-published version), idempotent re-actions, the catalog-row vs detail-page fragment branch, version-in-body targeting.
 * `backend/tests/test_ui_runbooks_acceptance.py` — the **cross-cutting** end-to-end acceptance (T4 #1385): one test exercises the surface as a whole against a single app instance — operator browse (catalog + filters) → operator opacity-floor restricted-detail (not a raw 403) → `tenant_admin` author (draft) → publish → deprecate round-trip with status transitions read back through the read surface → operator blocked (403) from author / publish / deprecate → sidebar link + dashboard tile render. A companion test pins the post-completion operator crossing the floor (completed run → full steps).
 * `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).
+
+## Retrieval diagnostics surface (G10.14-T1 #1888)
+
+`meho_backplane.ui.routes.retrieval` ships the **anchor** surface for the
+retrieval diagnostics & quality console at `/ui/retrieval` (Initiative #1840).
+It is the operator-console face of the in-process hybrid retriever
+(`meho_backplane.retrieval.retriever.retrieve`) the `POST /api/v1/retrieve`
+route fronts: diagnosing "is retrieval returning what I expect?" previously
+meant a Python REPL inside the cluster or a `curl` against the REST endpoint.
+
+The anchor task stands up the page scaffold (the sidebar entry, the tab strip,
+the page chrome) + its default **Diagnostics** tab. Sibling tasks nest into the
+same page as additional client-side tab panels: T2 fills the **Usage Analytics**
++ **Eval Quality** tabs, T3 the **Retire Checklist** tab — all rendered as
+placeholders by this task so the chrome reads as a real tabbed surface from day
+one.
+
+### Routes
+
+* `GET /ui/retrieval` — the page. Renders the tabbed shell (a client-side
+  Alpine `x-data="{ tab: 'diagnostics' }"` toggle; the Diagnostics tab is the
+  default-active panel, the other three render a "lands in a follow-up task"
+  placeholder) with the Diagnostics query form (a `query` textarea, optional
+  `source` / `kind` text inputs, a `limit` selector over `(5, 10, 20, 50)`) and
+  an empty `#retrieval-diagnostics-results` region. Mints a CSRF token + sets
+  the `meho_csrf` cookie, passes `active_surface="retrieval"` for the sidebar
+  highlight.
+* `POST /ui/retrieval/diagnostics` — the HTMX fragment. Reconstructs the
+  session operator, binds the privacy `audit_*` contextvars, runs the in-process
+  `retrieve` service, and swaps `retrieval/_diagnostics_results.html` (one card
+  per hit) into `#retrieval-diagnostics-results`. An empty hit list renders a
+  "no matches" state.
+
+### Mirroring the docs-corpus console
+
+The surface is a near-line-for-line mirror of `ui/routes/corpus/routes.py` (the
+convention authority): the `_resolve_operator` seam (`load_fresh_session` +
+`verify_access_token_with_refresh`) reconstructs the full `Operator` from the
+BFF session (the `UISessionContext` carries only `operator_sub` / `tenant_id`,
+not the `sub` the per-principal predicate needs); the `_set_csrf_cookie` +
+`_resolve_diagnostics_csrf` pair implements the same reuse-live-token
+double-submit pattern (the fragment swaps only the results region and leaves the
+form in place, so it reuses the live cookie token rather than rotating a fresh
+one out from under the un-swapped form — the #1754 desync class); the
+`build_retrieval_router()` factory + module-level `Depends(require_ui_session)`
+closure follow the chassis convention. Like corpus, it routes **through the
+in-process service**, not a self-HTTP call, keeping the audit binding in-process
+and avoiding a network hop — there is no new `/api/v1` endpoint.
+
+### Per-signal RRF breakdown (the load-bearing render)
+
+Each `RetrievalHit` carries the full per-signal breakdown the substrate already
+computes: `fused_score` (the RRF score the hits are sorted by), `bm25_score` /
+`cosine_score` (`float | None`), and `bm25_rank` / `cosine_rank`
+(`int | None`). A `None` rank means the document was **absent** from that
+signal's top-`CANDIDATE_LIMIT` (50) candidate list. The diagnostics fragment
+renders each hit's breakdown as a 2-row table (BM25 + Cosine); a `None` rank
+renders the explicit `absent from this signal's top-50` marker, **not** a blank
+cell, so an operator can tell "scored 0 in that signal" apart from "never
+appeared in that signal". `query_duration_ms` is shown in the result heading.
+
+### Audit / privacy binding (load-bearing)
+
+The handler reproduces the `POST /api/v1/retrieve` audit binding before calling
+`retrieve`: it binds `audit_query_hash` (the SHA-256 hex digest of the raw query
+via the same `_compute_query_hash` encoding contract — **never** the raw query),
+`audit_source`, `audit_kind` up-front and `audit_hit_count` after, so the
+in-process `audit_log` row carries the privacy-preserving query trace even on a
+mid-retrieval exception. The raw query and filter values are deliberately
+ephemeral.
+
+### Tenant scoping + RBAC
+
+`operator` role minimum (the whole surface sits behind `require_ui_session`,
+**not** `require_ui_admin`, matching the OPERATOR floor the REST route carries).
+Diagnostics is **own-tenant only**: tenant identity is derived from the
+reconstructed operator's `tenant_id` and the per-principal isolation predicate
+is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
+(that is the sibling T3 concern). The surface is read-only, so no confirm gates.
+
+### Route ordering (two levels, both load-bearing)
+
+* `build_router()` includes `build_retrieval_router()` alongside the other
+  surface routers and **before** `build_stubs_router()` — the stubs router owns
+  the catch-all `/ui/{slug}`, so a surface registered after it loses the
+  first-match-wins lookup.
+* Inside `build_retrieval_router`, the literal `POST /ui/retrieval/diagnostics`
+  is registered ahead of any `{param}` route (a NOTE comment pins the invariant
+  mirroring `corpus/routes.py`). The T2/T3 tabs are client-side panels on the
+  one page, so no per-tab param route exists today, but the ordering is pinned
+  for when one lands.
+
+### Tests
+
+* `backend/tests/test_ui_retrieval.py` — auth boundary (unauthenticated GET →
+  login redirect, POST → 302/403), page render (Diagnostics tab active + empty
+  results region + sidebar link + CSRF cookie/token), the per-signal breakdown
+  (fused score + both signals' score/rank, and the explicit absent marker for a
+  `None` rank), the no-matches state, the operator/tenant/filter forwarding
+  (own-tenant `principal_sub`), the audit binding (query hash bound, raw query
+  absent from every bound payload), CSRF (403 on missing header, live-cookie
+  reuse without rotation, 401 propagation on a dead session), and the route
+  ordering (retrieval include before stubs; literal diagnostics before any param
+  route) + dashboard tile.

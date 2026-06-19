@@ -99,6 +99,7 @@ from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
+from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
@@ -116,6 +117,7 @@ __all__ = [
     "build_kb_router",
     "build_memory_router",
     "build_operations_router",
+    "build_retrieval_router",
     "build_router",
     "build_runbooks_router",
     "build_runs_router",
@@ -179,6 +181,15 @@ def build_router() -> APIRouter:
     router.include_router(build_agents_router())
     router.include_router(build_kb_router())
     router.include_router(build_corpus_router())
+    # Retrieval diagnostics & quality console (G10.14-T1 #1888): the anchor
+    # surface for ``/ui/retrieval`` + ``POST /ui/retrieval/diagnostics``. The
+    # only state-changing route is the literal ``/diagnostics`` POST -- there
+    # is no ``/ui/retrieval/{param}`` route yet (the T2/T3 tabs are
+    # client-side panels on the one page), but the literal-before-param
+    # ordering is pinned inside ``build_retrieval_router`` for when one lands.
+    # Registered before the stubs aggregate so its concrete paths win the
+    # first-match-wins lookup against the placeholder ``/ui/{slug}``.
+    router.include_router(build_retrieval_router())
     router.include_router(build_runbooks_router())
     router.include_router(build_approvals_router())
     # Scheduler lands ``/ui/scheduler`` + ``/ui/scheduler/{trigger_id}`` +

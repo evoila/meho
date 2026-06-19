@@ -12433,6 +12433,69 @@
         }
       }
     },
+    "/ui/retrieval": {
+      "get": {
+        "tags": [
+          "ui-retrieval"
+        ],
+        "summary": "Retrieval Index",
+        "description": "Render the retrieval page (delegates to :func:`_render_retrieval_index`).",
+        "operationId": "retrieval_index_ui_retrieval_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/retrieval/diagnostics": {
+      "post": {
+        "tags": [
+          "ui-retrieval"
+        ],
+        "summary": "Retrieval Diagnostics",
+        "description": "Run the diagnostics fragment (delegates to :func:`_render_diagnostics`).",
+        "operationId": "retrieval_diagnostics_ui_retrieval_diagnostics_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -15749,6 +15812,35 @@
           "op_id"
         ],
         "title": "Body_operations_preview_ui_operations_preview_post"
+      },
+      "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Query",
+            "default": ""
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Source",
+            "default": ""
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Kind",
+            "default": ""
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "type": "object",
+        "title": "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
       },
       "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post": {
         "properties": {

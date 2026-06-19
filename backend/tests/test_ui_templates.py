@@ -306,9 +306,6 @@ _INJECTED_DIALOG_TEMPLATES = (
     "agents/_create_modal.html",
     "agents/_edit_modal.html",
     "agents/_delete_modal.html",
-    "agents/grants/_create_modal.html",
-    "agents/grants/_elevate_modal.html",
-    "agents/grants/_revoke_modal.html",
 )
 
 #: Re-find every opening ``<dialog ...>`` tag in a template source. Matches the

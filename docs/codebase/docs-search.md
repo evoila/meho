@@ -240,6 +240,43 @@ The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
 
+### `resolve_citation_link(source_url, *, title, document_id)` (`meho_backplane.docs_search.citation_links`, #1919)
+
+A citation's `source_url` is, for the GCS-backed vendor corpus, a **raw
+object path** — `gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html`
+or `gs://.../community/williamlam/blog/.../post.md`. A browser has no
+handler for the `gs://` scheme, so rendering it as an `href` is a dead link
+— yet the source identity is in the path (a Broadcom KB article id, a named
+community post). This resolver maps each `source_url` to a `CitationLink`
+(`label`, `href`, `kind`, `clickable`): a navigable canonical URL where the
+source kind allows, a human `label` for the link text, and a `kind` tag
+naming the matched rule.
+
+- **Declarative, no per-document config.** A fixed ordered list of rules
+  (`_RULES`) keyed on path *shape*, first match wins: `broadcom_kb`
+  (`gs://.../broadcom-kb/.../<id>.html` → `knowledge.broadcom.com/external/article/<id>`),
+  `community` (`gs://.../community/...` → title + non-clickable path, since
+  the mirror path carries no recoverable original URL), `external` (an
+  already-canonical `http(s)` source passes straight through as the href).
+  Adding a source kind is appending one rule; the substrate stays dumb.
+- **Never a broken `gs://` href (the load-bearing invariant).** A `gs://`
+  path no rule claims — or a KB object whose filename is not a clean numeric
+  id — degrades to a non-clickable `CitationLink` (`href=None`,
+  `clickable=False`) tagged `unknown`/its kind, so the caller renders *title
+  + path* rather than a dead anchor. A future `stored_object` arm (a
+  signed/proxied object link) needs a signing endpoint and is out of scope
+  for #1919.
+- **Pure — no network I/O.** Links are derived from the path (via
+  `urllib.parse.urlsplit` + `pathlib.PurePosixPath`) or from an already-web
+  `source_url`. The label is chosen title-first: explicit `title` →
+  `document_id` → humanised filename stem → the raw URL (never empty).
+- **One resolver, every face.** `citation_link_payload(...)` is the JSON
+  form embedded under each `ask_docs` citation's `link` key (the MCP tool;
+  reused unchanged by a future `POST /api/v1/ask_docs`, #1917); the
+  `/ui/corpus` render calls `resolve_citation_link(...)` per chunk for the
+  anchor href + link text. So KB / community / unknown citations resolve
+  identically across the answer payload and the console.
+
 ### `POST /api/v1/search_docs` (`meho_backplane.api.v1.search_docs`, T3 #1552)
 
 The REST face. `operator` role minimum (`read_only` → 403). Validates
@@ -360,6 +397,13 @@ across REST / CLI / MCP per G4.5-T8 #1549; the bare tool name still feeds
 `classify_op`, which leaves it as `other` while the tool definition pins
 the row's `op_class="read"`) and the raw query hashed into `params_hash` —
 the same privacy posture as `search_docs`.
+
+Each returned citation is enriched with a resolved `link` (#1919) via
+`citation_link_payload(...)` — `{href, label, kind, clickable}` — so a
+consumer renders the human title pointing at the canonical source URL (KB →
+`knowledge.broadcom.com`, `http(s)` → pass-through) rather than the raw
+`gs://` object path the corpus stores. The raw `source_url` stays on the
+citation for provenance. See *the citation-link resolver* above.
 
 The description routes the agent between the answer-shaped tool and the
 chunks-shaped one: `ask_docs` for a composed grounded answer, `search_docs`

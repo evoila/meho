@@ -95,6 +95,7 @@ from meho_backplane.docs_search import (
     UnknownCollectionError,
     build_docs_scope,
     collection_capability_key,
+    resolve_citation_link,
     resolve_entitled_ready_collection,
     search_docs,
 )
@@ -393,7 +394,7 @@ async def _render_corpus_index(
         "collections": collections,
         "selected_collection": selected_collection,
         "query": "",
-        "chunks": [],
+        "cited": [],
         "searched": False,
         "operator_sub": session.operator_sub,
         "entitlement_diagnostic": entitlement_diagnostic,
@@ -406,6 +407,29 @@ async def _render_corpus_index(
     return response
 
 
+def _cited_chunks(chunks: list[DocsChunk]) -> list[dict[str, object]]:
+    """Pair each cited chunk with its resolved navigable link (#1919).
+
+    Each chunk's ``source_url`` is, for the GCS-backed vendor corpus, a raw
+    ``gs://`` object path a browser cannot open -- rendering it as an ``href``
+    yields a dead link. :func:`~meho_backplane.docs_search.resolve_citation_link`
+    maps it to a :class:`~meho_backplane.docs_search.CitationLink`: a navigable
+    canonical URL (KB -> ``knowledge.broadcom.com``, ``http(s)`` ->
+    pass-through) + a human ``label``, or a non-clickable label for an
+    unrecognised / community source -- **never** a ``gs://`` href. The template
+    branches on ``link.clickable``. The same resolver backs the MCP
+    ``ask_docs`` payload, so the UI and the answer payload link citations
+    identically.
+    """
+    return [
+        {
+            "chunk": chunk,
+            "link": resolve_citation_link(chunk.source_url, document_id=chunk.document_id),
+        }
+        for chunk in chunks
+    ]
+
+
 async def _render_corpus_search(
     request: Request,
     session: UISessionContext,
@@ -415,10 +439,14 @@ async def _render_corpus_search(
     """Run the HTMX search fragment for ``POST /ui/corpus/search``.
 
     Swaps ``corpus/_results.html`` into ``#corpus-results``. A successful
-    search renders one card per chunk (content + source_url link + formatted
-    score, plus a collection tag when present); an empty hit list renders a
-    "no results" state; a 403 / 409 / 503 / 422 from the service renders a
-    typed error card with the detail.
+    search renders one card per chunk (content + a resolved navigable source
+    link with the human title as link text + formatted score, plus a collection
+    tag when present); an empty hit list renders a "no results" state; a 403 /
+    409 / 503 / 422 from the service renders a typed error card with the detail.
+
+    Each chunk's raw ``gs://`` ``source_url`` is resolved to a navigable
+    canonical link via :func:`_cited_chunks` (#1919) so the operator opens the
+    Broadcom KB article / original post rather than a dead object-store URL.
 
     CSRF handling defers to :func:`_resolve_search_csrf`: the live session
     token is reused (cookie left untouched) so the un-swapped search form's
@@ -443,7 +471,7 @@ async def _render_corpus_search(
         "collections": [],
         "selected_collection": collection_key,
         "query": query,
-        "chunks": chunks,
+        "cited": _cited_chunks(chunks),
         "searched": bool(query),
         "csrf_token": csrf_token,
         **error_context,

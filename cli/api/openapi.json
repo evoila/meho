@@ -9632,6 +9632,116 @@
         }
       }
     },
+    "/ui/conventions": {
+      "get": {
+        "tags": [
+          "ui-conventions"
+        ],
+        "summary": "Ui Conventions List",
+        "description": "``GET /ui/conventions`` -- list page or HTMX table fragment.",
+        "operationId": "ui_conventions_list_ui_conventions_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "all",
+              "title": "Kind"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/conventions/{slug}": {
+      "get": {
+        "tags": [
+          "ui-conventions"
+        ],
+        "summary": "Ui Conventions Detail",
+        "description": "``GET /ui/conventions/{slug}`` -- detail page or HTMX body fragment.",
+        "operationId": "ui_conventions_detail_ui_conventions__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/grants": {
       "get": {
         "tags": [

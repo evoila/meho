@@ -459,6 +459,65 @@
         }
       }
     },
+    "/api/v1/ask_docs": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Ask Docs Endpoint",
+        "description": "Compose a grounded, cited answer over a single vendor-document collection.\n\nThe synthesis sibling of ``POST /api/v1/search_docs``: resolve + entitle\n+ readiness-gate the mandatory ``collection`` (same 403 / 409 / 422 arms\nas ``search_docs``), then run the #1916 answer pipeline\n(expand -> retrieve-per-variant -> RRF-merge -> synthesize) in-process,\nreturning ``{answer, citations[]}`` with every citation carrying its\nresolved navigable ``link`` (#1919).\n\nSingle-collection only (no ``collections`` fan-out field). ``read_only``\noperators get 403 via :func:`require_role` before this handler. The\ncentral ``meho.docs.ask`` audit row is bound before the pipeline runs (so\na leg failure is still attributable); the raw query is never bound --\nonly its SHA-256 hash.",
+        "operationId": "ask_docs_endpoint_api_v1_ask_docs_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskDocsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskDocsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by ``detail.error``): the tenant is not entitled to the named collection (``detail.error='not_entitled'`` -- it lacks the ``meho-docs:<collection>`` capability; the structured detail names the ``required_capability`` and the ``operator_sub`` / ``tenant_id`` it checked) -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Mirrors ``search_docs``; neither is retryable."
+          },
+          "409": {
+            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding). Retryable once the rebuild finishes. Mirrors ``search_docs``."
+          },
+          "422": {
+            "description": "The mandatory ``collection`` scope is absent / blank, or names no collection visible to the tenant (an absent / cross-tenant key lands here -- it is unknown to the tenant-scoped catalogue). A grounded answer is never composed without a routable collection."
+          },
+          "502": {
+            "description": "The synthesis model ran but its output broke the grounding contract (non-JSON, wrong shape, or a citation outside the retrieved set): ``detail.leg='synthesis_malformed'``. A bad-gateway fault distinct from the model being unreachable (503). The structured #1918 ``{detail, leg, cause, message}`` envelope rides ``detail``."
+          },
+          "503": {
+            "description": "An answer-pipeline leg failed closed: the expand or synthesis model is unconfigured / produced unusable expansion (``detail.leg`` ``expand_failed`` / ``model_unavailable``), or the retrieval backend is unavailable (``detail.leg='corpus_unavailable'``). Fail-closed; never an ungrounded answer. The structured #1918 envelope rides ``detail``."
+          }
+        }
+      }
+    },
     "/api/v1/doc_collections": {
       "get": {
         "tags": [
@@ -11950,7 +12009,7 @@
           "ui-corpus"
         ],
         "summary": "Corpus Search",
-        "description": "Run the search fragment (delegates to :func:`_render_corpus_search`).",
+        "description": "Run the search / ask fragment (delegates to :func:`_render_corpus_search`).\n\n``mode`` selects between the original retrieve-only ``search`` path\nand the ``ask`` grounded-answer path (#1917); any unrecognised value\nfalls back to ``search``.",
         "operationId": "corpus_search_ui_corpus_search_post",
         "requestBody": {
           "content": {
@@ -14653,6 +14712,71 @@
         "title": "ApproveResponseBody",
         "description": "Response for a successful approve + re-dispatch."
       },
+      "AskDocsRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "collection": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Collection"
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Version"
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "AskDocsRequest",
+        "description": "POST body for ``/api/v1/ask_docs``.\n\n``collection`` is the **mandatory binary scope** -- typed optional here\nso a missing value is rejected by the service with a route-shaped 422\nnaming the absent key (carrying *why* the collection is mandatory)\nrather than Pydantic's generic ``field_required``. ``product`` /\n``version`` are optional refinements within the chosen collection.\n\nThere is **no** ``collections`` fan-out field: ``ask_docs`` is\nsingle-collection only (#1548 decision 2), matching the MCP tool.\n``extra=\"forbid\"`` rejects unknown fields at 422 -- so a client sending\na ``collections`` list (or a pre-rename key) fails loud rather than\nsilently fanning out, the same posture every public v1 request schema\nships under."
+      },
+      "AskDocsResponse": {
+        "properties": {
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Citations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "answer",
+          "citations"
+        ],
+        "title": "AskDocsResponse",
+        "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -15070,6 +15194,12 @@
             "maxLength": 2000,
             "title": "Q",
             "default": ""
+          },
+          "mode": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Mode",
+            "default": "search"
           }
         },
         "type": "object",

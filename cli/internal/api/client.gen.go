@@ -946,6 +946,51 @@ type ApproveResponseBody_DispatchResult struct {
 	union json.RawMessage
 }
 
+// AskDocsRequest POST body for “/api/v1/ask_docs“.
+//
+// “collection“ is the **mandatory binary scope** -- typed optional here
+// so a missing value is rejected by the service with a route-shaped 422
+// naming the absent key (carrying *why* the collection is mandatory)
+// rather than Pydantic's generic “field_required“. “product“ /
+// “version“ are optional refinements within the chosen collection.
+//
+// There is **no** “collections“ fan-out field: “ask_docs“ is
+// single-collection only (#1548 decision 2), matching the MCP tool.
+// “extra="forbid"“ rejects unknown fields at 422 -- so a client sending
+// a “collections“ list (or a pre-rename key) fails loud rather than
+// silently fanning out, the same posture every public v1 request schema
+// ships under.
+type AskDocsRequest struct {
+	Collection *string `json:"collection"`
+	Limit      *int    `json:"limit,omitempty"`
+	Product    *string `json:"product"`
+	Query      string  `json:"query"`
+	Version    *string `json:"version"`
+}
+
+// AskDocsResponse Successful response shape for “/api/v1/ask_docs“.
+//
+// “answer“ is the grounded, cited answer -- composed strictly from the
+// retrieved chunks (no claim without a citation) or, on an empty
+// retrieval, the deterministic
+// :data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so
+// an accidental post-construction mutation surfaces as a pydantic error
+// rather than a silently-altered response.
+//
+// “citations“ is the subset of retrieved chunks the answer relied on,
+// each serialised with its resolved navigable “link“ (#1919) -- the
+// **same** citation shape the MCP “ask_docs“ tool returns, so a client
+// consuming either face resolves citations identically. The list entries
+// are the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a
+// “link“ member; modelled as “list[dict]“ (not a typed model) because
+// the “link“ shape is produced by the shared
+// :func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as
+// the single source of truth for the citation-link contract.
+type AskDocsResponse struct {
+	Answer    string                   `json:"answer"`
+	Citations []map[string]interface{} `json:"citations"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1152,6 +1197,7 @@ type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 // BodyCorpusSearchUiCorpusSearchPost defines model for Body_corpus_search_ui_corpus_search_post.
 type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
+	Mode       *string `json:"mode,omitempty"`
 	Q          *string `json:"q,omitempty"`
 }
 
@@ -5860,6 +5906,11 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// AskDocsEndpointApiV1AskDocsPostParams defines parameters for AskDocsEndpointApiV1AskDocsPost.
+type AskDocsEndpointApiV1AskDocsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ByWorkRefApiV1AuditByWorkRefRefGetParams defines parameters for ByWorkRefApiV1AuditByWorkRefRefGet.
 type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -6677,6 +6728,9 @@ type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody = Dec
 
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody defines body for RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost for application/json ContentType.
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = RejectRequestBody
+
+// AskDocsEndpointApiV1AskDocsPostJSONRequestBody defines body for AskDocsEndpointApiV1AskDocsPost for application/json ContentType.
+type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
 
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
@@ -7948,6 +8002,11 @@ type ClientInterface interface {
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AskDocsEndpointApiV1AskDocsPostWithBody request with any body
+	AskDocsEndpointApiV1AskDocsPostWithBody(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AskDocsEndpointApiV1AskDocsPost(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, body AskDocsEndpointApiV1AskDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ByWorkRefApiV1AuditByWorkRefRefGet request
 	ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9227,6 +9286,30 @@ func (c *Client) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(
 
 func (c *Client) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AskDocsEndpointApiV1AskDocsPostWithBody(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAskDocsEndpointApiV1AskDocsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AskDocsEndpointApiV1AskDocsPost(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, body AskDocsEndpointApiV1AskDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAskDocsEndpointApiV1AskDocsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -14656,6 +14739,61 @@ func NewRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostRequestWithBody(se
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/approvals/%s/reject", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewAskDocsEndpointApiV1AskDocsPostRequest calls the generic AskDocsEndpointApiV1AskDocsPost builder with application/json body
+func NewAskDocsEndpointApiV1AskDocsPostRequest(server string, params *AskDocsEndpointApiV1AskDocsPostParams, body AskDocsEndpointApiV1AskDocsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAskDocsEndpointApiV1AskDocsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewAskDocsEndpointApiV1AskDocsPostRequestWithBody generates requests for AskDocsEndpointApiV1AskDocsPost with any type of body
+func NewAskDocsEndpointApiV1AskDocsPostRequestWithBody(server string, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/ask_docs")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -27121,6 +27259,11 @@ type ClientWithResponsesInterface interface {
 
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error)
 
+	// AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse request with any body
+	AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AskDocsEndpointApiV1AskDocsPostResponse, error)
+
+	AskDocsEndpointApiV1AskDocsPostWithResponse(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, body AskDocsEndpointApiV1AskDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AskDocsEndpointApiV1AskDocsPostResponse, error)
+
 	// ByWorkRefApiV1AuditByWorkRefRefGetWithResponse request
 	ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*ByWorkRefApiV1AuditByWorkRefRefGetResponse, error)
 
@@ -28565,6 +28708,28 @@ func (r RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse) Status()
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AskDocsEndpointApiV1AskDocsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AskDocsResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r AskDocsEndpointApiV1AskDocsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AskDocsEndpointApiV1AskDocsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -33675,6 +33840,23 @@ func (c *ClientWithResponses) RejectApprovalRequestApiV1ApprovalsRequestIdReject
 	return ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse(rsp)
 }
 
+// AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse request with arbitrary body returning *AskDocsEndpointApiV1AskDocsPostResponse
+func (c *ClientWithResponses) AskDocsEndpointApiV1AskDocsPostWithBodyWithResponse(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AskDocsEndpointApiV1AskDocsPostResponse, error) {
+	rsp, err := c.AskDocsEndpointApiV1AskDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAskDocsEndpointApiV1AskDocsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AskDocsEndpointApiV1AskDocsPostWithResponse(ctx context.Context, params *AskDocsEndpointApiV1AskDocsPostParams, body AskDocsEndpointApiV1AskDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AskDocsEndpointApiV1AskDocsPostResponse, error) {
+	rsp, err := c.AskDocsEndpointApiV1AskDocsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAskDocsEndpointApiV1AskDocsPostResponse(rsp)
+}
+
 // ByWorkRefApiV1AuditByWorkRefRefGetWithResponse request returning *ByWorkRefApiV1AuditByWorkRefRefGetResponse
 func (c *ClientWithResponses) ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*ByWorkRefApiV1AuditByWorkRefRefGetResponse, error) {
 	rsp, err := c.ByWorkRefApiV1AuditByWorkRefRefGet(ctx, ref, params, reqEditors...)
@@ -37286,6 +37468,32 @@ func ParseRejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse(rsp *ht
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAskDocsEndpointApiV1AskDocsPostResponse parses an HTTP response from a AskDocsEndpointApiV1AskDocsPostWithResponse call
+func ParseAskDocsEndpointApiV1AskDocsPostResponse(rsp *http.Response) (*AskDocsEndpointApiV1AskDocsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AskDocsEndpointApiV1AskDocsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AskDocsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	}
 

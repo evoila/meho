@@ -113,6 +113,7 @@ from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.routes.runbooks.editor_routes import register_editor_routes
 from meho_backplane.ui.routes.runbooks.lifecycle import register_lifecycle_routes
+from meho_backplane.ui.routes.runbooks.runs import register_runs_routes
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_runbooks_router"]
@@ -427,6 +428,14 @@ def build_runbooks_router() -> APIRouter:
     # ``/ui/runbooks/{slug}`` so the literal ``publish`` / ``deprecate`` tail
     # segments are not swallowed by the slug catch-all.
     register_lifecycle_routes(router)
+
+    # The #1837-T1 (#1884) run surface (``GET /ui/runbooks/runs`` list,
+    # ``GET /ui/runbooks/runs/start`` modal, ``POST /ui/runbooks/runs`` start)
+    # -- registered here, BEFORE ``/ui/runbooks/{slug}`` so the literal
+    # ``runs`` segment is not bound as a slug parameter, and ``runs/start``
+    # ahead of the future ``runs/{run_id}`` driver (T2 #1893). Their handlers
+    # live in ``runbooks.runs``.
+    register_runs_routes(router)
 
     @router.get("/ui/runbooks/{slug}", response_class=HTMLResponse)
     async def runbooks_detail(

@@ -50,7 +50,9 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Tenant
+from meho_backplane.retrieval.eval.result_models import EvalResult, SurfaceResult
 from meho_backplane.retrieval.retriever import RetrievalHit
+from meho_backplane.retrieval.usage import UsageReport
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -91,6 +93,14 @@ _RESOLVE_OPERATOR = "meho_backplane.ui.routes.retrieval.routes._resolve_operator
 #: The route-module symbol the diagnostics handler calls; mocked to control the
 #: returned hit list / raised failure without a live corpus + embedder.
 _RETRIEVE = "meho_backplane.ui.routes.retrieval.routes.retrieve"
+
+#: The route-module symbol the Usage tab calls; mocked to return a
+#: constructed :class:`UsageReport` without a live audit_log scan (#1889).
+_COMPUTE_USAGE = "meho_backplane.ui.routes.retrieval.routes.compute_usage"
+
+#: The route-module symbol the Eval tab calls; mocked to return a constructed
+#: :class:`EvalResult` without a live corpus + embedder run (#1889).
+_EVAL_ALL = "meho_backplane.ui.routes.retrieval.routes.eval_all"
 
 #: The contextvars binder the handler calls; patched to capture the audit
 #: payload without a live structlog pipeline.
@@ -613,3 +623,443 @@ def test_dashboard_surface_grid_includes_retrieval_tile() -> None:
     body = response.text
     assert 'href="/ui/retrieval"' in body
     assert "Retrieval" in body
+
+
+# ===========================================================================
+# Usage Analytics tab (#1889)
+# ===========================================================================
+
+
+def _usage_report(
+    *,
+    total_searches: int = 0,
+    buckets: list[object] | None = None,
+    rest_excluded: bool = True,
+) -> UsageReport:
+    """Build a :class:`UsageReport` the patched ``compute_usage`` returns.
+
+    ``counted_surfaces`` / ``rest_excluded`` default from the model (so the
+    honesty-gap explainer fields are populated as production would emit them).
+    """
+    now = datetime(2026, 6, 19, 12, 0, tzinfo=UTC)
+    return UsageReport(
+        since=now - timedelta(days=30),
+        until=now,
+        surfaces=["kb", "memory", "operations"],
+        tenant_id=_TENANT_A,
+        buckets=buckets or [],  # type: ignore[arg-type]
+        total_searches=total_searches,
+        rest_excluded=rest_excluded,
+    )
+
+
+def test_usage_renders_total_and_rest_excluded_explainer_on_zero() -> None:
+    """A ``total_searches=0`` renders the REST-excluded explainer, not "no activity".
+
+    Acceptance criterion: ``compute_usage`` returns a ``UsageReport`` with
+    ``total_searches=0, rest_excluded=True``; the fragment must surface the
+    "REST excluded" / ``counted_surfaces`` explainer so the zero does not read
+    as inactivity.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    report = _usage_report(total_searches=0, rest_excluded=True)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_USAGE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/usage",
+                data={"since": "30d"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Fragment, not full page.
+    assert 'id="retrieval-usage-results"' in body
+    assert "<!doctype html>" not in body.lower()
+    # The honesty-gap explainer reads as "REST excluded", not "no activity".
+    assert "REST excluded" in body
+    # At least one counted /mcp surface badge renders so the zero is self-explaining.
+    assert "mcp:search_knowledge" in body
+
+
+def test_usage_renders_per_surface_buckets() -> None:
+    """A non-zero report renders ``total_searches`` + the per-(day, surface) table."""
+    from meho_backplane.retrieval.usage import DailyUsageBucket
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    bucket = DailyUsageBucket(
+        date=datetime(2026, 6, 18, tzinfo=UTC).date(),
+        surface="kb",
+        search_count=7,
+        distinct_operators=2,
+        action_conversion_pct=42.86,
+    )
+    report = _usage_report(total_searches=7, buckets=[bucket])
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_USAGE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/usage",
+                data={"since": "30d"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "7" in body
+    assert "2026-06-18" in body
+    assert "kb" in body
+    assert "42.86" in body
+    # A non-zero count does not show the zero-explainer.
+    assert "REST excluded" not in body
+
+
+def test_usage_own_tenant_only_no_tenant_filter() -> None:
+    """The Usage handler runs own-tenant: ``compute_usage`` gets ``operator.tenant_id``."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    usage_mock = AsyncMock(return_value=_usage_report(total_searches=0))
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_USAGE, usage_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/usage",
+                data={"since": "30d"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    usage_mock.assert_awaited_once()
+    kwargs = usage_mock.await_args.kwargs
+    # Own-tenant only -- the report is scoped to the reconstructed operator's
+    # tenant; there is no cross-tenant tenant_filter on this surface.
+    assert kwargs["tenant_id"] == _TENANT_A
+
+
+def test_usage_malformed_since_renders_inline_400_card_not_500() -> None:
+    """A malformed ``since`` surfaces the ``SinceValueError`` as an inline error card.
+
+    Acceptance criterion: a ``since`` like ``"banana"`` must render an inline
+    400-class error card (the backend ``SinceValueError`` detail), NOT a 500 --
+    and ``compute_usage`` must never be reached (the parse fails first).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    usage_mock = AsyncMock(return_value=_usage_report())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_USAGE, usage_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/usage",
+                data={"since": "banana"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    # Not a 500 -- the parser rejection is caught and rendered inline.
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'role="alert"' in body
+    assert "Invalid lookback window" in body
+    # The substrate was never reached -- the bad window short-circuits the run.
+    usage_mock.assert_not_awaited()
+
+
+def test_usage_rejected_without_csrf_token() -> None:
+    """A usage POST without the CSRF header is rejected 403 by the middleware."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        response = client.post("/ui/retrieval/usage", data={"since": "30d"})
+
+    assert response.status_code == 403
+
+
+def test_usage_reuses_live_csrf_cookie_without_rotation() -> None:
+    """The usage fragment reuses the live CSRF cookie and does NOT rotate it."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_USAGE, new_callable=AsyncMock, return_value=_usage_report()),
+        ):
+            response = client.post(
+                "/ui/retrieval/usage",
+                data={"since": "30d"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    set_cookie = response.headers.get("set-cookie", "")
+    assert CSRF_COOKIE_NAME not in set_cookie
+
+
+# ===========================================================================
+# Eval Quality tab (#1889)
+# ===========================================================================
+
+
+def _surface_result(
+    *,
+    surface: str = "kb",
+    precision_at_5: float = 0.8,
+    mrr: float = 0.75,
+    coverage: float = 0.9,
+    verdict: str = "green",
+    query_count: int = 10,
+) -> SurfaceResult:
+    """Build a :class:`SurfaceResult` for mocked ``eval_all`` returns."""
+    return SurfaceResult(
+        surface=surface,  # type: ignore[arg-type]
+        query_count=query_count,
+        precision_at_5=precision_at_5,
+        mrr=mrr,
+        coverage=coverage,
+        verdict=verdict,  # type: ignore[arg-type]
+    )
+
+
+def _eval_result(
+    *,
+    surfaces: list[SurfaceResult] | None = None,
+    overall_verdict: str = "green",
+) -> EvalResult:
+    """Build an :class:`EvalResult` the patched ``eval_all`` returns."""
+    return EvalResult(
+        ran_at=datetime(2026, 6, 19, 12, 0, tzinfo=UTC),
+        surfaces=surfaces if surfaces is not None else [_surface_result()],
+        overall_verdict=overall_verdict,  # type: ignore[arg-type]
+    )
+
+
+def test_eval_renders_metrics_and_verdict_pills() -> None:
+    """The Eval fragment renders per-surface metrics + a verdict pill + the overall.
+
+    Acceptance criterion: a stubbed ``eval_all`` returning a ``red`` surface
+    renders the red pill (``data-verdict="red"``) AND a red ``overall_verdict``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    result = _eval_result(
+        surfaces=[
+            _surface_result(
+                surface="kb",
+                precision_at_5=0.2,
+                mrr=0.15,
+                coverage=0.3,
+                verdict="red",
+            )
+        ],
+        overall_verdict="red",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_EVAL_ALL, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/retrieval/eval",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Fragment, not full page.
+    assert 'id="retrieval-eval-results"' in body
+    assert "<!doctype html>" not in body.lower()
+    # Per-surface metrics rendered.
+    assert "0.200" in body  # precision@5
+    assert "0.150" in body  # mrr
+    assert "0.300" in body  # coverage
+    # The verdict token is rendered verbatim with its mapped color class.
+    assert 'data-verdict="red"' in body
+    assert "badge-error" in body
+    # The overall verdict is red too (worst-of every surface).
+    assert body.count('data-verdict="red"') >= 2
+
+
+def test_eval_renders_green_for_empty_corpus_surface_verbatim() -> None:
+    """An empty-corpus surface's ``green`` verdict is rendered verbatim, not recomputed."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    result = _eval_result(
+        surfaces=[
+            _surface_result(
+                surface="memory",
+                precision_at_5=0.0,
+                mrr=0.0,
+                coverage=0.0,
+                verdict="green",
+                query_count=0,
+            )
+        ],
+        overall_verdict="green",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_EVAL_ALL, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/retrieval/eval",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-verdict="green"' in body
+    assert "badge-success" in body
+
+
+def test_eval_own_tenant_only_no_baseline() -> None:
+    """The Eval handler calls ``eval_all`` own-tenant with no baseline argument.
+
+    Acceptance criterion: the 501 baseline path is never reached -- ``eval_all``
+    is invoked with ``tenant_id`` only (no ``baseline*`` kwarg).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    eval_mock = AsyncMock(return_value=_eval_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_EVAL_ALL, eval_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/eval",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    eval_mock.assert_awaited_once()
+    kwargs = eval_mock.await_args.kwargs
+    assert kwargs["tenant_id"] == _TENANT_A
+    # No baseline argument is ever passed -- the 501 server-side baseline path
+    # cannot be reached from this surface.
+    assert not any("baseline" in key for key in kwargs)
+    assert eval_mock.await_args.args == ()
+
+
+def test_eval_rejected_without_csrf_token() -> None:
+    """An eval POST without the CSRF header is rejected 403 by the middleware."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        response = client.post("/ui/retrieval/eval", data={})
+
+    assert response.status_code == 403
+
+
+# ===========================================================================
+# Tab panes + template wiring (#1889)
+# ===========================================================================
+
+
+def test_index_renders_usage_and_eval_forms_no_baseline_field() -> None:
+    """``GET /ui/retrieval`` wires the live Usage + Eval tab forms (no baseline field).
+
+    Acceptance criteria: the Eval tab offers no baseline toggle (assert no
+    ``baseline`` form field), and both tabs are own-tenant only (no
+    ``tenant_filter`` form field).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Both tab forms post to their fragment routes.
+    assert 'hx-post="/ui/retrieval/usage"' in body
+    assert 'hx-post="/ui/retrieval/eval"' in body
+    # Both results regions present for the initial (empty) render.
+    assert 'id="retrieval-usage-results"' in body
+    assert 'id="retrieval-eval-results"' in body
+    # No baseline toggle anywhere -- the 501 baseline path must be unreachable.
+    assert 'name="baseline"' not in body
+    assert ">baseline<" not in body.lower()
+    # Own-tenant only -- no cross-tenant selector on either tab (T3 owns that).
+    assert 'name="tenant_filter"' not in body
+
+
+def test_retrieval_usage_eval_literals_before_any_param_route() -> None:
+    """No ``/ui/retrieval/{param}`` route precedes the literal usage / eval POSTs."""
+    from meho_backplane.ui.routes.retrieval import build_retrieval_router
+
+    router = build_retrieval_router()
+    retrieval_paths = [
+        route.path  # type: ignore[attr-defined]
+        for route in router.routes
+        if getattr(route, "path", "").startswith("/ui/retrieval")
+    ]
+    for literal in ("/ui/retrieval/usage", "/ui/retrieval/eval"):
+        assert literal in retrieval_paths
+        idx = retrieval_paths.index(literal)
+        for path in retrieval_paths[:idx]:
+            assert "{" not in path, f"param route {path!r} precedes the literal {literal!r}"

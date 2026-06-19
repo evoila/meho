@@ -1,20 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Retrieval-diagnostics UI routes: in-process hybrid query + per-signal breakdown.
+"""Retrieval UI routes: in-process diagnostics + usage + eval, no new REST endpoint.
 
-Initiative #1840 (G10.14 Retrieval diagnostics & quality console), Task #1888.
+Initiative #1840 (G10.14 Retrieval diagnostics & quality console), Tasks #1888
+(Diagnostics) + #1889 (Usage Analytics + Eval Quality).
 
 ``GET /ui/retrieval`` renders the page: a tabbed shell (Diagnostics tab
-default-active; the Usage / Eval / Retire tabs are placeholders T2/T3 fill
-in) with a query form (a query textarea, optional ``source`` / ``kind``
-inputs, a ``limit`` selector) and an empty ``#retrieval-diagnostics-results``
-region. ``POST /ui/retrieval/diagnostics`` is the HTMX fragment endpoint --
-it reconstructs the session operator, binds the privacy ``audit_*``
-contextvars, runs the in-process :func:`~meho_backplane.retrieval.retriever.retrieve`
-service, and swaps ``retrieval/_diagnostics_results.html`` (one card per hit,
-each with the ``fused_score`` and the per-signal RRF score/rank breakdown)
-into ``#retrieval-diagnostics-results``.
+default-active; Usage Analytics + Eval Quality live as of T2; the Retire tab is
+a placeholder T3 fills in) with the diagnostics query form and an empty
+``#retrieval-diagnostics-results`` region. Three HTMX fragment endpoints front
+the three in-process services -- none adds a ``/api/v1`` endpoint, exactly as
+``ui/routes/corpus/routes.py`` fronts ``search_docs``:
+
+* ``POST /ui/retrieval/diagnostics`` -- reconstructs the session operator, binds
+  the privacy ``audit_*`` contextvars, runs in-process
+  :func:`~meho_backplane.retrieval.retriever.retrieve`, and swaps
+  ``retrieval/_diagnostics_results.html`` (one card per hit, each with the
+  ``fused_score`` and the per-signal RRF score/rank breakdown) into
+  ``#retrieval-diagnostics-results``.
+* ``POST /ui/retrieval/usage`` (#1889) -- runs in-process
+  :func:`~meho_backplane.retrieval.usage.compute_usage` own-tenant over a
+  ``since`` window (opening a read-only session via
+  :func:`~meho_backplane.db.engine.get_sessionmaker`, which ``compute_usage``
+  requires), and swaps ``retrieval/_usage_results.html`` with the per-day /
+  per-surface buckets, ``total_searches``, and -- load-bearing -- the
+  ``rest_excluded`` / ``counted_surfaces`` honesty-gap explainer so a
+  ``total_searches=0`` reads as "REST excluded", not "no activity". A malformed
+  ``since`` (:class:`~meho_backplane.retrieval.usage.SinceValueError`) renders an
+  inline 400 error card, never a 500.
+* ``POST /ui/retrieval/eval`` (#1889) -- runs in-process
+  :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant with **no
+  baseline** (the server-side baseline path is 501 today), and swaps
+  ``retrieval/_eval_results.html`` with per-surface ``precision_at_5`` / ``mrr``
+  / ``coverage`` + a green/yellow/red verdict pill (mapped in the template from
+  the verdict token the service returns verbatim) + the ``overall_verdict``.
 
 Reusing the substrate (no new ``/api/v1`` endpoint)
 ---------------------------------------------------
@@ -61,7 +81,7 @@ mints the token and sets the ``meho_csrf`` cookie. The fragment swaps only
 **reuses** the live cookie token (cookie untouched) rather than rotating a
 fresh one out from under the un-swapped form -- the cookie-rotation desync the
 corpus surface diagnosed (#1754). A missing / invalid cookie falls back to a
-fresh mint + re-set. See :func:`_resolve_diagnostics_csrf`.
+fresh mint + re-set. See :func:`_resolve_fragment_csrf`.
 
 Tenant scoping + RBAC
 ---------------------
@@ -77,6 +97,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import UTC, datetime
 from typing import Final
 
 import structlog
@@ -84,10 +105,20 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.retrieval.eval import EvalResult, eval_all
 from meho_backplane.retrieval.retriever import (
     CANDIDATE_LIMIT,
     RetrievalHit,
     retrieve,
+)
+from meho_backplane.retrieval.usage import (
+    DEFAULT_SINCE,
+    SUPPORTED_SURFACES,
+    SinceValueError,
+    UsageReport,
+    compute_usage,
+    parse_since,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -122,6 +153,19 @@ _DEFAULT_LIMIT: Final[int] = 10
 
 #: The ``limit`` options the selector renders.
 _LIMIT_OPTIONS: Final[tuple[int, ...]] = (5, 10, 20, 50)
+
+#: Maximum ``since`` value length accepted by the usage fragment. Mirrors the
+#: backend ``GET /api/v1/retrieve/usage`` ``since`` query cap (max 32 chars,
+#: ``retrieve_usage.py``) so an oversized free-form window is rejected at the
+#: form boundary rather than forwarded to :func:`parse_since`.
+_MAX_SINCE_LENGTH: Final[int] = 32
+
+#: The ``since`` presets the usage selector offers. ``30d`` (the backend
+#: :data:`~meho_backplane.retrieval.usage.DEFAULT_SINCE`) is the retire-decision
+#: window Goal #215 keys off; the others are common shorter lookbacks. An
+#: operator can still type any ``<N>d`` / ``<N>h`` / ISO-8601 value the backend
+#: parser accepts.
+_SINCE_OPTIONS: Final[tuple[str, ...]] = ("24h", "7d", "30d", "90d")
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built once
 #: (rather than inline) to satisfy ruff B008, matching the convention the
@@ -190,14 +234,14 @@ def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
     )
 
 
-def _resolve_diagnostics_csrf(request: Request, session_id: str) -> tuple[str, bool]:
-    """Pick the CSRF token the diagnostics fragment echoes + whether to set the cookie.
+def _resolve_fragment_csrf(request: Request, session_id: str) -> tuple[str, bool]:
+    """Pick the CSRF token a retrieval fragment echoes + whether to set the cookie.
 
-    Returns ``(token, set_cookie)``. The fragment swaps only
-    ``#retrieval-diagnostics-results`` -- the diagnostics ``<form>`` that
-    carries the ``hx-headers`` ``X-CSRF-Token`` lives in ``index.html`` and is
-    **not** re-rendered. So the rule (mirroring the corpus surface's
-    ``_resolve_search_csrf``, the #1754 fix) is:
+    Returns ``(token, set_cookie)``. Shared by every ``/ui/retrieval`` HTMX
+    fragment (Diagnostics / Usage / Eval) -- each swaps only its own results
+    region; the ``<form>`` that carries the ``hx-headers`` ``X-CSRF-Token``
+    lives in ``index.html`` and is **not** re-rendered. So the rule (mirroring
+    the corpus surface's ``_resolve_search_csrf``, the #1754 fix) is:
 
     * **Live cookie present + valid** -- *reuse* that token and do **not**
       re-set the cookie. Minting a fresh token + ``Set-Cookie`` here would
@@ -271,6 +315,23 @@ def build_retrieval_router() -> APIRouter:
         """Run the diagnostics fragment (delegates to :func:`_render_diagnostics`)."""
         return await _render_diagnostics(request, session, query, source, kind, limit)
 
+    @router.post("/ui/retrieval/usage", response_class=HTMLResponse)
+    async def retrieval_usage(
+        request: Request,
+        session: UISessionContext = _require_session,
+        since: str = Form(default=DEFAULT_SINCE, max_length=_MAX_SINCE_LENGTH),
+    ) -> HTMLResponse:
+        """Run the Usage Analytics fragment (delegates to :func:`_render_usage`)."""
+        return await _render_usage(request, session, since)
+
+    @router.post("/ui/retrieval/eval", response_class=HTMLResponse)
+    async def retrieval_eval(
+        request: Request,
+        session: UISessionContext = _require_session,
+    ) -> HTMLResponse:
+        """Run the Eval Quality fragment (delegates to :func:`_render_eval`)."""
+        return await _render_eval(request, session)
+
     return router
 
 
@@ -315,6 +376,14 @@ async def _render_retrieval_index(
         "hits": [],
         "searched": False,
         "candidate_limit": CANDIDATE_LIMIT,
+        # Usage Analytics tab (#1889): the lookback form defaults to the
+        # retire-decision window; the partials read their data off
+        # ``report`` / ``result`` (both ``None`` on the initial render, so the
+        # included fragments fall through to their quiet prompts).
+        "since": DEFAULT_SINCE,
+        "since_options": _SINCE_OPTIONS,
+        "report": None,
+        "result": None,
         "operator_sub": session.operator_sub,
         "active_surface": "retrieval",
         "page_title": "Retrieval",
@@ -344,7 +413,7 @@ async def _render_diagnostics(
     The privacy ``audit_*`` contextvars are bound **before** the ``retrieve``
     call (and ``audit_hit_count`` after) so the in-process audit row carries the
     SHA-256 query trace even on a mid-retrieval exception. CSRF handling defers
-    to :func:`_resolve_diagnostics_csrf`.
+    to :func:`_resolve_fragment_csrf`.
     """
     query_text = query.strip()
     source_filter = source.strip()
@@ -366,7 +435,7 @@ async def _render_diagnostics(
             # login redirect), matching the corpus surface.
             raise
 
-    csrf_token, set_csrf = _resolve_diagnostics_csrf(request, str(session.session_id))
+    csrf_token, set_csrf = _resolve_fragment_csrf(request, str(session.session_id))
     context: dict[str, object] = {
         **_diagnostics_form_context(
             query=query_text,
@@ -434,3 +503,157 @@ async def _run_diagnostics(
         duration_ms=duration_ms,
     )
     return hits, duration_ms
+
+
+# ---------------------------------------------------------------------------
+# Usage Analytics tab (#1889)
+# ---------------------------------------------------------------------------
+
+
+async def _render_usage(
+    request: Request,
+    session: UISessionContext,
+    since: str,
+) -> HTMLResponse:
+    """Run the HTMX Usage Analytics fragment for ``POST /ui/retrieval/usage``.
+
+    Reconstructs the operator and runs the in-process
+    :func:`~meho_backplane.retrieval.usage.compute_usage` own-tenant (no
+    ``tenant_filter`` -- the ``platform_admin`` cross-tenant selector is the
+    sibling T3 concern), then swaps ``retrieval/_usage_results.html`` into
+    ``#retrieval-usage-results``.
+
+    ``compute_usage`` is keyword-only and **requires** a ``session:
+    AsyncSession``, so this handler opens one via
+    :func:`~meho_backplane.db.engine.get_sessionmaker` exactly as the corpus
+    console does -- the helper is read-only and does not commit or close the
+    session (lifetime is the caller's concern). The ``since`` string is
+    resolved with :func:`~meho_backplane.retrieval.usage.parse_since`; a
+    :class:`~meho_backplane.retrieval.usage.SinceValueError` renders an inline
+    400 error card (mirroring the REST route's
+    ``raise HTTPException(status_code=400, ...)``) rather than escaping as a
+    500.
+
+    The honesty-gap explainer is load-bearing: a ``total_searches == 0`` with
+    ``rest_excluded`` / ``counted_surfaces`` must read as "REST excluded -- only
+    audited /mcp search tools are counted", not "no activity". The template
+    renders that badge from the :class:`~meho_backplane.retrieval.usage.UsageReport`
+    fields verbatim.
+    """
+    since_value = since.strip() or DEFAULT_SINCE
+
+    report: UsageReport | None = None
+    error_message: str | None = None
+    now = datetime.now(UTC)
+    try:
+        since_dt = parse_since(since_value, now=now)
+    except SinceValueError as exc:
+        # Surface the parser's rejection as an inline 400-class error card --
+        # the same shape the REST route maps to ``HTTPException(400, ...)`` --
+        # rather than letting it escape as a 500.
+        error_message = str(exc)
+    else:
+        operator = await _resolve_operator(session)
+        report = await _run_usage(operator, since_dt, now)
+
+    csrf_token, set_csrf = _resolve_fragment_csrf(request, str(session.session_id))
+    context: dict[str, object] = {
+        "since": since_value,
+        "since_options": _SINCE_OPTIONS,
+        "report": report,
+        "error_message": error_message,
+        "csrf_token": csrf_token,
+    }
+    response = get_templates().TemplateResponse(request, "retrieval/_usage_results.html", context)
+    if set_csrf:
+        _set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _run_usage(
+    operator: Operator,
+    since_dt: datetime,
+    now: datetime,
+) -> UsageReport:
+    """Open a read-only session and run in-process ``compute_usage`` own-tenant.
+
+    Scoped to ``operator.tenant_id`` (no ``tenant_filter``) across every
+    :data:`~meho_backplane.retrieval.usage.SUPPORTED_SURFACES`. The session is
+    opened via :func:`~meho_backplane.db.engine.get_sessionmaker` and closed by
+    the ``async with`` -- ``compute_usage`` neither commits nor closes it.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        report = await compute_usage(
+            session=db_session,
+            since=since_dt,
+            until=now,
+            surfaces=SUPPORTED_SURFACES,
+            tenant_id=operator.tenant_id,
+        )
+    log.info(
+        "ui_retrieval_usage_completed",
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        total_searches=report.total_searches,
+        bucket_count=len(report.buckets),
+    )
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Eval Quality tab (#1889)
+# ---------------------------------------------------------------------------
+
+
+async def _render_eval(
+    request: Request,
+    session: UISessionContext,
+) -> HTMLResponse:
+    """Run the HTMX Eval Quality fragment for ``POST /ui/retrieval/eval``.
+
+    Reconstructs the operator and runs the in-process
+    :func:`~meho_backplane.retrieval.eval.eval_all` own-tenant with **no
+    baseline** -- the server-side baseline path is rejected 501
+    (``retrieve_eval.py``) since v0.2 ships no checked-in corpus snapshot, so
+    this surface never offers a baseline toggle and never reaches that path.
+    Unlike usage, ``eval_all`` takes **no session** (it owns its own retrieval
+    plumbing), so it is called as ``await eval_all(tenant_id=operator.tenant_id)``.
+
+    Swaps ``retrieval/_eval_results.html`` into ``#retrieval-eval-results``: per
+    surface, ``precision_at_5`` / ``mrr`` / ``coverage`` and a green/yellow/red
+    verdict pill mapped (in the template) from the verdict token the service
+    returns verbatim, plus the ``overall_verdict``. An empty-corpus surface
+    legitimately returns ``green``; the verdict is rendered as-is, never
+    recomputed.
+    """
+    operator = await _resolve_operator(session)
+    result = await _run_eval(operator)
+
+    csrf_token, set_csrf = _resolve_fragment_csrf(request, str(session.session_id))
+    context: dict[str, object] = {
+        "result": result,
+        "csrf_token": csrf_token,
+    }
+    response = get_templates().TemplateResponse(request, "retrieval/_eval_results.html", context)
+    if set_csrf:
+        _set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _run_eval(operator: Operator) -> EvalResult:
+    """Run in-process ``eval_all`` own-tenant with no baseline.
+
+    Scoped to ``operator.tenant_id``; ``eval_all`` runs every shipped surface's
+    corpus (the default) and computes MEHO-only metrics -- no ``baseline``
+    argument, so the 501 baseline path is never reached.
+    """
+    result = await eval_all(tenant_id=operator.tenant_id)
+    log.info(
+        "ui_retrieval_eval_completed",
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        overall_verdict=result.overall_verdict,
+        surface_count=len(result.surfaces),
+    )
+    return result

@@ -13123,6 +13123,69 @@
         }
       }
     },
+    "/ui/retrieval/usage": {
+      "post": {
+        "tags": [
+          "ui-retrieval"
+        ],
+        "summary": "Retrieval Usage",
+        "description": "Run the Usage Analytics fragment (delegates to :func:`_render_usage`).",
+        "operationId": "retrieval_usage_ui_retrieval_usage_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_retrieval_usage_ui_retrieval_usage_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/retrieval/eval": {
+      "post": {
+        "tags": [
+          "ui-retrieval"
+        ],
+        "summary": "Retrieval Eval",
+        "description": "Run the Eval Quality fragment (delegates to :func:`_render_eval`).",
+        "operationId": "retrieval_eval_ui_retrieval_eval_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -16468,6 +16531,18 @@
         },
         "type": "object",
         "title": "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
+      },
+      "Body_retrieval_usage_ui_retrieval_usage_post": {
+        "properties": {
+          "since": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Since",
+            "default": "30d"
+          }
+        },
+        "type": "object",
+        "title": "Body_retrieval_usage_ui_retrieval_usage_post"
       },
       "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post": {
         "properties": {

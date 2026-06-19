@@ -193,17 +193,89 @@
     {% include "retrieval/_diagnostics_results.html" %}
   </div>
 
-  {# ---------- Placeholder tab panels (T2 / T3) ---------- #}
-  <div role="tabpanel" x-show="tab === 'usage'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
-    <div class="card-body text-center py-10">
-      <p class="text-base opacity-50">Usage Analytics lands in a follow-up task.</p>
+  {# ---------- Usage Analytics tab panel (T2) ---------- #}
+  {#- ``POST /ui/retrieval/usage`` swaps ``#retrieval-usage-results``. The form
+      declares its OWN ``hx-headers`` ``X-CSRF-Token`` (HTMX does not propagate
+      ``hx-headers`` to a descendant form, #1693). Own-tenant only -- there is
+      no ``tenant_filter`` field (that is T3's ``platform_admin`` selector). -#}
+  <div role="tabpanel" x-show="tab === 'usage'" x-cloak class="space-y-4">
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-4">
+        <form
+          id="retrieval-usage-form"
+          hx-post="/ui/retrieval/usage"
+          hx-target="#retrieval-usage-results"
+          hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="flex flex-col gap-3 sm:flex-row sm:items-end"
+          aria-label="Run a retrieval usage report"
+        >
+          <label class="form-control w-full sm:w-48">
+            <div class="label">
+              <span class="label-text">Lookback window</span>
+            </div>
+            <input
+              type="text"
+              name="since"
+              value="{{ since }}"
+              maxlength="32"
+              list="retrieval-usage-since-options"
+              placeholder="e.g. 30d, 24h, 2026-05-01"
+              class="input input-bordered w-full"
+              aria-label="Usage lookback window"
+              autocomplete="off"
+            />
+            <datalist id="retrieval-usage-since-options">
+              {% for option in since_options %}
+                <option value="{{ option }}"></option>
+              {% endfor %}
+            </datalist>
+          </label>
+          <button type="submit" class="btn btn-primary gap-1" aria-label="Run the usage report">
+            {{ icon("activity") }}
+            Run
+          </button>
+        </form>
+      </div>
     </div>
+
+    {# ---------- Usage results region ---------- #}
+    {% include "retrieval/_usage_results.html" %}
   </div>
-  <div role="tabpanel" x-show="tab === 'eval'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
-    <div class="card-body text-center py-10">
-      <p class="text-base opacity-50">Eval Quality lands in a follow-up task.</p>
+
+  {# ---------- Eval Quality tab panel (T2) ---------- #}
+  {#- ``POST /ui/retrieval/eval`` swaps ``#retrieval-eval-results``. No baseline
+      toggle (the server-side baseline path is 501 today). Own-tenant only. -#}
+  <div role="tabpanel" x-show="tab === 'eval'" x-cloak class="space-y-4">
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-4">
+        <form
+          id="retrieval-eval-form"
+          hx-post="/ui/retrieval/eval"
+          hx-target="#retrieval-eval-results"
+          hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="flex flex-wrap items-center justify-between gap-3"
+          aria-label="Run the retrieval eval corpus"
+        >
+          <p class="text-sm opacity-70">
+            Run the checked-in eval corpus against this tenant&rsquo;s substrate
+            and read back precision@5 / MRR / coverage with a green/yellow/red
+            verdict per surface.
+          </p>
+          <button type="submit" class="btn btn-primary gap-1" aria-label="Run the eval corpus">
+            {{ icon("gauge") }}
+            Run eval
+          </button>
+        </form>
+      </div>
     </div>
+
+    {# ---------- Eval results region ---------- #}
+    {% include "retrieval/_eval_results.html" %}
   </div>
+
+  {# ---------- Placeholder tab panel (T3) ---------- #}
   <div role="tabpanel" x-show="tab === 'retire'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
     <div class="card-body text-center py-10">
       <p class="text-base opacity-50">Retire Checklist lands in a follow-up task.</p>

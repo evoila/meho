@@ -33,7 +33,7 @@ import asyncio
 import uuid
 import warnings
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -42,12 +42,23 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.adapters import HttpConnector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Tenant
+from meho_backplane.db.models import (
+    AuditLog,
+    EndpointDescriptor,
+    OperationGroup,
+    Tenant,
+)
+from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -59,7 +70,7 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
 )
-from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
@@ -98,6 +109,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_jwks_cache()
     reset_engine_for_testing()
     clear_registry()
+    reset_dispatcher_caches()
     yield
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
@@ -107,6 +119,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_jwks_cache()
     reset_engine_for_testing()
     clear_registry()
+    reset_dispatcher_caches()
 
 
 def _build_app() -> FastAPI:
@@ -259,6 +272,45 @@ def _client_with_role(
     client = TestClient(_build_app(), follow_redirects=False)
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     return client, mock
+
+
+def _client_with_role_and_csrf(
+    *,
+    tenant_id: uuid.UUID,
+    operator_sub: str,
+    role: TenantRole,
+) -> tuple[TestClient, respx.MockRouter, str]:
+    """Return a TestClient + respx mock + a minted CSRF token for a POST.
+
+    Mirrors :func:`_client_with_role` but also sets the ``meho_csrf``
+    double-submit cookie and returns the matching token so a state-changing
+    ``POST /ui/operations/preview`` can echo it via ``X-CSRF-Token``. A
+    request omitting the header gets a 403 from the CSRF middleware.
+    """
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=operator_sub,
+        tenant_id=str(tenant_id),
+        tenant_role=role.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=tenant_id,
+        access_token=access_token,
+        operator_sub=operator_sub,
+    )
+    mock = respx.mock(assert_all_called=False)
+    _mock_discovery_and_jwks(mock, jwks)
+    client = TestClient(_build_app(), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    csrf_token = mint_csrf_token(str(session_id))
+    client.cookies.set(CSRF_COOKIE_NAME, csrf_token)
+    return client, mock, csrf_token
+
+
+def _csrf_headers(token: str) -> dict[str, str]:
+    """Headers for an HTMX state-changing request -- CSRF echo + HX-Request."""
+    return {"X-CSRF-Token": token, "HX-Request": "true"}
 
 
 # ---------------------------------------------------------------------------
@@ -427,3 +479,365 @@ def test_operations_ui_route_ordering_search_not_param() -> None:
     assert response.status_code == 200
     # The search partial's empty-connector branch, not a descriptor 404/422.
     assert "Select a connector" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Preview panel (Task #1880, T2): the read-only would-be-request action
+# ---------------------------------------------------------------------------
+
+
+class _RecordingHttpConnector(HttpConnector):
+    """Connector whose transport records calls instead of sending.
+
+    The preview path must resolve the literal request WITHOUT touching the
+    HTTP transport; a non-empty ``calls`` list after a preview is the "it
+    dispatched" failure signal. Mirrors the sibling
+    ``test_operations_request_preview`` recording connector.
+    """
+
+    product = "gh"
+    version = "3"
+    impl_id = "gh-rest"
+    supported_version_range = ">=3,<4"
+    priority = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, Any]] = []
+
+    async def _request_json(
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"verb": method, "path": path, "params": params, "json": json})
+        return {"sent": True}
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"verb": "POST", "path": path, "json": json})
+        return {"sent": True}
+
+    async def fingerprint(  # type: ignore[override]
+        self, target: Any, operator: Operator | None = None
+    ) -> FingerprintResult:
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+def _register_recording_gh_connector() -> _RecordingHttpConnector:
+    """Register :class:`_RecordingHttpConnector` under ``gh-rest-3``."""
+    register_connector_v2(product="gh", version="3", impl_id="gh-rest", cls=_RecordingHttpConnector)
+    connector = get_or_create_connector_instance(_RecordingHttpConnector)
+    assert isinstance(connector, _RecordingHttpConnector)
+    return connector
+
+
+def _seed_ingested_op(
+    *,
+    tenant_id: uuid.UUID | None,
+    op_id: str = "POST:/repos/{owner}/{repo}/issues",
+    method: str = "POST",
+    path: str = "/repos/{owner}/{repo}/issues",
+    parameter_schema: dict[str, Any] | None = None,
+) -> uuid.UUID:
+    """Seed one enabled ``source_kind='ingested'`` gh-rest descriptor row.
+
+    Returns the descriptor id (so the drawer + preview form can be exercised
+    end to end through the BFF). The default schema models a gh-rest
+    issue-create -- ``owner`` / ``repo`` path params + a ``body`` container.
+    """
+    if parameter_schema is None:
+        parameter_schema = {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-meho-param-loc": "path"},
+                "repo": {"type": "string", "x-meho-param-loc": "path"},
+                "body": {"type": "object", "x-meho-param-loc": "body"},
+            },
+        }
+    desc_id = uuid.uuid4()
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                EndpointDescriptor(
+                    id=desc_id,
+                    tenant_id=tenant_id,
+                    product="gh",
+                    version="3",
+                    impl_id="gh-rest",
+                    op_id=op_id,
+                    source_kind="ingested",
+                    method=method,
+                    path=path,
+                    summary="Create issue.",
+                    description="Ingested write test op.",
+                    parameter_schema=parameter_schema,
+                    llm_instructions=None,
+                    safety_level="caution",
+                    requires_approval=False,
+                    is_enabled=True,
+                )
+            )
+
+    asyncio.run(_do())
+    return desc_id
+
+
+def _seed_gh_target(*, tenant_id: uuid.UUID, name: str = "gh-prod") -> None:
+    """Seed a gh target row ``resolve_target`` can find by name."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                TargetORM(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    name=name,
+                    aliases=[],
+                    product="gh",
+                    version="3",
+                    host="api.github.com",
+                    port=443,
+                    fqdn=None,
+                    secret_ref=None,
+                    auth_model="shared_service_account",
+                    vpn_required=False,
+                    extras={},
+                    notes=None,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def _count_audit_rows() -> int:
+    """Return the total ``AuditLog`` row count (the no-dispatch assertion)."""
+
+    async def _do() -> int:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(select(func.count()).select_from(AuditLog))
+            return int(result.scalar_one())
+
+    return asyncio.run(_do())
+
+
+def test_operations_ui_preview_renders_literal_request_no_audit_row() -> None:
+    """A valid ingested-op preview renders method + path + redacted body, no audit row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    audit_before = _count_audit_rows()
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "diagnose me"}}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-preview-status="ok"' in body
+    # The literal request line: method + the substituted path.
+    assert "POST" in body
+    assert "/repos/evoila/meho/issues" in body
+    # The redacted-body block + the masked note are present.
+    assert "data-preview-body" in body
+    assert "diagnose me" in body
+    assert "redacted" in body
+    # The preview wrote no audit row (it never dispatched).
+    assert _count_audit_rows() == audit_before
+
+
+def test_operations_ui_preview_invalid_params_renders_in_envelope_error() -> None:
+    """Params failing the schema render the in-envelope status=error inline (HTTP 200)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(
+        tenant_id=None,
+        parameter_schema={
+            "type": "object",
+            "properties": {"owner": {"type": "string", "x-meho-param-loc": "path"}},
+            "required": ["owner"],
+            "additionalProperties": False,
+        },
+    )
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"unexpected": "field"}',
+            },
+        )
+    # An operator-input fault is INSIDE the envelope -- HTTP 200, not 4xx.
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-preview-status="error"' in body
+    assert "invalid_params" in body
+
+
+def test_operations_ui_preview_missing_target_name_is_inline_400() -> None:
+    """A blank target surfaces the meta-tool's missing-target-name 400 inline.
+
+    The route forwards the whitespace-stripped target verbatim, so a blank /
+    whitespace-only field strips to the empty string the meta-tool rejects
+    with the ValueError the REST route maps to a hard 400 (the
+    ``{"target": {}}``-without-name contract). The BFF renders it as an
+    inline form error instead of tearing the operator out of the drawer.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                # Whitespace-only target -> strips to "" -> the meta-tool's
+                # missing-target-name ValueError -> the REST route's hard 400.
+                "target": "   ",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 400, response.text
+    body = response.text
+    assert 'data-preview-status="form_error"' in body
+    assert "name" in body
+
+
+def test_operations_ui_preview_malformed_params_json_is_inline_400() -> None:
+    """A malformed ``params`` JSON renders an inline 400 form error, not a 422/500."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{not valid json",
+            },
+        )
+    assert response.status_code == 400, response.text
+    assert 'data-preview-status="form_error"' in response.text
+
+
+def test_operations_ui_preview_without_csrf_token_is_403() -> None:
+    """A preview POST omitting the CSRF header is rejected by the middleware (403)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            # No X-CSRF-Token header -> the double-submit pair is incomplete.
+            headers={"HX-Request": "true"},
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 403, response.text
+
+
+def test_operations_ui_preview_operator_role_can_preview() -> None:
+    """RBAC: a plain operator session can preview (no tenant_admin required)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/preview",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "ok"}}',
+            },
+        )
+    # Operator (not tenant_admin) renders the ok preview -- no 403.
+    assert response.status_code == 200, response.text
+    assert 'data-preview-status="ok"' in response.text
+
+
+def test_operations_ui_drawer_renders_preview_form_for_ingested_op() -> None:
+    """The detail drawer carries the preview form for an HTTP-ingested op."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_ingested_op(tenant_id=None)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get(f"/ui/operations/descriptor/{desc_id}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The preview form posts to the preview route and seeds the connector_id.
+    assert 'hx-post="/ui/operations/preview"' in body
+    assert 'value="gh-rest-3"' in body
+    assert 'id="operations-preview-region"' in body
+    # The drawer GET re-set the CSRF cookie so the form's double-submit lines up.
+    assert CSRF_COOKIE_NAME in response.cookies

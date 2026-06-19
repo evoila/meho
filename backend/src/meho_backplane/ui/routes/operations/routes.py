@@ -42,14 +42,47 @@ Route inventory
   ``hx-trigger="keyup changed delay:300ms"`` + ``hx-push-url`` so searches
   are shareable.
 * ``GET /ui/operations/descriptor/{descriptor_id}`` -- the operation
-  detail drawer fragment (read). See the RBAC note below.
+  detail drawer fragment (read). See the RBAC note below. The drawer
+  render mints + re-sets the ``meho_csrf`` cookie so the preview form it
+  carries (below) has a matching double-submit pair after the swap.
+* ``POST /ui/operations/preview`` (Task #1880, T2) -- the read-only
+  request **preview** action that lives inside the detail drawer: given
+  the chosen op + a target + params, it renders the literal would-be HTTP
+  request (``method`` / ``resolved_path`` / ``query`` / ``redacted_body``)
+  **without dispatching it**. CSRF-gated (it is a ``POST`` under ``/ui/``)
+  and ``require_ui_session``-gated; calls
+  :func:`~meho_backplane.operations.meta_tools.preview_operation`
+  in-process -- the same in-process BFF pattern the approvals decision
+  POSTs use, because the Bearer-gated ``POST /api/v1/operations/preview``
+  cannot be authenticated by a session cookie. Preview NEVER sends a
+  request and writes NO audit row; dispatch (Run) is T3.
 
-The literal ``search`` / ``descriptor`` segments register BEFORE the
-``{descriptor_id}`` route is even relevant -- the only ``{param}`` route
-sits under the distinct ``/ui/operations/descriptor/`` prefix, so first-
-match-wins routing never binds ``search`` as a descriptor id. The router
-is registered ahead of the stubs aggregate in
-:func:`meho_backplane.ui.routes.build_router`.
+The literal ``search`` / ``descriptor`` / ``preview`` segments register
+BEFORE the ``{descriptor_id}`` route is even relevant -- the only
+``{param}`` route sits under the distinct ``/ui/operations/descriptor/``
+prefix, so first-match-wins routing never binds ``search`` / ``preview``
+as a descriptor id (and ``preview`` is a ``POST``, so it could not collide
+with the GET slug route regardless). The router is registered ahead of the
+stubs aggregate in :func:`meho_backplane.ui.routes.build_router`.
+
+Preview envelope + the one hard 400
+-----------------------------------
+
+:func:`preview_operation` returns the structured envelope verbatim:
+``status`` of ``"ok"`` (carries ``method`` / ``resolved_path`` / ``query``
+/ ``redacted_body``) / ``"error"`` / ``"unavailable"`` (the operator-input
+faults -- unknown op, invalid params, unresolvable connector -- come back
+INSIDE the envelope with ``extras.error_code``, NOT as HTTP 4xx, the same
+contract as ``POST /api/v1/operations/preview``). The one exception that
+surfaces as a hard ``400`` is a missing target name (a ``ValueError`` from
+the meta-tool's target normalisation); the BFF route replicates the REST
+route's ``try/except ValueError`` and renders that ``400`` as an inline
+form error rather than tearing the operator out of the drawer.
+
+The ``redacted_body`` is the would-be body run through the SAME
+connector-boundary redaction pipeline the response path uses -- it is not
+a new raw-secret surface, so it is surfaced verbatim (with a clear
+"redacted -- secrets masked" note) and never un-redacted.
 
 connector_id shape (load-bearing)
 ---------------------------------
@@ -97,11 +130,12 @@ indistinguishable from a missing one (404).
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, Final
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
@@ -116,11 +150,14 @@ from meho_backplane.operations.meta_tools import (
     UnknownConnectorError,
     describe_descriptor,
     list_operation_groups,
+    preview_operation,
     search_operations,
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.csrf import mint_csrf_token
+from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
@@ -150,6 +187,24 @@ _SEARCH_LIMIT: Final[int] = 25
 #: Page size for the group-browse listing (empty query). Real connectors
 #: carry O(10) groups; 100 keeps every one on one page.
 _GROUPS_LIMIT: Final[int] = 100
+
+#: Maximum ``op_id`` length accepted on the preview form. An op id is the
+#: descriptor's natural-key string (``vault.kv.read``,
+#: ``POST:/repos/{owner}/{repo}/issues``); bounding the wire shape rejects
+#: an oversized paste at the form boundary (422) rather than forwarding it.
+_MAX_OP_ID_LENGTH: Final[int] = 512
+
+#: Maximum target-name length accepted on the preview form. A target name
+#: is a short slug (``rdc-vcenter``); the bound protects the form parse
+#: against a paste-from-clipboard accident.
+_MAX_TARGET_LENGTH: Final[int] = 256
+
+#: Maximum raw ``params`` JSON length accepted on the preview form. The
+#: params editor is a free-form JSON textarea; 64 KiB is a comfortable
+#: ceiling for a real op's arguments while bounding the body parse against
+#: an oversized paste. The CSRF middleware already caps the buffered body
+#: at 256 KiB; this is the surface-specific, friendlier-error bound.
+_MAX_PARAMS_LENGTH: Final[int] = 64 * 1024
 
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the approvals / kb / connectors routers.
@@ -271,12 +326,15 @@ def build_operations_router() -> APIRouter:
     """
     router = APIRouter(tags=["ui-operations"])
 
-    # NOTE: the literal ``search`` segment and the ``descriptor/{id}`` route
-    # are registered BEFORE the bare ``/ui/operations`` index so the
-    # first-match-wins lookup is unambiguous; the only ``{param}`` route
-    # sits under the distinct ``/ui/operations/descriptor/`` prefix, so the
-    # literal ``search`` can never bind as a descriptor id (the ordering
-    # discipline the approvals / kb routers document).
+    # NOTE: the literal ``search`` / ``preview`` segments and the
+    # ``descriptor/{id}`` route are registered BEFORE the bare
+    # ``/ui/operations`` index so the first-match-wins lookup is
+    # unambiguous; the only ``{param}`` route sits under the distinct
+    # ``/ui/operations/descriptor/`` prefix, so the literal ``search`` can
+    # never bind as a descriptor id (the ordering discipline the approvals /
+    # kb routers document). ``preview`` is a ``POST``, so it cannot collide
+    # with the GET slug route regardless -- the ordering note is kept for
+    # consistency.
 
     @router.get("/ui/operations/search", response_class=HTMLResponse)
     async def operations_search(
@@ -308,6 +366,28 @@ def build_operations_router() -> APIRouter:
         carries the per-op agent prompt in its body (the RBAC trap).
         """
         return await _render_drawer(request, session, descriptor_id, role_probe)
+
+    @router.post("/ui/operations/preview", response_class=HTMLResponse)
+    async def operations_preview(
+        request: Request,
+        session: UISessionContext = _require_session,
+        connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
+        op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
+        target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
+        params: str = Form(default="", max_length=_MAX_PARAMS_LENGTH),
+    ) -> HTMLResponse:
+        """Render the read-only request **preview** fragment (no dispatch).
+
+        CSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under
+        ``/ui/``) and ``require_ui_session``-gated. Resolves the same op +
+        target + params a real dispatch would and renders the literal
+        would-be HTTP request -- ``method`` / ``resolved_path`` / ``query``
+        / ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an
+        audit row. Operator-input faults land inside the rendered envelope
+        (``status="error"`` / ``"unavailable"``); a missing target name
+        surfaces as an inline ``400`` form error.
+        """
+        return await _render_preview(request, session, connector_id, op_id, target, params)
 
     @router.get("/ui/operations", response_class=HTMLResponse)
     async def operations_index(
@@ -429,6 +509,17 @@ async def _render_drawer(
     ``llm_instructions`` block is threaded into the context ONLY when the
     role probe says tenant_admin -- the operator-render body never carries
     the per-op agent prompt.
+
+    Mints a fresh CSRF token and re-sets the ``meho_csrf`` cookie on the
+    drawer response so the preview form the drawer carries (Task #1880) has
+    a matching double-submit pair after the HTMX swap rotated it -- the same
+    cookie-desync defence the approvals detail modal applies (#1693 /
+    #1754). The ``connector_id`` (``<impl_id>-<version>``) is reconstructed
+    from the descriptor's natural key so the preview form can post it
+    without the operator re-typing it; preview is offered only for an
+    ``source_kind="ingested"`` op (a typed / composite op has no single
+    literal HTTP request to preview, so its envelope would be
+    ``status="unavailable"`` -- the template hides the form for those).
     """
     operator = await _resolve_operator(session)
     descriptor = await describe_descriptor(operator, descriptor_id)
@@ -437,6 +528,7 @@ async def _render_drawer(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="operation_descriptor_not_found",
         )
+    csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, Any] = {
         "descriptor": descriptor,
         "is_tenant_admin": role_probe.is_tenant_admin,
@@ -444,5 +536,129 @@ async def _render_drawer(
         # render carries it. A plain operator's body never contains the
         # prompt text (prompt-injection vector if leaked).
         "llm_instructions": descriptor.llm_instructions if role_probe.is_tenant_admin else None,
+        # The dispatchable connector id the preview form posts back. The
+        # descriptor's natural key round-trips ``parse_connector_id``.
+        "connector_id": f"{descriptor.impl_id}-{descriptor.version}",
+        # Preview is meaningful only for an HTTP-ingested op.
+        "previewable": descriptor.source_kind == "ingested",
+        "csrf_token": csrf_token,
     }
-    return get_templates().TemplateResponse(request, "operations/_drawer.html", context)
+    response = get_templates().TemplateResponse(request, "operations/_drawer.html", context)
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _render_preview(
+    request: Request,
+    session: UISessionContext,
+    connector_id: str,
+    op_id: str,
+    target: str,
+    params: str,
+) -> HTMLResponse:
+    """Render the read-only request-preview fragment for the drawer.
+
+    Parses the free-form ``params`` JSON textarea server-side (a malformed
+    body is a typed inline error, not a 422), forwards the ``target`` name to
+    the meta-tool's bare-string shape, then calls :func:`preview_operation`
+    in-process. The structured envelope (``status`` of ``"ok"`` / ``"error"``
+    / ``"unavailable"``) is surfaced verbatim; the one ``ValueError`` the
+    meta-tool raises (a missing target name -- the empty-string / dict-
+    without-name case) is mapped to an inline ``400`` form error, replicating
+    the REST route's ``try/except ValueError``.
+
+    The target is forwarded **verbatim** (whitespace-stripped, not coerced to
+    ``None``) so a blank field on an ingested op -- which always needs a
+    target to resolve its connector -- fails loud as that ``400`` ("supply a
+    target name") rather than as a confusing in-envelope ``no_connector``
+    fault.
+
+    No dispatch, no audit row -- the meta-tool guarantees both.
+    """
+    operator = await _resolve_operator(session)
+
+    try:
+        parsed_params = _parse_params_field(params)
+    except ValueError as exc:
+        return _render_preview_form_error(request, connector_id, op_id, target, params, str(exc))
+
+    arguments: dict[str, Any] = {
+        "connector_id": connector_id,
+        "op_id": op_id,
+        # Bare-string target shape ``_normalize_target_arg`` accepts. An empty
+        # string (blank field) raises the meta-tool's missing-target-name
+        # ValueError -- the REST route's hard 400 -- surfaced inline below.
+        "target": target.strip(),
+        "params": parsed_params,
+    }
+    try:
+        envelope = await preview_operation(operator, arguments)
+    except ValueError as exc:
+        # The only ValueError the meta-tool raises is a missing target name
+        # (the dict-target-without-name case). The REST route maps it to a
+        # hard 400; here it is an inline form error so the operator stays in
+        # the drawer.
+        return _render_preview_form_error(request, connector_id, op_id, target, params, str(exc))
+
+    context: dict[str, Any] = {
+        "envelope": envelope,
+        "error_message": None,
+        "connector_id": connector_id,
+        "op_id": op_id,
+        "target": target,
+        "params": params,
+    }
+    return get_templates().TemplateResponse(request, "operations/_preview.html", context)
+
+
+def _parse_params_field(params: str) -> dict[str, Any]:
+    """Parse the preview form's free-form ``params`` JSON into a dict.
+
+    A blank field is the empty-params case (``{}``). A non-blank field must
+    be a JSON **object**; a malformed body or a non-object JSON value
+    (a list, a bare scalar) raises :class:`ValueError` with an operator-
+    legible message the caller renders inline -- the meta-tool's
+    ``params`` contract is a dict.
+    """
+    text = params.strip()
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"params is not valid JSON: {exc.msg} (line {exc.lineno})") from exc
+    if not isinstance(value, dict):
+        raise ValueError('params must be a JSON object (e.g. {"path": "secret/data/app"}).')
+    return value
+
+
+def _render_preview_form_error(
+    request: Request,
+    connector_id: str,
+    op_id: str,
+    target: str,
+    params: str,
+    message: str,
+) -> HTMLResponse:
+    """Render the preview fragment with an inline form error (HTTP 400).
+
+    Covers the malformed-``params`` case and the missing-target-name
+    ``ValueError`` the meta-tool raises (the REST route's hard 400). The
+    fragment carries ``error_message`` and no ``envelope`` so the template
+    renders the alert instead of a request preview; the ``400`` status lets
+    a caller distinguish a form fault from a successful in-envelope render.
+    """
+    context: dict[str, Any] = {
+        "envelope": None,
+        "error_message": message,
+        "connector_id": connector_id,
+        "op_id": op_id,
+        "target": target,
+        "params": params,
+    }
+    return get_templates().TemplateResponse(
+        request,
+        "operations/_preview.html",
+        context,
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )

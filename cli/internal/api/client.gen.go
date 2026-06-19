@@ -1176,6 +1176,14 @@ type BodyKbUploadSingleUiKbUploadPost struct {
 	Slug *string `json:"slug,omitempty"`
 }
 
+// BodyOperationsPreviewUiOperationsPreviewPost defines model for Body_operations_preview_ui_operations_preview_post.
+type BodyOperationsPreviewUiOperationsPreviewPost struct {
+	ConnectorId string  `json:"connector_id"`
+	OpId        string  `json:"op_id"`
+	Params      *string `json:"params,omitempty"`
+	Target      *string `json:"target,omitempty"`
+}
+
 // BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost defines model for Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post.
 type BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost struct {
 	Version *string `json:"version,omitempty"`
@@ -6845,6 +6853,9 @@ type UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody = Body
 // OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody defines body for OperationsDescriptorUiOperationsDescriptorDescriptorIdGet for application/json ContentType.
 type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody = UISessionContext
 
+// OperationsPreviewUiOperationsPreviewPostFormdataRequestBody defines body for OperationsPreviewUiOperationsPreviewPost for application/x-www-form-urlencoded ContentType.
+type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperationsPreviewUiOperationsPreviewPost
+
 // RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody defines body for RunbooksEditorCreateUiRunbooksNewPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody = BodyRunbooksEditorCreateUiRunbooksNewPost
 
@@ -8482,6 +8493,11 @@ type ClientInterface interface {
 	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBody(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	OperationsDescriptorUiOperationsDescriptorDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OperationsPreviewUiOperationsPreviewPostWithBody request with any body
+	OperationsPreviewUiOperationsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	OperationsPreviewUiOperationsPreviewPostWithFormdataBody(ctx context.Context, body OperationsPreviewUiOperationsPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// OperationsSearchUiOperationsSearchGet request
 	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12029,6 +12045,30 @@ func (c *Client) OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBo
 
 func (c *Client) OperationsDescriptorUiOperationsDescriptorDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequest(c.Server, descriptorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsPreviewUiOperationsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsPreviewUiOperationsPreviewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsPreviewUiOperationsPreviewPostWithFormdataBody(ctx context.Context, body OperationsPreviewUiOperationsPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsPreviewUiOperationsPreviewPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24239,6 +24279,46 @@ func NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequestWithBody
 	return req, nil
 }
 
+// NewOperationsPreviewUiOperationsPreviewPostRequestWithFormdataBody calls the generic OperationsPreviewUiOperationsPreviewPost builder with application/x-www-form-urlencoded body
+func NewOperationsPreviewUiOperationsPreviewPostRequestWithFormdataBody(server string, body OperationsPreviewUiOperationsPreviewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewOperationsPreviewUiOperationsPreviewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewOperationsPreviewUiOperationsPreviewPostRequestWithBody generates requests for OperationsPreviewUiOperationsPreviewPost with any type of body
+func NewOperationsPreviewUiOperationsPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewOperationsSearchUiOperationsSearchGetRequest generates requests for OperationsSearchUiOperationsSearchGet
 func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *OperationsSearchUiOperationsSearchGetParams) (*http.Request, error) {
 	var err error
@@ -26245,6 +26325,11 @@ type ClientWithResponsesInterface interface {
 	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBodyWithResponse(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error)
 
 	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error)
+
+	// OperationsPreviewUiOperationsPreviewPostWithBodyWithResponse request with any body
+	OperationsPreviewUiOperationsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OperationsPreviewUiOperationsPreviewPostResponse, error)
+
+	OperationsPreviewUiOperationsPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body OperationsPreviewUiOperationsPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*OperationsPreviewUiOperationsPreviewPostResponse, error)
 
 	// OperationsSearchUiOperationsSearchGetWithResponse request
 	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
@@ -30818,6 +30903,28 @@ func (r OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse) Statu
 	return 0
 }
 
+type OperationsPreviewUiOperationsPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsPreviewUiOperationsPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsPreviewUiOperationsPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type OperationsSearchUiOperationsSearchGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -33785,6 +33892,23 @@ func (c *ClientWithResponses) OperationsDescriptorUiOperationsDescriptorDescript
 		return nil, err
 	}
 	return ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse(rsp)
+}
+
+// OperationsPreviewUiOperationsPreviewPostWithBodyWithResponse request with arbitrary body returning *OperationsPreviewUiOperationsPreviewPostResponse
+func (c *ClientWithResponses) OperationsPreviewUiOperationsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OperationsPreviewUiOperationsPreviewPostResponse, error) {
+	rsp, err := c.OperationsPreviewUiOperationsPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsPreviewUiOperationsPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) OperationsPreviewUiOperationsPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body OperationsPreviewUiOperationsPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*OperationsPreviewUiOperationsPreviewPostResponse, error) {
+	rsp, err := c.OperationsPreviewUiOperationsPreviewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsPreviewUiOperationsPreviewPostResponse(rsp)
 }
 
 // OperationsSearchUiOperationsSearchGetWithResponse request returning *OperationsSearchUiOperationsSearchGetResponse
@@ -39868,6 +39992,32 @@ func ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse(rsp 
 	}
 
 	response := &OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsPreviewUiOperationsPreviewPostResponse parses an HTTP response from a OperationsPreviewUiOperationsPreviewPostWithResponse call
+func ParseOperationsPreviewUiOperationsPreviewPostResponse(rsp *http.Response) (*OperationsPreviewUiOperationsPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsPreviewUiOperationsPreviewPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

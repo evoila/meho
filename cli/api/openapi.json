@@ -12739,6 +12739,48 @@
         }
       }
     },
+    "/ui/operations/preview": {
+      "post": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Preview",
+        "description": "Render the read-only request **preview** fragment (no dispatch).\n\nCSRF-gated by the ``ui/csrf.py`` middleware (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated. Resolves the same op +\ntarget + params a real dispatch would and renders the literal\nwould-be HTTP request -- ``method`` / ``resolved_path`` / ``query``\n/ ``redacted_body`` -- WITHOUT sending it and WITHOUT writing an\naudit row. Operator-input faults land inside the rendered envelope\n(``status=\"error\"`` / ``\"unavailable\"``); a missing target name\nsurfaces as an inline ``400`` form error.",
+        "operationId": "operations_preview_ui_operations_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_operations_preview_ui_operations_preview_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations": {
       "get": {
         "tags": [
@@ -14212,6 +14254,38 @@
           "file"
         ],
         "title": "Body_kb_upload_single_ui_kb_upload_post"
+      },
+      "Body_operations_preview_ui_operations_preview_post": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Op Id"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "params": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Params",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "title": "Body_operations_preview_ui_operations_preview_post"
       },
       "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post": {
         "properties": {

@@ -18,10 +18,26 @@
     so a plain operator's response body never carries the prompt text
     (leaking it is a prompt-injection vector, api/v1/operations.py).
 
+  Preview panel (Task #1880, T2)
+    For an HTTP-ingested op (``previewable``) the drawer carries a
+    read-only **Preview** form: given a target + params it renders the
+    literal would-be HTTP request (``operations/_preview.html``) WITHOUT
+    dispatching. Preview is in the operator capability set -- no
+    tenant_admin step. The form is its own ``<form>`` carrying its OWN
+    ``hx-headers`` ``X-CSRF-Token`` (HTMX does not inherit ``hx-headers``
+    to children); the drawer GET minted the token + re-set the matching
+    ``meho_csrf`` cookie. The Preview button is labelled distinctly from
+    Run (T3) and reads as safe (no dispatch). A typed / composite op is
+    NOT previewable, so the form is hidden for those.
+
   Context:
     descriptor       -- OperationDescriptor: the full read shape
     is_tenant_admin  -- bool: gate for the llm_instructions block
     llm_instructions -- dict | None: present (and non-null) only for admins
+    connector_id     -- str: the dispatchable <impl_id>-<version> id, posted
+                        back by the preview form
+    previewable      -- bool: True for an HTTP-ingested op (preview offered)
+    csrf_token       -- str: minted double-submit token for the preview POST
 -#}
 {% from "_icons.html" import icon %}
 <dialog id="operations-drawer" class="modal" aria-label="Operation detail">
@@ -88,6 +104,66 @@
           <p class="text-xs opacity-60">No parameters.</p>
         {% endif %}
       </div>
+
+      {#- Preview panel (Task #1880): the read-only would-be-request action.
+          Offered only for an HTTP-ingested op (a typed/composite op has no
+          single literal HTTP request to preview). Its own <form> carries
+          the CSRF header echo -- HTMX does not inherit hx-headers to
+          children. Preview NEVER dispatches; the button is labelled
+          distinctly from Run (T3). -#}
+      {% if previewable %}
+        <div class="border-t border-base-300 pt-4">
+          <div class="meho-overline mb-2">Preview request</div>
+          <p class="mb-3 text-xs opacity-60">
+            Render the literal HTTP request meho would send for this
+            operation &mdash; method, path, query, and the redacted body
+            &mdash; <span class="font-semibold">without dispatching it</span>.
+            No request is sent and no audit row is written.
+          </p>
+          <form
+            class="space-y-3"
+            hx-post="/ui/operations/preview"
+            hx-target="#operations-preview-region"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-disabled-elt="find button"
+          >
+            <input type="hidden" name="connector_id" value="{{ connector_id }}" />
+            <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs opacity-70">Target <span class="opacity-50">(name; leave blank for a target-less op)</span></span>
+              <input
+                type="text"
+                name="target"
+                maxlength="256"
+                class="input input-bordered input-sm w-full font-mono"
+                placeholder="e.g. rdc-vcenter"
+                aria-label="Target name"
+                autocomplete="off"
+              />
+            </label>
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs opacity-70">Params <span class="opacity-50">(JSON object)</span></span>
+              <textarea
+                name="params"
+                rows="4"
+                maxlength="65536"
+                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                placeholder='{"path": "secret/data/app"}'
+                aria-label="Operation params as JSON"
+              ></textarea>
+            </label>
+            <button type="submit" class="btn btn-outline btn-sm gap-1" data-action="preview">
+              {{ icon("search", class="size-4") }}
+              Preview request
+              <span class="badge badge-ghost badge-xs">no dispatch</span>
+            </button>
+          </form>
+          {#- Swap target for the rendered preview fragment. Empty until the
+              operator submits the form. -#}
+          <div id="operations-preview-region" class="mt-3"></div>
+        </div>
+      {% endif %}
 
       {#- llm_instructions: tenant_admin only. The block is absent entirely
           for a plain operator -- the context does not carry the prompt for

@@ -23,16 +23,17 @@ G0.6 dispatch shim). Operations arrive in #834 via spec ingestion of
 The connector imports its auth scaffolding from the shared
 `connectors/_shared/vcf_auth.py` module (#841 G3.6-T13) — vRLI is the
 session-token consumer of that shared module's `vcf_session_login`
-helper. The 401-retry-once loop wraps downstream calls and lives in
-this connector module (not in the shared helper) because the
-downstream paths differ per connector.
+helper. The session-expiry retry-once loop (440 or 401) wraps downstream
+calls and lives in this connector module (not in the shared helper)
+because the downstream paths differ per connector.
 
 ## Key types
 
 - **`VcfLogsConnector(HttpConnector)`** —
   `connectors/vcf_logs/connector.py`. Hand-rolled session-token
   connector with per-target token cache + Vault-sourced
-  service-account credentials + 401-driven re-login + retry-once.
+  service-account credentials + session-expiry-driven re-login + retry-once
+  (440 or 401).
 - **`VcfLogsTargetLike`** — `connectors/vcf_logs/session.py`.
   Runtime-checkable Protocol extending the cross-connector
   `VcfTargetLike` with an optional `provider` field
@@ -89,21 +90,44 @@ The connector caches the `sessionId` per `target.name` in
 `_session_tokens`; subsequent `auth_headers()` calls reuse the cached
 value without a fresh login.
 
-### 401 retry-once
+### Session-expiry retry-once (440 or 401)
 
 `_get_json_with_session_retry()` wraps `HttpConnector._get_json` and
-handles the session-expiry case:
+handles the session-expiry case. vRLI signals an expired session two
+ways and the connector recovers from both
+(`_SESSION_EXPIRED_STATUSES = {401, 440}`):
+
+- **`440`** — vRLI's own `trait.authenticated.440`: *"the session ID has
+  expired; obtain a new session ID from `/api/v2/sessions`"* (carried by
+  117 endpoints in the spec). This is the case that bites in practice:
+  vRLI idle-expires the in-memory session, so the call after an idle gap
+  returns 440. **This is the recoverable case** — re-login fixes it.
+- **`401`** — `trait.authenticated.401`: missing/invalid `Authorization`
+  header or session ID.
+
+The loop:
 
 1. Issue the GET with the cached Bearer header.
-2. On HTTP 401 → invalidate the cached `sessionId` (credentials cache
-   untouched — the 401 means the session expired, not that the creds
-   are wrong) and re-login.
+2. On HTTP 440 **or** 401 → invalidate the cached `sessionId`
+   (credentials cache untouched — a 440/401 means the session expired or
+   was rejected, not that the creds are wrong) and re-login.
 3. Retry the GET once with the fresh token.
-4. If the retry also 401s → raise `RuntimeError` naming the target.
+4. If the retry also returns 440/401 → raise `RuntimeError` naming the
+   target and the status.
 
 This is the same posture the NSX precedent established (re-login once,
 not a retry loop) — a misconfigured credential pair fails fast instead
 of hammering vRLI's audit log.
+
+Before #1909 the trigger keyed strictly on `401`, so a 440 fell straight
+through unretried: the first call after a backplane start worked (fresh
+cached session), vRLI idle-expired the session, and every subsequent call
+returned 440 until a backplane restart cleared the in-memory token cache —
+breaking any scheduled / long-running vRLI consumer. The
+dispatcher-side classification of 440 → structured `connector_auth_failed`
+(#1804, `operations/_errors.py`) only fixed the *diagnosability* of the
+flat error; the recovery (re-login on 440) lives here in the
+session-retry.
 
 ### Fingerprint + probe
 
@@ -162,18 +186,18 @@ caller wants to issue an authenticated GET:
   │    │         │              └─ POST /api/v2/sessions
   │    │         └─ client.request("GET", path, ...)
   │    │              └─ on 200 → return resp.json()
-  │    │              └─ on 401 → raise HTTPStatusError
-  │    └─ on HTTPStatusError(401):
+  │    │              └─ on 440 / 401 → raise HTTPStatusError
+  │    └─ on HTTPStatusError(440 or 401):    # _SESSION_EXPIRED_STATUSES
   │         ├─ _invalidate_session(target)       # drop cached sessionId
   │         └─ retry _get_json(...) once
-  │              └─ on 401 again → RuntimeError "after refresh"
+  │              └─ on 440 / 401 again → RuntimeError "after refresh"
 ```
 
 The credentials cache (`_credentials`, a shared `CredentialsCache`
 keyed on `target.name`) is touched once per target lifetime; the
 session-token cache (`_session_tokens`) is touched once per
-target-session lifetime (initial login + any 401-driven re-login).
-Both caches are flushed on `aclose()`.
+target-session lifetime (initial login + any session-expiry-driven
+re-login on 440 or 401). Both caches are flushed on `aclose()`.
 
 ## Dependencies
 
@@ -200,9 +224,11 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   Vault read path is wired for the VCF management-plane connectors
   (tracked under Goal #214).
 - No proactive token refresh. vRLI's session has a documented TTL
-  (default 30 days but operator-tunable); the connector relies on the
-  401-retry layer to handle expiry. Acceptable in v0.2; revisit if
-  operator-side cache TTLs drop below the round-trip timing.
+  (default 30 days but operator-tunable) and also idle-expires; the
+  connector relies on the session-expiry retry layer (440 or 401) to
+  recover on demand rather than refreshing ahead of time. Acceptable in
+  v0.2; revisit if operator-side cache TTLs drop below the round-trip
+  timing.
 - No DELETE-revoke on `aclose()` — a per-target network call during
   lifespan shutdown is more risk than benefit (same posture NSX
   takes). Revoke-on-close is v0.2.next.
@@ -235,6 +261,7 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
 - End-to-end recorded-fixture coverage (G3.6-T6 #838):
   [`backend/tests/test_connectors_vcf_logs_e2e.py`](../../backend/tests/test_connectors_vcf_logs_e2e.py)
   — exercises all 7 ops through the full dispatcher, the
-  session-establish + 401 retry-once + second-401-fails paths via
-  `_get_json_with_session_retry`, the audit-row contract, and the
-  JSONFlux handle path on `vrli.event.query`.
+  session-establish + session-expiry retry-once (440 and 401) +
+  second-expiry-fails paths via `_get_json_with_session_retry`, the
+  audit-row contract, and the JSONFlux handle path on
+  `vrli.event.query`.

@@ -43,6 +43,18 @@ from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, Corpus
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.docs_search.answer_errors import (
+    ANSWER_ERROR_DETAIL,
+    CAUSE_CLIENT_UNAVAILABLE,
+    CAUSE_CORPUS_UNAVAILABLE,
+    CAUSE_EXPANSION_INVALID,
+    CAUSE_SYNTHESIS_CITATION_RESOLUTION,
+    CAUSE_SYNTHESIS_PARSE,
+    LEG_CORPUS,
+    LEG_EXPAND,
+    LEG_MODEL,
+    LEG_SYNTHESIS,
+)
 from meho_backplane.docs_search.synthesis import NO_GROUNDED_ANSWER
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
@@ -586,13 +598,14 @@ def test_tools_call_ask_docs_zero_chunks_returns_no_grounded_answer(
 def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC4: an unconfigured synthesis model fails closed → ``-32603``.
+    """AC4: an unconfigured synthesis model fails closed → structured ``-32603``.
 
     ``build_anthropic_ingest_llm_client`` raising ``LlmClientUnavailable``
-    (no ``ANTHROPIC_API_KEY``) is the #1386 fail-closed precedent. It is
-    not caught in the handler, so it bubbles to the dispatcher's generic
-    catch → ``-32603`` (the MCP analogue of the route's 503). We never
-    return an ungrounded answer when the model is missing.
+    (no ``ANTHROPIC_API_KEY``) is the #1386 fail-closed precedent. The code
+    stays ``-32603`` (the MCP analogue of the route's 503) but ``error.data``
+    now names the ``model_unavailable`` leg (#1918), so a consumer can tell a
+    missing model from a backend outage. We never return an ungrounded answer
+    when the model is missing.
     """
     client, _op = docs_client
     _seed_collection_sync()
@@ -610,7 +623,12 @@ def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=7),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: the leg is named on error.data, not a flat -32603.
+    assert error["data"]["detail"] == ANSWER_ERROR_DETAIL
+    assert error["data"]["leg"] == LEG_MODEL
+    assert error["data"]["cause"] == CAUSE_CLIENT_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +644,9 @@ def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
 
     An unverifiable citation breaks the no-claim-without-a-REAL-citation
     contract, so the synthesis raises ``DocsSynthesisError`` rather than
-    returning an answer with a fabricated reference. Surfaces as ``-32603``.
+    returning an answer with a fabricated reference. Surfaces as a structured
+    ``-32603`` naming the ``synthesis_malformed`` leg with the
+    ``citation_resolution`` sub-cause (#1918).
     """
     client, _op = docs_client
     _seed_collection_sync()
@@ -643,7 +663,41 @@ def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=8),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_SYNTHESIS
+    assert error["data"]["cause"] == CAUSE_SYNTHESIS_CITATION_RESOLUTION
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_malformed_synthesis_output_names_parse_sub_cause(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A model returning non-JSON names ``synthesis_malformed`` / ``parse`` (#1918).
+
+    The sibling of the fabricated-citation case: here the output is
+    structurally unparseable (not a citation problem), so the sub-cause is
+    ``parse`` — letting an operator tell "the model emitted garbage" apart
+    from "the model cited a chunk that isn't in the result", which point at
+    different fixes.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    stub = _StubLlmClient("I'm sorry, I cannot answer that.")  # non-JSON
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=12),
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_SYNTHESIS
+    assert error["data"]["cause"] == CAUSE_SYNTHESIS_PARSE
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +726,11 @@ def test_tools_call_ask_docs_backend_unavailable_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=9),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: the corpus leg is named, distinct from the model/synthesis legs.
+    assert error["data"]["leg"] == LEG_CORPUS
+    assert error["data"]["cause"] == CAUSE_CORPUS_UNAVAILABLE
     # The corpus failed before synthesis was reached.
     assert stub.captured == {}
 
@@ -873,7 +931,49 @@ def test_tools_call_ask_docs_unconfigured_expand_model_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=21),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: a no-model failure on the EXPAND leg is attributed to expand_failed,
+    # NOT model_unavailable — even though both legs reuse the same #1386 client.
+    # The handler's per-leg wrap is what disambiguates the shared exception type.
+    assert error["data"]["leg"] == LEG_EXPAND
+    assert error["data"]["cause"] == CAUSE_CLIENT_UNAVAILABLE
+    # Expansion failed before retrieval or synthesis ran.
+    assert "query" not in corpus.captured  # type: ignore[attr-defined]
+    assert synth_stub.captured == {}
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_malformed_expansion_names_expand_leg(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A malformed expansion output names the ``expand_failed`` leg (#1918).
+
+    The expand model ran but returned non-JSON, so ``expand_docs_query``
+    raises ``DocsQueryExpansionError`` (distinct from the no-model
+    ``LlmClientUnavailable`` case above). It surfaces as ``expand_failed`` /
+    ``expansion_invalid`` — and never falls back to retrieving on the raw
+    question. Neither retrieval nor synthesis runs.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    expand_stub = _StubLlmClient("not valid json at all")  # → DocsQueryExpansionError
+    synth_stub = _StubLlmClient('{"answer": "unused", "cited_chunk_ids": []}')
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand_stub),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=22),
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_EXPAND
+    assert error["data"]["cause"] == CAUSE_EXPANSION_INVALID
     # Expansion failed before retrieval or synthesis ran.
     assert "query" not in corpus.captured  # type: ignore[attr-defined]
     assert synth_stub.captured == {}

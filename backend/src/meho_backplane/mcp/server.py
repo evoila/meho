@@ -107,6 +107,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
+    "McpInternalError",
     "McpInvalidParamsError",
     "mcp_session_id_capture_mode",
     "register_method",
@@ -211,6 +212,44 @@ class McpInvalidParamsError(Exception):
     Re-exported from :mod:`meho_backplane.mcp` so T3 (#248) tool
     handlers — and any future MCP method handler — can raise it
     without reaching into a dunder-private symbol.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.data = data
+
+
+class McpInternalError(Exception):
+    """Handler-side sentinel mapped to JSON-RPC ``INTERNAL_ERROR`` **with data**.
+
+    A generic handler exception bubbles to the dispatcher's catch-all and
+    becomes a flat ``-32603`` ``"internal error: <ClassName>"`` with no
+    ``error.data`` — fine for an unexpected fault, opaque for one a handler
+    can already classify. A handler that has structured diagnostic detail
+    for a *server-side* fault (the analogue of an HTTP 5xx, not invalid
+    params) raises this instead: the dispatcher keeps the ``-32603`` code
+    but surfaces ``data`` on the JSON-RPC ``error.data`` member (spec §5.1)
+    and uses ``message`` verbatim.
+
+    The first consumer is the ``ask_docs`` answer pipeline (#1918): each
+    failed leg (expand / corpus / model / synthesis) is classified into a
+    structured envelope
+    (:class:`meho_backplane.docs_search.answer_errors.AskDocsAnswerError`)
+    and raised here so the consumer can tell a config gap from a backend
+    outage from a model-output bug — instead of the indistinguishable
+    ``-32603`` they all collapsed to before.
+
+    Distinct from :class:`McpInvalidParamsError` (``-32602``): that names a
+    client-input fault the caller can fix by changing params; this names a
+    server-side fault the caller cannot fix by re-shaping the request
+    (though it may be retryable, e.g. a transiently-down backend). The
+    dispatcher catches this class *after* :class:`McpInvalidParamsError` so
+    the param-error lane is unaffected.
     """
 
     def __init__(
@@ -863,6 +902,15 @@ async def _dispatch_to_handler(
             )
             return Response(status_code=202)
         return _error_response(jrpc.id, INVALID_PARAMS, str(exc), data=exc.data)
+    except McpInternalError as exc:
+        # A handler-classified server-side fault: keep the -32603 code but
+        # surface its structured ``error.data`` + verbatim message (the
+        # ask_docs per-leg answer envelope, #1918) instead of the opaque
+        # ``internal error: <ClassName>``. The breadcrumb log still fires.
+        _log.warning("mcp_handler_internal_error", method=jrpc.method, error=str(exc))
+        if is_notification:
+            return Response(status_code=202)
+        return _error_response(jrpc.id, INTERNAL_ERROR, str(exc), data=exc.data)
     except Exception as exc:
         _log.exception("mcp_handler_error", method=jrpc.method)
         if is_notification:

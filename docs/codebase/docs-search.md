@@ -246,9 +246,9 @@ this step rewrites the question into a small set of query variants:
   skips expansion and answers on the raw question alone.
 
 `DocsQueryExpansionError` is a **distinct** exception type (not
-`DocsSynthesisError`, not a bare `RuntimeError`) so a later structured
-answer-error envelope (#1918) can attribute a failure to the `expand` leg
-(`expand_failed`) specifically rather than a generic catch-all.
+`DocsSynthesisError`, not a bare `RuntimeError`) so the structured
+answer-error envelope (#1918, below) attributes a failure to the `expand`
+leg (`expand_failed`) specifically rather than a generic catch-all.
 
 Substrate stays dumb (#1177 / #1178): this module only frames the manifest
 + question into a prompt and validates the returned variants. No DSL, no
@@ -295,12 +295,64 @@ acceptance criterion:
   adapter, reused via the shared `LlmClient` Protocol). No
   `ANTHROPIC_API_KEY` raises `LlmClientUnavailable`; a model that runs but
   breaks the JSON / citation contract raises `DocsSynthesisError`. Neither
-  is caught in the handler — both bubble to `-32603` (the MCP analogue of
+  is caught in the handler — both surface as `-32603` (the MCP analogue of
   503). The synthesis model is never relaxed into an ungrounded answer.
+- **`DocsSynthesisError` carries a sub-cause (#1918).** The two
+  structurally-distinct synthesis failures the message string previously
+  buried are split onto `exc.cause`: `SYNTHESIS_CAUSE_PARSE` (output didn't
+  parse into the required `{answer, cited_chunk_ids}` shape — non-JSON or
+  shape-violating) vs. `SYNTHESIS_CAUSE_CITATION_RESOLUTION` (output parsed
+  but a cited id didn't resolve to a retrieved chunk). They point at
+  different fixes (prompt / model vs. retrieval / index drift), so the
+  answer-error envelope surfaces the sub-cause.
 
 The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
+
+### `classify_answer_error(exc, *, llm_unavailable_leg=LEG_MODEL)` (`meho_backplane.docs_search.answer_errors`, #1918)
+
+The `ask_docs` answer pipeline runs four legs — **expand**, **retrieve**
+(corpus), **model** (synthesis call), **synthesis** (parse + citation
+resolution of the output) — each with its own typed failure. Before #1918
+all four collapsed to one opaque `-32603` `"internal error: <ClassName>"`
+at the MCP dispatcher's generic catch, so a consumer could not tell a
+config gap (no `ANTHROPIC_API_KEY`) from a backend outage (corpus down)
+from a model-output bug (malformed synthesis) — and mis-diagnosed
+(`claude-rdc-hetzner-dc#1407` gap 2). This module is the **one**
+framework-agnostic place that maps a raised leg exception onto a
+structured envelope naming *which* leg failed.
+
+- **Distinct leg + sub-cause per failure.** `classify_answer_error` returns
+  an `AskDocsAnswerError` carrying `leg` (one of `expand_failed` /
+  `corpus_unavailable` / `model_unavailable` / `synthesis_malformed`) and a
+  leg-scoped `cause`: `DocsQueryExpansionError` → `expand_failed` /
+  `expansion_invalid`; `CorpusUnavailable` → `corpus_unavailable`;
+  `DocsSynthesisError` → `synthesis_malformed` with its parse /
+  citation-resolution sub-cause carried through; `LlmClientUnavailable` →
+  `model_unavailable` / `client_unavailable` (or `expand_failed` when the
+  caller pins `llm_unavailable_leg=LEG_EXPAND`). A non-leg exception returns
+  `None` so the caller falls through to its generic catch — a genuinely
+  unexpected fault stays a plain `-32603`, not a mis-attributed leg.
+- **The one ambiguous type needs a caller hint.** A bare
+  `LlmClientUnavailable` is raised by the *same* #1386 client whether the
+  expand leg or the synthesis leg reached it, so only the caller (which
+  knows the pipeline position) can place it. The MCP handler's
+  `_run_answer_pipeline` wraps each leg and passes `llm_unavailable_leg`
+  accordingly; the leg's own typed shapes are unaffected.
+- **One envelope, every face (REST-ready).**
+  `AskDocsAnswerError.to_error_data()` renders a JSON-safe
+  `{detail: "ask_docs_failed", leg, cause, message}` dict — the same shape
+  on the MCP `error.data` member (raised as `McpInternalError`, code stays
+  `-32603`) and in a future REST `POST /api/v1/ask_docs` (#1917)
+  `HTTPException.detail` (the route picks 4xx vs 5xx per leg). This mirrors
+  `operations/ingest/error_envelopes.py`, the connector-ingest dual-surface
+  precedent. No corpus body or raw LLM output ever rides the envelope.
+- **Fail-closed preserved.** Classifying an error never produces an
+  answer — a leg failure surfaces as an error envelope, never a degraded /
+  ungrounded answer. The `/ui/corpus` Ask mode (wired by #1917) reads the
+  same `leg` to render its fail-open-to-chunks banner (the chunks stay,
+  the answer does not) via `corpus_ask_fallback_context`.
 
 ### `resolve_citation_link(source_url, *, title, document_id)` (`meho_backplane.docs_search.citation_links`, #1919)
 

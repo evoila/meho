@@ -1,0 +1,215 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connector review drawer -- ONE op row with inline governance edits
+  (Initiative #1839 Task #1887 T3). Rendered inside a group body
+  (``_review_group_body.html``) and re-rendered standalone by the per-op
+  edit submit (``hx-swap="outerHTML"`` on this ``<li>``).
+
+  Each control PATCHes
+  ``/ui/connectors/registry/{connector_id}/operations/{op_id}`` and swaps
+  THIS row's outerHTML with the re-rendered row. The ``op_id`` is the
+  natural key ``f"{method}:{path}"`` (e.g. ``GET:/api/vcenter/cluster``)
+  which CONTAINS slashes; it is emitted RAW into the ``hx-patch`` URL
+  (Jinja HTML-escapes the attribute but does NOT URL-encode the path) so
+  the ``{op_id:path}`` converter on the route captures the slash-bearing
+  segment intact -- URL-encoding the slashes would break ``:path``
+  matching. OpenAPI-derived paths never carry ``?`` / ``#``, so the raw
+  segment is URL-safe.
+
+  Governance footgun (loosening confirms): a LOOSENING edit widens the
+  safety boundary, so it is confirm-gated via ``hx-confirm``
+  (https://htmx.org/attributes/hx-confirm/) before it fires; a TIGHTENING
+  edit applies directly. Direction is computed from the op's CURRENT
+  value:
+    * ``is_enabled`` toggle: enable (false->true) loosens -> confirm;
+      disable (true->false) tightens -> direct.
+    * ``requires_approval`` toggle: remove approval (true->false) loosens
+      -> confirm; add approval (false->true) tightens -> direct.
+    * ``safety_level`` ``<select>``: any relaxation loosens; the select is
+      confirm-gated (a blanket confirm never under-confirms a loosening).
+
+  Soft-hide: when ``is_tenant_admin`` is false the controls render as
+  read-only badges (no forms) -- an operator sees the op's current
+  governance state but no edit affordances. The PATCH route's
+  ``resolve_operator_or_403`` is the security authority regardless.
+
+  ``warnings`` carries ``EditOpResponse.warnings`` (the
+  ``unreplaced_auto_shim`` enable-time advisory) after an edit -- rendered
+  inline on the row so the operator learns the dispatch dead end at enable
+  time. The edit STILL landed (warnings never block the write).
+
+  CSRF: every edit form carries the signed double-submit ``X-CSRF-Token``
+  on its OWN ``hx-headers`` (HTMX does not inherit page-level
+  ``hx-headers`` to an HTMX-injected fragment). The render that produced
+  this row minted the token + re-set the ``meho_csrf`` cookie.
+
+  Context contract:
+    * ``connector_id``   -- str: the ``<impl_id>-<version>`` key.
+    * ``op``             -- dict: {op_id, summary, description,
+                            custom_description, safety_level,
+                            requires_approval, is_enabled, tags}.
+    * ``is_tenant_admin``-- bool: edit controls vs read-only badges.
+    * ``csrf_token``     -- str: minted double-submit token.
+    * ``warnings``       -- list[dict]: {code, connector_class, message}
+                            EditOpResponse advisories (empty on read /
+                            clean edit).
+-#}
+{%- set patch_url = "/ui/connectors/registry/" ~ connector_id ~ "/operations/" ~ op.op_id -%}
+{%- set row_id = "review-op-row-" ~ op.op_id -%}
+<li
+  id="{{ row_id }}"
+  class="flex flex-col gap-1.5 py-2"
+  data-review-op-row
+  data-op-id="{{ op.op_id }}"
+>
+  <div class="flex items-start gap-2">
+    <span class="font-mono text-xs shrink-0">{{ op.op_id }}</span>
+    {% if op.summary %}
+      <span class="text-xs opacity-70 truncate">{{ op.summary }}</span>
+    {% endif %}
+  </div>
+
+  {% if is_tenant_admin %}
+    {#- ---- Edit controls (tenant_admin) ----
+        Each control is its own micro-form so a change to one field does
+        not bundle the others; the handler treats an omitted field as "no
+        edit". All four PATCH the same route + swap this row's outerHTML. -#}
+    <div
+      class="flex flex-wrap items-center gap-3 text-xs"
+      data-op-edit-controls
+    >
+      {#- safety_level select: confirm-gated (relaxation loosens). -#}
+      <form
+        class="flex items-center gap-1"
+        hx-patch="{{ patch_url }}"
+        hx-target="#{{ row_id }}"
+        hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-confirm="Change the safety level of {{ op.op_id }}? Relaxing it widens what agents may call without extra gating."
+      >
+        <label class="opacity-60" for="safety-{{ row_id }}">safety</label>
+        <select
+          id="safety-{{ row_id }}"
+          name="safety_level"
+          class="select select-bordered select-xs"
+          data-control="safety_level"
+          onchange="this.form.requestSubmit()"
+        >
+          {% for level in ["safe", "caution", "dangerous"] %}
+            <option value="{{ level }}" {{ "selected" if op.safety_level == level else "" }}>
+              {{ level }}
+            </option>
+          {% endfor %}
+        </select>
+      </form>
+
+      {#- requires_approval toggle: removing approval loosens -> confirm;
+          adding approval tightens -> direct. The hidden field submits the
+          TARGET value (the flip of the current state). -#}
+      <form
+        class="flex items-center gap-1"
+        hx-patch="{{ patch_url }}"
+        hx-target="#{{ row_id }}"
+        hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        {% if op.requires_approval %}
+          hx-confirm="Remove the approval requirement on {{ op.op_id }}? Calls will dispatch without an operator decision."
+        {% endif %}
+        data-control-form="requires_approval"
+      >
+        <input type="hidden" name="requires_approval" value="{{ "false" if op.requires_approval else "true" }}" />
+        <button
+          type="submit"
+          class="btn btn-xs {{ 'btn-outline' if op.requires_approval else 'btn-ghost' }}"
+          data-control="requires_approval"
+          data-current="{{ 'true' if op.requires_approval else 'false' }}"
+        >
+          {{ "approval: on" if op.requires_approval else "approval: off" }}
+        </button>
+      </form>
+
+      {#- is_enabled toggle: enable loosens -> confirm; disable tightens
+          -> direct. The hidden field submits the TARGET value. -#}
+      <form
+        class="flex items-center gap-1"
+        hx-patch="{{ patch_url }}"
+        hx-target="#{{ row_id }}"
+        hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        {% if not op.is_enabled %}
+          hx-confirm="Enable {{ op.op_id }} for dispatch? This makes it callable by agents."
+        {% endif %}
+        data-control-form="is_enabled"
+      >
+        <input type="hidden" name="is_enabled" value="{{ "false" if op.is_enabled else "true" }}" />
+        <button
+          type="submit"
+          class="btn btn-xs {{ 'btn-success' if op.is_enabled else 'btn-ghost' }}"
+          data-control="is_enabled"
+          data-current="{{ 'true' if op.is_enabled else 'false' }}"
+        >
+          {{ "enabled" if op.is_enabled else "disabled" }}
+        </button>
+      </form>
+
+      {#- custom_description: free-form override, applied on blur / submit.
+          Tightening-neutral (descriptive only) -> no confirm. -#}
+      <form
+        class="flex items-center gap-1 grow"
+        hx-patch="{{ patch_url }}"
+        hx-target="#{{ row_id }}"
+        hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        data-control-form="custom_description"
+      >
+        <input
+          type="text"
+          name="custom_description"
+          class="input input-bordered input-xs grow"
+          maxlength="4096"
+          placeholder="custom description (overrides the spec)"
+          value="{{ op.custom_description or '' }}"
+          data-control="custom_description"
+          autocomplete="off"
+        />
+      </form>
+    </div>
+  {% else %}
+    {#- ---- Read-only badges (operator soft-hide) ---- -#}
+    <div class="flex flex-wrap items-center gap-2 text-xs" data-op-readonly>
+      {%- set safety = op.safety_level -%}
+      {% if safety == "dangerous" %}
+        <span class="badge badge-error badge-xs">{{ safety }}</span>
+      {% elif safety == "caution" %}
+        <span class="badge badge-warning badge-xs">{{ safety }}</span>
+      {% else %}
+        <span class="badge badge-ghost badge-xs">{{ safety }}</span>
+      {% endif %}
+      {% if op.requires_approval %}
+        <span class="badge badge-outline badge-xs">approval</span>
+      {% endif %}
+      <span class="badge badge-xs {{ 'badge-success' if op.is_enabled else 'badge-ghost' }}">
+        {{ "enabled" if op.is_enabled else "disabled" }}
+      </span>
+    </div>
+  {% endif %}
+
+  {#- ---- Enable-time advisory (warnings never block) ----
+      ``warnings`` is unset when the row is rendered as part of a group
+      body (the lazy ``{% include %}`` path); it is only populated by the
+      per-op edit re-render. Default to an empty list so the include path
+      renders cleanly. -#}
+  {% for warning in warnings | default([]) %}
+    <div role="alert" class="alert alert-warning mt-1 py-1 text-xs" data-op-warning="{{ warning.code }}">
+      <span>
+        <span class="font-semibold">Heads up:</span>
+        {{ warning.message }}
+        {% if warning.connector_class %}
+          <span class="opacity-70">(shim: <code>{{ warning.connector_class }}</code>)</span>
+        {% endif %}
+      </span>
+    </div>
+  {% endfor %}
+</li>

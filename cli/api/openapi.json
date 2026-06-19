@@ -10240,6 +10240,184 @@
         }
       }
     },
+    "/ui/connectors/registry/{connector_id}/review": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Review",
+        "description": "``GET .../{connector_id}/review`` -- the drawer shell (lazy accordion).",
+        "operationId": "ui_connectors_registry_review_ui_connectors_registry__connector_id__review_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/registry/{connector_id}/review/groups/{group_key}": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Review Group",
+        "description": "``GET .../{connector_id}/review/groups/{group_key}`` -- one group's ops.",
+        "operationId": "ui_connectors_registry_review_group_ui_connectors_registry__connector_id__review_groups__group_key__get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "group_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/registry/{connector_id}/operations/{op_id}": {
+      "patch": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Op Edit",
+        "description": "``PATCH .../{connector_id}/operations/{op_id:path}`` -- one per-op edit.",
+        "operationId": "ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/connectors/{name}/probe": {
       "post": {
         "tags": [
@@ -17158,6 +17336,37 @@
         },
         "type": "object",
         "title": "Body_ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post"
+      },
+      "Body_ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch": {
+        "properties": {
+          "custom_description": {
+            "type": "string",
+            "maxLength": 4096,
+            "nullable": true,
+            "title": "Custom Description"
+          },
+          "safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Requires Approval"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Is Enabled"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch"
       },
       "Body_ui_conventions_create_submit_ui_conventions_create_post": {
         "properties": {

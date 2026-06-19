@@ -1,0 +1,30 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit-query "Load more" append response (Initiative #1841 G10.15, Task
+  #1944).
+
+  Returned by ``GET /ui/audit/results?...&partial=rows`` -- the forward-cursor
+  append fetch the "Load more" button issues. It is deliberately NOT the full
+  ``_results.html`` console block: appending that whole block into the rows
+  ``<ul>`` with ``hx-swap="beforeend"`` would nest a second console and
+  duplicate every ``id``.
+
+  Instead this emits exactly two things:
+
+    1. The bare ``<li>`` rows for the requested page, which HTMX appends to
+       the existing ``#audit-results-rows`` list (the button's own
+       ``beforeend`` target).
+    2. An out-of-band re-render of the pager (``hx-swap-oob`` via
+       ``_results_pager.html``) so the "Load more" button's URL advances to
+       the NEXT ``next_cursor`` (or collapses to "No more rows" on the last
+       page). HTMX processes ``hx-swap-oob`` elements out of band regardless
+       of the primary target, so the pager updates even though the primary
+       swap targets the rows list.
+
+  Context variables: the same results context the route builds (see
+  ``_results.html``).
+-#}
+{% include "audit/_results_rows.html" %}
+{% with oob = True %}{% include "audit/_results_pager.html" %}{% endwith %}

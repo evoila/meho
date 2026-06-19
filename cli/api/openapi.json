@@ -15163,6 +15163,270 @@
         }
       }
     },
+    "/ui/audit/results": {
+      "get": {
+        "tags": [
+          "ui-audit"
+        ],
+        "summary": "Ui Audit Results",
+        "description": "``GET /ui/audit/results`` -- the filter-submit + pager fragment.\n\n``partial=rows`` (the \"Load more\" append fetch) renders ONLY the\npage's rows plus an out-of-band pager re-render; any other value\nrenders the full ``audit/_results.html`` console block. A foreign\n``partial`` value is rejected (422) rather than silently coerced.",
+        "operationId": "ui_audit_results_ui_audit_results_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "",
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "result_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 16,
+              "default": "",
+              "title": "Result Status"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Until"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Work Ref"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "partial",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Partial"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/audit": {
+      "get": {
+        "tags": [
+          "ui-audit"
+        ],
+        "summary": "Ui Audit Page",
+        "description": "``GET /ui/audit`` -- the full page: filter form + first result page.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the form sets\n``hx-push-url`` on the fragment route, mirroring broadcast /\noperations). Sets + echoes the CSRF cookie so the form's ``hx-get``\npasses the double-submit check, even though every route here is GET.",
+        "operationId": "ui_audit_page_ui_audit_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "",
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "result_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 16,
+              "default": "",
+              "title": "Result Status"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Until"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Work Ref"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

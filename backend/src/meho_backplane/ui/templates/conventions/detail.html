@@ -28,11 +28,54 @@
 {{ pygments_css }}
 </style>
 <section class="space-y-4">
-  <nav class="text-sm" aria-label="Breadcrumb">
-    <a href="/ui/conventions" class="link link-hover">Conventions</a>
-    <span aria-hidden="true">/</span>
-    <span class="font-mono">{{ convention.slug }}</span>
-  </nav>
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <nav class="text-sm" aria-label="Breadcrumb">
+      <a href="/ui/conventions" class="link link-hover">Conventions</a>
+      <span aria-hidden="true">/</span>
+      <span class="font-mono">{{ convention.slug }}</span>
+    </nav>
+
+    <div class="flex items-center gap-2">
+      {# History is a read affordance -- available to every operator. #}
+      <button
+        type="button"
+        class="btn btn-sm btn-ghost"
+        data-action="show-history"
+        hx-get="/ui/conventions/{{ convention.slug | urlencode }}/history"
+        hx-target="#conventions-history-panel"
+        hx-swap="outerHTML"
+      >
+        History
+      </button>
+      {# Edit / Delete -- server-hidden from non-admins; the write routes
+         re-check role (resolve_write_context 403s) as the authority. #}
+      {% if is_tenant_admin %}
+        <button
+          type="button"
+          class="btn btn-sm"
+          data-action="edit-convention"
+          hx-get="/ui/conventions/{{ convention.slug | urlencode }}/edit"
+          hx-target="#conventions-modal-container"
+          hx-swap="innerHTML"
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          class="btn btn-sm btn-error btn-outline"
+          data-action="delete-convention"
+          hx-get="/ui/conventions/{{ convention.slug | urlencode }}/delete"
+          hx-target="#conventions-modal-container"
+          hx-swap="innerHTML"
+        >
+          Delete
+        </button>
+      {% endif %}
+    </div>
+  </div>
+
+  {# HTMX modal mount for the edit / delete-confirm fragments. #}
+  <div id="conventions-modal-container"></div>
 
   <header
     class="card bg-base-100 border-base-300 border shadow-sm"
@@ -66,5 +109,9 @@
 
   {# Body slot -- full convention body rendered as sanitised Markdown. #}
   {% include "conventions/_body_view.html" %}
+
+  {# History diff panel mount -- the "History" button lazy-loads the
+     newest-first diff rows into this element via HTMX (outerHTML swap). #}
+  <section id="conventions-history-panel" aria-label="Convention history"></section>
 </section>
 {% endblock %}

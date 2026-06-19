@@ -1,0 +1,130 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded edit modal for the Conventions surface (Initiative #1838
+  Task #1896). Loaded into ``#conventions-modal-container`` on the detail
+  page by the "Edit" button's ``hx-get`` to
+  ``/ui/conventions/{slug}/edit``.
+
+  ``kind`` and ``slug`` are rendered read-only -- the PATCH surface
+  cannot change them (operators delete + recreate to switch kind, which
+  produces a clean two-row history trail). Only ``title`` / ``priority``
+  / ``body`` are editable, and only those three are submitted.
+
+  Form posts (``PATCH``) to ``/ui/conventions/{slug}``; on success the
+  route returns 204 + ``HX-Redirect`` (or the DROPPED fragment when the
+  edit pushes the rule out of the preamble); on 422 (over budget) the
+  inline error renders in ``#conventions-write-result``.
+-#}
+<dialog id="conventions-edit-modal" class="modal">
+  <div class="modal-box max-w-3xl">
+    <h3 class="font-semibold text-lg" id="conventions-edit-modal-title">
+      Edit convention
+    </h3>
+
+    <form
+      id="conventions-edit-form"
+      hx-patch="/ui/conventions/{{ convention.slug | urlencode }}"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#conventions-write-result"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="conventions-edit-modal-title"
+    >
+      <div id="conventions-write-result" aria-live="assertive"></div>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <label class="form-control">
+          <span class="label-text">Slug <span class="opacity-60">(read-only)</span></span>
+          <input
+            type="text"
+            value="{{ convention.slug }}"
+            readonly
+            class="input input-bordered input-sm font-mono opacity-70"
+            data-readonly-slug
+          />
+        </label>
+
+        <label class="form-control">
+          <span class="label-text">Kind <span class="opacity-60">(read-only)</span></span>
+          <input
+            type="text"
+            value="{{ convention.kind }}"
+            readonly
+            class="input input-bordered input-sm font-mono opacity-70"
+            data-readonly-kind
+          />
+          <span class="text-xs opacity-60 mt-1">
+            Delete + recreate to change the kind.
+          </span>
+        </label>
+      </div>
+
+      <label class="form-control">
+        <span class="label-text">Title</span>
+        <input
+          type="text"
+          name="title"
+          required
+          maxlength="{{ title_max_length }}"
+          value="{{ convention.title }}"
+          class="input input-bordered input-sm"
+        />
+      </label>
+
+      <label class="form-control max-w-[12rem]">
+        <span class="label-text">Priority</span>
+        <input
+          type="number"
+          name="priority"
+          value="{{ convention.priority }}"
+          min="{{ priority_min }}"
+          max="{{ priority_max }}"
+          class="input input-bordered input-sm font-mono"
+        />
+      </label>
+
+      <input type="hidden" name="kind" value="{{ convention.kind }}" data-preview-kind />
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <label class="form-control">
+          <span class="label-text">Body (Markdown)</span>
+          <textarea
+            name="body"
+            required
+            maxlength="{{ body_max_length }}"
+            class="textarea textarea-bordered min-h-[14rem] font-mono text-sm"
+            hx-post="/ui/conventions/preview"
+            hx-trigger="keyup changed delay:300ms"
+            hx-target="#conventions-token-preview"
+            hx-swap="outerHTML"
+            hx-include="closest form"
+            aria-label="Convention body in Markdown"
+          >{{ convention.body }}</textarea>
+        </label>
+
+        <div class="space-y-2">
+          {% include "conventions/_token_preview.html" %}
+        </div>
+      </div>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          onclick="document.getElementById('conventions-edit-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="edit-submit">
+          Save changes
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

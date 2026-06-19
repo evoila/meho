@@ -1,0 +1,163 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded author modal for the Conventions surface (Initiative
+  #1838 Task #1896). Loaded into ``#conventions-modal-container`` on the
+  list page by the "New convention" button's ``hx-get`` to
+  ``/ui/conventions/create``. The shared app-shell modal controller
+  opens the inserted ``<dialog class="modal">`` via ``showModal()`` on
+  ``htmx:afterSwap``.
+
+  Form posts to ``POST /ui/conventions/create``:
+    * On success the route returns 204 + ``HX-Redirect: /ui/conventions``
+      and HTMX reloads the list so the new row appears -- unless the new
+      operational rule was dropped from the preamble on budget overflow,
+      in which case the route returns the red "DROPPED" fragment into the
+      ``#conventions-write-result`` slot instead.
+    * On 409 (duplicate slug) / 422 (over budget) the route returns the
+      inline error fragment into ``#conventions-write-result`` -- no
+      redirect, the operator's input survives.
+
+  Token-cost preview: the body textarea + kind selector both drive a
+  debounced ``hx-post`` to ``/ui/conventions/preview``
+  (``keyup changed delay:300ms`` on the body, ``change`` on the kind
+  selector). The preview fragment shows ``estimate_tokens(body)`` vs the
+  600-token budget, red when an operational body is over.
+
+  CSRF posture: the form declares its own ``hx-headers`` echo of the
+  token THIS render minted; the route set the matching ``meho_csrf``
+  cookie on the same response, so the double-submit pair lines up
+  (#1693). The form-level declaration also covers the body textarea's
+  debounced preview ``hx-post`` (children inherit ``hx-headers``).
+
+  RBAC: this modal is only reachable through the tenant_admin-gated
+  ``resolve_write_context`` dependency, so a plain operator never gets
+  this fragment (the GET 403s) and never sees the "New convention"
+  button (server-hidden in ``index.html``).
+-#}
+<dialog id="conventions-create-modal" class="modal">
+  <div class="modal-box max-w-3xl">
+    <h3 class="font-semibold text-lg" id="conventions-create-modal-title">
+      New convention
+    </h3>
+
+    <form
+      id="conventions-create-form"
+      hx-post="/ui/conventions/create"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#conventions-write-result"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="conventions-create-modal-title"
+    >
+      <div id="conventions-write-result" aria-live="assertive"></div>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <label class="form-control">
+          <span class="label-text">Slug</span>
+          <input
+            type="text"
+            name="slug"
+            required
+            maxlength="{{ slug_max_length }}"
+            pattern="[a-z0-9][a-z0-9\-]*"
+            class="input input-bordered input-sm font-mono"
+            placeholder="confirm-before-applying"
+            aria-describedby="conventions-create-slug-hint"
+          />
+          <span id="conventions-create-slug-hint" class="text-xs opacity-60 mt-1">
+            Lowercase letters, digits, hyphen. The natural key within your tenant.
+          </span>
+        </label>
+
+        <label class="form-control">
+          <span class="label-text">Kind</span>
+          <select
+            name="kind"
+            class="select select-bordered select-sm"
+            required
+            data-action="kind-select"
+            hx-post="/ui/conventions/preview"
+            hx-trigger="change"
+            hx-target="#conventions-token-preview"
+            hx-swap="outerHTML"
+            hx-include="closest form"
+          >
+            {% for opt in kind_options %}
+              <option value="{{ opt.value }}">{{ opt.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <label class="form-control">
+        <span class="label-text">Title</span>
+        <input
+          type="text"
+          name="title"
+          required
+          maxlength="{{ title_max_length }}"
+          class="input input-bordered input-sm"
+          placeholder="Confirm before applying a destructive change"
+        />
+      </label>
+
+      <label class="form-control max-w-[12rem]">
+        <span class="label-text">Priority</span>
+        <input
+          type="number"
+          name="priority"
+          value="0"
+          min="{{ priority_min }}"
+          max="{{ priority_max }}"
+          class="input input-bordered input-sm font-mono"
+          aria-describedby="conventions-create-priority-hint"
+        />
+        <span id="conventions-create-priority-hint" class="text-xs opacity-60 mt-1">
+          Higher wins when the preamble packer drops on overflow.
+        </span>
+      </label>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <label class="form-control">
+          <span class="label-text">Body (Markdown)</span>
+          <textarea
+            name="body"
+            required
+            maxlength="{{ body_max_length }}"
+            class="textarea textarea-bordered min-h-[14rem] font-mono text-sm"
+            hx-post="/ui/conventions/preview"
+            hx-trigger="keyup changed delay:300ms"
+            hx-target="#conventions-token-preview"
+            hx-swap="outerHTML"
+            hx-include="closest form"
+            aria-label="Convention body in Markdown"
+            placeholder="Always confirm the change set with the operator before applying."
+          ></textarea>
+        </label>
+
+        <div class="space-y-2">
+          {% include "conventions/_token_preview.html" %}
+        </div>
+      </div>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          onclick="document.getElementById('conventions-create-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="create-submit">
+          Create
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

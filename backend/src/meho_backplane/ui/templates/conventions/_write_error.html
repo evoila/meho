@@ -1,0 +1,16 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Inline write-error fragment for the Conventions author / edit modals
+  (Initiative #1838 Task #1896). Rendered into the
+  ``#conventions-write-result`` slot when a create hits a 409 (duplicate
+  slug) or an over-budget 422, or when an edit hits an over-budget 422.
+
+  No redirect -- the operator's input survives in the form fields for an
+  immediate fix-and-retry. The message is server-composed and escaped by
+  Jinja autoescape.
+-#}
+<div class="alert alert-error" role="alert" data-write-error>
+  <span>{{ message }}</span>
+</div>

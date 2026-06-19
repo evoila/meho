@@ -1,0 +1,26 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Benign "already deleted" fragment for the Conventions delete flow
+  (Initiative #1838 Task #1896). Rendered into ``#conventions-write-result``
+  when a DELETE re-fires on an already-gone slug -- the service DELETE is
+  non-idempotent and 404s on a missing row, so a double-click on the
+  Confirm button (or a re-submit from a stale modal) would otherwise
+  surface a raw 404. This fragment turns that into a calm "already
+  deleted" message and offers a link back to the refreshed list.
+-#}
+<div class="alert alert-info" role="status" data-already-deleted>
+  <span>
+    <span class="font-mono">{{ slug }}</span> is already deleted.
+    <a
+      href="/ui/conventions"
+      class="link"
+      hx-get="/ui/conventions"
+      hx-target="body"
+      hx-push-url="true"
+    >
+      Back to conventions
+    </a>
+  </span>
+</div>

@@ -35,10 +35,31 @@
         Operator-authored rules packed into every agent session preamble.
       </p>
     </div>
-    <span class="text-sm opacity-70" aria-live="polite">
-      {{ entry_count }} convention{{ "" if entry_count == 1 else "s" }}
-    </span>
+    <div class="flex items-center gap-3">
+      <span class="text-sm opacity-70" aria-live="polite">
+        {{ entry_count }} convention{{ "" if entry_count == 1 else "s" }}
+      </span>
+      {# Author affordance -- server-hidden from non-admins. The write
+         route re-checks role (resolve_write_context 403s), so this is a
+         UX gate only. #}
+      {% if is_tenant_admin %}
+        <button
+          type="button"
+          class="btn btn-sm btn-primary"
+          data-action="new-convention"
+          hx-get="/ui/conventions/create"
+          hx-target="#conventions-modal-container"
+          hx-swap="innerHTML"
+        >
+          New convention
+        </button>
+      {% endif %}
+    </div>
   </header>
+
+  {# HTMX modal mount: the author modal fragment is injected here and the
+     shared modal controller opens it on htmx:afterSwap. #}
+  <div id="conventions-modal-container"></div>
 
   {# ---------- Always-on preamble token-budget banner ---------- #}
   {% include "conventions/_budget_banner.html" %}

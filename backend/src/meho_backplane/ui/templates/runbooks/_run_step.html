@@ -1,0 +1,337 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook run driver — current-step fragment. Swapped into
+  ``#runbook-run-step`` by the Advance / Abort / Reassign controls; also
+  included directly by ``run_driver.html`` for the initial full-page render
+  so both paths share identical markup.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1893 (T2).
+
+  OPACITY (the #1 correctness property): this fragment renders ONLY the
+  ONE current step (``step_view.step``) — never the full template step
+  list. There is no ``for step in template.steps`` loop here; that is the
+  template-detail surface (``runbooks/detail.html`` / ``_render_steps``)
+  and the exact skip-ahead leak #1198 closed. The single current step's
+  body is pre-rendered Markdown (``step_view.body_html``) by the handler.
+
+  Context variables:
+    run_id          -- str: the run's id (for the control hx-post targets)
+    step_view       -- _StepView | None: {step, body_html, position, failed}
+                       for a live step; None on a terminal / error-only render
+    terminal_state  -- "completed" | "abandoned" | None
+    completed_at    -- datetime | None (terminal_state == "completed")
+    abandoned_at    -- datetime | None (terminal_state == "abandoned")
+    is_assignee     -- bool: caller == run.assigned_to (gates Advance)
+    is_admin        -- bool: caller is tenant_admin (gates Reassign)
+    error_message   -- str | None: inline alert (NotRunAssigneeError,
+                       empty-reason guard, verify/terminal errors)
+    csrf_token      -- str: double-submit token echoed via hx-headers
+
+  hx-headers note: every control echoes ``X-CSRF-Token`` from
+  ``csrf_token``; the handler refreshes the matching ``meho_csrf`` cookie on
+  the same response (the #1693 desync footgun).
+-#}
+<div id="runbook-run-step" class="space-y-4">
+
+  {#- Inline alert: not-the-assignee / reassigned-away, empty-reason guard,
+      or a verify/terminal error. HTTP 200 (never a 500). -#}
+  {% if error_message %}
+    <div role="alert" class="alert alert-warning" aria-label="Run notice">
+      <span aria-hidden="true">&#9888;</span>
+      <span>{{ error_message }}</span>
+    </div>
+  {% endif %}
+
+  {% if terminal_state == "completed" %}
+    {#- ---------- Completed terminal banner (no step body, no Advance) ---------- #}
+    <div role="alert" class="alert alert-success" aria-label="Run completed">
+      <span aria-hidden="true">&#10003;</span>
+      <div>
+        <h2 class="font-semibold">Run completed</h2>
+        <p class="text-sm">
+          Every step verified.
+          {% if completed_at %}
+            Completed at
+            <span class="font-mono">{{ completed_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+    <a href="/ui/runbooks/runs" class="btn btn-ghost btn-sm">&larr; Back to runs</a>
+
+  {% elif terminal_state == "abandoned" %}
+    {#- ---------- Abandoned terminal banner (no step body, no Advance) ---------- #}
+    <div role="alert" class="alert alert-error" aria-label="Run abandoned">
+      <span aria-hidden="true">&#10007;</span>
+      <div>
+        <h2 class="font-semibold">Run abandoned</h2>
+        <p class="text-sm">
+          This run was aborted; the reason is recorded in the audit log.
+          {% if abandoned_at %}
+            Abandoned at
+            <span class="font-mono">{{ abandoned_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+    <a href="/ui/runbooks/runs" class="btn btn-ghost btn-sm">&larr; Back to runs</a>
+
+  {% elif step_view %}
+    {%- set step = step_view.step -%}
+    {#- ---------- The ONE current step ---------- #}
+    <article class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body space-y-3 py-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge badge-neutral" aria-label="Step position">
+            step {{ step_view.position.n }} of {{ step_view.position.total }}
+          </span>
+          <h2 class="card-title font-mono text-base">{{ step.id }}</h2>
+          {% if step.type == "operation_call" %}
+            <span class="badge badge-info badge-outline" aria-label="Step kind: operation call">
+              operation_call
+            </span>
+          {% else %}
+            <span class="badge badge-ghost badge-outline" aria-label="Step kind: manual">
+              manual
+            </span>
+          {% endif %}
+        </div>
+        <p class="font-medium">{{ step.title }}</p>
+
+        {#- Current step body — server-rendered Markdown (shared KB renderer). -#}
+        <div class="prose prose-sm max-w-none">{{ step_view.body_html }}</div>
+
+        {#- operation_call steps carry the substituted op_id + params payload. -#}
+        {% if step.type == "operation_call" %}
+          <div class="bg-base-200 rounded-box space-y-1 p-3 text-sm">
+            <div>
+              <span class="opacity-60">Operation:</span>
+              <code class="font-mono">{{ step.op_id }}</code>
+            </div>
+            {% if step.params %}
+              <div>
+                <span class="opacity-60">Params:</span>
+                <pre class="overflow-x-auto text-xs"><code>{{ step.params | tojson(indent=2) }}</code></pre>
+              </div>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {#- Verify gate — confirm prompt OR operation_call match shape. -#}
+        {%- set verify = step.verify -%}
+        <div class="border-base-300 border-t pt-2">
+          <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+          {% if verify.type == "confirm" %}
+            <p class="text-sm">
+              <span class="badge badge-sm badge-outline mr-1">confirm</span>
+              {{ verify.prompt }}
+            </p>
+          {% else %}
+            <div class="space-y-1 text-sm">
+              <p>
+                <span class="badge badge-sm badge-outline mr-1">operation_call</span>
+                <code class="font-mono">{{ verify.op_id }}</code>
+              </p>
+              {% if verify.expect %}
+                <div>
+                  <span class="opacity-60">Expect:</span>
+                  <pre class="overflow-x-auto text-xs"><code>{{ verify.expect | tojson(indent=2) }}</code></pre>
+                </div>
+              {% endif %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </article>
+
+    {% if step_view.failed %}
+      {#- ---------- Failed-step dead-end banner (Advance hidden) ---------- #}
+      <div role="alert" class="alert alert-error" aria-label="Step failed">
+        <span aria-hidden="true">&#10007;</span>
+        <div>
+          <h2 class="font-semibold">This step failed its verify</h2>
+          <p class="text-sm">
+            The verify gate for this step did not pass (you answered
+            <strong>no</strong> / <strong>escalate</strong>, or an
+            operation-call verify did not match). The run cannot continue
+            past a failed step — the only forward move is to
+            <strong>Abort</strong> it below (with a reason).
+          </p>
+        </div>
+      </div>
+    {% endif %}
+
+    {#- ---------- Action controls ---------- #}
+    <div class="flex flex-wrap items-center gap-2">
+
+      {#- Advance — shown ONLY to the assignee, and only for a live
+          (non-failed) step. For a confirm verify the operator picks an
+          answer (yes advances; no/escalate fail the step). For an
+          operation_call verify a plain Advance fires (the engine
+          dispatches + captures the result). -#}
+      {% if is_assignee and not step_view.failed %}
+        {% if verify.type == "confirm" %}
+          <form
+            hx-post="/ui/runbooks/runs/{{ run_id }}/next"
+            hx-target="#runbook-run-step"
+            hx-swap="outerHTML"
+            hx-disabled-elt="find button[type=submit]"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            class="flex flex-wrap items-center gap-2"
+          >
+            <input type="hidden" name="verify_type" value="confirm" />
+            <label class="form-control">
+              <select
+                name="answer"
+                class="select select-bordered select-sm"
+                aria-label="Verify answer"
+              >
+                <option value="yes" selected>Verified — yes, advance</option>
+                <option value="no">No — fail this step</option>
+                <option value="escalate">Escalate — fail and flag</option>
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary btn-sm">Advance</button>
+          </form>
+        {% else %}
+          <form
+            hx-post="/ui/runbooks/runs/{{ run_id }}/next"
+            hx-target="#runbook-run-step"
+            hx-swap="outerHTML"
+            hx-disabled-elt="find button[type=submit]"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          >
+            <input type="hidden" name="verify_type" value="operation_call" />
+            <button type="submit" class="btn btn-primary btn-sm">
+              Advance (run verify)
+            </button>
+          </form>
+        {% endif %}
+      {% endif %}
+
+      {#- Abort — available to anyone who can act on the run (the service
+          enforces the {assignee, tenant_admin} allowance). Opens a modal
+          carrying the REQUIRED reason textarea. -#}
+      <button
+        type="button"
+        class="btn btn-error btn-outline btn-sm"
+        aria-label="Abort this run"
+        onclick="document.getElementById('runbook-run-abort-modal').showModal()"
+      >
+        Abort run
+      </button>
+
+      {#- Reassign — tenant_admin only (soft probe hides it; the POST
+          re-gates hard via require_ui_admin). Opens a modal with the
+          new-assignee field. -#}
+      {% if is_admin %}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          aria-label="Reassign this run"
+          onclick="document.getElementById('runbook-run-reassign-modal').showModal()"
+        >
+          Reassign
+        </button>
+      {% endif %}
+    </div>
+
+    {#- ---------- Abort modal (required reason) ---------- #}
+    <dialog id="runbook-run-abort-modal" class="modal">
+      <div class="modal-box">
+        <h3 class="text-lg font-semibold">Abort run</h3>
+        <p class="py-2 text-sm opacity-70">
+          Aborting ends the run. The reason is <strong>required</strong> and is
+          recorded in the audit log.
+        </p>
+        <form
+          hx-post="/ui/runbooks/runs/{{ run_id }}/abort"
+          hx-target="#runbook-run-step"
+          hx-swap="outerHTML"
+          hx-disabled-elt="find button[type=submit]"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-abort-modal').close()"
+          class="space-y-3"
+        >
+          <label class="form-control">
+            <div class="label"><span class="label-text">Reason</span></div>
+            <textarea
+              name="reason"
+              required
+              minlength="1"
+              rows="3"
+              class="textarea textarea-bordered"
+              placeholder="Why is this run being aborted?"
+              aria-label="Abort reason"
+            ></textarea>
+          </label>
+          <div class="modal-action">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              onclick="document.getElementById('runbook-run-abort-modal').close()"
+            >
+              Cancel
+            </button>
+            <button type="submit" class="btn btn-error btn-sm">Abort run</button>
+          </div>
+        </form>
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    {#- ---------- Reassign modal (tenant_admin only) ---------- #}
+    {% if is_admin %}
+      <dialog id="runbook-run-reassign-modal" class="modal">
+        <div class="modal-box">
+          <h3 class="text-lg font-semibold">Reassign run</h3>
+          <p class="py-2 text-sm opacity-70">
+            Transfer ownership to another operator. They become the sole
+            assignee able to advance the run.
+          </p>
+          <form
+            hx-post="/ui/runbooks/runs/{{ run_id }}/reassign"
+            hx-target="#runbook-run-step"
+            hx-swap="outerHTML"
+            hx-disabled-elt="find button[type=submit]"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-on::after-request="if(event.detail.successful) document.getElementById('runbook-run-reassign-modal').close()"
+            class="space-y-3"
+          >
+            <label class="form-control">
+              <div class="label"><span class="label-text">New assignee</span></div>
+              <input
+                type="text"
+                name="new_assignee"
+                required
+                minlength="1"
+                class="input input-bordered"
+                placeholder="operator subject id"
+                aria-label="New assignee subject"
+                autocomplete="off"
+              />
+            </label>
+            <div class="modal-action">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                onclick="document.getElementById('runbook-run-reassign-modal').close()"
+              >
+                Cancel
+              </button>
+              <button type="submit" class="btn btn-primary btn-sm">Reassign</button>
+            </div>
+          </form>
+        </div>
+        <form method="dialog" class="modal-backdrop"><button>close</button></form>
+      </dialog>
+    {% endif %}
+
+  {% else %}
+    {#- No step and no terminal banner: an error-only render (e.g. the run
+        vanished mid-action). The alert above carries the message. -#}
+    <a href="/ui/runbooks/runs" class="btn btn-ghost btn-sm">&larr; Back to runs</a>
+  {% endif %}
+</div>

@@ -808,6 +808,117 @@ class RunbookRunService:
                 )
             return summaries
 
+    async def get_current_step(
+        self,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        run_id: uuid.UUID,
+    ) -> CurrentStepResponse | RunCompletedResponse | AbortRunResponse:
+        """Read the run's current step (opacity-safe), or its terminal state.
+
+        The read-side analogue of :meth:`start_run` / :meth:`next_step`:
+        the BFF run **driver** page (``GET /ui/runbooks/runs/{run_id}``,
+        #1893) needs a renderable current step on a fresh navigation /
+        browser refresh, but neither :meth:`list_runs` (no body) nor the
+        POST advance handlers (only fire on an action) yield one. This
+        getter closes that gap.
+
+        It returns exactly the same single-step projection the advance
+        path returns — a :class:`CurrentStepResponse` carrying one
+        :class:`StepBody` (``${run.target}`` / ``${run.params.X}``
+        resolved by the engine) plus the :class:`StepPosition` hint — for
+        an ``in_progress`` run. For a terminal run it returns the matching
+        terminal-state shape (:class:`RunCompletedResponse` for
+        ``completed``, :class:`AbortRunResponse` for ``abandoned``) so the
+        driver can render the completed / abandoned banner without a body.
+
+        **This method is the opacity guard for the read path.** It builds
+        the response through :func:`engine.current_step_body` — the
+        single-step opacity function — and never returns
+        ``template_body.steps`` or any structural hint about adjacent
+        positions. The pinned body is loaded internally only to resolve
+        the one current step + its position (exactly as :meth:`start_run`
+        does); it is not surfaced. Re-deriving the current step from the
+        full pinned body in the handler / template would re-open the
+        skip-ahead leak Initiative #1198 (G12) closed — this method exists
+        so the handler never has to touch the step list.
+
+        No role / assignee gate: reading the current step is the same
+        operator-floor read as :meth:`list_runs` (the BFF session gate is
+        the floor). The assignee gate is a **write**-side invariant on
+        :meth:`next_step`; the driver shows the step to any operator who
+        can see the run and gates the *Advance* control separately.
+
+        Raises :class:`RunNotFoundError` when *run_id* does not resolve in
+        this tenant (the driver maps it to a 404 page).
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            run = await self._load_run_or_raise(session, tenant_id, run_id)
+
+            if run.state == "completed":
+                # Terminal: no current step. The completed-at timestamp is
+                # the canonical column set when ``next_step`` flipped the run.
+                return RunCompletedResponse(
+                    run_id=run.run_id,
+                    completed_at=run.completed_at or run.started_at,
+                )
+            if run.state == "abandoned":
+                return AbortRunResponse(
+                    run_id=run.run_id,
+                    abandoned_at=run.abandoned_at or run.started_at,
+                )
+
+            template_body = await self._load_pinned_template_body(session, run)
+            step_states = await _load_step_states(session, run_id)
+            current_step_id = self._current_step_id_or_raise(run, step_states)
+
+        # Build the single opaque StepBody outside the session (pure CPU on
+        # the already-loaded body). ``current_step_body`` returns exactly one
+        # step — there is no overload that leaks the surrounding list.
+        step_body = current_step_body(
+            template_body,
+            current_step_id,
+            target=run.target,
+            params=dict(run.params),
+        )
+        return CurrentStepResponse(
+            run_id=run.run_id,
+            template_slug=run.template_slug,
+            template_version=run.template_version,
+            position=_position_for_step(template_body, current_step_id),
+            current_step=step_body,
+        )
+
+    async def get_run_assignee(
+        self,
+        tenant_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> str:
+        """Return the run's current ``assigned_to`` subject (opacity-neutral).
+
+        The BFF driver page (#1893) needs the assignee to decide whether to
+        render the *Advance* control — it is shown only when
+        ``session.operator_sub == assigned_to``. The assignee is already
+        surfaced on :class:`RunSummary` via :meth:`list_runs`, but that path
+        is role-scoped (an operator's ``list_runs`` omits runs assigned to
+        someone else) and returns a list; this focused read returns just the
+        one field for the one run, with no opacity surface widened (it
+        exposes no step content).
+
+        The control this gates is a UX hint only: the real enforcement is
+        :meth:`next_step` raising :class:`NotRunAssigneeError` fail-closed
+        for any non-assignee (including a TENANT_ADMIN). Hiding the button
+        is convenience; the service is the authority.
+
+        Raises :class:`RunNotFoundError` when *run_id* does not resolve in
+        this tenant.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            run = await self._load_run_or_raise(session, tenant_id, run_id)
+            return run.assigned_to
+
     async def can_show_template_post_completion(
         self,
         tenant_id: uuid.UUID,

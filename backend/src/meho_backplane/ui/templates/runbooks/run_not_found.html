@@ -1,0 +1,46 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook run driver — 404 page. Rendered when ``GET
+  /ui/runbooks/runs/{run_id}`` resolves no run for the caller's tenant
+  (unknown id, or a cross-tenant probe). The same copy is shown for both
+  so existence never leaks via a status-code / message differential.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1893 (T2).
+
+  Context variables:
+    run_id -- str: the id the operator navigated to (echoed for support)
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Run not found &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+  <header class="space-y-2">
+    <div class="flex flex-wrap items-center gap-3">
+      <a href="/ui/runbooks/runs" class="btn btn-ghost btn-sm" aria-label="Back to runbook runs">
+        &larr; Runs
+      </a>
+      <h1 class="text-2xl font-semibold">Run not found</h1>
+    </div>
+  </header>
+
+  {% include "runbooks/_tabs.html" %}
+
+  <div role="alert" class="alert alert-warning" aria-label="Run not found">
+    <span aria-hidden="true">&#128269;</span>
+    <div>
+      <h2 class="font-semibold">No such run</h2>
+      <p class="text-sm">
+        No run <code class="font-mono">{{ run_id }}</code> exists in your
+        tenant, or it is not visible to you. It may have been removed, or the
+        link may be stale.
+      </p>
+    </div>
+  </div>
+
+  <a href="/ui/runbooks/runs" class="btn btn-primary btn-sm">Back to runs</a>
+</section>
+{% endblock %}

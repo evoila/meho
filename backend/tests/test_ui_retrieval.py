@@ -51,6 +51,11 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import Tenant
 from meho_backplane.retrieval.eval.result_models import EvalResult, SurfaceResult
+from meho_backplane.retrieval.retire import (
+    CriterionResult,
+    RetireChecklistReport,
+    SurfaceChecklist,
+)
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.retrieval.usage import UsageReport
 from meho_backplane.settings import get_settings
@@ -101,6 +106,12 @@ _COMPUTE_USAGE = "meho_backplane.ui.routes.retrieval.routes.compute_usage"
 #: The route-module symbol the Eval tab calls; mocked to return a constructed
 #: :class:`EvalResult` without a live corpus + embedder run (#1889).
 _EVAL_ALL = "meho_backplane.ui.routes.retrieval.routes.eval_all"
+
+#: The route-module symbol the Retire tab calls; mocked to return a constructed
+#: :class:`RetireChecklistReport` without a live audit-log + eval run (#1890).
+_COMPUTE_RETIRE = "meho_backplane.ui.routes.retrieval.routes.compute_retire_checklist"
+
+_TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 #: The contextvars binder the handler calls; patched to capture the audit
 #: payload without a live structlog pipeline.
@@ -212,6 +223,7 @@ def _operator(
     *,
     tenant_id: uuid.UUID,
     sub: str = "op-42",
+    platform_admin: bool = False,
 ) -> Operator:
     """Build an :class:`Operator` the patched ``_resolve_operator`` returns."""
     return Operator(
@@ -220,6 +232,7 @@ def _operator(
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
         capabilities=frozenset(),
+        platform_admin=platform_admin,
     )
 
 
@@ -1063,3 +1076,526 @@ def test_retrieval_usage_eval_literals_before_any_param_route() -> None:
         idx = retrieval_paths.index(literal)
         for path in retrieval_paths[:idx]:
             assert "{" not in path, f"param route {path!r} precedes the literal {literal!r}"
+
+
+# ===========================================================================
+# Retire Checklist tab (#1890)
+# ===========================================================================
+
+
+def _criterion(
+    *,
+    name: str = "daily_use_duration",
+    verdict: str = "green",
+    observed_value: str = "45 days since first use",
+    threshold_summary: str = ">= 30 days",
+    notes: str | None = None,
+) -> CriterionResult:
+    """Build a :class:`CriterionResult` for a stubbed surface checklist."""
+    return CriterionResult(
+        name=name,  # type: ignore[arg-type]
+        verdict=verdict,  # type: ignore[arg-type]
+        observed_value=observed_value,
+        threshold_summary=threshold_summary,
+        notes=notes,
+    )
+
+
+def _full_criteria(*, c4_yellow: bool = True) -> list[CriterionResult]:
+    """Build the five canonical criteria; criterion 4 yellow by default (UI ceiling)."""
+    return [
+        _criterion(name="daily_use_duration", verdict="green"),
+        _criterion(
+            name="operator_breadth",
+            verdict="green",
+            observed_value="3 qualified operators",
+            threshold_summary=">= 3 operators",
+        ),
+        _criterion(
+            name="eval_precision",
+            verdict="green",
+            observed_value="precision@5 = 0.840",
+            threshold_summary=">= 0.80",
+        ),
+        _criterion(
+            name="meho_vs_baseline",
+            verdict="yellow" if c4_yellow else "green",
+            observed_value="baseline did not run" if c4_yellow else "every metric >= baseline",
+            threshold_summary="every metric >= baseline",
+            notes=("no baseline corpus configured for this surface in v0.2" if c4_yellow else None),
+        ),
+        _criterion(
+            name="open_blockers",
+            verdict="green",
+            observed_value="0 open",
+            threshold_summary="== 0 open blockers",
+        ),
+    ]
+
+
+def _surface_checklist(
+    *,
+    surface: str = "kb",
+    verdict: str = "REVIEW MANUALLY",
+    criteria: list[CriterionResult] | None = None,
+) -> SurfaceChecklist:
+    """Build a :class:`SurfaceChecklist` for a stubbed retire report."""
+    return SurfaceChecklist(
+        surface=surface,  # type: ignore[arg-type]
+        verdict=verdict,  # type: ignore[arg-type]
+        criteria=criteria if criteria is not None else _full_criteria(),
+    )
+
+
+def _retire_report(
+    *,
+    surfaces: list[SurfaceChecklist] | None = None,
+    overall_verdict: str = "REVIEW MANUALLY",
+    tenant_id: uuid.UUID = _TENANT_A,
+) -> RetireChecklistReport:
+    """Build a :class:`RetireChecklistReport` the patched service returns."""
+    now = datetime(2026, 6, 19, 12, 0, tzinfo=UTC)
+    return RetireChecklistReport(
+        ran_at=now,
+        tenant_id=tenant_id,
+        since=now - timedelta(days=90),
+        until=now,
+        surfaces=surfaces if surfaces is not None else [_surface_checklist()],
+        overall_verdict=overall_verdict,  # type: ignore[arg-type]
+    )
+
+
+def test_retire_renders_three_distinct_verdict_states_not_binary() -> None:
+    """The Retire fragment renders all three verdict states with distinct pills.
+
+    Acceptance criterion: a report whose surfaces carry "READY TO RETIRE",
+    "REVIEW MANUALLY", and "NOT YET" must render each as a distinct verdict pill
+    (no collapse to a binary retire / hold).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    report = _retire_report(
+        surfaces=[
+            _surface_checklist(surface="kb", verdict="READY TO RETIRE"),
+            _surface_checklist(surface="memory", verdict="REVIEW MANUALLY"),
+            _surface_checklist(surface="operations", verdict="NOT YET"),
+        ],
+        overall_verdict="NOT YET",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Fragment, not full page.
+    assert 'id="retrieval-retire-results"' in body
+    assert "<!doctype html>" not in body.lower()
+    # All three states render as distinct pills, verbatim.
+    assert 'data-verdict="READY TO RETIRE"' in body
+    assert 'data-verdict="REVIEW MANUALLY"' in body
+    assert 'data-verdict="NOT YET"' in body
+    # Each maps to its own daisyUI color (success/warning/error) -- not collapsed.
+    assert "badge-success" in body
+    assert "badge-warning" in body
+    assert "badge-error" in body
+    # The overall verdict pill heads the fragment (worst-of -> NOT YET here).
+    assert "Overall" in body
+    assert body.count('data-verdict="NOT YET"') >= 2
+
+
+def test_retire_renders_five_criteria_verbatim_with_c4_yellow_note() -> None:
+    """Each surface renders its five criteria verbatim + the criterion-4 yellow note.
+
+    Acceptance criterion: the five criterion names render with their
+    verdict/observed/threshold/notes verbatim, and the criterion-4 yellow honesty
+    note copy is present when ``meho_vs_baseline.verdict == "yellow"``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    report = _retire_report(
+        surfaces=[_surface_checklist(surface="kb", criteria=_full_criteria(c4_yellow=True))]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # All five criterion names render verbatim.
+    for name in (
+        "daily_use_duration",
+        "operator_breadth",
+        "eval_precision",
+        "meho_vs_baseline",
+        "open_blockers",
+    ):
+        assert name in body
+    # Observed/threshold fields render verbatim.
+    assert "precision@5 = 0.840" in body
+    assert "3 qualified operators" in body
+    # The criterion-4 yellow honesty note is surfaced (baseline is CLI-only in v0.2).
+    assert "Baseline is CLI-only in v0.2" in body
+    # A green/yellow/red dot is rendered per criterion (the yellow c4 dot here).
+    assert 'data-band="yellow"' in body
+    assert 'data-band="green"' in body
+
+
+def test_retire_c4_yellow_note_absent_when_criterion_green() -> None:
+    """The criterion-4 honesty note is NOT shown when ``meho_vs_baseline`` is green."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    report = _retire_report(
+        surfaces=[
+            _surface_checklist(
+                surface="kb",
+                verdict="READY TO RETIRE",
+                criteria=_full_criteria(c4_yellow=False),
+            )
+        ],
+        overall_verdict="READY TO RETIRE",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Baseline is CLI-only in v0.2" not in body
+
+
+def test_retire_tenant_filter_selector_hidden_for_non_platform_admin() -> None:
+    """The ``tenant_filter`` selector is absent for a non-platform-admin operator.
+
+    Acceptance criterion: a non-platform-admin sees no cross-tenant selector and
+    is own-tenant scoped.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=False)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The retire form posts to the read-only fragment route...
+    assert 'hx-post="/ui/retrieval/retire-checklist"' in body
+    # ...but the cross-tenant selector is hidden for a non-platform-admin.
+    assert 'name="tenant_filter"' not in body
+
+
+def test_retire_tenant_filter_selector_shown_for_platform_admin() -> None:
+    """The ``tenant_filter`` selector renders for a platform-admin operator.
+
+    Acceptance criterion: a platform admin sees the cross-tenant selector.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=True)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'name="tenant_filter"' in body
+
+
+def test_retire_platform_admin_forwards_tenant_filter() -> None:
+    """A platform admin's ``tenant_filter`` is authorized + forwarded to the service."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=True)
+    retire_mock = AsyncMock(return_value=_retire_report(tenant_id=_TENANT_B))
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, retire_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={"tenant_filter": str(_TENANT_B)},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    retire_mock.assert_awaited_once()
+    kwargs = retire_mock.await_args.kwargs
+    # The cross-tenant claim is authorized (platform admin) and forwarded.
+    assert kwargs["tenant_id"] == _TENANT_B
+    # Every supported surface is requested, in order.
+    assert list(kwargs["surfaces"]) == ["kb", "memory", "operations"]
+    # The UI sends no CLI-fill-only body fields.
+    assert "blocker_counts" not in kwargs
+    assert "baseline_overrides" not in kwargs
+
+
+def test_retire_own_tenant_when_no_tenant_filter() -> None:
+    """A blank ``tenant_filter`` scopes the run to the operator's own tenant."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=False)
+    retire_mock = AsyncMock(return_value=_retire_report())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, retire_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    retire_mock.assert_awaited_once()
+    kwargs = retire_mock.await_args.kwargs
+    assert kwargs["tenant_id"] == _TENANT_A
+
+
+def test_retire_forged_cross_tenant_filter_renders_403_card_not_500() -> None:
+    """A non-platform-admin's forged ``tenant_filter`` surfaces the 403 inline, not a 500.
+
+    Acceptance criterion: a non-platform-admin POST carrying a foreign
+    ``tenant_filter`` surfaces the backend ``cross_tenant_requires_platform_admin``
+    403 as an inline error card -- ``compute_retire_checklist`` is never reached.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=False)
+    retire_mock = AsyncMock(return_value=_retire_report())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, retire_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={"tenant_filter": str(_TENANT_B)},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    # Not a 500 -- the cross-tenant denial is caught and rendered inline.
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'role="alert"' in body
+    assert "cross_tenant_requires_platform_admin" in body
+    # The cross-tenant gate short-circuits before the service runs.
+    retire_mock.assert_not_awaited()
+
+
+def test_retire_malformed_tenant_filter_renders_error_card_not_500() -> None:
+    """A malformed (non-UUID) ``tenant_filter`` renders an inline error card, not a 500."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=True)
+    retire_mock = AsyncMock(return_value=_retire_report())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, retire_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={"tenant_filter": "not-a-uuid"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'role="alert"' in body
+    assert "Invalid tenant filter" in body
+    retire_mock.assert_not_awaited()
+
+
+def test_retire_renders_rest_excluded_honesty_explainer() -> None:
+    """The fragment surfaces the ``rest_excluded`` / ``counted_surfaces`` explainer."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    report = _retire_report()
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, new_callable=AsyncMock, return_value=report),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # rest_excluded defaults True on the model, so the explainer renders.
+    assert "REST excluded" in body
+    assert "mcp:search_knowledge" in body
+
+
+def test_retire_no_write_affordance_read_only() -> None:
+    """The retire surface is read-only: the only POST is the checklist run.
+
+    Acceptance criterion: no purge / dry-run / execute-retirement affordance --
+    no write form/button beyond the read-only ``hx-post`` to the checklist route.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, platform_admin=True)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The only retire POST is the read-only checklist run.
+    assert 'hx-post="/ui/retrieval/retire-checklist"' in body
+    # No purge / dry-run / execute-retirement affordance anywhere.
+    for forbidden in ("purge", "dry-run", "dry run", "execute-retirement", "execute retirement"):
+        assert forbidden not in body.lower()
+    # The UI never offers a baseline-entry form for criterion 4.
+    assert 'name="baseline"' not in body
+    assert 'name="blocker_counts"' not in body
+    assert 'name="baseline_overrides"' not in body
+
+
+def test_retire_rejected_without_csrf_token() -> None:
+    """A retire POST without the CSRF header is rejected 403 by the middleware."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        response = client.post("/ui/retrieval/retire-checklist", data={})
+
+    assert response.status_code == 403
+
+
+def test_retire_reuses_live_csrf_cookie_without_rotation() -> None:
+    """The retire fragment reuses the live CSRF cookie and does NOT rotate it."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_COMPUTE_RETIRE, new_callable=AsyncMock, return_value=_retire_report()),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    set_cookie = response.headers.get("set-cookie", "")
+    assert CSRF_COOKIE_NAME not in set_cookie
+
+
+def test_retire_session_gone_propagates_401() -> None:
+    """A 401 from the operator-reconstruction seam surfaces as 401, not an error card."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with patch(
+            _RESOLVE_OPERATOR,
+            new_callable=AsyncMock,
+            side_effect=HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="session_expired"
+            ),
+        ):
+            response = client.post(
+                "/ui/retrieval/retire-checklist",
+                data={},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 401
+
+
+def test_retire_literal_before_any_param_route() -> None:
+    """No ``/ui/retrieval/{param}`` route precedes the literal ``retire-checklist`` POST."""
+    from meho_backplane.ui.routes.retrieval import build_retrieval_router
+
+    router = build_retrieval_router()
+    retrieval_paths = [
+        route.path  # type: ignore[attr-defined]
+        for route in router.routes
+        if getattr(route, "path", "").startswith("/ui/retrieval")
+    ]
+    assert "/ui/retrieval/retire-checklist" in retrieval_paths
+    idx = retrieval_paths.index("/ui/retrieval/retire-checklist")
+    for path in retrieval_paths[:idx]:
+        assert "{" not in path, f"param route {path!r} precedes the literal retire-checklist route"

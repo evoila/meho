@@ -1262,6 +1262,11 @@ type BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost struct {
 	Source *string `json:"source,omitempty"`
 }
 
+// BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost defines model for Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post.
+type BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost struct {
+	TenantFilter *string `json:"tenant_filter,omitempty"`
+}
+
 // BodyRetrievalUsageUiRetrievalUsagePost defines model for Body_retrieval_usage_ui_retrieval_usage_post.
 type BodyRetrievalUsageUiRetrievalUsagePost struct {
 	Since *string `json:"since,omitempty"`
@@ -7249,6 +7254,9 @@ type OperationsPreviewUiOperationsPreviewPostFormdataRequestBody = BodyOperation
 // RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody defines body for RetrievalDiagnosticsUiRetrievalDiagnosticsPost for application/x-www-form-urlencoded ContentType.
 type RetrievalDiagnosticsUiRetrievalDiagnosticsPostFormdataRequestBody = BodyRetrievalDiagnosticsUiRetrievalDiagnosticsPost
 
+// RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody defines body for RetrievalRetireChecklistUiRetrievalRetireChecklistPost for application/x-www-form-urlencoded ContentType.
+type RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody = BodyRetrievalRetireChecklistUiRetrievalRetireChecklistPost
+
 // RetrievalUsageUiRetrievalUsagePostFormdataRequestBody defines body for RetrievalUsageUiRetrievalUsagePost for application/x-www-form-urlencoded ContentType.
 type RetrievalUsageUiRetrievalUsagePostFormdataRequestBody = BodyRetrievalUsageUiRetrievalUsagePost
 
@@ -9083,6 +9091,11 @@ type ClientInterface interface {
 
 	// RetrievalEvalUiRetrievalEvalPost request
 	RetrievalEvalUiRetrievalEvalPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody request with any body
+	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RetrievalUsageUiRetrievalUsagePostWithBody request with any body
 	RetrievalUsageUiRetrievalUsagePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13525,6 +13538,30 @@ func (c *Client) RetrievalDiagnosticsUiRetrievalDiagnosticsPostWithFormdataBody(
 
 func (c *Client) RetrievalEvalUiRetrievalEvalPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrievalEvalUiRetrievalEvalPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27607,6 +27644,46 @@ func NewRetrievalEvalUiRetrievalEvalPostRequest(server string) (*http.Request, e
 	return req, nil
 }
 
+// NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody calls the generic RetrievalRetireChecklistUiRetrievalRetireChecklistPost builder with application/x-www-form-urlencoded body
+func NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithFormdataBody(server string, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody generates requests for RetrievalRetireChecklistUiRetrievalRetireChecklistPost with any type of body
+func NewRetrievalRetireChecklistUiRetrievalRetireChecklistPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/retrieval/retire-checklist")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRetrievalUsageUiRetrievalUsagePostRequestWithFormdataBody calls the generic RetrievalUsageUiRetrievalUsagePost builder with application/x-www-form-urlencoded body
 func NewRetrievalUsageUiRetrievalUsagePostRequestWithFormdataBody(server string, body RetrievalUsageUiRetrievalUsagePostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -30077,6 +30154,11 @@ type ClientWithResponsesInterface interface {
 
 	// RetrievalEvalUiRetrievalEvalPostWithResponse request
 	RetrievalEvalUiRetrievalEvalPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalEvalUiRetrievalEvalPostResponse, error)
+
+	// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse request with any body
+	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error)
+
+	RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error)
 
 	// RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse request with any body
 	RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalUsageUiRetrievalUsagePostResponse, error)
@@ -35515,6 +35597,28 @@ func (r RetrievalEvalUiRetrievalEvalPostResponse) StatusCode() int {
 	return 0
 }
 
+type RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RetrievalUsageUiRetrievalUsagePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -39249,6 +39353,23 @@ func (c *ClientWithResponses) RetrievalEvalUiRetrievalEvalPostWithResponse(ctx c
 		return nil, err
 	}
 	return ParseRetrievalEvalUiRetrievalEvalPostResponse(rsp)
+}
+
+// RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse request with arbitrary body returning *RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse
+func (c *ClientWithResponses) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
+	rsp, err := c.RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBodyWithResponse(ctx context.Context, body RetrievalRetireChecklistUiRetrievalRetireChecklistPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
+	rsp, err := c.RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp)
 }
 
 // RetrievalUsageUiRetrievalUsagePostWithBodyWithResponse request with arbitrary body returning *RetrievalUsageUiRetrievalUsagePostResponse
@@ -46415,6 +46536,32 @@ func ParseRetrievalEvalUiRetrievalEvalPostResponse(rsp *http.Response) (*Retriev
 	response := &RetrievalEvalUiRetrievalEvalPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse parses an HTTP response from a RetrievalRetireChecklistUiRetrievalRetireChecklistPostWithResponse call
+func ParseRetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse(rsp *http.Response) (*RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetrievalRetireChecklistUiRetrievalRetireChecklistPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

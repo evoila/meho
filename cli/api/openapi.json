@@ -13186,6 +13186,47 @@
         }
       }
     },
+    "/ui/retrieval/retire-checklist": {
+      "post": {
+        "tags": [
+          "ui-retrieval"
+        ],
+        "summary": "Retrieval Retire Checklist",
+        "description": "Run the Retire Checklist fragment (delegates to :func:`_render_retire`).",
+        "operationId": "retrieval_retire_checklist_ui_retrieval_retire_checklist_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks": {
       "get": {
         "tags": [
@@ -16531,6 +16572,18 @@
         },
         "type": "object",
         "title": "Body_retrieval_diagnostics_ui_retrieval_diagnostics_post"
+      },
+      "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post": {
+        "properties": {
+          "tenant_filter": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Tenant Filter",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_retrieval_retire_checklist_ui_retrieval_retire_checklist_post"
       },
       "Body_retrieval_usage_ui_retrieval_usage_post": {
         "properties": {

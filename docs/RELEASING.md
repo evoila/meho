@@ -144,7 +144,10 @@ cite the shipped path (or pass `--allow-path` if the citation is
 intentionally outside the snapshot's surface). The script tolerates
 concrete IDs in citations (UUIDs / digits resolve against the
 matching templated form) so example URLs in prose don't trip the
-gate.
+gate. A citation that spells out an HTTP method
+(`POST /api/v1/operations/search`) is also held to that path's
+actual verbs — a method the route doesn't expose fails the gate even
+when the path itself resolves (#1914).
 
 ### 4. Tag + push
 

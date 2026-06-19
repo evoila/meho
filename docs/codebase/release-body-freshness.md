@@ -30,6 +30,14 @@ per-cycle slip:
   with 3 routes, not 6). Also: the topology history endpoint cited
   as `/api/v1/topology/history` (actual: per-resource
   `/api/v1/topology/history/{name}`).
+- **v0.17.0** (#1914): the CHANGELOG `[0.17.0]` bullet advertised
+  `POST /api/v1/operations/search` while operations-search ships
+  **GET-only** and connector-scoped — the *same bullet* later wrote
+  it correctly as GET, so the entry was internally contradictory.
+  This is a different failure class from the v0.5/v0.6 drifts: the
+  **path exists**, only the **method** is wrong, so the original
+  path-existence-only gate was blind to it. It motivated the
+  verb-aware check (step 4 below).
 
 The release runbook (`docs/RELEASING.md`) makes "roll the CHANGELOG
 before tagging" load-bearing post-v0.5.0, but a load-bearing CHANGELOG
@@ -59,9 +67,22 @@ any working directory.
    the OpenAPI snapshot (`cli/api/openapi.json` — the artifact
    `make snapshot-openapi` produces). At least one candidate must
    match; otherwise the citation is unresolved.
-4. **Report** unresolved citations on stderr with the closest
-   snapshot-path hint, ranked by (shared-prefix length, last-segment
-   match). Exit 1 when any citation is unresolved.
+4. **Verb-check** every citation that spells out an HTTP method.
+   `load_openapi_paths` returns each path's method set (the
+   path-item object's keys, filtered to the recognised HTTP verbs —
+   `parameters`/`summary`/`$ref` are ignored), so a citation like
+   `POST /api/v1/operations/search` against a GET-only route is
+   flagged even though the *path* resolves. Only an explicitly
+   written verb is held to the snapshot; a bare `/api/v1/...`
+   citation carries no method to validate and is path-checked only.
+   The path-existence failure (step 3) takes precedence — a
+   verb-prefixed citation of a missing path is reported once, by the
+   path check, not duplicated by the verb check.
+5. **Report** unresolved citations on stderr — a missing-path
+   failure with the closest snapshot-path hint (ranked by
+   shared-prefix length, last-segment match), a verb-drift failure
+   with the methods the resolved path actually exposes. Exit 1 when
+   any citation is unresolved.
 
 Template-awareness is what makes the gate useful. Without it, a
 release body that legitimately writes a concrete example URL —

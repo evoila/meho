@@ -31,7 +31,11 @@ from meho_backplane.docs_search import (
     DocsSynthesisError,
     synthesize_docs_answer,
 )
-from meho_backplane.docs_search.synthesis import NO_GROUNDED_ANSWER
+from meho_backplane.docs_search.synthesis import (
+    NO_GROUNDED_ANSWER,
+    SYNTHESIS_CAUSE_CITATION_RESOLUTION,
+    SYNTHESIS_CAUSE_PARSE,
+)
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 
 
@@ -121,24 +125,32 @@ async def test_citations_follow_retrieval_order_and_dedupe() -> None:
 
 
 async def test_fabricated_citation_raises_synthesis_error() -> None:
-    """A cited id outside the retrieved set breaks the grounding contract."""
+    """A cited id outside the retrieved set breaks the grounding contract.
+
+    The sub-cause is ``citation_resolution`` (#1918): the output parsed, but
+    a cited id did not resolve to a retrieved chunk — distinct from a
+    structurally-unparseable output.
+    """
     stub = _StubLlmClient(json.dumps({"answer": "Fabricated.", "cited_chunk_ids": ["chunk-z"]}))
-    with pytest.raises(DocsSynthesisError, match="not in the retrieved set"):
+    with pytest.raises(DocsSynthesisError, match="not in the retrieved set") as excinfo:
         await synthesize_docs_answer("x", DocsSearchResult(chunks=[_CHUNK_A]), llm_client=stub)
+    assert excinfo.value.cause == SYNTHESIS_CAUSE_CITATION_RESOLUTION
 
 
 async def test_non_json_output_raises_synthesis_error() -> None:
-    """A model that returns prose instead of JSON fails closed."""
+    """A model that returns prose instead of JSON fails closed (cause=parse)."""
     stub = _StubLlmClient("Sorry, I can't help with that.")
-    with pytest.raises(DocsSynthesisError, match="non-JSON"):
+    with pytest.raises(DocsSynthesisError, match="non-JSON") as excinfo:
         await synthesize_docs_answer("x", DocsSearchResult(chunks=[_CHUNK_A]), llm_client=stub)
+    assert excinfo.value.cause == SYNTHESIS_CAUSE_PARSE
 
 
 async def test_shape_violating_output_raises_synthesis_error() -> None:
-    """JSON missing the required ``answer`` key fails the strict shape."""
+    """JSON missing the required ``answer`` key fails the strict shape (cause=parse)."""
     stub = _StubLlmClient(json.dumps({"cited_chunk_ids": ["chunk-a"]}))
-    with pytest.raises(DocsSynthesisError, match="shape"):
+    with pytest.raises(DocsSynthesisError, match="shape") as excinfo:
         await synthesize_docs_answer("x", DocsSearchResult(chunks=[_CHUNK_A]), llm_client=stub)
+    assert excinfo.value.cause == SYNTHESIS_CAUSE_PARSE
 
 
 async def test_default_client_fails_closed_without_key(

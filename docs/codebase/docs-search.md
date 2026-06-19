@@ -44,6 +44,16 @@ degrading to an un-expanded / ungrounded answer. The expand step is the
 answer-pipeline's job only — `search_docs` (the raw-chunks tool) is
 unchanged.
 
+`ask_docs` is exposed over **three** faces, all composing the same
+in-process pipeline: the MCP `ask_docs` tool (T7, #1526), the REST
+`POST /api/v1/ask_docs` route (T2, #1917 — the synthesis sibling of
+`POST /api/v1/search_docs`), and the `/ui/corpus` **Ask mode** (T2, #1917 —
+a toggle alongside the original retrieve mode). The REST route + the UI BFF
+share one composition helper (`run_ask_pipeline` in
+`meho_backplane.api.v1.ask_docs`) so the leg-by-leg structure and the #1918
+per-leg error classification are defined once; `ask_docs` is
+single-collection only on every face (no `collections` fan-out field).
+
 ## Key types
 
 ### `search_corpus(...)` (`meho_backplane.auth.corpus`, T2 #1520)
@@ -246,9 +256,9 @@ this step rewrites the question into a small set of query variants:
   skips expansion and answers on the raw question alone.
 
 `DocsQueryExpansionError` is a **distinct** exception type (not
-`DocsSynthesisError`, not a bare `RuntimeError`) so a later structured
-answer-error envelope (#1918) can attribute a failure to the `expand` leg
-(`expand_failed`) specifically rather than a generic catch-all.
+`DocsSynthesisError`, not a bare `RuntimeError`) so the structured
+answer-error envelope (#1918, below) attributes a failure to the `expand`
+leg (`expand_failed`) specifically rather than a generic catch-all.
 
 Substrate stays dumb (#1177 / #1178): this module only frames the manifest
 + question into a prompt and validates the returned variants. No DSL, no
@@ -295,12 +305,66 @@ acceptance criterion:
   adapter, reused via the shared `LlmClient` Protocol). No
   `ANTHROPIC_API_KEY` raises `LlmClientUnavailable`; a model that runs but
   breaks the JSON / citation contract raises `DocsSynthesisError`. Neither
-  is caught in the handler — both bubble to `-32603` (the MCP analogue of
+  is caught in the handler — both surface as `-32603` (the MCP analogue of
   503). The synthesis model is never relaxed into an ungrounded answer.
+- **`DocsSynthesisError` carries a sub-cause (#1918).** The two
+  structurally-distinct synthesis failures the message string previously
+  buried are split onto `exc.cause`: `SYNTHESIS_CAUSE_PARSE` (output didn't
+  parse into the required `{answer, cited_chunk_ids}` shape — non-JSON or
+  shape-violating) vs. `SYNTHESIS_CAUSE_CITATION_RESOLUTION` (output parsed
+  but a cited id didn't resolve to a retrieved chunk). They point at
+  different fixes (prompt / model vs. retrieval / index drift), so the
+  answer-error envelope surfaces the sub-cause.
 
 The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
+
+### `classify_answer_error(exc, *, llm_unavailable_leg=LEG_MODEL)` (`meho_backplane.docs_search.answer_errors`, #1918)
+
+The `ask_docs` answer pipeline runs four legs — **expand**, **retrieve**
+(corpus), **model** (synthesis call), **synthesis** (parse + citation
+resolution of the output) — each with its own typed failure. Before #1918
+all four collapsed to one opaque `-32603` `"internal error: <ClassName>"`
+at the MCP dispatcher's generic catch, so a consumer could not tell a
+config gap (no `ANTHROPIC_API_KEY`) from a backend outage (corpus down)
+from a model-output bug (malformed synthesis) — and mis-diagnosed
+(`claude-rdc-hetzner-dc#1407` gap 2). This module is the **one**
+framework-agnostic place that maps a raised leg exception onto a
+structured envelope naming *which* leg failed.
+
+- **Distinct leg + sub-cause per failure.** `classify_answer_error` returns
+  an `AskDocsAnswerError` carrying `leg` (one of `expand_failed` /
+  `corpus_unavailable` / `model_unavailable` / `synthesis_malformed`) and a
+  leg-scoped `cause`: `DocsQueryExpansionError` → `expand_failed` /
+  `expansion_invalid`; `CorpusUnavailable` → `corpus_unavailable`;
+  `DocsSynthesisError` → `synthesis_malformed` with its parse /
+  citation-resolution sub-cause carried through; `LlmClientUnavailable` →
+  `model_unavailable` / `client_unavailable` (or `expand_failed` when the
+  caller pins `llm_unavailable_leg=LEG_EXPAND`). A non-leg exception returns
+  `None` so the caller falls through to its generic catch — a genuinely
+  unexpected fault stays a plain `-32603`, not a mis-attributed leg.
+- **The one ambiguous type needs a caller hint.** A bare
+  `LlmClientUnavailable` is raised by the *same* #1386 client whether the
+  expand leg or the synthesis leg reached it, so only the caller (which
+  knows the pipeline position) can place it. The MCP handler's
+  `_run_answer_pipeline` wraps each leg and passes `llm_unavailable_leg`
+  accordingly; the leg's own typed shapes are unaffected.
+- **One envelope, every face.**
+  `AskDocsAnswerError.to_error_data()` renders a JSON-safe
+  `{detail: "ask_docs_failed", leg, cause, message}` dict — the same shape
+  on the MCP `error.data` member (raised as `McpInternalError`, code stays
+  `-32603`) and on the REST `POST /api/v1/ask_docs` (#1917)
+  `HTTPException.detail` (the route picks the HTTP status per leg: 503 for
+  `expand_failed` / `model_unavailable` / `corpus_unavailable`, 502 for
+  `synthesis_malformed`). This mirrors
+  `operations/ingest/error_envelopes.py`, the connector-ingest dual-surface
+  precedent. No corpus body or raw LLM output ever rides the envelope.
+- **Fail-closed preserved.** Classifying an error never produces an
+  answer — a leg failure surfaces as an error envelope, never a degraded /
+  ungrounded answer. The `/ui/corpus` Ask mode (#1917) reads the
+  same `leg` to render its fail-open-to-chunks banner (the chunks stay,
+  the answer does not) via `corpus_ask_fallback_context`.
 
 ### `resolve_citation_link(source_url, *, title, document_id)` (`meho_backplane.docs_search.citation_links`, #1919)
 
@@ -333,9 +397,9 @@ naming the matched rule.
   `source_url`. The label is chosen title-first: explicit `title` →
   `document_id` → humanised filename stem → the raw URL (never empty).
 - **One resolver, every face.** `citation_link_payload(...)` is the JSON
-  form embedded under each `ask_docs` citation's `link` key (the MCP tool;
-  reused unchanged by a future `POST /api/v1/ask_docs`, #1917); the
-  `/ui/corpus` render calls `resolve_citation_link(...)` per chunk for the
+  form embedded under each `ask_docs` citation's `link` key (the MCP tool and
+  the REST `POST /api/v1/ask_docs` route, #1917 — both reuse it unchanged);
+  the `/ui/corpus` render calls `resolve_citation_link(...)` per chunk for the
   anchor href + link text. So KB / community / unknown citations resolve
   identically across the answer payload and the console.
 
@@ -347,6 +411,50 @@ audit contextvars (including `audit_collection`), runs the shared
 `resolve_entitled_ready_collection` gate (unknown → 422, not entitled →
 403, not ready → 409), then calls the service. Takes a
 `Depends(get_session)` DB session for the resolve.
+
+### `POST /api/v1/ask_docs` (`meho_backplane.api.v1.ask_docs`, T2 #1917)
+
+The REST face of the **answer** pipeline — the synthesis sibling of
+`POST /api/v1/search_docs`. `operator` role minimum. Mirrors `search_docs`'s
+collection gate exactly (validate `collection` scope → 422; the shared
+`resolve_entitled_ready_collection` gate → unknown / cross-tenant / absent
+→ 422, not entitled → 403, disabled → terminal 403, transiently not-ready →
+409), then runs `run_ask_pipeline` (the in-process
+expand → retrieve-per-variant → RRF-merge → synthesize composition) and
+returns `AskDocsResponse{answer, citations[]}`, each citation carrying the
+#1919 resolved `link` — the **same** citation shape the MCP tool returns.
+
+**Single-collection only**: the request model has no `collections` field and
+`extra="forbid"`, so a fan-out attempt is a 422 (matching the MCP contract).
+
+The #1918 per-leg error model maps onto HTTP status: a leg failure is
+classified by the shared `classify_answer_error`, raised as
+`AskDocsAnswerError`, and mapped to **503** for `expand_failed` /
+`model_unavailable` / `corpus_unavailable` (server-side config /
+availability faults — the analogue of the MCP `-32603`) and **502** for
+`synthesis_malformed` (the upstream model answered, badly — a bad gateway,
+distinct from it being unreachable). The structured
+`{detail, leg, cause, message}` envelope rides `HTTPException.detail`
+byte-identical to the MCP `error.data` member. The answer stays fail-closed
+end to end (an empty retrieval is a normal 200 "no grounded answer", not an
+error). Binds the canonical `meho.docs.ask` audit op_id + `read` class
+before the pipeline runs, so a leg failure is still attributable.
+
+### `/ui/corpus` Ask mode (`meho_backplane.ui.routes.corpus.routes`, T2 #1917)
+
+The console face. The `/ui/corpus` search surface (#1777) gains a
+**Retrieve / Ask** mode toggle on its query form (radio buttons riding the
+form, default Retrieve). `mode=ask` calls the same `run_ask_pipeline`
+in-process (the Bearer-gated REST route cannot be authed by a session
+cookie — the established BFF pattern) and renders the grounded `answer` +
+its citation cards via the `answer` branch of `corpus/_results.html`. On an
+`AskDocsAnswerError` leg failure the Ask mode **fails open to chunks**: the
+`corpus_ask_fallback_context` seam (#1918) renders the retrieved chunks
+under a banner naming the failed leg (banner-only when the failing leg
+produced no chunks) — never an ungrounded answer. Collection-access failures
+render the same typed 403 / 409 / 422 error card as retrieve mode; an
+unrecognised `mode` degrades to retrieve. CSRF double-submit gated like the
+search fragment.
 
 ### `meho docs search` (`cli/internal/cmd/docs`, T5 / T3 #1552)
 

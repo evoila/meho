@@ -1529,11 +1529,12 @@ async def test_list_conventions_invokes_assembler_with_operator_sub(
     regression is caught at this layer.
 
     Spy strategy: wrap the real ``assemble_preamble`` import in
-    ``meho_backplane.api.v1.conventions`` and record every call's
-    positional args. Assert the second positional matches the
-    operator's sub from the JWT.
+    ``meho_backplane.conventions.service`` (where the budget arithmetic
+    now lives after the G10.12-T0 #1894 service extraction) and record
+    every call's positional args. Assert the second positional matches
+    the operator's sub from the JWT.
     """
-    from meho_backplane.api.v1 import conventions as conventions_module
+    from meho_backplane.conventions import service as conventions_module
 
     await _seed_tenants()
     key = make_rsa_keypair("kid-priming-list-spy")
@@ -1595,13 +1596,15 @@ async def test_post_convention_invokes_detailed_assembler_with_operator_sub(
     still looked right.
 
     Spy strategy: wrap the real ``assemble_preamble_detailed`` import
-    in ``meho_backplane.api.v1.conventions`` and assert every call
-    carries the operator's sub. Use an operational convention so the
-    helper is actually invoked (workflow / reference short-circuit
-    to ``preamble_status=None`` per the ``_compute_preamble_status``
+    in ``meho_backplane.conventions.service`` (where
+    ``_compute_preamble_status`` now lives after the G10.12-T0 #1894
+    service extraction) and assert every call carries the operator's
+    sub. Use an operational convention so the helper is actually
+    invoked (workflow / reference short-circuit to
+    ``preamble_status=None`` per the ``_compute_preamble_status``
     docstring).
     """
-    from meho_backplane.api.v1 import conventions as conventions_module
+    from meho_backplane.conventions import service as conventions_module
 
     await _seed_tenants()
     key = make_rsa_keypair("kid-priming-post-spy")
@@ -1673,8 +1676,13 @@ async def test_patch_convention_invokes_detailed_assembler_with_operator_sub(
     operator's MCP session shape (priming included). Verify across
     the create + update lifecycle so a refactor that dropped the sub
     on either route would fail.
+
+    The detailed assembler is patched on
+    ``meho_backplane.conventions.service`` (where
+    ``_compute_preamble_status`` now lives after the G10.12-T0 #1894
+    service extraction).
     """
-    from meho_backplane.api.v1 import conventions as conventions_module
+    from meho_backplane.conventions import service as conventions_module
 
     await _seed_tenants()
     key = make_rsa_keypair("kid-priming-patch-spy")

@@ -1,0 +1,64 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-swappable summary-table partial for the Conventions list
+  (Initiative #1838 Task #1895). Rendered:
+
+    * Inline by ``conventions/index.html`` on first page load.
+    * As the response to a kind-tab click (HTMX ``GET /ui/conventions?kind=...``
+      with ``HX-Request: true`` returns this partial; the tabs target
+      ``#conventions-table`` with ``hx-swap="outerHTML"``).
+
+  The outer element id ``#conventions-table`` is the HTMX swap target;
+  an ``outerHTML`` swap replaces the element including its id so a
+  subsequent tab click swaps cleanly.
+
+  Rows show slug / title / kind / priority only -- the list response
+  carries ``ConventionSummary`` (no full body); the detail fetch loads
+  the body. Each row links to ``/ui/conventions/<slug>``. Ordering is
+  ``priority DESC, created_at ASC`` (the service's order; the same key
+  the preamble packer considers).
+-#}
+<div id="conventions-table">
+  {% if entries %}
+    <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+      <table class="table table-zebra">
+        <thead>
+          <tr>
+            <th scope="col">Slug</th>
+            <th scope="col">Title</th>
+            <th scope="col">Kind</th>
+            <th scope="col" class="text-right">Priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in entries %}
+            <tr>
+              <td class="font-mono break-all">
+                <a
+                  href="/ui/conventions/{{ entry.slug | urlencode }}"
+                  class="link link-hover"
+                  data-slug="{{ entry.slug }}"
+                >
+                  {{ entry.slug }}
+                </a>
+              </td>
+              <td>{{ entry.title }}</td>
+              <td>
+                <span class="badge badge-outline badge-sm" data-kind="{{ entry.kind }}">
+                  {{ entry.kind }}
+                </span>
+              </td>
+              <td class="text-right font-mono">{{ entry.priority }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="rounded-box border border-base-300 bg-base-100 p-8 text-center opacity-70">
+      No conventions match the current kind filter.
+    </div>
+  {% endif %}
+</div>

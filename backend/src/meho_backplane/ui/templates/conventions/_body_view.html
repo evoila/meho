@@ -1,0 +1,24 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Body view partial for the Convention detail page (Initiative #1838
+  Task #1895). Rendered:
+
+    * Inline by ``conventions/detail.html`` on first page load.
+    * As the HTMX body fragment when ``GET /ui/conventions/<slug>`` is
+      requested with the ``HX-Request: true`` header.
+
+  ``convention.body_html`` is wrapped in :class:`markupsafe.Markup` by
+  :func:`render_markdown` so Jinja's autoescape leaves it as-is. The
+  ``commonmark`` preset is constructed with ``html=False`` so raw HTML
+  smuggled inside a convention body renders as escaped text, not parsed
+  markup.
+-#}
+<article
+  id="convention-body"
+  class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4"
+  aria-label="Convention body"
+>
+  {{ convention.body_html }}
+</article>

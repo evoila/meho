@@ -11,25 +11,111 @@
 
   Render branches (first match wins):
     1. ``error_status`` set -> a typed error card (403 / 409 / 503 / 422).
-    2. ``cited`` non-empty -> one cited-chunk card each.
-    3. ``searched`` true (a query ran, no error, no hits) -> "no results".
-    4. otherwise (initial render, no query yet) -> a quiet prompt.
+    2. ``ask_fallback_leg`` set -> the ask_docs synthesis-failed fail-open
+       banner (names the failed leg) followed by any retrieved chunks (#1918,
+       wired by the Ask mode in #1917).
+    3. ``answer`` set -> the ask_docs grounded answer (prose) + its citation
+       cards (#1917). Wins over the plain ``cited`` branch so an answer is
+       never rendered as a bare chunk list.
+    4. ``cited`` non-empty -> one cited-chunk card each (the retrieve path).
+    5. ``searched`` true (a query ran, no error, no hits) -> "no results".
+    6. otherwise (initial render, no query yet) -> a quiet prompt.
 
   Context variables:
-    query          -- str: the submitted query (for the heading + empty state)
-    cited          -- list[{chunk, link}]: ranked cited chunks, each paired with
-                      its resolved navigable source link (#1919). ``chunk`` is a
-                      DocsChunk (content, source_url, score, collection); ``link``
-                      is a CitationLink (label, href, kind, clickable). The raw
-                      gs:// ``source_url`` is resolved to a canonical web URL
-                      (KB / http(s)) or a non-clickable label -- never a broken
-                      gs:// href.
-    searched       -- bool: whether a query actually ran
-    error_status   -- int | unset: HTTP status of a search failure
-    error_message  -- str | unset: human detail of the failure
+    query              -- str: the submitted query (for the heading + empty state)
+    cited              -- list[{chunk, link}]: ranked cited chunks, each paired with
+                          its resolved navigable source link (#1919). ``chunk`` is a
+                          DocsChunk (content, source_url, score, collection); ``link``
+                          is a CitationLink (label, href, kind, clickable). The raw
+                          gs:// ``source_url`` is resolved to a canonical web URL
+                          (KB / http(s)) or a non-clickable label -- never a broken
+                          gs:// href.
+    searched           -- bool: whether a query actually ran
+    error_status       -- int | unset: HTTP status of a search failure
+    error_message      -- str | unset: human detail of the failure
+    ask_fallback_leg   -- str | unset: the failed ask_docs answer leg
+                          (expand_failed / corpus_unavailable / model_unavailable /
+                          synthesis_malformed) when synthesis failed but retrieval
+                          chunks are shown fail-open (#1918). Set by
+                          ``corpus_ask_fallback_context``.
+    ask_fallback_cause -- str | unset: the leg-scoped sub-cause classifier.
+    ask_fallback_message -- str | unset: human detail of the answer failure.
+    answer             -- str | unset: the ask_docs grounded answer prose
+                          (#1917). When set, the answer card renders followed
+                          by its citation cards (``cited``); the deterministic
+                          "no grounded answer" string renders the same way with
+                          an empty citation list. Set only by the Ask mode.
 -#}
+{#- Shared cited-chunk card list, reused by the ``cited`` and ``ask_fallback``
+    branches so the #1919 citation render lives in one place. -#}
+{% macro chunk_cards(cited) %}
+  <ul class="space-y-3" role="list" aria-label="Cited chunks">
+    {% for entry in cited %}
+      {% set chunk = entry.chunk %}
+      {% set link = entry.link %}
+      <li class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body py-3 space-y-2">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            {# Title as link text -> the resolved canonical URL (#1919). A raw
+               gs:// source_url is resolved to a navigable web link or, when no
+               canonical link exists, a non-clickable label -- never a broken
+               gs:// anchor. #}
+            <div class="min-w-0">
+              <h3 class="card-title text-sm font-semibold">
+                {% if link.clickable %}
+                  <a
+                    href="{{ link.href }}"
+                    class="link link-primary"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Open source document for this chunk"
+                  >{{ link.label }}</a>
+                {% else %}
+                  {{ link.label }}
+                {% endif %}
+              </h3>
+              {# Show the underlying object path for provenance when it is not
+                 itself the (clickable) link -- so a non-navigable source still
+                 surfaces where it came from, without pretending to be a link. #}
+              {% if chunk.source_url and not link.clickable %}
+                <p class="text-xs font-mono opacity-50 break-all" title="Source object path">
+                  {{ chunk.source_url }}
+                </p>
+              {% endif %}
+            </div>
+            <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Chunk metadata">
+              {% if chunk.collection %}
+                <span class="badge badge-ghost badge-outline" title="Source collection">
+                  {{ chunk.collection }}
+                </span>
+              {% endif %}
+              {% if chunk.score is not none %}
+                <span
+                  class="badge badge-primary badge-outline"
+                  title="Relevance score"
+                  aria-label="Score {{ '%.3f' | format(chunk.score) }}"
+                >
+                  score {{ "%.3f" | format(chunk.score) }}
+                </span>
+              {% endif %}
+            </div>
+          </div>
+          <p class="text-sm whitespace-pre-wrap">{{ chunk.content }}</p>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endmacro %}
 <div id="corpus-results" class="space-y-3">
   {% set error_status = error_status | default(none) %}
+  {# ``ask_fallback_*`` are only set by the Ask mode's fail-open seam (#1918);
+     default them so the search / initial-render paths don't trip an undefined. #}
+  {% set ask_fallback_leg = ask_fallback_leg | default(none) %}
+  {% set ask_fallback_cause = ask_fallback_cause | default(none) %}
+  {% set ask_fallback_message = ask_fallback_message | default(none) %}
+  {# ``answer`` is only set by the Ask mode's success path (#1917); default it
+     so the search / initial-render paths don't trip an undefined. #}
+  {% set answer = answer | default(none) %}
   {% if error_status %}
     {# ---------- Typed error card (403 / 409 / 503 / 422) ---------- #}
     {% if error_status == 409 or error_status == 503 %}
@@ -49,68 +135,63 @@
       </div>
     </div>
 
+  {% elif ask_fallback_leg %}
+    {# ---------- ask_docs synthesis-failed: fail open to retrieved chunks ----------
+       The answer pipeline failed AFTER (or before) retrieval; we never show an
+       ungrounded synthesized answer (fail-closed on the answer), but we DO show
+       whatever chunks were retrieved (fail-open on the evidence), under a banner
+       naming the failed leg so the operator can self-diagnose (#1918). For an
+       expand/corpus leg there may be no chunks -- the banner stands alone. #}
+    <div class="alert alert-warning" role="alert" aria-live="assertive">
+      <div>
+        <h3 class="font-semibold">
+          Answer unavailable &mdash; showing retrieved chunks
+        </h3>
+        <p class="text-sm opacity-90">
+          The grounded answer could not be composed (failed leg:
+          <code class="font-mono">{{ ask_fallback_leg }}</code>{% if ask_fallback_cause %},
+          cause <code class="font-mono">{{ ask_fallback_cause }}</code>{% endif %}).
+          {% if cited %}The retrieved source chunks are shown below.{% endif %}
+        </p>
+        {% if ask_fallback_message %}
+          <p class="text-xs opacity-70">{{ ask_fallback_message }}</p>
+        {% endif %}
+      </div>
+    </div>
+    {% if cited %}
+      {{ chunk_cards(cited) }}
+    {% endif %}
+
+  {% elif answer is not none %}
+    {# ---------- ask_docs grounded answer + citations (#1917) ----------
+       The Ask-mode success path: a grounded, cited answer composed strictly
+       over the retrieved chunks (no claim without a citation). The answer
+       prose renders in its own card; the chunks it cited render below as the
+       same #1919 citation cards the retrieve path uses. An empty retrieval
+       yields the deterministic "no grounded answer" string with no citations
+       -- rendered the same way, never a hallucinated answer. #}
+    <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Grounded answer">
+      <div class="card-body py-4 space-y-2">
+        <h3 class="card-title text-sm font-semibold">
+          Answer{% if query %} for <em>&ldquo;{{ query }}&rdquo;</em>{% endif %}
+        </h3>
+        <p class="text-sm whitespace-pre-wrap">{{ answer }}</p>
+      </div>
+    </article>
+    {% if cited %}
+      <p class="text-sm opacity-70" aria-live="polite">
+        Grounded in {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
+      </p>
+      {{ chunk_cards(cited) }}
+    {% endif %}
+
   {% elif cited %}
     {# ---------- Cited-chunk result cards ---------- #}
     <p class="text-sm opacity-70" aria-live="polite">
       {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
       for <em>&ldquo;{{ query }}&rdquo;</em>
     </p>
-    <ul class="space-y-3" role="list" aria-label="Cited chunks">
-      {% for entry in cited %}
-        {% set chunk = entry.chunk %}
-        {% set link = entry.link %}
-        <li class="card bg-base-100 border-base-300 border shadow-sm">
-          <div class="card-body py-3 space-y-2">
-            <div class="flex flex-wrap items-start justify-between gap-2">
-              {# Title as link text -> the resolved canonical URL (#1919). A raw
-                 gs:// source_url is resolved to a navigable web link or, when no
-                 canonical link exists, a non-clickable label -- never a broken
-                 gs:// anchor. #}
-              <div class="min-w-0">
-                <h3 class="card-title text-sm font-semibold">
-                  {% if link.clickable %}
-                    <a
-                      href="{{ link.href }}"
-                      class="link link-primary"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label="Open source document for this chunk"
-                    >{{ link.label }}</a>
-                  {% else %}
-                    {{ link.label }}
-                  {% endif %}
-                </h3>
-                {# Show the underlying object path for provenance when it is not
-                   itself the (clickable) link -- so a non-navigable source still
-                   surfaces where it came from, without pretending to be a link. #}
-                {% if chunk.source_url and not link.clickable %}
-                  <p class="text-xs font-mono opacity-50 break-all" title="Source object path">
-                    {{ chunk.source_url }}
-                  </p>
-                {% endif %}
-              </div>
-              <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Chunk metadata">
-                {% if chunk.collection %}
-                  <span class="badge badge-ghost badge-outline" title="Source collection">
-                    {{ chunk.collection }}
-                  </span>
-                {% endif %}
-                {% if chunk.score is not none %}
-                  <span
-                    class="badge badge-primary badge-outline"
-                    title="Relevance score"
-                    aria-label="Score {{ '%.3f' | format(chunk.score) }}"
-                  >
-                    score {{ "%.3f" | format(chunk.score) }}
-                  </span>
-                {% endif %}
-              </div>
-            </div>
-            <p class="text-sm whitespace-pre-wrap">{{ chunk.content }}</p>
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
+    {{ chunk_cards(cited) }}
 
   {% elif searched %}
     {# ---------- No-results state (a query ran, zero hits, not an error) ---------- #}

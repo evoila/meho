@@ -1,0 +1,70 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Convention detail view (Initiative #1838 Task
+  #1895). Extends ``base.html``. Renders:
+
+    * Breadcrumb + slug / title header with kind badge, priority,
+      created-by, and updated-at metadata.
+    * Full body rendered server-side as sanitised Markdown (markdown-it-py
+      ``html=False`` + pygments) via the shared ``render_markdown`` helper
+      -- raw HTML smuggled into a body renders as escaped text, never
+      live markup.
+
+  The pygments CSS for syntax-highlighted code blocks is embedded as a
+  per-page ``<style>`` block (the chassis ``base.html`` exposes no
+  per-page head slot; an in-body style block is valid HTML5).
+
+  Author / edit / delete affordances land in T2 (#1838-T2); this Task is
+  read-only.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Convention: {{ convention.slug }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<style>
+{{ pygments_css }}
+</style>
+<section class="space-y-4">
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/conventions" class="link link-hover">Conventions</a>
+    <span aria-hidden="true">/</span>
+    <span class="font-mono">{{ convention.slug }}</span>
+  </nav>
+
+  <header
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    data-convention-slug="{{ convention.slug }}"
+  >
+    <div class="card-body p-4 space-y-2">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h1 class="text-xl font-semibold break-all">{{ convention.title }}</h1>
+          <p class="text-sm opacity-70 font-mono break-all">{{ convention.slug }}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="badge badge-outline badge-sm" data-kind="{{ convention.kind }}">
+            {{ convention.kind }}
+          </span>
+          <span class="badge badge-ghost badge-sm font-mono" title="Priority">
+            priority {{ convention.priority }}
+          </span>
+        </div>
+      </div>
+      <div class="text-xs opacity-70 flex flex-wrap gap-x-4 gap-y-1">
+        {% if convention.created_by_sub %}
+          <span>created by {{ convention.created_by_sub }}</span>
+        {% endif %}
+        <span data-updated-at="{{ convention.updated_at.isoformat() }}">
+          updated {{ convention.updated_at.isoformat() }}
+        </span>
+      </div>
+    </div>
+  </header>
+
+  {# Body slot -- full convention body rendered as sanitised Markdown. #}
+  {% include "conventions/_body_view.html" %}
+</section>
+{% endblock %}

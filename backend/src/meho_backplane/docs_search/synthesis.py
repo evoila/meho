@@ -62,6 +62,8 @@ from meho_backplane.operations.ingest import LlmClient, build_anthropic_ingest_l
 
 __all__ = [
     "NO_GROUNDED_ANSWER",
+    "SYNTHESIS_CAUSE_CITATION_RESOLUTION",
+    "SYNTHESIS_CAUSE_PARSE",
     "DocsAnswer",
     "DocsSynthesisError",
     "synthesize_docs_answer",
@@ -137,6 +139,16 @@ class DocsAnswer(BaseModel):
     citations: list[DocsChunk] = Field(default_factory=list)
 
 
+#: A model that responded but did not parse into the strict output shape
+#: (non-JSON, or JSON failing :class:`_SynthesisOutput`). The output is
+#: structurally unusable.
+SYNTHESIS_CAUSE_PARSE: Final[str] = "parse"
+
+#: A model whose output parsed but cited a ``chunk_id`` absent from the
+#: retrieved set. The shape was fine; the grounding link was fabricated.
+SYNTHESIS_CAUSE_CITATION_RESOLUTION: Final[str] = "citation_resolution"
+
+
 class DocsSynthesisError(RuntimeError):
     """Raised when synthesis ran but produced an untrustworthy answer.
 
@@ -147,7 +159,23 @@ class DocsSynthesisError(RuntimeError):
     dispatcher surfaces this as JSON-RPC ``-32603`` — a synthesis fault,
     not invalid client params: the request was well-formed, the model's
     output was not.
+
+    ``cause`` splits the two structurally-distinct failure modes the
+    string message previously buried (#1918): :data:`SYNTHESIS_CAUSE_PARSE`
+    (output didn't parse into the required shape) vs.
+    :data:`SYNTHESIS_CAUSE_CITATION_RESOLUTION` (output parsed but a cited
+    id did not resolve to a retrieved chunk). A caller building a
+    structured answer-error envelope (the ``synthesis_malformed`` leg in
+    :mod:`meho_backplane.docs_search.answer_errors`) reads ``cause`` to
+    name the sub-cause without re-parsing the message — an operator can
+    then tell "the model emitted garbage JSON" apart from "the model
+    cited a chunk that isn't in the corpus result", which point at
+    different fixes (prompt / model vs. retrieval / index drift).
     """
+
+    def __init__(self, message: str, *, cause: str) -> None:
+        self.cause = cause
+        super().__init__(message)
 
 
 def _render_chunks_for_prompt(chunks: list[DocsChunk]) -> str:
@@ -176,13 +204,15 @@ def _parse_synthesis_output(raw: str) -> _SynthesisOutput:
         decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise DocsSynthesisError(
-            "synthesis model returned non-JSON output; cannot verify citations"
+            "synthesis model returned non-JSON output; cannot verify citations",
+            cause=SYNTHESIS_CAUSE_PARSE,
         ) from exc
     try:
         return _SynthesisOutput.model_validate(decoded)
     except ValidationError as exc:
         raise DocsSynthesisError(
-            "synthesis model output did not match the required {answer, cited_chunk_ids} shape"
+            "synthesis model output did not match the required {answer, cited_chunk_ids} shape",
+            cause=SYNTHESIS_CAUSE_PARSE,
         ) from exc
 
 
@@ -203,7 +233,10 @@ def _resolve_citations(
     by_id = {chunk.chunk_id: chunk for chunk in chunks}
     unknown = [cid for cid in cited_ids if cid not in by_id]
     if unknown:
-        raise DocsSynthesisError(f"synthesis cited chunk id(s) not in the retrieved set: {unknown}")
+        raise DocsSynthesisError(
+            f"synthesis cited chunk id(s) not in the retrieved set: {unknown}",
+            cause=SYNTHESIS_CAUSE_CITATION_RESOLUTION,
+        )
     cited = set(cited_ids)
     return [chunk for chunk in chunks if chunk.chunk_id in cited]
 

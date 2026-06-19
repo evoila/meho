@@ -36,6 +36,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._read import (
+    CompositeSubOpError,
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
@@ -164,6 +165,30 @@ def _err_result(op_id: str, error: str) -> OperationResult:
         op_id=op_id,
         error=error,
         duration_ms=1.0,
+    )
+
+
+def _connector_error_result(op_id: str, exception_message: str) -> OperationResult:
+    """Build a generic ``connector_error`` result the dispatcher emits for a 4xx/5xx.
+
+    Mirrors
+    :func:`meho_backplane.operations._errors.result_connector_error`: the
+    terse ``error`` summary plus the stringified ``httpx.HTTPStatusError``
+    (status line + URL) stashed under ``extras["exception_message"]``.
+    This is the exact shape a ``filter.datastores`` 400 (#1908) produces,
+    where the status code + offending URL live only in the
+    ``exception_message`` string (no structured ``http_status``).
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error="connector_error: HTTPStatusError",
+        duration_ms=1.0,
+        extras={
+            "error_code": "connector_error",
+            "exception_class": "HTTPStatusError",
+            "exception_message": exception_message,
+        },
     )
 
 
@@ -550,6 +575,144 @@ async def test_datastore_usage_skips_malformed_listing_entries() -> None:
     # Only the well-formed entry produces sub-ops + a result row.
     assert len(out["datastores"]) == 1
     assert out["datastores"][0]["id"] == "datastore-1"
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() -> None:
+    """A failed VM-placement sub-op keeps the row; vm_count/vm_names null + note (#1908).
+
+    The capacity/free/type read is load-bearing and has already succeeded
+    by the time the optional ``filter.datastores`` VM lookup runs. When
+    that lookup 400s (the version-skew filter param the issue hit), the
+    datastore row is still returned -- capacity/free/type intact -- with
+    ``vm_count``/``vm_names`` nulled and an ``enrichment_note`` recording
+    why, rather than the whole composite failing.
+    """
+    sequence = [
+        _ok_result(
+            "GET:/vcenter/datastore",
+            [
+                {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+                {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+            ],
+        ),
+        # datastore-1: detail OK, VM enrichment 400s -> best-effort skip.
+        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 100, "free_space": 40}),
+        _connector_error_result(
+            "GET:/vcenter/vm",
+            "Client error '400 Bad Request' for url "
+            "'https://vc/api/vcenter/vm?filter.datastores=datastore-1'",
+        ),
+        # datastore-2: detail OK, VM enrichment OK -> fully enriched.
+        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 500, "free_space": 250}),
+        _ok_result("GET:/vcenter/vm", [{"name": "vm-c"}]),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+
+    # All 5 sub-ops fired -- the failed VM leg did not short-circuit.
+    assert len(dispatch.calls) == 5
+    rows = out["datastores"]
+    assert len(rows) == 2
+
+    # datastore-1: core data preserved, enrichment skipped.
+    ds1 = rows[0]
+    assert ds1["id"] == "datastore-1"
+    assert ds1["capacity"] == 100
+    assert ds1["free_space"] == 40
+    assert ds1["type"] == "VMFS"
+    assert ds1["vm_count"] is None
+    assert ds1["vm_names"] is None
+    assert "enrichment_note" in ds1
+    # The note bubbles the sub-op id, its status, the 400, and the URL.
+    note = ds1["enrichment_note"]
+    assert "GET:/vcenter/vm" in note
+    assert "400 Bad Request" in note
+    assert "filter.datastores=datastore-1" in note
+
+    # datastore-2: enriched normally, no note key.
+    ds2 = rows[1]
+    assert ds2["id"] == "datastore-2"
+    assert ds2["vm_count"] == 1
+    assert ds2["vm_names"] == ["vm-c"]
+    assert "enrichment_note" not in ds2
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_listing_error_bubbles_structured_detail() -> None:
+    """A load-bearing sub-op failure bubbles the sub-op's status code + URL (#1908).
+
+    Suggestion 2: the composite's failure envelope previously stopped at
+    ``connector_error: HTTPStatusError``; the actual 400 + offending URL
+    only showed on a manual replay. The raised
+    :class:`CompositeSubOpError` now folds the sub-op's diagnostic line
+    (status code + URL, from the stringified ``HTTPStatusError``) into its
+    message and exposes the sub-op's structured fields as attributes.
+    """
+    failing = _connector_error_result(
+        "GET:/vcenter/datastore",
+        "Client error '400 Bad Request' for url "
+        "'https://vc/api/vcenter/datastore?filter.names=bogus'",
+    )
+    dispatch = _RecordingDispatchChild([failing])
+    with pytest.raises(CompositeSubOpError) as excinfo:
+        await datastore_usage_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={},
+            dispatch_child=dispatch,
+        )
+    # No per-datastore calls fire after the listing fails.
+    assert len(dispatch.calls) == 1
+    exc = excinfo.value
+    # Backward-compatible substring (existing consumers string-match it).
+    assert "returned status='error'" in str(exc)
+    # The structured detail now rides the message.
+    assert "400 Bad Request" in str(exc)
+    assert "filter.names=bogus" in str(exc)
+    # And the sub-op's structured fields are addressable as attributes.
+    assert exc.op_id == "GET:/vcenter/datastore"
+    assert exc.status == "error"
+    assert exc.sub_op_extras["error_code"] == "connector_error"
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_bubbles_structured_http_status_when_present() -> None:
+    """When a sub-op carried a structured ``http_status`` (403/422/auth), it bubbles too.
+
+    The generic 4xx path (400/404/5xx) carries the status + URL only in
+    ``exception_message``; the 403/422/401/440 builders instead extract a
+    structured ``http_status`` + ``upstream_message``. The bubble-up
+    prefers the structured form when it is present.
+    """
+    failing = OperationResult(
+        status="error",
+        op_id="GET:/vcenter/datastore",
+        error="connector_http_403: the upstream returned HTTP 403 Forbidden ...",
+        duration_ms=1.0,
+        extras={
+            "error_code": "connector_http_403",
+            "http_status": 403,
+            "upstream_message": "Resource not accessible by integration",
+            "permission_headers": {},
+        },
+    )
+    dispatch = _RecordingDispatchChild([failing])
+    with pytest.raises(CompositeSubOpError) as excinfo:
+        await datastore_usage_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={},
+            dispatch_child=dispatch,
+        )
+    message = str(excinfo.value)
+    assert "HTTP 403" in message
+    assert "Resource not accessible by integration" in message
 
 
 # ---------------------------------------------------------------------------

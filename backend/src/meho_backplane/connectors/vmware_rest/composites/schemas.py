@@ -425,14 +425,31 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                         ),
                     },
                     "vm_count": {
-                        "type": "integer",
+                        "type": ["integer", "null"],
                         "minimum": 0,
-                        "description": "Number of VMs placed on this datastore.",
+                        "description": (
+                            "Number of VMs placed on this datastore; ``null`` when "
+                            "the best-effort VM-placement enrichment was skipped "
+                            "because its sub-call errored (see ``enrichment_note``)."
+                        ),
                     },
                     "vm_names": {
-                        "type": "array",
+                        "type": ["array", "null"],
                         "items": {"type": "string"},
-                        "description": "Names of VMs placed on this datastore.",
+                        "description": (
+                            "Names of VMs placed on this datastore; ``null`` when "
+                            "the best-effort VM-placement enrichment was skipped "
+                            "(see ``enrichment_note``)."
+                        ),
+                    },
+                    "enrichment_note": {
+                        "type": "string",
+                        "description": (
+                            "Present only when the VM-placement enrichment was "
+                            "skipped; records the failing sub-op, its status, and "
+                            "the underlying error (status code + URL where the "
+                            "sub-op carried them)."
+                        ),
                     },
                 },
                 "required": ["id", "vm_count", "vm_names"],

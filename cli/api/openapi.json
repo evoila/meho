@@ -11419,6 +11419,131 @@
         }
       }
     },
+    "/ui/corpus/collections/register": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collections Register Modal",
+        "description": "``GET /ui/corpus/collections/register`` -- HTMX-loaded register modal.",
+        "operationId": "ui_corpus_collections_register_modal_ui_corpus_collections_register_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collections Register Submit",
+        "description": "``POST /ui/corpus/collections/register`` -- register one collection.",
+        "operationId": "ui_corpus_collections_register_submit_ui_corpus_collections_register_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/corpus/collections": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collections Table",
+        "description": "``GET /ui/corpus/collections`` -- the lifecycle table (page or fragment).",
+        "operationId": "ui_corpus_collections_table_ui_corpus_collections_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/corpus": {
       "get": {
         "tags": [
@@ -14902,6 +15027,58 @@
         },
         "type": "object",
         "title": "Body_ui_connectors_import_preview_ui_connectors_import_post"
+      },
+      "Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post": {
+        "properties": {
+          "collection_key": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Collection Key",
+            "default": ""
+          },
+          "vendor": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Vendor",
+            "default": ""
+          },
+          "products": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Products"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Description"
+          },
+          "when_to_use": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "When To Use"
+          },
+          "backend_type": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Backend Type",
+            "default": ""
+          },
+          "backend_ref": {
+            "type": "string",
+            "maxLength": 16384,
+            "nullable": true,
+            "title": "Backend Ref"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post"
       },
       "Body_ui_memory_bulk_ui_memory_bulk_post": {
         "properties": {

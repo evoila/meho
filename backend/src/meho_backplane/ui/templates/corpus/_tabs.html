@@ -1,0 +1,39 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus tab strip (Initiative #1836 Task #1882). Two tabs under the
+  single ``corpus`` sidebar surface -- "Search" (the existing G10.7 #1777
+  picker + ask-the-corpus surface) and "Collections" (the admin lifecycle
+  table). Rendered as a second tab on ``/ui/corpus`` rather than a 9th
+  sidebar entry so ``base.html``'s nav stays unchanged; both pages set
+  ``active_surface="corpus"`` so the sidebar highlight is identical across
+  the two tabs.
+
+  Each tab is a plain ``<a>`` full-page navigation -- the two surfaces are
+  distinct pages (Search owns its CSRF-bound search form + results region;
+  Collections owns its registry table + register modal), so a tab click is
+  a navigation, not a fragment swap. DaisyUI ``tabs`` + ``tab-active``
+  marks the current tab.
+
+  Context contract:
+    * ``active_tab`` -- "search" | "collections": which tab is current.
+-#}
+<div role="tablist" class="tabs tabs-bordered" aria-label="Docs Corpus sections">
+  <a
+    role="tab"
+    href="/ui/corpus"
+    class="tab {% if active_tab == 'search' %}tab-active{% endif %}"
+    {% if active_tab == 'search' %}aria-selected="true"{% endif %}
+  >
+    Search
+  </a>
+  <a
+    role="tab"
+    href="/ui/corpus/collections"
+    class="tab {% if active_tab == 'collections' %}tab-active{% endif %}"
+    {% if active_tab == 'collections' %}aria-selected="true"{% endif %}
+  >
+    Collections
+  </a>
+</div>

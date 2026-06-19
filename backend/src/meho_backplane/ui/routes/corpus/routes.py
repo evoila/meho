@@ -107,7 +107,7 @@ from meho_backplane.ui.auth.refresh import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
-__all__ = ["build_corpus_router"]
+__all__ = ["build_corpus_search_router"]
 
 log = structlog.get_logger(__name__)
 
@@ -327,13 +327,17 @@ def _search_or_error_context(exc: HTTPException) -> dict[str, object]:
     return {"error_status": exc.status_code, "error_message": message}
 
 
-def build_corpus_router() -> APIRouter:
-    """Construct the ``/ui/corpus*`` :class:`APIRouter`.
+def build_corpus_search_router() -> APIRouter:
+    """Construct the ``GET /ui/corpus`` + ``POST /ui/corpus/search`` router.
 
     Factory function (not a module-level constant) so a test app can
     construct parallel routers without shared route state -- the same
     convention :func:`meho_backplane.ui.routes.kb.build_kb_router` and the
-    other surface routers follow.
+    other surface routers follow. The admin Collections lifecycle routes
+    (``/ui/corpus/collections*``, #1882) live on a sibling router built by
+    :func:`meho_backplane.ui.routes.corpus.collections.build_corpus_collections_router`;
+    :func:`meho_backplane.ui.routes.corpus.build_corpus_router` aggregates
+    both with the load-bearing literal-before-param include order.
     """
     router = APIRouter(tags=["ui-corpus"])
 

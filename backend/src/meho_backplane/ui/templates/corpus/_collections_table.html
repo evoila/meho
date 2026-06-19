@@ -28,7 +28,14 @@
   {% if collection_rows %}
     {% for row in collection_rows %}
       <tr data-collection-key="{{ row.collection_key }}">
-        <td class="font-mono">{{ row.collection_key }}</td>
+        <td class="font-mono">
+          {# Link to the per-collection detail page (T2 #1883): identity +
+             readiness card + re-probe + enable/disable. #}
+          <a
+            href="/ui/corpus/collections/{{ row.collection_key | urlencode }}"
+            class="link link-hover"
+          >{{ row.collection_key }}</a>
+        </td>
         <td>{{ row.vendor }}</td>
         <td class="text-xs">
           {% if row.products %}

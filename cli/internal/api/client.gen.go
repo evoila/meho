@@ -6855,6 +6855,21 @@ type UiCorpusCollectionsRegisterModalUiCorpusCollectionsRegisterGetJSONRequestBo
 // UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostFormdataRequestBody defines body for UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost for application/x-www-form-urlencoded ContentType.
 type UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostFormdataRequestBody = BodyUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost
 
+// UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody defines body for UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet for application/json ContentType.
+type UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody = UISessionContext
+
+// UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody defines body for UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet for application/json ContentType.
+type UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody = UISessionContext
+
+// UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody defines body for UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost for application/json ContentType.
+type UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody = UISessionContext
+
+// UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody defines body for UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost for application/json ContentType.
+type UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody = UISessionContext
+
+// UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody defines body for UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost for application/json ContentType.
+type UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody = UISessionContext
+
 // CorpusSearchUiCorpusSearchPostFormdataRequestBody defines body for CorpusSearchUiCorpusSearchPost for application/x-www-form-urlencoded ContentType.
 type CorpusSearchUiCorpusSearchPostFormdataRequestBody = BodyCorpusSearchUiCorpusSearchPost
 
@@ -8461,6 +8476,31 @@ type ClientInterface interface {
 	UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostWithFormdataBody(ctx context.Context, body UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBody request with any body
+	UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet(ctx context.Context, collectionKey string, body UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBody request with any body
+	UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBody request with any body
+	UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBody request with any body
+	UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost(ctx context.Context, collectionKey string, body UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBody request with any body
+	UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, body UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CorpusSearchUiCorpusSearchPostWithBody request with any body
 	CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11737,6 +11777,126 @@ func (c *Client) UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPos
 
 func (c *Client) UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostWithFormdataBody(ctx context.Context, body UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequestWithBody(c.Server, collectionKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet(ctx context.Context, collectionKey string, body UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequest(c.Server, collectionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequestWithBody(c.Server, collectionKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequest(c.Server, collectionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequestWithBody(c.Server, collectionKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequest(c.Server, collectionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequestWithBody(c.Server, collectionKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost(ctx context.Context, collectionKey string, body UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequest(c.Server, collectionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBody(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequestWithBody(c.Server, collectionKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, body UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequest(c.Server, collectionKey, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23492,6 +23652,241 @@ func NewUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostRequestW
 	return req, nil
 }
 
+// NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequest calls the generic UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet builder with application/json body
+func NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequest(server string, collectionKey string, body UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequestWithBody(server, collectionKey, "application/json", bodyReader)
+}
+
+// NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequestWithBody generates requests for UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet with any type of body
+func NewUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetRequestWithBody(server string, collectionKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/collections/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequest calls the generic UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet builder with application/json body
+func NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequest(server string, collectionKey string, body UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequestWithBody(server, collectionKey, "application/json", bodyReader)
+}
+
+// NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequestWithBody generates requests for UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet with any type of body
+func NewUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetRequestWithBody(server string, collectionKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/collections/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequest calls the generic UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost builder with application/json body
+func NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequest(server string, collectionKey string, body UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequestWithBody(server, collectionKey, "application/json", bodyReader)
+}
+
+// NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequestWithBody generates requests for UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost with any type of body
+func NewUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostRequestWithBody(server string, collectionKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/collections/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequest calls the generic UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost builder with application/json body
+func NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequest(server string, collectionKey string, body UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequestWithBody(server, collectionKey, "application/json", bodyReader)
+}
+
+// NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequestWithBody generates requests for UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost with any type of body
+func NewUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostRequestWithBody(server string, collectionKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/collections/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequest calls the generic UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost builder with application/json body
+func NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequest(server string, collectionKey string, body UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequestWithBody(server, collectionKey, "application/json", bodyReader)
+}
+
+// NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequestWithBody generates requests for UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost with any type of body
+func NewUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostRequestWithBody(server string, collectionKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/collections/%s/probe", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody calls the generic CorpusSearchUiCorpusSearchPost builder with application/x-www-form-urlencoded body
 func NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody(server string, body CorpusSearchUiCorpusSearchPostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -26618,6 +27013,31 @@ type ClientWithResponsesInterface interface {
 	UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostResponse, error)
 
 	UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostWithFormdataBodyWithResponse(ctx context.Context, body UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostResponse, error)
+
+	// UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBodyWithResponse request with any body
+	UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse, error)
+
+	UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse, error)
+
+	// UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBodyWithResponse request with any body
+	UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse, error)
+
+	UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse, error)
+
+	// UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBodyWithResponse request with any body
+	UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse, error)
+
+	UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse, error)
+
+	// UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBodyWithResponse request with any body
+	UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse, error)
+
+	UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse, error)
+
+	// UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBodyWithResponse request with any body
+	UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse, error)
+
+	UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse, error)
 
 	// CorpusSearchUiCorpusSearchPostWithBodyWithResponse request with any body
 	CorpusSearchUiCorpusSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
@@ -30844,6 +31264,116 @@ func (r UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostResponse
 	return 0
 }
 
+type UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type CorpusSearchUiCorpusSearchPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -34126,6 +34656,91 @@ func (c *ClientWithResponses) UiCorpusCollectionsRegisterSubmitUiCorpusCollectio
 		return nil, err
 	}
 	return ParseUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostResponse(rsp)
+}
+
+// UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse
+func (c *ClientWithResponses) UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse, error) {
+	rsp, err := c.UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithBody(ctx, collectionKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse, error) {
+	rsp, err := c.UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGet(ctx, collectionKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse(rsp)
+}
+
+// UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse
+func (c *ClientWithResponses) UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse, error) {
+	rsp, err := c.UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithBody(ctx, collectionKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse, error) {
+	rsp, err := c.UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGet(ctx, collectionKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse(rsp)
+}
+
+// UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse
+func (c *ClientWithResponses) UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithBody(ctx, collectionKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePost(ctx, collectionKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse(rsp)
+}
+
+// UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse
+func (c *ClientWithResponses) UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithBody(ctx, collectionKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePost(ctx, collectionKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse(rsp)
+}
+
+// UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse
+func (c *ClientWithResponses) UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBodyWithResponse(ctx context.Context, collectionKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithBody(ctx, collectionKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithResponse(ctx context.Context, collectionKey string, body UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse, error) {
+	rsp, err := c.UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePost(ctx, collectionKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse(rsp)
 }
 
 // CorpusSearchUiCorpusSearchPostWithBodyWithResponse request with arbitrary body returning *CorpusSearchUiCorpusSearchPostResponse
@@ -40054,6 +40669,136 @@ func ParseUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostRespon
 	}
 
 	response := &UiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse parses an HTTP response from a UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetWithResponse call
+func ParseUiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse(rsp *http.Response) (*UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusCollectionDetailUiCorpusCollectionsCollectionKeyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse parses an HTTP response from a UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetWithResponse call
+func ParseUiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse(rsp *http.Response) (*UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusCollectionDisableModalUiCorpusCollectionsCollectionKeyDisableGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse parses an HTTP response from a UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostWithResponse call
+func ParseUiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse(rsp *http.Response) (*UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusCollectionDisableUiCorpusCollectionsCollectionKeyDisablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse parses an HTTP response from a UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostWithResponse call
+func ParseUiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse(rsp *http.Response) (*UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusCollectionEnableUiCorpusCollectionsCollectionKeyEnablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse parses an HTTP response from a UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostWithResponse call
+func ParseUiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse(rsp *http.Response) (*UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

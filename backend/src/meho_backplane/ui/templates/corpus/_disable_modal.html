@@ -1,0 +1,90 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded disable-confirm modal for the Docs Corpus collection detail
+  surface (Initiative #1836 Task #1883). Loaded into
+  ``#corpus-collection-modal-container`` on the detail page by the "Disable"
+  button's ``hx-get`` to ``/ui/corpus/collections/{key}/disable``. The shared
+  app-shell modal controller (#1803) opens the inserted ``<dialog>`` via
+  ``showModal()`` on ``htmx:afterSwap`` so it shows without an extra click and
+  dismisses on the close button / ESC / backdrop.
+
+  Disable is AVAILABILITY-DESTRUCTIVE: a disabled collection fails
+  ``search_docs`` with a TERMINAL ``403 collection_disabled`` for ALL
+  searchers (not a retryable not-ready 409), so the modal spells out that
+  impact before the operator confirms -- mirroring the connectors
+  delete-confirm modal's destructive-action warning.
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/corpus/collections/{key}/disable``, targeting itself
+  (``hx-target="this"`` + ``hx-swap="outerHTML"``).
+    * Success -> 204 + ``HX-Redirect`` to the detail page (re-renders the page
+      with the new ``disabled`` pill + the Enable button replacing Disable).
+    * A forbidden transition -> 409 + a legible ``invalid_collection_transition``
+      alert fragment swapped in place of the form (not a stack trace).
+
+  CSRF: this form declares its OWN ``hx-headers`` ``X-CSRF-Token`` -- HTMX
+  does NOT propagate ``hx-headers`` from an ancestor to a descendant form
+  (#1693), and the modal is swapped into a fresh container, so the token rides
+  the form element that issues the request. The route mints + re-sets the
+  ``meho_csrf`` cookie on every modal render so the double-submit pair lines
+  up.
+
+  Context contract (set by ``detail._render_disable_modal``):
+    * ``collection_key`` -- str: the collection being disabled.
+    * ``csrf_token``     -- str: minted double-submit token.
+-#}
+<dialog id="corpus-disable-modal" class="modal">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg" id="corpus-disable-modal-title">
+      Disable collection <span class="font-mono">{{ collection_key }}</span>?
+    </h3>
+
+    <div class="py-2 space-y-2 text-sm">
+      <p>
+        Disabling hides the collection from search immediately.
+      </p>
+      <div role="alert" class="alert alert-warning text-xs">
+        <div>
+          <p>
+            <strong>Availability impact:</strong> while disabled, every
+            <code>search_docs</code> against
+            <span class="font-mono">{{ collection_key }}</span> fails with a
+            terminal <code>403 collection_disabled</code> &mdash; for ALL
+            searchers, not just you. Enable the collection (then probe it) to
+            return it to service.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <form
+      id="corpus-disable-form"
+      hx-post="/ui/corpus/collections/{{ collection_key | urlencode }}/disable"
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      class="space-y-2"
+      aria-labelledby="corpus-disable-modal-title"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-disable"
+          onclick="document.getElementById('corpus-disable-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="disable-submit">
+          Disable collection
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

@@ -1,0 +1,152 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operations launcher results partial (Initiative #1835, Task #1879).
+
+  The swap target for the picker + search box on the launcher page. Four
+  branches:
+    * No connector selected -> a prompt to pick one.
+    * ``error == "unknown_connector"`` -> the mistyped-id 404 message.
+    * ``error == "connector_not_ingested"`` -> the typed ``next_step``
+      ingest hint (NOT an empty list), mirroring api/v1/operations.py.
+    * Resolved -> the connector's operation groups (browse, empty query)
+      and -- when a query is set -- the ranked hybrid-search hits, each
+      carrying a ``safety_level`` + ``requires_approval`` badge and a
+      drawer link to ``/ui/operations/descriptor/{descriptor_id}``.
+
+  The drawer link uses ``hx-get`` into the shared app-shell modal
+  container so any operator can open the read-only detail without leaving
+  the launcher.
+
+  Context keys: ``connector_id``, ``query``, ``groups``, ``hits``,
+  ``error``, ``next_step`` (see ``operations/routes.py``).
+-#}
+{% from "_icons.html" import icon %}
+
+{%- macro safety_badge(safety) -%}
+  {#- ``safety_level`` is the closed enum the DB CHECK constraint pins
+      (``safe`` / ``caution`` / ``dangerous``); the palette colours by
+      level so an operator scanning results sees the policy gate visually
+      before reading the label -- same palette as the connectors ops
+      matrix. -#}
+  {% if safety == "dangerous" %}
+    <span class="badge badge-error badge-xs" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+  {% elif safety == "caution" %}
+    <span class="badge badge-warning badge-xs" title="Caution — state-changing">{{ safety }}</span>
+  {% else %}
+    <span class="badge badge-ghost badge-xs" title="Safe — read or non-impacting">{{ safety }}</span>
+  {% endif %}
+{%- endmacro -%}
+
+{% if not connector_id %}
+  <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+    Select a connector to browse its operation groups and search for an operation.
+  </div>
+{% elif error == "unknown_connector" %}
+  <div role="alert" class="alert alert-warning" data-ops-error="unknown_connector">
+    <div>
+      <h3 class="text-sm font-semibold">Unknown connector</h3>
+      <p class="text-xs">
+        <code>{{ connector_id }}</code> names no connector. Use the
+        <code>&lt;impl_id&gt;-&lt;version&gt;</code> id from the picker
+        (e.g. <code>vault-1.x</code>), not the bare product slug.
+      </p>
+    </div>
+  </div>
+{% elif error == "connector_not_ingested" %}
+  <div role="alert" class="alert alert-info" data-ops-error="connector_not_ingested">
+    <div>
+      <h3 class="text-sm font-semibold">Connector not ingested yet</h3>
+      <p class="text-xs">
+        <code>{{ connector_id }}</code> is registered but has no operations
+        yet.
+        {% if next_step %}
+          Run the ingest verb to populate it, then retry:
+        {% endif %}
+      </p>
+      {% if next_step %}
+        <pre class="mt-2 overflow-x-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ next_step.verb }}</code></pre>
+        <p class="mt-1 text-xs opacity-70">{{ next_step.rationale }}</p>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="space-y-4">
+    {#- Group rail: the connector's enabled operation groups. Always
+        rendered (browse), regardless of query, so an operator can scan
+        the catalog without searching. -#}
+    <section aria-label="Operation groups">
+      <h2 class="mb-2 text-sm font-semibold opacity-80">Operation groups</h2>
+      {% if groups %}
+        <div class="space-y-2">
+          {% for group in groups %}
+            <details class="rounded-box border border-base-300 bg-base-100" data-group-key="{{ group.group_key }}">
+              <summary class="cursor-pointer px-3 py-2 text-sm font-semibold">
+                {{ group.name }}
+                <span class="ml-2 text-xs opacity-60">({{ group.enabled_op_count }} ops)</span>
+                {% if group.partial %}
+                  <span class="badge badge-outline badge-xs ml-1" title="Group not fully enabled; some ops enabled per-op">partial</span>
+                {% endif %}
+              </summary>
+              {% if group.when_to_use %}
+                <div class="border-t border-base-300 px-3 py-2 text-xs opacity-70 italic">
+                  {{ group.when_to_use }}
+                </div>
+              {% endif %}
+            </details>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-sm opacity-60">No enabled operation groups for <code>{{ connector_id }}</code>.</p>
+      {% endif %}
+    </section>
+
+    {#- Search results: only rendered for a non-empty query. -#}
+    {% if query %}
+      <section aria-label="Search results">
+        <h2 class="mb-2 text-sm font-semibold opacity-80">
+          Search results for <span class="font-mono">{{ query }}</span>
+        </h2>
+        {% if hits %}
+          <ul class="divide-y divide-base-300 rounded-box border border-base-300 bg-base-100" role="list">
+            {% for hit in hits %}
+              <li class="flex items-start gap-2 px-3 py-2.5" data-op-id="{{ hit.op_id }}">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="font-mono text-sm">{{ hit.op_id }}</span>
+                    {{ safety_badge(hit.safety_level) }}
+                    {% if hit.requires_approval %}
+                      <span class="badge badge-outline badge-xs" title="Requires approval">approval</span>
+                    {% endif %}
+                    {% if hit.unbacked %}
+                      <span class="badge badge-warning badge-xs" title="Composite op whose sub-operations are not ingested">unbacked</span>
+                    {% endif %}
+                  </div>
+                  {% if hit.summary %}
+                    <p class="mt-0.5 truncate text-xs opacity-70">{{ hit.summary }}</p>
+                  {% endif %}
+                </div>
+                {% if hit.descriptor_id %}
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs shrink-0"
+                    aria-label="View operation detail"
+                    hx-get="/ui/operations/descriptor/{{ hit.descriptor_id }}"
+                    hx-target="#operations-drawer-container"
+                    hx-swap="innerHTML"
+                  >
+                    {{ icon("search", class="size-3.5") }}
+                    <span>Detail</span>
+                  </button>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-sm opacity-60">No operations matched your search.</p>
+        {% endif %}
+      </section>
+    {% endif %}
+  </div>
+{% endif %}

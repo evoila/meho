@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Operations launcher console** at `/ui/operations` (G10.9-T1): the read-only entry surface for finding a runnable operation across the catalog from the web console — previously only the CLI (`meho operation groups` / `meho operation search`) could. A connector picker (populated from the connector listing, so every option is the dispatchable `<impl_id>-<version>` id — `vault-1.x`, not the bare `vault` slug that names no connector), an operation-group browse rail, and a debounced (`keyup changed delay:300ms`) hybrid BM25+cosine free-text search box with shareable (`hx-push-url`) results carrying each hit's `safety_level` + `requires_approval` badge. Each result opens a read-only **operation detail drawer** (`GET /ui/operations/descriptor/{id}`) showing the descriptor's operator-safe fields (`op_id` / `summary` / `description` / `method` / `path` / `safety_level` / `requires_approval` / `parameter_schema`); the per-op `llm_instructions` agent prompt renders **only** for a `tenant_admin` (soft-hidden + server-side gated for plain operators, since leaking the prompt is an injection vector). An unknown `connector_id` renders the typed unknown-connector hint and a registered-but-not-ingested one renders its `meho connector ingest …` `next_step` rather than a silent empty result. A thin BFF over the existing operation meta-tools (`list_operation_groups` / `search_operations` / `describe_descriptor`) called in-process — no new backend route or meta-tool. The `/ui/*` routes register into the OpenAPI snapshot and the generated Go client, regenerated in lock-step (#1879).
+
 ## [0.17.0] - 2026-06-19
 
 ### Added

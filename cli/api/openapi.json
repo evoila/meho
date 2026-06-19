@@ -12628,6 +12628,173 @@
         }
       }
     },
+    "/ui/operations/search": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Search",
+        "description": "Render the group-browse / hybrid-search results partial.\n\nEmpty ``q`` browses the connector's operation groups; a non-empty\n``q`` runs the hybrid BM25 + cosine search. An unknown / not-yet-\ningested ``connector_id`` renders the typed 404 / ingest-hint\npanel, not an empty 200.",
+        "operationId": "operations_search_ui_operations_search_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500,
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/operations/descriptor/{descriptor_id}": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Descriptor",
+        "description": "Render the operation detail drawer fragment (read-only).\n\n``llm_instructions`` is threaded into the template context ONLY when\nthe role probe says tenant_admin -- a plain operator's render never\ncarries the per-op agent prompt in its body (the RBAC trap).",
+        "operationId": "operations_descriptor_ui_operations_descriptor__descriptor_id__get",
+        "parameters": [
+          {
+            "name": "descriptor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Descriptor Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/operations": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Index",
+        "description": "Render the operations launcher, content-negotiated by ``HX-Request``.\n\nA picker change re-fetches this route with ``HX-Request: true`` and\ngets only the ``_results.html`` fragment; a normal navigation\n(sidebar link, bookmark, shared search URL) gets the full page.",
+        "operationId": "operations_index_ui_operations_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500,
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

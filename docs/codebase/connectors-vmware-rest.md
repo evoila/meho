@@ -355,6 +355,45 @@ write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert.
 
+### Read-composite best-effort enrichment (`datastore.usage`, #1908)
+
+Read composites distinguish **load-bearing** sub-ops from **optional
+enrichment** sub-ops. A load-bearing failure routes through
+`_require_ok` and raises `CompositeSubOpError`, which the dispatcher
+wraps into a `connector_error` envelope -- the whole composite fails.
+An optional enrichment failure must **not** sink the composite: the
+leg degrades and the rows the core use case needs are still returned.
+
+`datastore.usage` is the canonical example. Its per-datastore layout is
+`GET:/vcenter/datastore` (listing, load-bearing) → per row
+`GET:/vcenter/datastore/{datastore}` (capacity/free/type, load-bearing)
+→ `GET:/vcenter/vm?filter.datastores=...` (VM placement, **best-effort**).
+The "which datastores are filling up?" use case is satisfied by the
+capacity/free/type read, which has already succeeded by the time the VM
+lookup runs. So when the VM lookup errors -- e.g. an 8.0 vCenter that
+400s the `filter.datastores` query the 9.0 spec emits -- the row is
+still returned with `capacity`/`free_space`/`type` intact,
+`vm_count`/`vm_names` set to `null`, and an `enrichment_note` string
+recording the failing sub-op, its status, and the underlying error.
+The response schema marks `vm_count`/`vm_names` as nullable and adds the
+optional `enrichment_note` key (present only on a skipped row).
+
+### Bubbling a sub-op's structured error (#1908)
+
+`CompositeSubOpError` folds the failed sub-op's most diagnostic line
+into its message via `_describe_sub_op_failure`, rather than stopping at
+the terse `error` summary (`connector_error: HTTPStatusError`). The
+helper prefers the structured `http_status` + `upstream_message` the
+dispatcher's 403/422/auth builders extract; for every other status
+(400/404/5xx, routed through the generic `connector_error` builder) it
+falls back to `extras["exception_message"]` -- the stringified
+`httpx.HTTPStatusError`, which already carries the status code **and**
+the offending URL. The same helper feeds `datastore.usage`'s
+`enrichment_note`. Net effect: the 400 + URL that previously only showed
+on a manual sub-op replay now ride the composite's error envelope (or
+the per-row note). The `returned status='<status>'` clause is preserved
+so existing string-matching consumers keep working.
+
 ### Park-time approval previews (#1608)
 
 All 8 write composites ship `requires_approval=True`, so a human/agent

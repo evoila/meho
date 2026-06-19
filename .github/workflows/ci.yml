@@ -303,7 +303,9 @@ jobs:
         # `-n auto --dist loadscope` 2007/0/0 — identical, empty
         # failure set; local wall-clock serial 10:18 → xdist 6:14
         # (limited by core count; CI multi-core gets the ~49→~10 min).
-        # -n 6: pinned, matched to the dedicated `meho-runners-ci-heavy`
+        # Worker count is -n 4 (lowered from -n 6 per #1901 — see the rationale in
+        # the perf-budget `run:` block below). The original -n 6 reasoning, kept
+        # for context: pinned, matched to the dedicated `meho-runners-ci-heavy`
         # scale set's 6000m guaranteed cores (#761). History: -n auto
         # was inconsistent on the shared 4-core pool (run 26164020459
         # reported 4 workers, a later same-day push reported 8 — cgroup
@@ -361,9 +363,19 @@ jobs:
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
-          budget_s=600
+          # -n 4 (lowered from -n 6, #1901): under full 6-core subscription on the
+          # heavy runner the GHA agent + xdist coordinator were starved and the unit
+          # lane died with "runner lost communication" at ~15min (resource-starvation
+          # hang) once the cumulative UI-console test wave (grants / approvals /
+          # agent-run-console+SSE) grew the suite — main red for every PR, NOT
+          # reproducible locally (full suite ~6:45, 7902 passed). -n 4 leaves 2-core
+          # headroom for the agent / coordinator / DinD / OS. budget_s raised 600 ->
+          # 1020 to match the slower-but-stable wall: fewer workers => longer wall by
+          # DESIGN here, not perf creep; still well under the 20-min timeout-minutes
+          # hang-backstop, so the early-warning function is preserved.
+          budget_s=1020
           start=$(date +%s)
-          COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
+          COVERAGE_CORE=sysmon uv run pytest -n 4 --dist loadscope --maxfail=1 --ignore=tests/integration \
             --cov=meho_backplane --cov-report=xml tests/
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = Goal #11 10-min; hard cap = job timeout-minutes)"

@@ -1,0 +1,211 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded register-collection modal for the Docs Corpus Collections
+  surface (Initiative #1836 Task #1882). Loaded into
+  ``#corpus-collections-modal-container`` on the Collections tab by the
+  "Register collection" button's ``hx-get`` to
+  ``/ui/corpus/collections/register``. The shared app-shell modal
+  controller (#1803) opens the inserted ``<dialog>`` via ``showModal()`` on
+  ``htmx:afterSwap`` so it shows without an extra click and dismisses on the
+  close button / ESC / backdrop.
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/corpus/collections/register``, swapping
+  ``#corpus-collections-modal-container`` (``hx-swap="innerHTML"``).
+    * Success -> the handler returns 204 + ``HX-Redirect:
+      /ui/corpus/collections`` so HTMX reloads the table with the new
+      ``provisioning`` row.
+    * Validation / conflict / backend-type failure -> the handler returns
+      422 (validation / unregistered backend.type) or 409 (duplicate key) +
+      this same modal re-rendered with ``errors`` populated and the
+      operator's typed values echoed back; HTMX replaces the container's
+      dialog so the operator fixes the field without losing their input.
+
+  CSRF: unlike the connectors create modal (which inherits the page-level
+  ``hx-headers``), this form declares its OWN ``hx-headers`` ``X-CSRF-Token``
+  -- HTMX does NOT propagate ``hx-headers`` from an ancestor to a descendant
+  form (#1693), and the modal is swapped into a fresh container, so the
+  token must ride the form element that issues the request. The route mints
+  + re-sets the ``meho_csrf`` cookie on every modal render so the
+  double-submit pair lines up.
+
+  Context contract (set by ``collections._build_modal_context``):
+    * ``csrf_token`` -- str: minted double-submit token.
+    * ``errors``     -- dict[field -> message]; empty on a fresh render,
+                        populated on a 422/409 re-render.
+    * ``values``     -- dict[field -> submitted value]; echoed back on a
+                        re-render so the operator keeps their typed input.
+-#}
+{%- macro field_value(field) -%}
+  {%- if values and field in values and values[field] not in (None, "") -%}
+    {{- values[field] -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_for(field) -%}
+  {%- if errors and field in errors -%}
+    <span class="label-text-alt text-error" role="alert" data-error-for="{{ field }}">
+      {{ errors[field] }}
+    </span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_class(field, base) -%}
+  {%- if errors and field in errors -%}{{ base }}{%- endif -%}
+{%- endmacro -%}
+
+<dialog id="corpus-register-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="corpus-register-modal-title">Register collection</h3>
+    <p class="text-sm opacity-70 mt-1">
+      The collection starts at <code>provisioning</code>; probe it after
+      registering to make it searchable.
+    </p>
+
+    {#- On a 422/409 the route returns this whole ``<dialog>`` re-rendered
+        with per-field errors. Target the modal container (not the form) and
+        swap its contents so the re-render replaces the dialog the same way
+        the initial open did; the shared modal controller re-opens the
+        swapped-in dialog via ``showModal()`` (#1803). The success path
+        returns 204 + ``HX-Redirect`` and swaps nothing. -#}
+    <form
+      id="corpus-register-form"
+      hx-post="/ui/corpus/collections/register"
+      hx-target="#corpus-collections-modal-container"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="corpus-register-modal-title"
+    >
+      <label class="form-control">
+        <span class="label-text">Collection key</span>
+        <input
+          type="text"
+          name="collection_key"
+          required
+          minlength="1"
+          maxlength="128"
+          value="{{ field_value('collection_key') }}"
+          class="input input-bordered input-sm font-mono {{ error_class('collection_key', 'input-error') }}"
+          aria-label="Collection key"
+          placeholder="vmware"
+        />
+        {{ error_for('collection_key') }}
+      </label>
+
+      <div class="grid gap-3 md:grid-cols-2">
+        <label class="form-control">
+          <span class="label-text">Vendor</span>
+          <input
+            type="text"
+            name="vendor"
+            required
+            minlength="1"
+            maxlength="256"
+            value="{{ field_value('vendor') }}"
+            class="input input-bordered input-sm {{ error_class('vendor', 'input-error') }}"
+            aria-label="Vendor"
+            placeholder="VMware by Broadcom"
+          />
+          {{ error_for('vendor') }}
+        </label>
+
+        <label class="form-control">
+          <span class="label-text">Products <span class="opacity-60">(comma-separated, optional)</span></span>
+          <input
+            type="text"
+            name="products"
+            maxlength="2048"
+            value="{{ field_value('products') }}"
+            class="input input-bordered input-sm {{ error_class('products', 'input-error') }}"
+            aria-label="Products"
+            placeholder="vsphere, nsx"
+          />
+          {{ error_for('products') }}
+        </label>
+      </div>
+
+      <label class="form-control">
+        <span class="label-text">Description <span class="opacity-60">(optional)</span></span>
+        <textarea
+          name="description"
+          maxlength="8192"
+          class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('description', 'textarea-error') }}"
+          aria-label="Description"
+          placeholder="What this corpus covers."
+        >{{ field_value('description') }}</textarea>
+        {{ error_for('description') }}
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">When to use <span class="opacity-60">(optional)</span></span>
+        <textarea
+          name="when_to_use"
+          maxlength="8192"
+          class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('when_to_use', 'textarea-error') }}"
+          aria-label="When to use"
+          placeholder="Pick this collection for ... questions."
+        >{{ field_value('when_to_use') }}</textarea>
+        {{ error_for('when_to_use') }}
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Backend type</span>
+        <input
+          type="text"
+          name="backend_type"
+          required
+          minlength="1"
+          maxlength="128"
+          value="{{ field_value('backend_type') }}"
+          class="input input-bordered input-sm font-mono {{ error_class('backend_type', 'input-error') }}"
+          aria-label="Backend type"
+          placeholder="corpus-http"
+          aria-describedby="corpus-backend-type-hint"
+        />
+        <span id="corpus-backend-type-hint" class="text-xs opacity-60 mt-1">
+          The search backend this collection routes to (validated against
+          the registered backends).
+        </span>
+        {{ error_for('backend_type') }}
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Backend ref <span class="opacity-60">(JSON, optional)</span></span>
+        <textarea
+          name="backend_ref"
+          maxlength="16384"
+          class="textarea textarea-bordered min-h-[5rem] font-mono text-xs {{ error_class('backend_ref', 'textarea-error') }}"
+          aria-label="Backend ref"
+          placeholder='{"endpoint": "https://corpus/v1/search"}'
+          aria-describedby="corpus-backend-ref-hint"
+        >{{ field_value('backend_ref') }}</textarea>
+        <span id="corpus-backend-ref-hint" class="text-xs opacity-60 mt-1">
+          Per-collection backend config the resolved adapter reads. Leave
+          blank for a backend that needs none.
+        </span>
+        {{ error_for('backend_ref') }}
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-register"
+          onclick="document.getElementById('corpus-register-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="register-submit">
+          Register
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

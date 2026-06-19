@@ -53,6 +53,10 @@
     </div>
   </header>
 
+  {# ---------- Tab strip: Search | Collections (#1882) ---------- #}
+  {% set active_tab = "search" %}
+  {% include "corpus/_tabs.html" %}
+
   {# ---------- Collection picker + query form ---------- #}
   <div class="card bg-base-100 border-base-300 border shadow-sm">
     <div class="card-body py-4">

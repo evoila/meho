@@ -14,9 +14,12 @@
     2. ``ask_fallback_leg`` set -> the ask_docs synthesis-failed fail-open
        banner (names the failed leg) followed by any retrieved chunks (#1918,
        wired by the Ask mode in #1917).
-    3. ``cited`` non-empty -> one cited-chunk card each.
-    4. ``searched`` true (a query ran, no error, no hits) -> "no results".
-    5. otherwise (initial render, no query yet) -> a quiet prompt.
+    3. ``answer`` set -> the ask_docs grounded answer (prose) + its citation
+       cards (#1917). Wins over the plain ``cited`` branch so an answer is
+       never rendered as a bare chunk list.
+    4. ``cited`` non-empty -> one cited-chunk card each (the retrieve path).
+    5. ``searched`` true (a query ran, no error, no hits) -> "no results".
+    6. otherwise (initial render, no query yet) -> a quiet prompt.
 
   Context variables:
     query              -- str: the submitted query (for the heading + empty state)
@@ -37,6 +40,11 @@
                           ``corpus_ask_fallback_context``.
     ask_fallback_cause -- str | unset: the leg-scoped sub-cause classifier.
     ask_fallback_message -- str | unset: human detail of the answer failure.
+    answer             -- str | unset: the ask_docs grounded answer prose
+                          (#1917). When set, the answer card renders followed
+                          by its citation cards (``cited``); the deterministic
+                          "no grounded answer" string renders the same way with
+                          an empty citation list. Set only by the Ask mode.
 -#}
 {#- Shared cited-chunk card list, reused by the ``cited`` and ``ask_fallback``
     branches so the #1919 citation render lives in one place. -#}
@@ -105,6 +113,9 @@
   {% set ask_fallback_leg = ask_fallback_leg | default(none) %}
   {% set ask_fallback_cause = ask_fallback_cause | default(none) %}
   {% set ask_fallback_message = ask_fallback_message | default(none) %}
+  {# ``answer`` is only set by the Ask mode's success path (#1917); default it
+     so the search / initial-render paths don't trip an undefined. #}
+  {% set answer = answer | default(none) %}
   {% if error_status %}
     {# ---------- Typed error card (403 / 409 / 503 / 422) ---------- #}
     {% if error_status == 409 or error_status == 503 %}
@@ -148,6 +159,29 @@
       </div>
     </div>
     {% if cited %}
+      {{ chunk_cards(cited) }}
+    {% endif %}
+
+  {% elif answer is not none %}
+    {# ---------- ask_docs grounded answer + citations (#1917) ----------
+       The Ask-mode success path: a grounded, cited answer composed strictly
+       over the retrieved chunks (no claim without a citation). The answer
+       prose renders in its own card; the chunks it cited render below as the
+       same #1919 citation cards the retrieve path uses. An empty retrieval
+       yields the deterministic "no grounded answer" string with no citations
+       -- rendered the same way, never a hallucinated answer. #}
+    <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Grounded answer">
+      <div class="card-body py-4 space-y-2">
+        <h3 class="card-title text-sm font-semibold">
+          Answer{% if query %} for <em>&ldquo;{{ query }}&rdquo;</em>{% endif %}
+        </h3>
+        <p class="text-sm whitespace-pre-wrap">{{ answer }}</p>
+      </div>
+    </article>
+    {% if cited %}
+      <p class="text-sm opacity-70" aria-live="polite">
+        Grounded in {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
+      </p>
       {{ chunk_cards(cited) }}
     {% endif %}
 

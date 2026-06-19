@@ -77,6 +77,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1.ask_docs import run_ask_pipeline
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -91,6 +92,7 @@ from meho_backplane.docs_search import (
     CollectionDisabledError,
     CollectionForbiddenError,
     CollectionNotReadyError,
+    DocsAnswer,
     DocsChunk,
     MissingDocsFilterError,
     UnknownCollectionError,
@@ -128,6 +130,15 @@ _MAX_COLLECTION_LENGTH: Final[int] = 128
 #: ``search_docs`` request default; the page shows a single ranked list
 #: (pagination is a corpus follow-up, out of scope per #1777).
 _SEARCH_LIMIT: Final[int] = 10
+
+#: The two modes the corpus surface offers (#1917). ``search`` (the original
+#: #1777 behaviour) renders the raw ranked cited chunks over ``search_docs``;
+#: ``ask`` renders a grounded, cited answer over the ``ask_docs`` pipeline
+#: (expand → retrieve → synthesize) with a fail-open-to-chunks render on a
+#: synthesis failure. ``search`` is the default for any unrecognised value so
+#: a malformed ``mode`` form field degrades to the safe retrieve-only path.
+_MODE_SEARCH: Final[str] = "search"
+_MODE_ASK: Final[str] = "ask"
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
@@ -406,9 +417,15 @@ def build_corpus_search_router() -> APIRouter:
         session: UISessionContext = _require_session,
         collection: str = Form(default="", max_length=_MAX_COLLECTION_LENGTH),
         q: str = Form(default="", max_length=_MAX_QUERY_LENGTH),
+        mode: str = Form(default=_MODE_SEARCH, max_length=16),
     ) -> HTMLResponse:
-        """Run the search fragment (delegates to :func:`_render_corpus_search`)."""
-        return await _render_corpus_search(request, session, collection, q)
+        """Run the search / ask fragment (delegates to :func:`_render_corpus_search`).
+
+        ``mode`` selects between the original retrieve-only ``search`` path
+        and the ``ask`` grounded-answer path (#1917); any unrecognised value
+        falls back to ``search``.
+        """
+        return await _render_corpus_search(request, session, collection, q, mode)
 
     return router
 
@@ -442,6 +459,9 @@ async def _render_corpus_index(
         "collections": collections,
         "selected_collection": selected_collection,
         "query": "",
+        # Initial render defaults the mode toggle to retrieve-only ``search``
+        # (#1917); a submit echoes the operator's chosen ``mode`` back.
+        "mode": _MODE_SEARCH,
         "cited": [],
         "searched": False,
         "operator_sub": session.operator_sub,
@@ -488,51 +508,162 @@ async def _render_corpus_search(
     session: UISessionContext,
     collection: str,
     q: str,
+    mode: str,
 ) -> HTMLResponse:
-    """Run the HTMX search fragment for ``POST /ui/corpus/search``.
+    """Run the HTMX search / ask fragment for ``POST /ui/corpus/search``.
 
-    Swaps ``corpus/_results.html`` into ``#corpus-results``. A successful
-    search renders one card per chunk (content + a resolved navigable source
-    link with the human title as link text + formatted score, plus a collection
-    tag when present); an empty hit list renders a "no results" state; a 403 /
-    409 / 503 / 422 from the service renders a typed error card with the detail.
+    Swaps ``corpus/_results.html`` into ``#corpus-results``. Two modes (#1917):
+
+    * **search** (the original #1777 behaviour) -- one card per retrieved
+      chunk (content + a resolved navigable source link with the human title
+      as link text + formatted score, plus a collection tag); an empty hit
+      list renders "no results"; a 403 / 409 / 503 / 422 from the service
+      renders a typed error card.
+    * **ask** -- a grounded, cited **answer** over the ``ask_docs`` pipeline
+      (expand → retrieve → synthesize). On success the answer prose + its
+      citation cards render; on an answer-pipeline leg failure the render
+      **fails open to chunks** (the #1918 ``corpus_ask_fallback_context``
+      seam) -- the retrieved chunks under a banner naming the failed leg,
+      never an ungrounded answer; a 403 / 409 / 422 collection-access failure
+      still renders the same typed error card as search (the answer never
+      reached the pipeline).
 
     Each chunk's raw ``gs://`` ``source_url`` is resolved to a navigable
-    canonical link via :func:`_cited_chunks` (#1919) so the operator opens the
-    Broadcom KB article / original post rather than a dead object-store URL.
+    canonical link via :func:`_cited_chunks` (#1919). An unrecognised *mode*
+    degrades to ``search`` (the safe retrieve-only path).
 
     CSRF handling defers to :func:`_resolve_search_csrf`: the live session
-    token is reused (cookie left untouched) so the un-swapped search form's
+    token is reused (cookie left untouched) so the un-swapped form's
     ``hx-headers`` echo stays aligned with the cookie across repeated
-    searches; a missing / invalid cookie triggers a defensive re-mint +
-    re-set so the double-submit pair is restored.
+    submits; a missing / invalid cookie triggers a defensive re-mint + re-set
+    so the double-submit pair is restored.
     """
     query = q.strip()
     collection_key = collection.strip()
+    ask_mode = mode == _MODE_ASK
 
-    chunks: list[DocsChunk] = []
-    error_context: dict[str, object] = {}
+    result_context: dict[str, object] = {}
     if query:
         operator = await _resolve_operator(session)
-        try:
-            chunks = await _run_search(operator, query, collection_key)
-        except HTTPException as exc:
-            error_context = _search_or_error_context(exc)
+        if ask_mode:
+            result_context = await _ask_result_context(operator, query, collection_key)
+        else:
+            result_context = await _search_result_context(operator, query, collection_key)
 
     csrf_token, set_csrf = _resolve_search_csrf(request, str(session.session_id))
     context: dict[str, object] = {
         "collections": [],
         "selected_collection": collection_key,
         "query": query,
-        "cited": _cited_chunks(chunks),
+        "cited": [],
         "searched": bool(query),
         "csrf_token": csrf_token,
-        **error_context,
+        **result_context,
     }
     response = get_templates().TemplateResponse(request, "corpus/_results.html", context)
     if set_csrf:
         _set_csrf_cookie(response, csrf_token)
     return response
+
+
+async def _search_result_context(
+    operator: Operator,
+    query: str,
+    collection_key: str,
+) -> dict[str, object]:
+    """Build the retrieve-mode result context (cited chunks or a typed error)."""
+    try:
+        chunks = await _run_search(operator, query, collection_key)
+    except HTTPException as exc:
+        return _search_or_error_context(exc)
+    return {"cited": _cited_chunks(chunks)}
+
+
+async def _ask_result_context(
+    operator: Operator,
+    query: str,
+    collection_key: str,
+) -> dict[str, object]:
+    """Build the ask-mode result context: a grounded answer, or fail open.
+
+    Runs the in-process ``ask_docs`` pipeline
+    (:func:`~meho_backplane.api.v1.ask_docs.run_ask_pipeline`, the SAME
+    composition the Bearer-gated REST route fronts -- the session cookie
+    cannot auth that route, so the BFF composes the primitives in-process,
+    the established ``/ui/corpus`` pattern). Three outcomes:
+
+    * **collection-access failure** (missing / unknown / not-entitled /
+      disabled / not-ready ``collection``) -> the same typed 403 / 409 / 422
+      error card the search path renders. The answer pipeline never ran.
+    * **answer-pipeline leg failure** (:class:`AskDocsAnswerError` -- expand /
+      corpus / model / synthesis) -> **fail open to chunks** via
+      :func:`corpus_ask_fallback_context`: the chunks the pipeline managed to
+      retrieve, under a banner naming the failed leg (#1918). For an expand /
+      corpus leg there may be no chunks (the banner stands alone). The answer
+      stays fail-*closed* -- never an ungrounded synthesized answer.
+    * **success** -> the grounded ``answer`` + its citation cards (the #1919
+      cited-chunk shape).
+    """
+    # Validate the mandatory collection scope -- a missing / blank
+    # ``collection`` is the same mandatory-scope 422 the search path renders
+    # (an answer is never composed without a routable collection).
+    try:
+        docs_scope = build_docs_scope(collection_key or None)
+    except MissingDocsFilterError as exc:
+        return _search_or_error_context(
+            HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+        )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session, db_session.begin():
+        try:
+            collection = await _resolve_collection_or_http_error(
+                db_session, operator, docs_scope.collection_key
+            )
+        except HTTPException as exc:
+            return _search_or_error_context(exc)
+
+    try:
+        answer = await run_ask_pipeline(
+            operator,
+            query,
+            scope=docs_scope,
+            collection=collection,
+            limit=_SEARCH_LIMIT,
+        )
+    except AskDocsAnswerError as answer_error:
+        # Fail open: render whatever chunks the pipeline retrieved under a
+        # banner naming the failed leg, never an ungrounded answer. The
+        # in-process pipeline raises before handing back the retrieved chunks,
+        # so a leg failure surfaces the named-leg banner alone (richer
+        # chunk-preservation across the synthesis leg is a deliberate
+        # follow-up, not this task's scope); the seam already renders the
+        # banner-only case for the expand / corpus legs.
+        log.warning(
+            "ui_corpus_ask_pipeline_failed",
+            operator_sub=operator.sub,
+            collection=docs_scope.collection_key,
+            leg=answer_error.leg,
+            cause=answer_error.cause,
+        )
+        return corpus_ask_fallback_context(answer_error, [])
+
+    return _ask_answer_context(answer)
+
+
+def _ask_answer_context(answer: DocsAnswer) -> dict[str, object]:
+    """Build the success-path ask context: the grounded answer + citations.
+
+    ``answer`` is the prose (or the deterministic "no grounded answer" string
+    on an empty retrieval); ``cited`` is the cited-chunk subset paired with
+    resolved navigable links (#1919) -- the SAME ``[{chunk, link}]`` shape the
+    search path and the fail-open seam render, so ``_results.html`` reuses the
+    one citation card.
+    """
+    return {
+        "answer": answer.answer,
+        "cited": _cited_chunks(answer.citations),
+    }
 
 
 async def _run_search(operator: Operator, query: str, collection_key: str) -> list[DocsChunk]:

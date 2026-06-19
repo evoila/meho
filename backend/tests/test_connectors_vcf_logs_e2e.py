@@ -388,6 +388,116 @@ async def vrli_e2e_401_persists(
             reset_dispatcher_caches()
 
 
+@pytest.fixture
+async def vrli_e2e_440_recovery(
+    captured_events: list[Any],
+) -> AsyncIterator[_Vrli401RetryBundle]:
+    """vRLI setup that simulates a single 440 (session expired) on a downstream call.
+
+    Mirrors :func:`vrli_e2e_401_recovery` but the downstream
+    ``GET /api/v2/version`` returns vRLI's own **440** (``"Login
+    Timeout"`` / session-expired) on the first attempt, then 200. This is
+    the case observed live on v0.17.0 (#1909): vRLI idle-expires the
+    in-memory session, so the call after an idle gap returns 440. The
+    connector must treat 440 exactly like 401 — invalidate the cached
+    token, re-login via ``POST /api/v2/sessions``, retry once.
+    """
+    del captured_events
+
+    await _insert_vrli_descriptors()
+    target = await _seed_target()
+    instance = _resolve_connector()
+
+    async with respx.mock(
+        base_url=VRLI_CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        session_route = mock.post("/api/v2/sessions")
+        session_route.side_effect = [
+            httpx.Response(
+                200,
+                json={"sessionId": VRLI_CANARY_SESSION_ID, "ttl": 1800},
+            ),
+            httpx.Response(
+                200,
+                json={"sessionId": VRLI_CANARY_SESSION_REFRESH_ID, "ttl": 1800},
+            ),
+        ]
+        version_route = mock.get("/api/v2/version")
+        version_route.side_effect = [
+            httpx.Response(440, json={"errorMessage": "Login Timeout"}),
+            httpx.Response(
+                200,
+                json={
+                    "version": "9.0.0",
+                    "releaseName": "VMware Aria Operations for Logs 9.0",
+                    "buildNumber": "21761695",
+                },
+            ),
+        ]
+        try:
+            yield _Vrli401RetryBundle(
+                connector_instance=instance,
+                db_target=target,
+                session_route=session_route,
+                version_route=version_route,
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()
+
+
+@pytest.fixture
+async def vrli_e2e_440_persists(
+    captured_events: list[Any],
+) -> AsyncIterator[_Vrli401RetryBundle]:
+    """vRLI setup that returns 440 from the downstream call even after re-login.
+
+    The failure half of the 440 contract: a fresh session token that
+    still produces a 440 on the downstream call raises ``RuntimeError``
+    naming the target and the status rather than entering a retry loop —
+    same fast-fail posture as the second-401 case.
+    """
+    del captured_events
+
+    await _insert_vrli_descriptors()
+    target = await _seed_target()
+    instance = _resolve_connector()
+
+    async with respx.mock(
+        base_url=VRLI_CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        session_route = mock.post("/api/v2/sessions")
+        session_route.side_effect = [
+            httpx.Response(
+                200,
+                json={"sessionId": VRLI_CANARY_SESSION_ID, "ttl": 1800},
+            ),
+            httpx.Response(
+                200,
+                json={"sessionId": VRLI_CANARY_SESSION_REFRESH_ID, "ttl": 1800},
+            ),
+        ]
+        version_route = mock.get("/api/v2/version")
+        version_route.side_effect = [
+            httpx.Response(440, json={"errorMessage": "Login Timeout"}),
+            httpx.Response(440, json={"errorMessage": "Login Timeout"}),
+        ]
+        try:
+            yield _Vrli401RetryBundle(
+                connector_instance=instance,
+                db_target=target,
+                session_route=session_route,
+                version_route=version_route,
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -616,6 +726,90 @@ async def test_vrli_e2e_second_401_fails_with_runtime_error(
     )
     assert bundle.version_route.call_count == 2, (
         f"Expected GET /api/v2/version called twice (401 + retry-401); "
+        f"got call_count={bundle.version_route.call_count}"
+    )
+
+
+async def test_vrli_e2e_440_recovery_via_connector_method(
+    vrli_e2e_440_recovery: _Vrli401RetryBundle,
+) -> None:
+    """A 440 (session expired) triggers one re-login + one retry — the #1909 fix.
+
+    vRLI's ``trait.authenticated.440`` (*"the session ID has expired;
+    obtain a new session ID"*) is the status the appliance emits once it
+    idle-times out the in-memory session — observed live on v0.17.0 as a
+    200 on the first call then 440 on every later call until restart.
+    Before #1909 the connector keyed re-login strictly on 401 and
+    re-raised 440 unretried, so the session never recovered. This asserts
+    a 440 now drives the same invalidate -> re-login -> retry-once path
+    as a 401.
+
+    Assertions (identical to the 401-recovery contract):
+    * The call returns the version JSON successfully (retry succeeded).
+    * ``POST /api/v2/sessions`` called exactly twice (initial + post-440).
+    * ``GET /api/v2/version`` called exactly twice (440 + retry).
+    * Post-retry token cache holds the refreshed id, not the stale one.
+    """
+    bundle = vrli_e2e_440_recovery
+
+    result = await bundle.connector_instance._get_json_with_session_retry(
+        bundle.db_target,
+        "/api/v2/version",
+        operator=_OPERATOR,
+    )
+
+    assert result.get("version") == "9.0.0", (
+        f"Expected version='9.0.0' in retry result; got {result!r}"
+    )
+    assert bundle.session_route.call_count == 2, (
+        f"Expected session-create called twice (initial + post-440 relogin); "
+        f"got call_count={bundle.session_route.call_count}"
+    )
+    assert bundle.version_route.call_count == 2, (
+        f"Expected GET /api/v2/version called twice (440 + retry); "
+        f"got call_count={bundle.version_route.call_count}"
+    )
+    cached = bundle.connector_instance._session_tokens.get(target_cache_key(bundle.db_target))
+    assert cached == VRLI_CANARY_SESSION_REFRESH_ID, (
+        f"Expected post-retry token to be the refreshed id {VRLI_CANARY_SESSION_REFRESH_ID!r}; "
+        f"got cached token {cached!r}"
+    )
+
+
+async def test_vrli_e2e_second_440_fails_with_runtime_error(
+    vrli_e2e_440_persists: _Vrli401RetryBundle,
+) -> None:
+    """If the post-relogin retry also 440s, RuntimeError naming the target is raised.
+
+    The failure half of the 440 contract: a session that consistently
+    440s should fail fast rather than looping. Mirrors the second-401
+    posture verbatim, but the error names the 440 status.
+
+    Asserts:
+    * The connector raises ``RuntimeError``.
+    * The error message names the target.
+    * The error message references "440".
+    * Session-create called exactly twice (no third re-login attempt).
+    * Downstream GET called exactly twice (no third request).
+    """
+    bundle = vrli_e2e_440_persists
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await bundle.connector_instance._get_json_with_session_retry(
+            bundle.db_target,
+            "/api/v2/version",
+            operator=_OPERATOR,
+        )
+
+    msg = str(exc_info.value)
+    assert _E2E_TARGET_NAME in msg, f"Expected target name in error; got {msg!r}"
+    assert "440" in msg, f"Expected '440' in error; got {msg!r}"
+    assert bundle.session_route.call_count == 2, (
+        f"Expected session-create called twice (no third re-login attempt); "
+        f"got call_count={bundle.session_route.call_count}"
+    )
+    assert bundle.version_route.call_count == 2, (
+        f"Expected GET /api/v2/version called twice (440 + retry-440); "
         f"got call_count={bundle.version_route.call_count}"
     )
 

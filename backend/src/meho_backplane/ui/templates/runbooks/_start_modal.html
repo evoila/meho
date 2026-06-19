@@ -1,0 +1,161 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded start-run modal for the runbook runs surface. Loaded into
+  ``#runbook-runs-modal-container`` on the runs page by the "+ Start run"
+  button's ``hx-get`` to ``/ui/runbooks/runs/start``. The shared app-shell
+  modal controller (``app/modal-dialogs.js``) opens the inserted
+  ``<dialog class="modal">`` via ``showModal()`` on ``htmx:afterSwap`` so
+  the operator sees the modal without an extra click.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1884 (T1).
+
+  Submit flow: the form ``hx-post``s to ``POST /ui/runbooks/runs``.
+
+    * SUCCESS -> 204 with ``HX-Redirect: /ui/runbooks/runs/{run_id}`` --
+      HTMX navigates straight into the T2 run driver (the empty 204 body
+      makes the innerHTML swap a no-op; the redirect fires first).
+    * TYPED START ERROR (deprecated template / not found / missing
+      ``${run.params.X}``) -> a 200 re-render of THIS modal carrying an
+      inline ``alert-error`` (``error_message`` set). Because the form
+      targets ``#runbook-runs-modal-container`` with ``hx-swap="innerHTML"``,
+      the re-rendered modal replaces this one in place and the controller
+      re-opens it (a fresh, not-yet-open ``<dialog>`` node), so the operator
+      sees the message -- e.g. exactly which run.params key to supply -- and
+      can correct + resubmit without losing their place.
+
+  CSRF posture: the form declares its own ``hx-headers`` echo of the token
+  THIS render minted; the route sets the matching ``meho_csrf`` cookie on
+  the same response, so the double-submit pair always lines up (#1693).
+  Relying on the page-level token is not enough -- the modal render rotates
+  the cookie, so an inherited header would carry the stale list-render token
+  while the cookie carried the fresh one and the chassis CSRF middleware
+  would 403 the start POST (``value_mismatch``). On the typed-error
+  re-render the token is re-minted + cookie refreshed so the retry matches.
+-#}
+<dialog id="runbook-run-start-modal" class="modal">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="runbook-run-start-modal-title">Start a run</h3>
+    <p class="text-sm opacity-70 mt-1">
+      Begin a run on a published runbook template. You are assigned as the
+      run's operator.
+    </p>
+
+    <form
+      id="runbook-run-start-form"
+      hx-post="/ui/runbooks/runs"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#runbook-runs-modal-container"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="runbook-run-start-modal-title"
+    >
+      {#- Inline error banner. Populated on the typed-error re-render
+          (``error_message`` set) -- e.g. the missing-params message naming
+          which ``${run.params.X}`` the template needs. Absent on the
+          initial render. ``aria-live`` announces it to a screen reader. -#}
+      {% if error_message %}
+        <div class="alert alert-error" role="alert" aria-live="assertive">
+          <span>{{ error_message }}</span>
+        </div>
+      {% endif %}
+
+      <label class="form-control">
+        <span class="label-text">Template slug</span>
+        <input
+          type="text"
+          name="template_slug"
+          list="runbook-run-published-slugs"
+          required
+          maxlength="256"
+          class="input input-bordered input-sm font-mono"
+          placeholder="e.g. drain-node"
+          autocomplete="off"
+          aria-describedby="runbook-run-start-slug-hint"
+        />
+        {#- Published templates the tenant can run. A ``<datalist>`` is a
+            convenience picker -- free text is still accepted, and the
+            service resolves the slug to its latest published version. -#}
+        <datalist id="runbook-run-published-slugs">
+          {% for slug in published_slugs %}
+            <option value="{{ slug }}"></option>
+          {% endfor %}
+        </datalist>
+        <span id="runbook-run-start-slug-hint" class="text-xs opacity-60 mt-1">
+          {% if published_slugs %}
+            Pick a published template or type its slug.
+          {% else %}
+            No published templates yet -- publish one from the Templates tab first.
+          {% endif %}
+        </span>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Target</span>
+        <input
+          type="text"
+          name="target"
+          required
+          maxlength="512"
+          class="input input-bordered input-sm font-mono"
+          placeholder="the run's subject -- host, cluster, cert thumbprint"
+          autocomplete="off"
+          aria-describedby="runbook-run-start-target-hint"
+        />
+        <span id="runbook-run-start-target-hint" class="text-xs opacity-60 mt-1">
+          Substituted into the steps as <code>${run.target}</code>.
+        </span>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Params <span class="opacity-60">(optional, JSON object)</span></span>
+        <textarea
+          name="params"
+          maxlength="16384"
+          class="textarea textarea-bordered min-h-[8rem] font-mono text-sm"
+          placeholder='{"namespace": "prod", "replicas": 3}'
+          aria-describedby="runbook-run-start-params-hint"
+        ></textarea>
+        <span id="runbook-run-start-params-hint" class="text-xs opacity-60 mt-1">
+          A JSON object of <code>${run.params.X}</code> substitutions. Leave
+          blank for none.
+        </span>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text">Work ref <span class="opacity-60">(optional)</span></span>
+        <input
+          type="text"
+          name="work_ref"
+          maxlength="512"
+          class="input input-bordered input-sm font-mono"
+          placeholder="gh:evoila/meho#9, a Jira key, a CR id"
+          autocomplete="off"
+          aria-describedby="runbook-run-start-work-ref-hint"
+        />
+        <span id="runbook-run-start-work-ref-hint" class="text-xs opacity-60 mt-1">
+          The external change ticket this run executes under. Pinned on the
+          run and every step's audit row.
+        </span>
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          onclick="document.getElementById('runbook-run-start-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary">
+          Start run
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

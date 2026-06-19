@@ -60,8 +60,10 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.docs_search.service import (
     DocsChunk,
+    DocsScope,
     DocsSearchResult,
     _project_chunk,
+    search_docs,
 )
 from meho_backplane.retrieval.retriever import RRF_K
 
@@ -74,6 +76,7 @@ __all__ = [
     "CollectionScope",
     "ConflictingCollectionScopeError",
     "parse_collection_scope",
+    "retrieve_multi_query",
     "rrf_merge",
     "search_docs_fanout",
 ]
@@ -93,6 +96,15 @@ ALL_COLLECTIONS_SENTINEL: Final[str] = "all"
 #: backends (the win over a serial loop). Tuned conservatively — the
 #: federation backends are remote and per-collection ``limit``-bounded.
 _MAX_CONCURRENT_BACKENDS: Final[int] = 5
+
+#: Cap on simultaneous backend round-trips during a single-collection
+#: multi-query retrieve (:func:`retrieve_multi_query`). The variant count
+#: is already small (bounded by
+#: :data:`~meho_backplane.docs_search.expansion.MAX_QUERY_VARIANTS`), but
+#: the semaphore keeps the same bounded-concurrency posture as the
+#: cross-collection fan-out so every variant hits the *same* backend
+#: without an unbounded burst of concurrent connections.
+_MAX_CONCURRENT_QUERIES: Final[int] = 5
 
 
 class ConflictingCollectionScopeError(ValueError):
@@ -306,6 +318,84 @@ async def search_docs_fanout(
         "docs_search_fanout_completed",
         operator_sub=operator.sub,
         collections=[c.collection_key for c in collections],
+        hit_count=len(merged),
+    )
+    return DocsSearchResult(chunks=merged)
+
+
+async def retrieve_multi_query(
+    operator: Operator,
+    queries: list[str],
+    *,
+    scope: DocsScope,
+    collection: DocCollection,
+    limit: int = 10,
+) -> DocsSearchResult:
+    """Retrieve *queries* against one *collection* and RRF-merge the results.
+
+    The same-collection, multiple-query analogue of
+    :func:`search_docs_fanout` (which is one-query, multiple-collection):
+    each query variant is run through the shared single-collection
+    :func:`~meho_backplane.docs_search.service.search_docs` retrieval on the
+    **same** backend, concurrently but bounded by
+    :data:`_MAX_CONCURRENT_QUERIES`, then the per-variant ranked lists are
+    fused by :func:`rrf_merge` — rank-based, never a raw-score sort — and
+    truncated to *limit*. The ``ask_docs`` answer pipeline calls this with
+    the variants from
+    :func:`~meho_backplane.docs_search.expansion.expand_docs_query`.
+
+    A single-element ``queries`` list degenerates to one retrieval plus a
+    trivial (identity) fuse, so a useless expansion (only the original
+    question) costs exactly one backend round-trip — the same as the
+    pre-expansion path.
+
+    Chunks from a single collection carry ``collection=None``
+    (``search_docs`` does not tag provenance on the single-collection path),
+    so :func:`rrf_merge`'s ``(collection, chunk_id)`` key collapses to
+    ``(None, chunk_id)`` — i.e. the same chunk surfaced by several variants
+    is correctly deduplicated and rank-boosted, exactly as intended.
+
+    Args:
+        operator: The verified operator whose JWT the backend adapter
+            forwards.
+        queries: The query variants to retrieve (non-empty; the original
+            question is always one of them). Run independently on the same
+            backend.
+        scope: The validated binary scope (``collection_key`` + optional
+            product/version refinements) — identical for every variant.
+        collection: The resolved doc collection whose backend serves every
+            variant.
+        limit: The per-variant request cap **and** the merged-result cap.
+
+    Returns:
+        A :class:`DocsSearchResult` whose chunks are the RRF-fused hits
+        across all variants (best first).
+
+    Raises:
+        CorpusUnavailable: propagated from the backend — fail-closed: if the
+            collection's backend is unconfigured / unreachable for any
+            variant, the whole query is 503 rather than a partial fused
+            list. The surface maps it the same way the single-query path
+            does.
+    """
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_QUERIES)
+
+    async def _retrieve_one(variant: str) -> list[DocsChunk]:
+        async with semaphore:
+            result = await search_docs(
+                operator, variant, scope=scope, collection=collection, limit=limit
+            )
+        return list(result.chunks)
+
+    per_query: list[list[DocsChunk]] = await asyncio.gather(
+        *(_retrieve_one(variant) for variant in queries)
+    )
+    merged = rrf_merge(per_query, limit=limit)
+    _log.info(
+        "docs_search_multi_query_completed",
+        operator_sub=operator.sub,
+        collection_key=scope.collection_key,
+        variant_count=len(queries),
         hit_count=len(merged),
     )
     return DocsSearchResult(chunks=merged)

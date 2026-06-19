@@ -46,15 +46,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     ConnectorListItem,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
+    ConnectorScopeCandidate,
     DeleteConnectorResult,
     DeleteConnectorWarning,
     EditOpWarning,
 )
 from tests.mcp_test_fixtures import (
+    build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
@@ -98,6 +102,13 @@ class _FakeReviewService:
     #: a clean run that flipped two read-class ops.
     enable_reads_count: ClassVar[int] = 2
 
+    #: When set, :meth:`get_review_payload` / :meth:`enable_reads` raise
+    #: this instead of returning — class attribute for the same lazy-
+    #: construction reason as ``edit_op_warnings``, so the ambiguous-scope
+    #: mapping (#1910) can be exercised through the real handler. Default
+    #: ``None`` keeps the clean path.
+    raise_on_resolve: ClassVar[AmbiguousConnectorScopeError | None] = None
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -114,6 +125,8 @@ class _FakeReviewService:
         tenant_id: Any,
     ) -> ConnectorReviewPayload:
         self.review_calls.append((connector_id, tenant_id))
+        if self.raise_on_resolve is not None:
+            raise self.raise_on_resolve
         return ConnectorReviewPayload(
             connector_id=connector_id,
             product="vmware",
@@ -159,6 +172,8 @@ class _FakeReviewService:
 
     async def enable_reads(self, connector_id: str, **kwargs: Any) -> int:
         self.enable_reads_calls.append({"connector_id": connector_id, **kwargs})
+        if self.raise_on_resolve is not None:
+            raise self.raise_on_resolve
         return self.enable_reads_count
 
     async def disable_connector(self, connector_id: str, **_kwargs: Any) -> None:
@@ -970,3 +985,189 @@ def test_operator_role_cannot_call_tenant_admin_mutator(
     assert not stubbed_services["review"], (
         "operator role bypassed RBAC and reached the service layer"
     )
+
+
+# ---------------------------------------------------------------------------
+# AmbiguousConnectorScopeError → structured -32602 (#1910)
+#
+# When a connector_id maps to BOTH a tenant-curated row and a built-in
+# row, the shared resolver raises AmbiguousConnectorScopeError. The two
+# scope-resolving curation tools (review / enable_reads) must surface it
+# as a structured JSON-RPC -32602 carrying the candidate scopes on
+# error.data — the same envelope the REST 409 carries — rather than
+# falling through the dispatcher's generic catch-all to a bare
+# -32603 "internal error: AmbiguousConnectorScopeError" (the #1910
+# symptom). Mirrors the spec-error -32602 mapping (#777 / #1534).
+# ---------------------------------------------------------------------------
+
+
+def _ambiguous_scope_error() -> AmbiguousConnectorScopeError:
+    """Build the two-candidate (built-in + tenant) ambiguous-scope error.
+
+    Matches the shape ``ReviewService._resolve_existing_scope`` raises
+    when a label resolves to both a ``tenant_id IS NULL`` built-in row
+    and the operator's own tenant-curated row for the same parsed triple.
+    """
+    return AmbiguousConnectorScopeError(
+        connector_id="vrli-rest-9.0.2",
+        candidates=[
+            ConnectorScopeCandidate(
+                product="vrli",
+                version="9.0.2",
+                impl_id="vrli-rest",
+                tenant_id=None,
+            ),
+            ConnectorScopeCandidate(
+                product="vrli",
+                version="9.0.2",
+                impl_id="vrli-rest",
+                tenant_id=build_operator().tenant_id,
+            ),
+        ],
+    )
+
+
+def _assert_ambiguous_scope_envelope(data: dict[str, Any] | None) -> None:
+    """Assert the ``error.data`` envelope carries the disambiguation hint."""
+    assert data is not None
+    assert data["detail"] == "connector_scope_ambiguous"
+    assert data["connector_id"] == "vrli-rest-9.0.2"
+    # Both candidate scopes are surfaced so an agent can re-issue with the
+    # disambiguating tenant_id (null for built-in, the operator's UUID for
+    # the tenant row) — the structured form of the issue's "pass
+    # product/scope=X|Y" ask.
+    tenant_ids = {candidate["tenant_id"] for candidate in data["candidates"]}
+    assert None in tenant_ids
+    assert len(data["candidates"]) == 2
+
+
+async def test_review_handler_maps_ambiguous_scope_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_review_handler`` raises -32602 (not -32603) with the candidate list."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_on_resolve",
+        _ambiguous_scope_error(),
+    )
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    op = build_operator(TenantRole.OPERATOR)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ca_mod._review_handler(
+            op,
+            {"connector_id": "vrli-rest-9.0.2", "tenant_id": str(op.tenant_id)},
+        )
+
+    assert "ambiguous" in str(caught.value).lower()
+    _assert_ambiguous_scope_envelope(caught.value.data)
+
+
+async def test_enable_reads_handler_maps_ambiguous_scope_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_enable_reads_handler`` raises -32602 (not -32603) with the candidates."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_on_resolve",
+        _ambiguous_scope_error(),
+    )
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ca_mod._enable_reads_handler(
+            op,
+            {"connector_id": "vrli-rest-9.0.2", "tenant_id": str(op.tenant_id)},
+        )
+
+    assert "ambiguous" in str(caught.value).lower()
+    _assert_ambiguous_scope_envelope(caught.value.data)
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_review_ambiguous_scope_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.review`` on an ambiguous label.
+
+    The wire response is a JSON-RPC ``-32602`` (not the bare ``-32603``
+    the dispatcher catch-all would emit) carrying the candidate scopes on
+    ``error.data`` — proving the #1910 regression is closed at the MCP
+    boundary, not just at the handler.
+    """
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_on_resolve",
+        _ambiguous_scope_error(),
+    )
+    client, op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.review",
+                "arguments": {
+                    "connector_id": "vrli-rest-9.0.2",
+                    "tenant_id": str(op.tenant_id),
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    _assert_ambiguous_scope_envelope(body["error"].get("data"))
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_enable_reads_ambiguous_scope_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.enable_reads`` on an ambiguous label."""
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_on_resolve",
+        _ambiguous_scope_error(),
+    )
+    client, op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.enable_reads",
+                "arguments": {
+                    "connector_id": "vrli-rest-9.0.2",
+                    "tenant_id": str(op.tenant_id),
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    _assert_ambiguous_scope_envelope(body["error"].get("data"))

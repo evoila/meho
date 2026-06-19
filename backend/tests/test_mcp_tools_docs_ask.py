@@ -68,6 +68,14 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 #: factory propagates.
 _BUILD_LLM_CLIENT = "meho_backplane.docs_search.synthesis.build_anthropic_ingest_llm_client"
 
+#: Where the corpus-aware expand step (#1916) resolves its default LLM
+#: client. Distinct from the synthesis seam so a test can pin the expand
+#: client independently (or assert its fail-closed factory propagates).
+#: ``ask_docs`` now expands the question *before* retrieval, so every
+#: pipeline-reaching test must pin a working expand client — the autouse
+#: :func:`_default_expand_client` fixture does that by default.
+_BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ingest_llm_client"
+
 #: The corpus-http backend's transport seam — the function the
 #: ``corpus-http`` adapter actually calls.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
@@ -159,6 +167,25 @@ class _StubLlmClient:
         self.captured["user_prompt"] = user_prompt
         self.captured["max_output_tokens"] = max_output_tokens
         return self._raw
+
+
+@pytest.fixture(autouse=True)
+def _default_expand_client() -> Iterator[None]:
+    """Pin a working expand client for every ``ask_docs`` test (#1916).
+
+    ``ask_docs`` now runs the corpus-aware expand step before retrieval, and
+    the default expand client (``build_anthropic_ingest_llm_client``) fails
+    closed with no ``ANTHROPIC_API_KEY`` — which the test env never sets. So
+    without this fixture every pipeline-reaching test would 503 on the
+    expand leg before retrieval. The default stub proposes one extra variant
+    (so the happy-path corpus is hit twice — original + 1 variant — and the
+    RRF merge runs over two lists). A test that asserts expand behaviour or
+    its fail-closed posture re-patches ``_BUILD_EXPAND_CLIENT`` inside its
+    own ``with`` block, which wins because it is applied later.
+    """
+    stub = _StubLlmClient(json.dumps({"queries": ["VMware NSX configuration maximums"]}))
+    with patch(_BUILD_EXPAND_CLIENT, return_value=stub):
+        yield
 
 
 _SAMPLE_CHUNK = CorpusChunk(
@@ -727,3 +754,126 @@ async def test_tools_call_ask_docs_audit_row_carries_op_id_and_collection(
     assert payload["collection"] == "vmware"
     assert "logical switch maximums" not in json.dumps(payload)
     assert payload["params_hash"]
+
+
+# ---------------------------------------------------------------------------
+# tools/call — corpus-aware expand → multi-query retrieve → RRF (AC1/AC2)
+# ---------------------------------------------------------------------------
+
+
+def _fake_corpus_per_query(by_query: dict[str, list[CorpusChunk]]) -> Any:
+    """An async ``search_corpus`` stand-in returning per-query chunk lists.
+
+    Records every query it was called with (so a test can prove retrieval
+    ran once per expanded variant) and returns the chunk list keyed by that
+    query — letting a test exercise the real RRF merge over distinct
+    per-variant results.
+    """
+    queries: list[str] = []
+
+    async def _search(operator: Operator, query: str, **kwargs: Any) -> CorpusSearchResponse:
+        queries.append(query)
+        return CorpusSearchResponse(chunks=list(by_query.get(query, [])))
+
+    _search.queries = queries  # type: ignore[attr-defined]
+    return _search
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_expands_then_rrf_merges_per_variant(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """AC1/AC2: ``ask_docs`` retrieves per expanded variant and RRF-merges.
+
+    The expand client (corpus-aware) proposes one extra, domain-term variant
+    alongside the original question. Retrieval runs once per variant — each
+    returning a *distinct* chunk plus a shared one — and the RRF merge fuses
+    them so the answer can ground on a chunk only the expanded variant found
+    (the recall win expansion exists for). The expansion prompt carries the
+    collection's manifest product token (corpus-awareness).
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+
+    original = "logical switch maximums"
+    variant = "VMware NSX configuration maximums"
+    # Distinct top hit per variant + one shared chunk → exercises the merge.
+    corpus = _fake_corpus_per_query(
+        {
+            original: [_SAMPLE_CHUNK],
+            variant: [_SECOND_CHUNK],
+        }
+    )
+    expand_stub = _StubLlmClient(json.dumps({"queries": [variant]}))
+    # Synthesis cites the chunk that ONLY the expanded variant retrieved —
+    # provable only if the merge actually included it.
+    synth_stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 1,000 transport nodes per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0008"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand_stub),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": original, "collection": "vmware"}, call_id=20),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+
+    # Retrieval ran once per variant (original + the expanded one).
+    assert sorted(corpus.queries) == sorted([original, variant])  # type: ignore[attr-defined]
+    # The answer grounded on the chunk only the expanded variant found —
+    # proof the per-variant lists were RRF-merged before synthesis.
+    assert [c["chunk_id"] for c in payload["citations"]] == ["nsx-9.0-maximums-0008"]
+    # Corpus-aware: the manifest product token reached the expansion prompt.
+    assert "nsx" in expand_stub.captured["user_prompt"]
+    assert "VMware by Broadcom" in expand_stub.captured["user_prompt"]
+    # Synthesis answered the operator's ORIGINAL question (variants only
+    # widened retrieval).
+    assert original in synth_stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_unconfigured_expand_model_is_internal_error(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """AC3: an unconfigured expand model fails closed → ``-32603``.
+
+    Expansion reuses the #1386 fail-closed client. With no expand model
+    configured it raises ``LlmClientUnavailable`` *before* retrieval, which
+    bubbles to ``-32603`` (the MCP analogue of 503). We never fall back to
+    retrieving on the raw question and returning a silently un-expanded
+    answer — the same fail-closed posture as synthesis. Neither retrieval
+    nor synthesis is reached.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    synth_stub = _StubLlmClient('{"answer": "unused", "cited_chunk_ids": []}')
+
+    def _fail_closed() -> Any:
+        raise LlmClientUnavailable("no ANTHROPIC_API_KEY configured")
+
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, side_effect=_fail_closed),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=21),
+        )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    # Expansion failed before retrieval or synthesis ran.
+    assert "query" not in corpus.captured  # type: ignore[attr-defined]
+    assert synth_stub.captured == {}

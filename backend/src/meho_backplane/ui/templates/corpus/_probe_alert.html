@@ -1,0 +1,33 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus collection re-probe / lifecycle failure alert fragment
+  (Initiative #1836 Task #1883). Returned in place of the readiness card when
+  a re-probe maps to 503 (``CorpusUnavailable`` -- backend unreachable, row
+  status left UNCHANGED via success-only write-back) or 409
+  (``DocCollectionStateError`` -- e.g. probing a disabled collection), and
+  when an enable / disable hits a forbidden ``invalid_collection_transition``.
+
+  The wrapper keeps the same ``id="collection-readiness-card"`` so a follow-up
+  successful re-probe (after the operator fixes the underlying state) swaps
+  the real card back into the same slot via the same
+  ``hx-target="#collection-readiness-card"`` selector. Mirrors the connectors
+  ``_probe_alert.html``.
+
+  Context contract:
+    * ``title``   -- str: the alert heading.
+    * ``message`` -- str: the human-readable remediation text.
+-#}
+<article
+  id="collection-readiness-card"
+  class="card border-warning border bg-warning/10 shadow-sm"
+  aria-label="Collection action failure"
+>
+  <div class="card-body space-y-1">
+    <div role="alert" class="space-y-1">
+      <h2 class="card-title text-sm text-warning">{{ title }}</h2>
+      <p class="text-xs whitespace-pre-line">{{ message }}</p>
+    </div>
+  </div>
+</article>

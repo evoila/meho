@@ -31,14 +31,18 @@ The same `search_docs` service backs four consumers: the REST route
 #1526). They share one service so the REQUIRE_FILTERS gate and the
 cited-chunk shape are defined exactly once.
 
-`ask_docs` is the **synthesis fast-follow**: where `search_docs` returns
-the raw cited chunks, `ask_docs` runs the *same* retrieval and then
-composes one grounded answer over those chunks, returning
-`{answer, citations[]}`. The grounding contract is enforced in code, not
-just in the prompt — no claim survives without a citation that resolves
-to a retrieved chunk, an empty retrieval returns a deterministic "no
-grounded answer" (never a guess), and an unconfigured synthesis model
-fails closed rather than degrading to an ungrounded answer.
+`ask_docs` is the **answer pipeline**: where `search_docs` returns the raw
+cited chunks, `ask_docs` runs a corpus-aware **expand** step, retrieves per
+expanded variant, RRF-merges the chunks, and then composes one grounded
+answer over them, returning `{answer, citations[]}`. The pipeline is
+**expand → retrieve (per variant) → RRF-merge → synthesize** (#1916). The
+grounding contract is enforced in code, not just in the prompt — no claim
+survives without a citation that resolves to a retrieved chunk, an empty
+retrieval returns a deterministic "no grounded answer" (never a guess), and
+an unconfigured **expand or synthesis** model fails closed rather than
+degrading to an un-expanded / ungrounded answer. The expand step is the
+answer-pipeline's job only — `search_docs` (the raw-chunks tool) is
+unchanged.
 
 ## Key types
 
@@ -209,6 +213,64 @@ entitled, ready collection). Three pieces back it:
 
 `ask_docs` stays single-collection permanently (#1548 decision 2) and
 rejects both fan-out shapes before any retrieval.
+
+### `expand_docs_query(query, collection, *, llm_client=None)` (`meho_backplane.docs_search.expansion`, #1916)
+
+The corpus-aware **expand** step the `ask_docs` answer pipeline runs
+*before* retrieval (and `search_docs`, the raw-chunks tool, deliberately
+does **not** — expansion is the answer-pipeline's job only). A terse /
+acronym-heavy operator question ("NSX maximums") under-retrieves against a
+corpus that spells the term out ("VMware NSX configuration maximums"), so
+this step rewrites the question into a small set of query variants:
+
+- **Bounded N.** The returned list always *leads with the operator's
+  original question* and adds model-proposed rewrites, capped at
+  `MAX_QUERY_VARIANTS` (4, original + 3). Expansion can only *widen* recall
+  — the literal query is never dropped, so a useless model degrades to
+  retrieving on the original alone (one backend round-trip, the pre-expand
+  cost). Blank / duplicate rewrites and a re-cast of the original are
+  deduplicated (case-insensitive, whitespace-collapsed).
+- **Corpus-aware.** The collection's manifest fields — `vendor` /
+  `products` / `description` / `when_to_use`, read straight off the
+  resolved `DocCollection` (no new table, no schema change; the data
+  already existed, it was just never put in front of a model) — are framed
+  into the expansion prompt, so the model expands acronyms and product
+  synonyms in the corpus's own domain terms. Empty optional fields are
+  omitted rather than framed as bare `None` lines.
+- **Fail-closed, like synthesis.** It reuses the **same** #1386 fail-closed
+  Anthropic Messages client (`build_anthropic_ingest_llm_client`) via the
+  shared `LlmClient` Protocol. No `ANTHROPIC_API_KEY` raises
+  `LlmClientUnavailable`; a model that returns non-JSON or a wrong shape
+  raises `DocsQueryExpansionError`. Neither is caught in the handler — both
+  bubble to `-32603` (the MCP analogue of 503). The pipeline never silently
+  skips expansion and answers on the raw question alone.
+
+`DocsQueryExpansionError` is a **distinct** exception type (not
+`DocsSynthesisError`, not a bare `RuntimeError`) so a later structured
+answer-error envelope (#1918) can attribute a failure to the `expand` leg
+(`expand_failed`) specifically rather than a generic catch-all.
+
+Substrate stays dumb (#1177 / #1178): this module only frames the manifest
++ question into a prompt and validates the returned variants. No DSL, no
+per-collection weighting, no tunable knob — the LLM does the expansion and
+`MAX_QUERY_VARIANTS` is a fixed constant.
+
+### `retrieve_multi_query(operator, queries, *, scope, collection, limit=10)` (`meho_backplane.docs_search.fanout`, #1916)
+
+The same-collection, multiple-query analogue of `search_docs_fanout`
+(which is one-query, multiple-collection). Given the variants
+`expand_docs_query` produced, it runs the shared single-collection
+`search_docs` retrieval once per variant on the **same** backend
+(concurrently, bounded by a semaphore — same posture as the
+cross-collection fan-out) and merges the per-variant ranked lists with the
+**same `rrf_merge`** the cross-collection path uses (rank-based, house
+`RRF_K=60`, never a raw-score sort). Single-collection chunks carry
+`collection=None`, so the `(collection, chunk_id)` RRF key collapses to
+`(None, chunk_id)` — the same chunk surfaced by several variants is
+correctly deduplicated and rank-boosted. A single-variant list degenerates
+to one retrieval plus a trivial fuse. `CorpusUnavailable` from the backend
+propagates unchanged (fail-closed: one down backend → 503, not a partial
+list), exactly like the single-query path.
 
 ### `synthesize_docs_answer(query, retrieval, *, llm_client=None)` (`meho_backplane.docs_search.synthesis`, T7 #1526)
 
@@ -382,14 +444,16 @@ the same strict `inputSchema` (`additionalProperties: false`, required
 50). It is absent from `tools/list` and 403-class on `tools/call` for an
 unprovisioned tenant exactly like `search_docs`.
 
-The handler mirrors `search_docs`'s error arms and adds the synthesis arm:
-`build_docs_scope` + the shared gate enforce the collection scope
-(`MissingDocsFilterError` / unknown / not-entitled → `-32602`);
+The handler runs the **expand → retrieve-per-variant → RRF → synthesize**
+pipeline (#1916) and mirrors `search_docs`'s error arms plus the expand +
+synthesis arms: `build_docs_scope` + the shared gate enforce the collection
+scope (`MissingDocsFilterError` / unknown / not-entitled → `-32602`);
 `CorpusUnavailable` from retrieval and a not-ready collection bubble to
-`-32603`; and the
-synthesis failures (`LlmClientUnavailable` for an unconfigured model,
+`-32603`; and the LLM-leg failures (`LlmClientUnavailable` for an
+unconfigured expand *or* synthesis model — both reuse the #1386 client;
+`DocsQueryExpansionError` for an unusable expansion;
 `DocsSynthesisError` for a broken grounding contract) also bubble to
-`-32603` — never an ungrounded 200. It stays `op_class="read"`: it
+`-32603` — never an un-expanded / ungrounded 200. It stays `op_class="read"`: it
 composes over retrieved chunks, it never mutates the corpus. The
 dispatcher writes one `audit_log` row per call with `op_id="meho.docs.ask"`
 (the handler binds `audit_op_id`, lifted into the persisted row — uniform
@@ -534,8 +598,10 @@ Because the divergence is invisible without help, every surface now emits an
 - No local indexing — federation only. MEHO gains no Qdrant dependency
   and does not absorb the corpus into its own substrate.
 - `ask_docs` is **single-shot** Q→cited-A only — no multi-turn /
-  conversational follow-up, and no re-ranking or weighting beyond what T3
-  retrieval returns (binary scope only, per #1177).
+  conversational follow-up. The corpus-aware expand step (#1916) widens
+  recall via bounded multi-query + RRF, but there is still no per-collection
+  *weighting* or tunable ranking knob (binary scope + rank-based RRF only,
+  per #1177 / #1178) — the LLM does the expansion, the merge is deterministic.
 
 ## References
 
@@ -549,6 +615,10 @@ Because the divergence is invisible without help, every surface now emits an
   (`base.py` ABC, `corpus_http.py` first adapter, `registry.py`,
   `resolver.py`). Registry/ABC/resolver precedent:
   `backend/src/meho_backplane/connectors/` (registry + base + resolver).
+- Corpus-aware expand (#1916): `backend/src/meho_backplane/docs_search/expansion.py`
+  (`expand_docs_query`, `DocsQueryExpansionError`, `MAX_QUERY_VARIANTS`);
+  multi-query retrieve + RRF merge: `retrieve_multi_query` in
+  `backend/src/meho_backplane/docs_search/fanout.py`.
 - Synthesis (`ask_docs`): `backend/src/meho_backplane/docs_search/synthesis.py`.
 - MCP tools (`search_docs` + `ask_docs`): `backend/src/meho_backplane/mcp/tools/docs.py`.
 - Fail-closed LLM client precedent (#1386):

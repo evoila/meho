@@ -1,0 +1,35 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks surface sub-tab nav: Templates (``/ui/runbooks``) vs Runs
+  (``/ui/runbooks/runs``). Both views share the single ``runbooks``
+  sidebar entry (the Initiative #1837 recommendation -- keep the sidebar
+  stable), so this DaisyUI ``tabs`` row is the in-surface switch between
+  the template catalog (authoring, G10.6) and the run lifecycle (G10.11).
+
+  ``active_tab`` ("templates" / "runs") marks the current tab; it defaults
+  to "templates" so the catalog page need not set it explicitly. The links
+  are plain navigations (a direct GET renders the full page); ``role=tab``
+  + ``aria-selected`` carry the active state to assistive tech (DaisyUI's
+  ``tab-active`` is the visual cue, never the only one -- WCAG 1.4.1).
+-#}
+{% set _active_tab = active_tab | default("templates") %}
+<div role="tablist" class="tabs tabs-bordered" aria-label="Runbooks views">
+  <a
+    role="tab"
+    href="/ui/runbooks"
+    class="tab{% if _active_tab == 'templates' %} tab-active{% endif %}"
+    {% if _active_tab == 'templates' %}aria-selected="true" aria-current="page"{% else %}aria-selected="false"{% endif %}
+  >
+    Templates
+  </a>
+  <a
+    role="tab"
+    href="/ui/runbooks/runs"
+    class="tab{% if _active_tab == 'runs' %} tab-active{% endif %}"
+    {% if _active_tab == 'runs' %}aria-selected="true" aria-current="page"{% else %}aria-selected="false"{% endif %}
+  >
+    Runs
+  </a>
+</div>

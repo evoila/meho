@@ -109,9 +109,11 @@ from meho_backplane.docs_search import (
     UnknownCollectionError,
     build_docs_scope,
     citation_link_payload,
+    expand_docs_query,
     parse_collection_scope,
     resolve_entitled_ready_collection,
     resolve_entitled_ready_collections,
+    retrieve_multi_query,
     search_docs,
     search_docs_fanout,
     synthesize_docs_answer,
@@ -476,14 +478,27 @@ async def _ask_docs_handler(
 ) -> dict[str, Any]:
     """Answer a vendor-document question with a grounded, cited answer.
 
-    The synthesis fast-follow to ``search_docs``: it runs the **same**
-    shared retrieval (so the collection scope gate, per-collection
-    entitlement, backend routing, and forwarded-JWT audit are enforced in
-    exactly one place), then composes a single answer grounded strictly in
-    the retrieved chunks via
-    :func:`~meho_backplane.docs_search.synthesize_docs_answer`. Returns
-    ``{answer, citations[]}`` where every citation is a chunk the retrieval
-    returned and the model relied on — no claim without a citation.
+    The synthesis fast-follow to ``search_docs``, with a corpus-aware
+    **expand** step in front of retrieval (#1916). The pipeline is:
+
+    1. **Expand** — :func:`~meho_backplane.docs_search.expand_docs_query`
+       rewrites the question into a small set of query variants grounded in
+       the collection's manifest (``vendor`` / ``products`` / ``description``
+       / ``when_to_use``), so a terse / acronym-heavy question retrieves in
+       the corpus's own domain terms. The original question is always one of
+       the variants.
+    2. **Retrieve** — :func:`~meho_backplane.docs_search.retrieve_multi_query`
+       runs the shared single-collection retrieval once per variant on the
+       same backend (scope gate, entitlement, routing, and forwarded-JWT
+       audit still enforced in one place) and RRF-merges the chunks.
+    3. **Synthesize** — :func:`~meho_backplane.docs_search.synthesize_docs_answer`
+       composes one answer grounded strictly in the merged chunks, answering
+       the operator's *original* question.
+
+    Returns ``{answer, citations[]}`` where every citation is a chunk the
+    retrieval returned and the model relied on — no claim without a citation.
+    The expand step is the **answer-pipeline's** job only: ``search_docs``
+    (the raw-chunks tool) is unchanged.
 
     ``ask_docs`` is **single-collection only** (#1548 decision 2): cross-
     collection synthesis is permanently out of scope. A fan-out attempt —
@@ -493,35 +508,28 @@ async def _ask_docs_handler(
     corpora.
 
     Error arms mirror ``search_docs``'s single-collection path, plus the
-    synthesis arm:
+    expand + synthesis arms:
 
-    * **Fan-out attempt** (``collections`` / ``collection="all"``) — mapped
-      to :class:`McpInvalidParamsError` (``-32602``): ``ask_docs`` is
-      single-collection only.
-    * **Missing/blank or unknown / not-entitled / disabled ``collection``**
-      — mapped to :class:`McpInvalidParamsError` (``-32602``) by
+    * **Fan-out attempt** (``collections`` / ``collection="all"``) /
+      **missing / unknown / not-entitled / disabled ``collection``** — mapped
+      to :class:`McpInvalidParamsError` (``-32602``) by
+      :func:`_parse_scope_or_invalid_params` /
       :func:`_build_scope_or_invalid_params` /
-      :func:`_resolve_collection_or_error` (the MCP analogue of the route's
-      422 / 403). A disabled collection carries
-      ``error.data.reason='collection_disabled'`` — a terminal,
-      client-actionable rejection distinct from the retryable not-ready
-      ``-32603`` below. The inputSchema's ``required`` list catches the
-      missing case first for a schema-validating client.
-    * **Transiently not-ready collection / corpus unavailable** —
-      :class:`~meho_backplane.docs_search.CollectionNotReadyError`
-      (``provisioning`` / ``rebuilding``) and
-      :class:`~meho_backplane.auth.corpus.CorpusUnavailable` are *not*
-      caught; they bubble to ``-32603`` (a down / not-serving-yet backend is
-      a server fault the agent can retry).
-    * **Synthesis model unconfigured / unreachable** —
-      :class:`~meho_backplane.operations.ingest.LlmClientUnavailable` (and
-      :class:`~meho_backplane.docs_search.DocsSynthesisError` for a model
-      that ran but broke the grounding contract) are likewise *not* caught;
-      they bubble to ``-32603``. We never degrade to an ungrounded answer —
-      a fail-closed 503-analogue is the correct posture for a grounded-
-      reference add-on. An empty retrieval is handled inside the synthesis
-      helper, which returns a deterministic "no grounded answer" *without*
-      calling the model.
+      :func:`_resolve_collection_or_error` (the MCP analogue of 422 / 403;
+      a disabled collection carries ``error.data.reason='collection_disabled'``).
+    * **Transiently not-ready collection / corpus unavailable** — not caught;
+      they bubble to ``-32603`` (a down / not-serving-yet backend is a
+      retryable server fault).
+    * **Expand or synthesis LLM leg fails** — not caught; bubbles to
+      ``-32603``. ``LlmClientUnavailable`` (no model — both legs reuse the
+      same #1386 client), :class:`~meho_backplane.docs_search.DocsQueryExpansionError`
+      (expand output unusable), and
+      :class:`~meho_backplane.docs_search.DocsSynthesisError` (synthesis broke
+      the grounding contract) all fail closed — never an un-expanded /
+      ungrounded answer. The expand vs synthesis exception types are distinct
+      so a later structured answer-error envelope (#1918) can name the failed
+      leg. An empty retrieval short-circuits inside the synthesis helper to a
+      deterministic "no grounded answer" *without* a model call.
     """
     # Same canonical-op_id + collection binding as ``search_docs`` —
     # ``ask_docs`` audit rows are filterable by ``op_id="meho.docs.ask"``
@@ -548,7 +556,19 @@ async def _ask_docs_handler(
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
     collection = await _resolve_collection_or_error(operator, scope, tool="ask_docs")
 
-    retrieval = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
+    # Corpus-aware expand step (#1916): rewrite the question into a small set
+    # of query variants grounded in the collection's manifest, retrieve per
+    # variant on the same backend, and RRF-merge the chunks before synthesis.
+    # ``expand_docs_query`` fails closed on an unconfigured model
+    # (``LlmClientUnavailable``) exactly like synthesis — never an
+    # un-expanded, ungrounded answer — and a malformed expansion raises the
+    # distinguishable ``DocsQueryExpansionError`` (both bubble to -32603).
+    variants = await expand_docs_query(query, collection)
+    retrieval = await retrieve_multi_query(
+        operator, variants, scope=scope, collection=collection, limit=limit
+    )
+    # Synthesis grounds on the merged chunks but answers the operator's
+    # *original* question (the variants only widened retrieval).
     answer = await synthesize_docs_answer(query, retrieval)
     return {
         "answer": answer.answer,

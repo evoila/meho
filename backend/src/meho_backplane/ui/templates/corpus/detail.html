@@ -1,0 +1,175 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus per-collection detail page (Initiative #1836 Task #1883).
+  Extends ``base.html`` so the chrome matches the rest of the console; sets
+  ``active_surface="corpus"`` so the sidebar highlight stays on the corpus
+  surface (the same surface the Collections table lives under).
+
+  Layout (top-down):
+    * Breadcrumb back to the Collections table + the collection identity
+      header (key / vendor / products).
+    * The readiness card (``_readiness_card.html``) hosting the re-probe
+      action -- swap target ``#collection-readiness-card``.
+    * The lifecycle actions (Enable / Disable) -- tenant_admin only; Disable
+      opens the destructive-action confirm modal, Enable is a plain confirmed
+      button (non-destructive).
+    * The backend ``{type, ref}`` card -- SERVER-SIDE-ONLY (#1548), rendered
+      ONLY when ``is_tenant_admin``. A plain operator never sees the ``ref``.
+
+  Context contract (set by ``detail._render_detail``):
+    * ``collection``      -- dict: the projected full read shape.
+    * ``is_tenant_admin`` -- bool: gates the actions + the backend card.
+    * ``csrf_token``      -- str: minted double-submit token.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ collection.collection_key }} &middot; Collections &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  {# ---------- Breadcrumb + identity header ---------- #}
+  <nav aria-label="Breadcrumb" class="text-xs opacity-70">
+    <a href="/ui/corpus" class="link link-hover">Docs Corpus</a>
+    <span aria-hidden="true">/</span>
+    <a href="/ui/corpus/collections" class="link link-hover">Collections</a>
+    <span aria-hidden="true">/</span>
+    <span class="font-mono">{{ collection.collection_key }}</span>
+  </nav>
+
+  <header class="flex flex-wrap items-baseline justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold font-mono">{{ collection.collection_key }}</h1>
+      <p class="text-sm opacity-70">
+        {% if collection.vendor %}<span>{{ collection.vendor }}</span>{% endif %}
+        {% if collection.products %}
+          <span class="opacity-50">&middot;</span>
+          {% for product in collection.products %}
+            <span class="badge badge-outline badge-sm">{{ product }}</span>
+          {% endfor %}
+        {% endif %}
+      </p>
+    </div>
+
+    {# Lifecycle actions -- tenant_admin only. The Enable / Disable routes
+       re-check the role server-side via ``resolve_operator_or_403`` (403 for
+       a non-admin); this hide is the UX affordance, not the security gate.
+       Disable is availability-destructive -> opens a confirm modal; Enable is
+       non-destructive -> a plain confirmed button. #}
+    {% if is_tenant_admin %}
+      <div class="flex items-center gap-2">
+        {% if collection.status == "disabled" %}
+          <button
+            type="button"
+            class="btn btn-outline btn-sm"
+            hx-post="/ui/corpus/collections/{{ collection.collection_key | urlencode }}/enable"
+            hx-disabled-elt="this"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            aria-label="Enable {{ collection.collection_key }}"
+          >
+            Enable
+          </button>
+        {% else %}
+          <button
+            type="button"
+            class="btn btn-outline btn-error btn-sm"
+            hx-get="/ui/corpus/collections/{{ collection.collection_key | urlencode }}/disable"
+            hx-target="#corpus-collection-modal-container"
+            hx-swap="innerHTML"
+            aria-label="Disable {{ collection.collection_key }}"
+          >
+            Disable
+          </button>
+        {% endif %}
+      </div>
+    {% endif %}
+  </header>
+
+  {# HTMX modal mount point -- the disable confirm modal is swapped in here;
+     the shared modal controller opens the inserted ``<dialog>`` via
+     ``showModal()`` on swap (#1803). #}
+  <div id="corpus-collection-modal-container"></div>
+
+  <div class="grid gap-4 lg:grid-cols-2">
+    {# ---------- Column 1 -- readiness ---------- #}
+    <div class="space-y-4">
+      {% include "corpus/_readiness_card.html" %}
+    </div>
+
+    {# ---------- Column 2 -- identity + (admin-only) backend ---------- #}
+    <div class="space-y-4">
+      <article
+        class="card bg-base-100 border-base-300 border shadow-sm"
+        aria-label="Collection properties"
+      >
+        <div class="card-body space-y-2">
+          <h2 class="card-title text-base">Properties</h2>
+          <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+            <dt class="opacity-60">id</dt>
+            <dd class="font-mono text-xs">{{ collection.id }}</dd>
+            <dt class="opacity-60">collection_key</dt>
+            <dd class="font-mono">{{ collection.collection_key }}</dd>
+            <dt class="opacity-60">vendor</dt>
+            <dd>{{ collection.vendor }}</dd>
+            <dt class="opacity-60">products</dt>
+            <dd>
+              {% if collection.products %}
+                {{ collection.products | join(", ") }}
+              {% else %}
+                <span class="opacity-50">&mdash;</span>
+              {% endif %}
+            </dd>
+            <dt class="opacity-60">scope</dt>
+            <dd>{{ "tenant" if collection.tenant_id is not none else "global" }}</dd>
+            <dt class="opacity-60">created_at</dt>
+            <dd class="text-xs">{{ collection.created_at.isoformat() }}</dd>
+            <dt class="opacity-60">updated_at</dt>
+            <dd class="text-xs">{{ collection.updated_at.isoformat() }}</dd>
+          </dl>
+          {% if collection.description %}
+            <div class="mt-1">
+              <h3 class="text-xs font-semibold uppercase opacity-60">Description</h3>
+              <p class="text-sm whitespace-pre-line">{{ collection.description }}</p>
+            </div>
+          {% endif %}
+          {% if collection.when_to_use %}
+            <div class="mt-1">
+              <h3 class="text-xs font-semibold uppercase opacity-60">When to use</h3>
+              <p class="text-sm whitespace-pre-line">{{ collection.when_to_use }}</p>
+            </div>
+          {% endif %}
+        </div>
+      </article>
+
+      {# ---------- Backend card -- SERVER-SIDE-ONLY (#1548) ----------
+         The backend ``{type, ref}`` routing record is server-side-only: it is
+         omitted from the agent-facing summary and rendered ONLY on the
+         tenant_admin detail page. A plain operator must never see the ``ref``
+         value (it can carry a backend endpoint / credentials hint). #}
+      {% if is_tenant_admin %}
+        <article
+          id="collection-backend-card"
+          class="card bg-base-100 border-base-300 border shadow-sm"
+          aria-label="Collection backend"
+        >
+          <div class="card-body space-y-2">
+            <h2 class="card-title text-base">Backend</h2>
+            <p class="text-xs opacity-60">
+              Server-side routing record &mdash; visible to tenant admins only.
+            </p>
+            <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+              <dt class="opacity-60">type</dt>
+              <dd class="font-mono">{{ collection.backend.get("type", "—") }}</dd>
+            </dl>
+            <details class="mt-1">
+              <summary class="cursor-pointer text-xs opacity-70">Backend ref JSON</summary>
+              <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ collection.backend.get("ref", {}) | tojson(indent=2) }}</pre>
+            </details>
+          </div>
+        </article>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

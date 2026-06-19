@@ -1,0 +1,135 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook runs page: the "Runs" tab on the runbooks surface. A
+  role-scoped runs list (OPERATOR sees their own runs, TENANT_ADMIN sees
+  every tenant run) plus a "+ Start run" button that HTMX-loads the
+  start-run modal.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1884 (T1).
+
+  Sub-tab nav: this surface shares the ``runbooks`` sidebar entry with the
+  template catalog (``/ui/runbooks``); a DaisyUI ``tabs`` row switches
+  between "Templates" and "Runs" so the sidebar stays stable (the
+  Initiative recommendation). ``active_tab`` marks the current tab.
+
+  HTMX wiring:
+    * Status select: ``hx-trigger="change"`` fires ``GET /ui/runbooks/runs``
+      with the current filter values, swapping ``#runbook-runs-list``.
+    * Assignee input (admin only): ``hx-trigger="keyup changed delay:300ms"``
+      so a keystroke that does not change the value does not fire.
+    * Both controls ``hx-include`` the sibling filter so the server sees
+      every value on each request, and ``hx-push-url`` keeps the URL in
+      sync (a filtered view is copy/paste reproducible).
+    * The "+ Start run" button ``hx-get``s the modal into the stable
+      ``#runbook-runs-modal-container``; the shared app-shell modal
+      controller (``app/modal-dialogs.js``) opens the swapped-in
+      ``<dialog>`` via ``showModal()`` on ``htmx:afterSwap``.
+
+  Template blocks:
+    * ``page_title`` -- overrides the ``<title>`` suffix.
+    * ``content`` -- overrides the base.html main pane.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Runbook runs &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Runbook runs</h1>
+      <p class="text-sm opacity-70">
+        {% if is_admin %}
+          Every run in the tenant. Start a new run from a published template.
+        {% else %}
+          The runs assigned to you. Start a new run from a published template.
+        {% endif %}
+      </p>
+    </div>
+    {# Start-run entry point. The button loads the modal fragment into the
+       container below; the modal posts to ``POST /ui/runbooks/runs``. The
+       route is operator-floor (the session gate), so every authenticated
+       operator may start a run -- the service auto-assigns them. #}
+    <button
+      type="button"
+      class="btn btn-primary btn-sm"
+      hx-get="/ui/runbooks/runs/start"
+      hx-target="#runbook-runs-modal-container"
+      hx-swap="innerHTML"
+      aria-label="Start a new runbook run"
+    >
+      + Start run
+    </button>
+  </header>
+
+  {# ---------- Sub-tab nav (Templates / Runs) ---------- #}
+  {% include "runbooks/_tabs.html" %}
+
+  {# ---------- Filter bar ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body flex-row flex-wrap items-end gap-4 py-3">
+      <label class="form-control">
+        <div class="label">
+          <span class="label-text">State</span>
+        </div>
+        <select
+          name="status"
+          class="select select-bordered select-sm"
+          aria-label="Filter by run state"
+          hx-get="/ui/runbooks/runs"
+          hx-target="#runbook-runs-list"
+          hx-swap="outerHTML"
+          hx-trigger="change"
+          hx-include="[name='assignee']"
+          hx-push-url="true"
+        >
+          <option value="" {% if not status_filter %}selected{% endif %}>All</option>
+          <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>
+            In progress
+          </option>
+          <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>
+            Completed
+          </option>
+          <option value="abandoned" {% if status_filter == 'abandoned' %}selected{% endif %}>
+            Abandoned
+          </option>
+        </select>
+      </label>
+
+      {# Assignee filter -- TENANT_ADMIN only. An OPERATOR never sees it; the
+         service ignores a forged ``?assignee=`` for a non-admin anyway, so
+         this is purely the admin's "inspect a junior's runs" control. #}
+      {% if is_admin %}
+        <label class="form-control w-full max-w-xs">
+          <div class="label">
+            <span class="label-text">Assignee</span>
+          </div>
+          <input
+            type="search"
+            name="assignee"
+            value="{{ assignee_filter }}"
+            placeholder="operator subject&hellip;"
+            class="input input-bordered input-sm w-full"
+            aria-label="Filter by assignee"
+            autocomplete="off"
+            hx-get="/ui/runbooks/runs"
+            hx-target="#runbook-runs-list"
+            hx-swap="outerHTML"
+            hx-trigger="keyup changed delay:300ms"
+            hx-include="[name='status']"
+            hx-push-url="true"
+          />
+        </label>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ---------- Runs list area ---------- #}
+  {% include "runbooks/_runs_list.html" %}
+
+  {# Modal container -- the "+ Start run" button swaps the start modal here. #}
+  <div id="runbook-runs-modal-container"></div>
+</section>
+{% endblock %}

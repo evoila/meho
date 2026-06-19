@@ -1,0 +1,246 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connector-ingest modal (Initiative #1839 Task #1886 T2). Loaded into
+  ``#connectors-modal-container`` on the registry list page by the
+  "Ingest" button's ``hx-get`` to ``/ui/connectors/registry/ingest``.
+  The shared app-shell modal controller (``modal-dialogs.js``) opens the
+  inserted ``<dialog class="modal">`` via ``showModal()`` on
+  ``htmx:afterSwap`` so it shows without an extra click and dismisses on
+  close / ESC / backdrop (#1803).
+
+  Two mutually-exclusive request shapes (the backend ``IngestRequest``
+  validator is the authority; the handler pre-checks to render a friendly
+  inline error rather than a raw 422):
+    * **catalog** -- a dropdown of ``<product>/<version>`` entries read
+      from ``catalog_endpoint`` in-process.
+    * **explicit quadruple** -- ``product`` / ``version`` / ``impl_id``
+      text inputs + one-or-more ``specs[].uri`` ``https://`` rows. Inline
+      ``specs[].content`` byte upload is out of scope (CLI-only on-ramp).
+
+  A **Dry-run** checkbox flips the submit between a sync parse-counts
+  render (writes nothing) and the real async ingest (kicks the job +
+  seeds the poll fragment).
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/connectors/registry/ingest`` swapping ``#ingest-result`` (the
+  in-modal result slot). A 422 friendly pre-check error, a catalog 422,
+  the 503 ``LlmClientUnavailable`` panel, and the 202 job-poll seed all
+  render into that slot so the operator stays in the modal.
+
+  CSRF: the form carries the OWASP signed double-submit token on its OWN
+  ``hx-headers`` (HTMX does not inherit the page ``hx-headers`` to an
+  HTMX-injected fragment). The GET that rendered this modal minted the
+  token + re-set the matching ``meho_csrf`` cookie.
+
+  Context contract:
+    * ``catalog_entries`` -- list[dict]: {ref, product, version, impl_id}
+                             for the catalog dropdown (may be empty).
+    * ``csrf_token``      -- str: minted double-submit token for the POST.
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="connectors-ingest-modal" class="modal" aria-label="Ingest a connector spec">
+  <div
+    class="modal-box max-w-2xl"
+    x-data="{ mode: 'catalog' }"
+  >
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="text-lg font-semibold" id="connectors-ingest-modal-title">
+        Ingest a connector spec
+      </h3>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <p class="mt-1 text-xs opacity-70">
+      Parse a vendor OpenAPI spec into the connector registry. Pick a
+      catalog entry or supply an explicit product / version / impl_id with
+      one or more <span class="font-mono">https://</span> spec URLs. A
+      real ingest runs as a background job you can watch to completion.
+    </p>
+
+    {# ---------- Mode tabs ---------- #}
+    <div role="tablist" class="tabs tabs-boxed mt-4">
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        data-mode-tab="catalog"
+        :class="mode === 'catalog' ? 'tab-active' : ''"
+        @click="mode = 'catalog'"
+      >
+        Catalog
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        data-mode-tab="explicit"
+        :class="mode === 'explicit' ? 'tab-active' : ''"
+        @click="mode = 'explicit'"
+      >
+        Explicit quadruple
+      </button>
+    </div>
+
+    <form
+      id="connectors-ingest-form"
+      hx-post="/ui/connectors/registry/ingest"
+      hx-target="#ingest-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-3"
+      aria-labelledby="connectors-ingest-modal-title"
+    >
+      {# The active mode rides the form so the handler builds exactly one
+         request shape. Alpine binds it to the visible tab. #}
+      <input type="hidden" name="mode" :value="mode" />
+
+      {# ---------- Catalog mode ---------- #}
+      <div x-show="mode === 'catalog'" data-mode-panel="catalog">
+        <label class="form-control">
+          <span class="label-text">Catalog entry</span>
+          {% if catalog_entries %}
+            <select
+              name="catalog_entry"
+              class="select select-bordered select-sm"
+              aria-label="Catalog entry"
+            >
+              {% for entry in catalog_entries %}
+                <option value="{{ entry.ref }}">
+                  {{ entry.ref }} &middot; {{ entry.impl_id }}
+                </option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <div role="alert" class="alert alert-info mt-1 text-xs">
+              <span>
+                No catalog entries are packaged in this deploy. Use the
+                <span class="font-semibold">Explicit quadruple</span> tab.
+              </span>
+            </div>
+          {% endif %}
+        </label>
+      </div>
+
+      {# ---------- Explicit-quadruple mode ---------- #}
+      <div x-show="mode === 'explicit'" data-mode-panel="explicit" class="space-y-3">
+        <div class="grid gap-3 md:grid-cols-3">
+          <label class="form-control">
+            <span class="label-text">Product</span>
+            <input
+              type="text"
+              name="product"
+              class="input input-bordered input-sm"
+              maxlength="64"
+              placeholder="vmware"
+              autocomplete="off"
+            />
+          </label>
+          <label class="form-control">
+            <span class="label-text">Version</span>
+            <input
+              type="text"
+              name="version"
+              class="input input-bordered input-sm"
+              maxlength="64"
+              placeholder="9.0"
+              autocomplete="off"
+            />
+          </label>
+          <label class="form-control">
+            <span class="label-text">Impl id</span>
+            <input
+              type="text"
+              name="impl_id"
+              class="input input-bordered input-sm"
+              maxlength="128"
+              placeholder="vmware-rest"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+
+        {# One-or-more ``specs[].uri`` rows. Inline content upload is out
+           of scope -- https:// URLs only. A small Alpine repeater adds /
+           removes rows; each row submits as a repeated ``spec_uri`` field
+           the handler folds into ``specs[]``. #}
+        <div x-data="{ rows: [''] }" data-spec-uris>
+          <span class="label-text">Spec URLs (https only)</span>
+          <template x-for="(uri, index) in rows" :key="index">
+            <div class="mt-1 flex items-center gap-2">
+              <input
+                type="url"
+                name="spec_uri"
+                class="input input-bordered input-sm grow"
+                maxlength="2048"
+                placeholder="https://vendor.example/openapi.yaml"
+                pattern="https://.*"
+                x-model="rows[index]"
+                autocomplete="off"
+              />
+              <button
+                type="button"
+                class="btn btn-ghost btn-square btn-sm"
+                aria-label="Remove spec URL"
+                x-show="rows.length > 1"
+                @click="rows.splice(index, 1)"
+              >
+                {{ icon("x", class="size-4") }}
+              </button>
+            </div>
+          </template>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs mt-2"
+            data-action="add-spec-uri"
+            @click="rows.push('')"
+          >
+            + Add another spec URL
+          </button>
+        </div>
+      </div>
+
+      {# ---------- Dry-run toggle ---------- #}
+      <label class="label cursor-pointer justify-start gap-3 pt-1" data-dry-run-toggle>
+        <input
+          type="checkbox"
+          name="dry_run"
+          value="true"
+          class="checkbox checkbox-sm"
+        />
+        <span class="label-text">
+          Dry-run &mdash; parse and report the counts only, write nothing.
+        </span>
+      </label>
+
+      {# ---------- Result slot ---------- #}
+      {# The submit handler swaps its render here: the friendly pre-check
+         error, a catalog / explicit 422 panel, the 503 panel, the
+         dry-run parse counts, or the 202 job-poll seed. #}
+      <div id="ingest-result" aria-live="polite"></div>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onclick="document.getElementById('connectors-ingest-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary btn-sm gap-1" data-action="ingest-submit">
+          {{ icon("package", class="size-4") }}
+          Ingest
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

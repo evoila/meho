@@ -1,0 +1,43 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Dry-run result fragment (Initiative #1839 Task #1886 T2). Swapped into
+  the ingest modal's ``#ingest-result`` slot when the submit ran with
+  ``dry_run=true``: the backend returns the 200 sync ``IngestResponse``
+  (the parser's projected counts, ``grouping=None``) and **writes
+  nothing** -- no connector row, no job. The panel makes the
+  parse-validated-only nature explicit so the operator knows to re-submit
+  without dry-run to actually ingest.
+
+  Context contract:
+    * ``ingestion`` -- dict: {inserted_count, updated_count,
+                       skipped_count, connector_registered,
+                       operations_grouped, connector_id} from the
+                       ``IngestionResultModel`` projection.
+-#}
+{% from "_icons.html" import icon %}
+<div role="status" class="alert alert-info items-start" data-ingest-dry-run>
+  {{ icon("check", class="size-5 shrink-0") }}
+  <div>
+    <h4 class="text-sm font-semibold">Dry-run parsed &mdash; nothing was written</h4>
+    <p class="text-xs opacity-80">
+      The spec(s) parsed cleanly. These are the counts a real ingest would
+      project for
+      <span class="font-mono">{{ ingestion.connector_id }}</span>. Untick
+      <span class="font-semibold">Dry-run</span> and re-submit to ingest
+      for real.
+    </p>
+    <div class="mt-2 flex flex-wrap items-center gap-2">
+      <span class="badge badge-success badge-sm" data-inserted-count>
+        {{ ingestion.inserted_count }} would insert
+      </span>
+      <span class="badge badge-ghost badge-sm">
+        {{ ingestion.updated_count }} would update
+      </span>
+      <span class="badge badge-ghost badge-sm">
+        {{ ingestion.skipped_count }} skipped
+      </span>
+    </div>
+  </div>
+</div>

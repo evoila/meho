@@ -9678,6 +9678,142 @@
         }
       }
     },
+    "/ui/connectors/registry/ingest": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Ingest Modal",
+        "description": "``GET /ui/connectors/registry/ingest`` -- the ingest modal fragment.",
+        "operationId": "ui_connectors_registry_ingest_modal_ui_connectors_registry_ingest_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Ingest Submit",
+        "description": "``POST /ui/connectors/registry/ingest`` -- build one shape + ingest.",
+        "operationId": "ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/registry/ingest/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Registry Ingest Job",
+        "description": "``GET /ui/connectors/registry/ingest/jobs/{job_id}`` -- poll a job.",
+        "operationId": "ui_connectors_registry_ingest_job_ui_connectors_registry_ingest_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/connectors/registry/{connector_id}/enable": {
       "get": {
         "tags": [
@@ -16896,6 +17032,57 @@
         },
         "type": "object",
         "title": "Body_ui_connectors_import_preview_ui_connectors_import_post"
+      },
+      "Body_ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Mode",
+            "default": "catalog"
+          },
+          "catalog_entry": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Catalog Entry",
+            "default": ""
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Product",
+            "default": ""
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Version",
+            "default": ""
+          },
+          "impl_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Impl Id",
+            "default": ""
+          },
+          "spec_uri": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Spec Uri"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_registry_ingest_submit_ui_connectors_registry_ingest_post"
       },
       "Body_ui_conventions_create_submit_ui_conventions_create_post": {
         "properties": {

@@ -41,6 +41,27 @@
         (the connectable hosts + credentials).
       </p>
     </div>
+    {# Ingest entry point -- soft-hidden from non-admins (the ingest BFF
+       routes are TENANT_ADMIN-gated server-side regardless). Loads the
+       ingest modal fragment into the modal container; the shared modal
+       controller opens it via ``showModal()`` on swap (#1803). The
+       button carries the page-level ``X-CSRF-Token`` (from the section's
+       ``hx-headers``) on its GET; the modal render re-mints the cookie +
+       puts the token on the submit form's own ``hx-headers``. #}
+    {% if is_tenant_admin %}
+      <button
+        type="button"
+        class="btn btn-primary btn-sm gap-1"
+        data-action="open-ingest"
+        hx-get="/ui/connectors/registry/ingest"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+      >
+        {% from "_icons.html" import icon %}
+        {{ icon("package", class="size-4") }}
+        Ingest
+      </button>
+    {% endif %}
   </header>
 
   {# HTMX modal mount point -- each confirm modal fragment is swapped in

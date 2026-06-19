@@ -77,7 +77,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.api.v1.ask_docs import run_ask_pipeline
+from meho_backplane.api.v1.ask_docs import run_ask_pipeline_capturing_retrieval
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -587,20 +587,28 @@ async def _ask_result_context(
     """Build the ask-mode result context: a grounded answer, or fail open.
 
     Runs the in-process ``ask_docs`` pipeline
-    (:func:`~meho_backplane.api.v1.ask_docs.run_ask_pipeline`, the SAME
-    composition the Bearer-gated REST route fronts -- the session cookie
-    cannot auth that route, so the BFF composes the primitives in-process,
-    the established ``/ui/corpus`` pattern). Three outcomes:
+    (:func:`~meho_backplane.api.v1.ask_docs.run_ask_pipeline_capturing_retrieval`,
+    the SAME composition the Bearer-gated REST route fronts -- the session
+    cookie cannot auth that route, so the BFF composes the primitives
+    in-process, the established ``/ui/corpus`` pattern). The capturing variant
+    (over the raising :func:`~meho_backplane.api.v1.ask_docs.run_ask_pipeline`
+    the REST route uses) hands back the chunks retrieval returned alongside a
+    classified leg error, so a post-retrieval failure fails open to the real
+    grounding rather than dropping it. Three outcomes:
 
     * **collection-access failure** (missing / unknown / not-entitled /
       disabled / not-ready ``collection``) -> the same typed 403 / 409 / 422
       error card the search path renders. The answer pipeline never ran.
     * **answer-pipeline leg failure** (:class:`AskDocsAnswerError` -- expand /
       corpus / model / synthesis) -> **fail open to chunks** via
-      :func:`corpus_ask_fallback_context`: the chunks the pipeline managed to
-      retrieve, under a banner naming the failed leg (#1918). For an expand /
-      corpus leg there may be no chunks (the banner stands alone). The answer
-      stays fail-*closed* -- never an ungrounded synthesized answer.
+      :func:`corpus_ask_fallback_context`: a **post-retrieval** leg
+      (``synthesis_malformed`` / ``model_unavailable``) renders the chunks
+      retrieval actually returned under a banner naming the failed leg
+      (#1918), so the operator keeps the usable grounding even though the
+      synthesized answer was rejected; a **pre-retrieval** leg
+      (``expand_failed`` / ``corpus_unavailable``) has no chunks, so the
+      banner stands alone. The answer stays fail-*closed* -- never an
+      ungrounded synthesized answer.
     * **success** -> the grounded ``answer`` + its citation cards (the #1919
       cited-chunk shape).
     """
@@ -623,32 +631,35 @@ async def _ask_result_context(
         except HTTPException as exc:
             return _search_or_error_context(exc)
 
-    try:
-        answer = await run_ask_pipeline(
-            operator,
-            query,
-            scope=docs_scope,
-            collection=collection,
-            limit=_SEARCH_LIMIT,
-        )
-    except AskDocsAnswerError as answer_error:
-        # Fail open: render whatever chunks the pipeline retrieved under a
-        # banner naming the failed leg, never an ungrounded answer. The
-        # in-process pipeline raises before handing back the retrieved chunks,
-        # so a leg failure surfaces the named-leg banner alone (richer
-        # chunk-preservation across the synthesis leg is a deliberate
-        # follow-up, not this task's scope); the seam already renders the
-        # banner-only case for the expand / corpus legs.
+    outcome = await run_ask_pipeline_capturing_retrieval(
+        operator,
+        query,
+        scope=docs_scope,
+        collection=collection,
+        limit=_SEARCH_LIMIT,
+    )
+    if outcome.error is not None:
+        # Fail open: render the chunks the pipeline retrieved under a banner
+        # naming the failed leg, never an ungrounded answer. The capturing
+        # pipeline hands back the real retrieved chunks for a *post-retrieval*
+        # leg (``synthesis_malformed`` / ``model_unavailable`` -- retrieval
+        # already succeeded), so the operator keeps the usable grounding; a
+        # *pre-retrieval* leg (``expand_failed`` / ``corpus_unavailable``) has
+        # none, so the seam renders the banner alone.
         log.warning(
             "ui_corpus_ask_pipeline_failed",
             operator_sub=operator.sub,
             collection=docs_scope.collection_key,
-            leg=answer_error.leg,
-            cause=answer_error.cause,
+            leg=outcome.error.leg,
+            cause=outcome.error.cause,
+            retrieved_chunk_count=len(outcome.retrieved_chunks),
         )
-        return corpus_ask_fallback_context(answer_error, [])
+        return corpus_ask_fallback_context(outcome.error, outcome.retrieved_chunks)
 
-    return _ask_answer_context(answer)
+    # No leg error -> the success outcome always carries a grounded answer
+    # (the AskPipelineOutcome contract: exactly one of answer / error is set).
+    assert outcome.answer is not None
+    return _ask_answer_context(outcome.answer)
 
 
 def _ask_answer_context(answer: DocsAnswer) -> dict[str, object]:

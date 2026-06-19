@@ -39,6 +39,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1.ask_docs import AskPipelineOutcome
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import DocCollection, Tenant
@@ -46,7 +47,9 @@ from meho_backplane.docs_search import DocsAnswer, DocsChunk
 from meho_backplane.docs_search.answer_errors import (
     CAUSE_CLIENT_UNAVAILABLE,
     CAUSE_SYNTHESIS_PARSE,
+    LEG_CORPUS,
     LEG_EXPAND,
+    LEG_MODEL,
     LEG_SYNTHESIS,
     AskDocsAnswerError,
 )
@@ -80,9 +83,12 @@ _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 #: Patched so the handlers get an entitled operator without a JWKS round-trip.
 _RESOLVE_OPERATOR = "meho_backplane.ui.routes.corpus.routes._resolve_operator"
-#: The Ask-mode pipeline the handler calls; mocked to control the answer /
-#: raised leg failure without a live corpus / model.
-_RUN_ASK = "meho_backplane.ui.routes.corpus.routes.run_ask_pipeline"
+#: The Ask-mode pipeline the handler calls; mocked to control the outcome
+#: (answer / classified leg failure + retrieved chunks) without a live corpus
+#: / model. The BFF uses the structured ``run_ask_pipeline_capturing_retrieval``
+#: variant (returns an :class:`AskPipelineOutcome`, never raises for a leg
+#: failure) so it can fail open to the chunks retrieval returned (#1939).
+_RUN_ASK = "meho_backplane.ui.routes.corpus.routes.run_ask_pipeline_capturing_retrieval"
 
 
 @pytest.fixture(autouse=True)
@@ -259,13 +265,14 @@ def test_ask_mode_renders_grounded_answer_and_citations() -> None:
         answer="Snapshots quiesce the guest before capture for app-consistent backups.",
         citations=[_chunk()],
     )
+    outcome = AskPipelineOutcome(answer=answer, retrieved_chunks=[_chunk()])
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RUN_ASK, new_callable=AsyncMock, return_value=answer),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
         ):
             response = client.post(
                 "/ui/corpus/search",
@@ -297,7 +304,12 @@ def test_ask_mode_forwards_query_and_collection_to_pipeline() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     csrf = mint_csrf_token(str(session_id))
     operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
-    run_mock = AsyncMock(return_value=DocsAnswer(answer="ok", citations=[_chunk()]))
+    run_mock = AsyncMock(
+        return_value=AskPipelineOutcome(
+            answer=DocsAnswer(answer="ok", citations=[_chunk()]),
+            retrieved_chunks=[_chunk()],
+        )
+    )
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -315,7 +327,7 @@ def test_ask_mode_forwards_query_and_collection_to_pipeline() -> None:
     assert response.status_code == 200, response.text
     run_mock.assert_awaited_once()
     call = run_mock.await_args
-    # run_ask_pipeline(operator, query, *, scope=, collection=, limit=)
+    # run_ask_pipeline_capturing_retrieval(operator, query, *, scope=, collection=, limit=)
     assert call.args[0] is operator
     assert call.args[1] == "snapshot quiesce"
     assert call.kwargs["scope"].collection_key == "vmware"
@@ -329,13 +341,14 @@ def test_ask_mode_no_grounded_answer_renders_without_citations() -> None:
     csrf = mint_csrf_token(str(session_id))
     operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
     answer = DocsAnswer(answer="No grounded answer: the corpus returned no chunks.", citations=[])
+    outcome = AskPipelineOutcome(answer=answer, retrieved_chunks=[])
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RUN_ASK, new_callable=AsyncMock, return_value=answer),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
         ):
             response = client.post(
                 "/ui/corpus/search",
@@ -357,12 +370,14 @@ def test_ask_mode_no_grounded_answer_renders_without_citations() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ask_mode_synthesis_failure_fails_open_with_named_leg() -> None:
-    """A synthesis leg failure renders the fail-open banner naming the leg (#1918).
+def test_ask_mode_synthesis_failure_fails_open_renders_retrieved_chunks() -> None:
+    """A synthesis leg failure renders the retrieved chunks under the leg banner (#1939).
 
-    The Ask mode catches the :class:`AskDocsAnswerError` and renders the
-    ``corpus_ask_fallback_context`` banner -- naming ``synthesis_malformed`` /
-    ``parse`` -- rather than a bare error or an ungrounded answer.
+    ``synthesis_malformed`` is a **post-retrieval** leg: retrieval already
+    succeeded, so the capturing pipeline hands back the real chunks alongside
+    the classified error. The Ask mode fails **open to those chunks** -- the
+    banner names ``synthesis_malformed`` / ``parse`` AND the retrieved chunk
+    cards render, never an ungrounded answer and never an empty list.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_collection(collection_key="vmware")
@@ -374,13 +389,16 @@ def test_ask_mode_synthesis_failure_fails_open_with_named_leg() -> None:
         cause=CAUSE_SYNTHESIS_PARSE,
         message="synthesis leg failed: non-JSON output",
     )
+    # Retrieval succeeded before synthesis broke -> real chunks are carried
+    # back on the outcome for the BFF to fail open to.
+    outcome = AskPipelineOutcome(error=leg_error, retrieved_chunks=[_chunk()])
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RUN_ASK, new_callable=AsyncMock, side_effect=leg_error),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
         ):
             response = client.post(
                 "/ui/corpus/search",
@@ -394,14 +412,65 @@ def test_ask_mode_synthesis_failure_fails_open_with_named_leg() -> None:
     assert "Answer unavailable" in body
     assert LEG_SYNTHESIS in body
     assert CAUSE_SYNTHESIS_PARSE in body
+    # The retrieved chunk renders under the banner -- the #1939 fix: real
+    # grounding is shown, not an empty list.
+    assert 'role="list" aria-label="Cited chunks"' in body
+    assert "Snapshots quiesce the guest" in body
+    assert 'href="https://docs.vmware.test/snapshots"' in body
+    # Still fail-closed on the *answer*: no grounded-answer card is rendered.
+    assert 'aria-label="Grounded answer"' not in body
 
 
-def test_ask_mode_expand_leg_failure_renders_banner() -> None:
-    """An expand leg failure (no chunks to fail open to) renders the named banner.
+def test_ask_mode_model_unavailable_fails_open_renders_retrieved_chunks() -> None:
+    """A post-retrieval ``model_unavailable`` failure renders the retrieved chunks (#1939).
 
-    The expand leg fails before retrieval produces usable chunks, so the
-    fail-open render is the named-leg banner alone -- still diagnosable, just
-    without chunk cards -- never an ungrounded answer.
+    ``model_unavailable`` (synthesis-stage ``LlmClientUnavailable`` -- no
+    ANTHROPIC_API_KEY) is the other post-retrieval leg: retrieval succeeded,
+    only the synthesis model was missing, so the retrieved chunks are still
+    good and must render under the named-leg banner.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = mint_csrf_token(str(session_id))
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    leg_error = AskDocsAnswerError(
+        leg=LEG_MODEL,
+        cause=CAUSE_CLIENT_UNAVAILABLE,
+        message="model leg failed: no ANTHROPIC_API_KEY configured",
+    )
+    outcome = AskPipelineOutcome(error=leg_error, retrieved_chunks=[_chunk()])
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot", "mode": "ask"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Answer unavailable" in body
+    assert LEG_MODEL in body
+    # The retrieved chunk renders under the banner (post-retrieval fail-open).
+    assert 'role="list" aria-label="Cited chunks"' in body
+    assert "Snapshots quiesce the guest" in body
+    assert 'aria-label="Grounded answer"' not in body
+
+
+def test_ask_mode_expand_leg_failure_renders_banner_only() -> None:
+    """A pre-retrieval expand leg failure renders the named banner ALONE (#1939).
+
+    The expand leg fails before retrieval produces any chunks, so the
+    capturing pipeline carries none -- the fail-open render is the named-leg
+    banner alone (still diagnosable, no fabricated chunk cards), never an
+    ungrounded answer.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_collection(collection_key="vmware")
@@ -413,13 +482,15 @@ def test_ask_mode_expand_leg_failure_renders_banner() -> None:
         cause=CAUSE_CLIENT_UNAVAILABLE,
         message="expand leg failed: no ANTHROPIC_API_KEY configured",
     )
+    # Pre-retrieval leg -> no chunks captured.
+    outcome = AskPipelineOutcome(error=leg_error, retrieved_chunks=[])
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
-            patch(_RUN_ASK, new_callable=AsyncMock, side_effect=leg_error),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
         ):
             response = client.post(
                 "/ui/corpus/search",
@@ -432,6 +503,45 @@ def test_ask_mode_expand_leg_failure_renders_banner() -> None:
     assert "Answer unavailable" in body
     assert LEG_EXPAND in body
     # No chunk cards (the expand leg failed before retrieval).
+    assert 'role="list" aria-label="Cited chunks"' not in body
+
+
+def test_ask_mode_corpus_unavailable_renders_banner_only() -> None:
+    """A pre-retrieval ``corpus_unavailable`` failure renders the named banner ALONE.
+
+    The retrieval call itself failed (backend down), so no chunks exist to
+    fail open to -- the banner stands alone, the pre-retrieval counterpart of
+    the post-retrieval chunk-rendering legs (#1939).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = mint_csrf_token(str(session_id))
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    leg_error = AskDocsAnswerError(
+        leg=LEG_CORPUS,
+        cause=CAUSE_CLIENT_UNAVAILABLE,
+        message="corpus leg failed: backend unreachable",
+    )
+    outcome = AskPipelineOutcome(error=leg_error, retrieved_chunks=[])
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RUN_ASK, new_callable=AsyncMock, return_value=outcome),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot", "mode": "ask"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Answer unavailable" in body
+    assert LEG_CORPUS in body
     assert 'role="list" aria-label="Cited chunks"' not in body
 
 
@@ -453,7 +563,9 @@ def test_ask_mode_not_entitled_renders_403_card() -> None:
     operator = _operator(
         tenant_id=_TENANT_A, capabilities=frozenset({"meho-docs"}), sub="op-nopriv"
     )
-    run_mock = AsyncMock(return_value=DocsAnswer(answer="unused", citations=[]))
+    run_mock = AsyncMock(
+        return_value=AskPipelineOutcome(answer=DocsAnswer(answer="unused", citations=[]))
+    )
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -483,7 +595,9 @@ def test_ask_mode_missing_collection_renders_422_card() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     csrf = mint_csrf_token(str(session_id))
     operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
-    run_mock = AsyncMock(return_value=DocsAnswer(answer="unused", citations=[]))
+    run_mock = AsyncMock(
+        return_value=AskPipelineOutcome(answer=DocsAnswer(answer="unused", citations=[]))
+    )
 
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
@@ -516,7 +630,9 @@ def test_unrecognised_mode_falls_back_to_retrieve() -> None:
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     csrf = mint_csrf_token(str(session_id))
     operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
-    ask_mock = AsyncMock(return_value=DocsAnswer(answer="unused", citations=[]))
+    ask_mock = AsyncMock(
+        return_value=AskPipelineOutcome(answer=DocsAnswer(answer="unused", citations=[]))
+    )
     search_mock = AsyncMock()
     search_mock.return_value = type("R", (), {"chunks": [_chunk()]})()
 

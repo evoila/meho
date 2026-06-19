@@ -49,10 +49,15 @@ in-process pipeline: the MCP `ask_docs` tool (T7, #1526), the REST
 `POST /api/v1/ask_docs` route (T2, #1917 — the synthesis sibling of
 `POST /api/v1/search_docs`), and the `/ui/corpus` **Ask mode** (T2, #1917 —
 a toggle alongside the original retrieve mode). The REST route + the UI BFF
-share one composition helper (`run_ask_pipeline` in
-`meho_backplane.api.v1.ask_docs`) so the leg-by-leg structure and the #1918
-per-leg error classification are defined once; `ask_docs` is
-single-collection only on every face (no `collections` fan-out field).
+share one leg-by-leg composition in `meho_backplane.api.v1.ask_docs` so the
+pipeline structure and the #1918 per-leg error classification are defined
+once: the REST route calls `run_ask_pipeline` (raises the classified
+`AskDocsAnswerError`), and the UI BFF calls the structured sibling
+`run_ask_pipeline_capturing_retrieval` (returns an `AskPipelineOutcome`
+carrying the chunks retrieval returned alongside the error) so it can fail
+open to those chunks on a post-retrieval leg failure — `run_ask_pipeline` is
+the thin raising wrapper over it. `ask_docs` is single-collection only on
+every face (no `collections` fan-out field).
 
 ## Key types
 
@@ -362,9 +367,13 @@ structured envelope naming *which* leg failed.
   precedent. No corpus body or raw LLM output ever rides the envelope.
 - **Fail-closed preserved.** Classifying an error never produces an
   answer — a leg failure surfaces as an error envelope, never a degraded /
-  ungrounded answer. The `/ui/corpus` Ask mode (#1917) reads the
-  same `leg` to render its fail-open-to-chunks banner (the chunks stay,
-  the answer does not) via `corpus_ask_fallback_context`.
+  ungrounded answer. The `/ui/corpus` Ask mode (#1917) reads the same `leg`
+  to render its fail-open-to-chunks banner (the chunks stay, the answer does
+  not) via `corpus_ask_fallback_context`; on a **post-retrieval** leg
+  (`synthesis_malformed` / `model_unavailable`) it renders the chunks
+  retrieval actually returned, carried out-of-band on the in-process
+  `AskPipelineOutcome` (#1939) — never on the wire envelope, which stays
+  small / JSON-safe.
 
 ### `resolve_citation_link(source_url, *, title, document_id)` (`meho_backplane.docs_search.citation_links`, #1919)
 
@@ -444,17 +453,21 @@ before the pipeline runs, so a leg failure is still attributable.
 
 The console face. The `/ui/corpus` search surface (#1777) gains a
 **Retrieve / Ask** mode toggle on its query form (radio buttons riding the
-form, default Retrieve). `mode=ask` calls the same `run_ask_pipeline`
+form, default Retrieve). `mode=ask` calls `run_ask_pipeline_capturing_retrieval`
 in-process (the Bearer-gated REST route cannot be authed by a session
 cookie — the established BFF pattern) and renders the grounded `answer` +
 its citation cards via the `answer` branch of `corpus/_results.html`. On an
 `AskDocsAnswerError` leg failure the Ask mode **fails open to chunks**: the
 `corpus_ask_fallback_context` seam (#1918) renders the retrieved chunks
-under a banner naming the failed leg (banner-only when the failing leg
-produced no chunks) — never an ungrounded answer. Collection-access failures
-render the same typed 403 / 409 / 422 error card as retrieve mode; an
-unrecognised `mode` degrades to retrieve. CSRF double-submit gated like the
-search fragment.
+under a banner naming the failed leg. A **post-retrieval** leg
+(`synthesis_malformed` / `model_unavailable`) renders the chunks retrieval
+actually returned — carried back on the `AskPipelineOutcome` channel (#1939)
+rather than dropped — so the operator keeps the usable grounding even though
+the synthesized answer was rejected; a **pre-retrieval** leg (`expand_failed`
+/ `corpus_unavailable`) produced no chunks, so the banner stands alone. Never
+an ungrounded answer. Collection-access failures render the same typed
+403 / 409 / 422 error card as retrieve mode; an unrecognised `mode` degrades
+to retrieve. CSRF double-submit gated like the search fragment.
 
 ### `meho docs search` (`cli/internal/cmd/docs`, T5 / T3 #1552)
 

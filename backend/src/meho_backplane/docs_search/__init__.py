@@ -49,10 +49,16 @@ from meho_backplane.docs_search.collection_access import (
     resolve_entitled_ready_collection,
     resolve_entitled_ready_collections,
 )
+from meho_backplane.docs_search.expansion import (
+    MAX_QUERY_VARIANTS,
+    DocsQueryExpansionError,
+    expand_docs_query,
+)
 from meho_backplane.docs_search.fanout import (
     CollectionScope,
     ConflictingCollectionScopeError,
     parse_collection_scope,
+    retrieve_multi_query,
     rrf_merge,
     search_docs_fanout,
 )
@@ -72,6 +78,7 @@ from meho_backplane.docs_search.synthesis import (
 )
 
 __all__ = [
+    "MAX_QUERY_VARIANTS",
     "NO_GROUNDED_ANSWER",
     "CollectionAccessError",
     "CollectionDisabledError",
@@ -81,6 +88,7 @@ __all__ = [
     "ConflictingCollectionScopeError",
     "DocsAnswer",
     "DocsChunk",
+    "DocsQueryExpansionError",
     "DocsScope",
     "DocsSearchResult",
     "DocsSynthesisError",
@@ -90,11 +98,13 @@ __all__ = [
     "UnknownCollectionError",
     "build_docs_scope",
     "collection_capability_key",
+    "expand_docs_query",
     "parse_collection_scope",
     "resolve_backend",
     "resolve_backend_or_label",
     "resolve_entitled_ready_collection",
     "resolve_entitled_ready_collections",
+    "retrieve_multi_query",
     "rrf_merge",
     "search_docs",
     "search_docs_fanout",

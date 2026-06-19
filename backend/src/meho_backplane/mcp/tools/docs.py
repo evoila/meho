@@ -89,7 +89,7 @@ call as the operator; there is no tool argument that names a tenant.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import structlog
 
@@ -101,6 +101,7 @@ from meho_backplane.docs_search import (
     CollectionForbiddenError,
     CollectionScope,
     ConflictingCollectionScopeError,
+    DocsAnswer,
     DocsChunk,
     DocsScope,
     DocsSearchResult,
@@ -118,8 +119,9 @@ from meho_backplane.docs_search import (
     search_docs_fanout,
     synthesize_docs_answer,
 )
+from meho_backplane.docs_search.answer_errors import LEG_EXPAND, classify_answer_error
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 
 __all__: list[str] = []
 
@@ -507,29 +509,14 @@ async def _ask_docs_handler(
     grounded-answer contract never has to reconcile chunks from divergent
     corpora.
 
-    Error arms mirror ``search_docs``'s single-collection path, plus the
-    expand + synthesis arms:
-
-    * **Fan-out attempt** (``collections`` / ``collection="all"``) /
-      **missing / unknown / not-entitled / disabled ``collection``** — mapped
-      to :class:`McpInvalidParamsError` (``-32602``) by
-      :func:`_parse_scope_or_invalid_params` /
-      :func:`_build_scope_or_invalid_params` /
-      :func:`_resolve_collection_or_error` (the MCP analogue of 422 / 403;
-      a disabled collection carries ``error.data.reason='collection_disabled'``).
-    * **Transiently not-ready collection / corpus unavailable** — not caught;
-      they bubble to ``-32603`` (a down / not-serving-yet backend is a
-      retryable server fault).
-    * **Expand or synthesis LLM leg fails** — not caught; bubbles to
-      ``-32603``. ``LlmClientUnavailable`` (no model — both legs reuse the
-      same #1386 client), :class:`~meho_backplane.docs_search.DocsQueryExpansionError`
-      (expand output unusable), and
-      :class:`~meho_backplane.docs_search.DocsSynthesisError` (synthesis broke
-      the grounding contract) all fail closed — never an un-expanded /
-      ungrounded answer. The expand vs synthesis exception types are distinct
-      so a later structured answer-error envelope (#1918) can name the failed
-      leg. An empty retrieval short-circuits inside the synthesis helper to a
-      deterministic "no grounded answer" *without* a model call.
+    Scope error arms mirror ``search_docs``'s single-collection path: a
+    fan-out attempt (``collections`` / ``collection="all"``) or a missing /
+    unknown / not-entitled / disabled ``collection`` maps to
+    :class:`McpInvalidParamsError` (``-32602``, the MCP analogue of 422 /
+    403); a transiently not-ready collection bubbles to ``-32603``. The
+    three answer-pipeline legs (expand / corpus / model / synthesis) are run
+    by :func:`_run_answer_pipeline`, which surfaces each failure as a
+    **structured** ``-32603`` naming *which* leg broke (#1918).
     """
     # Same canonical-op_id + collection binding as ``search_docs`` —
     # ``ask_docs`` audit rows are filterable by ``op_id="meho.docs.ask"``
@@ -556,24 +543,93 @@ async def _ask_docs_handler(
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
     collection = await _resolve_collection_or_error(operator, scope, tool="ask_docs")
 
-    # Corpus-aware expand step (#1916): rewrite the question into a small set
-    # of query variants grounded in the collection's manifest, retrieve per
-    # variant on the same backend, and RRF-merge the chunks before synthesis.
-    # ``expand_docs_query`` fails closed on an unconfigured model
-    # (``LlmClientUnavailable``) exactly like synthesis — never an
-    # un-expanded, ungrounded answer — and a malformed expansion raises the
-    # distinguishable ``DocsQueryExpansionError`` (both bubble to -32603).
-    variants = await expand_docs_query(query, collection)
-    retrieval = await retrieve_multi_query(
-        operator, variants, scope=scope, collection=collection, limit=limit
-    )
-    # Synthesis grounds on the merged chunks but answers the operator's
-    # *original* question (the variants only widened retrieval).
-    answer = await synthesize_docs_answer(query, retrieval)
+    answer = await _run_answer_pipeline(operator, query, scope, collection, limit)
     return {
         "answer": answer.answer,
         "citations": [_citation_payload(chunk) for chunk in answer.citations],
     }
+
+
+async def _run_answer_pipeline(
+    operator: Operator,
+    query: str,
+    scope: DocsScope,
+    collection: DocCollection,
+    limit: int,
+) -> DocsAnswer:
+    """Run expand → retrieve → synthesize, naming the failed leg on error.
+
+    The answer pipeline (#1916) is three model/transport legs. Each fails
+    closed with its own typed exception; here each leg is wrapped so a
+    failure is surfaced as a **structured** ``-32603`` whose ``error.data``
+    names which leg broke (#1918) — never an un-expanded / ungrounded
+    answer, and never the opaque ``internal error: <ClassName>`` they all
+    collapsed to before.
+
+    The wrapping is per-leg because the one ambiguous failure —
+    ``LlmClientUnavailable`` from the shared #1386 client — cannot be placed
+    by type alone: the expand leg pins it to ``expand_failed`` (via
+    ``llm_unavailable_leg=LEG_EXPAND``), the synthesis leg to the default
+    ``model_unavailable``.
+    :class:`~meho_backplane.auth.corpus.CorpusUnavailable` from retrieval is
+    classified to ``corpus_unavailable``. The original exception rides
+    ``raise ... from`` so the structlog breadcrumb keeps the traceback.
+    """
+    # 1. Expand: rewrite the question into corpus-aware query variants. Both
+    # an unconfigured model (LlmClientUnavailable) and unusable output
+    # (DocsQueryExpansionError) name the ``expand_failed`` leg.
+    try:
+        variants = await expand_docs_query(query, collection)
+    except Exception as exc:
+        _raise_classified_answer_error(exc, llm_unavailable_leg=LEG_EXPAND)
+
+    # 2. Retrieve per variant on the same backend and RRF-merge. A down /
+    # unconfigured backend (CorpusUnavailable) names the ``corpus_unavailable``
+    # leg.
+    try:
+        retrieval = await retrieve_multi_query(
+            operator, variants, scope=scope, collection=collection, limit=limit
+        )
+    except Exception as exc:
+        _raise_classified_answer_error(exc)
+
+    # 3. Synthesize over the merged chunks, answering the operator's
+    # *original* question. An unconfigured model names the ``model_unavailable``
+    # leg; a model whose output broke the grounding contract names the
+    # ``synthesis_malformed`` leg (with the parse / citation-resolution
+    # sub-cause). An empty retrieval short-circuits inside the helper to a
+    # deterministic "no grounded answer" without a model call.
+    try:
+        return await synthesize_docs_answer(query, retrieval)
+    except Exception as exc:
+        _raise_classified_answer_error(exc)
+
+
+def _raise_classified_answer_error(
+    exc: Exception,
+    *,
+    llm_unavailable_leg: str | None = None,
+) -> NoReturn:
+    """Re-raise *exc* as a leg-named :class:`McpInternalError`, or as-is.
+
+    Classifies *exc* via
+    :func:`~meho_backplane.docs_search.answer_errors.classify_answer_error`;
+    a recognised answer-pipeline leg failure becomes an
+    :class:`~meho_backplane.mcp.server.McpInternalError` carrying the
+    structured ``{detail, leg, cause, message}`` envelope on ``error.data``
+    (the dispatcher keeps the ``-32603`` code). Anything else is re-raised
+    unchanged so a genuinely unexpected fault still hits the dispatcher's
+    generic catch as a plain ``-32603`` rather than being mis-labelled a
+    leg failure. ``raise ... from exc`` preserves the traceback.
+    """
+    classify = (
+        classify_answer_error(exc, llm_unavailable_leg=llm_unavailable_leg)
+        if llm_unavailable_leg is not None
+        else classify_answer_error(exc)
+    )
+    if classify is None:
+        raise exc
+    raise McpInternalError(str(classify), data=classify.to_error_data()) from exc
 
 
 def _citation_payload(chunk: DocsChunk) -> dict[str, Any]:

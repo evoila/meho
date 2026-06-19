@@ -33,6 +33,15 @@ contextvars the chassis middleware lifts into the row.
 
 from __future__ import annotations
 
+from meho_backplane.docs_search.answer_errors import (
+    ANSWER_ERROR_DETAIL,
+    LEG_CORPUS,
+    LEG_EXPAND,
+    LEG_MODEL,
+    LEG_SYNTHESIS,
+    AskDocsAnswerError,
+    classify_answer_error,
+)
 from meho_backplane.docs_search.backends import (
     SearchBackend,
     resolve_backend,
@@ -83,8 +92,14 @@ from meho_backplane.docs_search.synthesis import (
 )
 
 __all__ = [
+    "ANSWER_ERROR_DETAIL",
+    "LEG_CORPUS",
+    "LEG_EXPAND",
+    "LEG_MODEL",
+    "LEG_SYNTHESIS",
     "MAX_QUERY_VARIANTS",
     "NO_GROUNDED_ANSWER",
+    "AskDocsAnswerError",
     "CitationLink",
     "CollectionAccessError",
     "CollectionDisabledError",
@@ -104,6 +119,7 @@ __all__ = [
     "UnknownCollectionError",
     "build_docs_scope",
     "citation_link_payload",
+    "classify_answer_error",
     "collection_capability_key",
     "expand_docs_query",
     "parse_collection_scope",

@@ -87,6 +87,7 @@ from meho_backplane.docs_collections import (
     project_doc_collection_to_summary,
 )
 from meho_backplane.docs_search import (
+    AskDocsAnswerError,
     CollectionDisabledError,
     CollectionForbiddenError,
     CollectionNotReadyError,
@@ -108,7 +109,7 @@ from meho_backplane.ui.auth.refresh import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
-__all__ = ["build_corpus_search_router"]
+__all__ = ["build_corpus_search_router", "corpus_ask_fallback_context"]
 
 log = structlog.get_logger(__name__)
 
@@ -306,6 +307,49 @@ def _resolve_search_csrf(request: Request, session_id: str) -> tuple[str, bool]:
     if existing and verify_csrf_token(session_id, existing):
         return existing, False
     return mint_csrf_token(session_id), True
+
+
+def corpus_ask_fallback_context(
+    answer_error: AskDocsAnswerError,
+    chunks: list[DocsChunk],
+) -> dict[str, object]:
+    """Build the fail-open-to-chunks context when ``ask_docs`` synthesis fails.
+
+    The reusable seam the ``/ui/corpus`` **Ask mode** wires in (#1917, T2):
+    when the answer pipeline fails *after* retrieval succeeded, the Ask mode
+    has the retrieved chunks in hand and should **fail open** — render those
+    chunks (the same #1919 cited-chunk cards the search path renders) under a
+    banner that **names the failed leg** — rather than show a bare error and
+    discard usable evidence. Staying fail-*open* on the chunks is distinct
+    from the answer's fail-*closed* posture: the operator never gets an
+    ungrounded synthesized answer, but they do get the raw grounding the
+    pipeline already retrieved, plus a named reason the synthesis step did
+    not complete.
+
+    The returned context drives the ``ask_fallback`` branch of
+    ``corpus/_results.html``: ``ask_fallback_leg`` / ``ask_fallback_cause``
+    name the failure (from the structured #1918
+    :class:`~meho_backplane.docs_search.answer_errors.AskDocsAnswerError`
+    envelope) and ``cited`` carries the retrieved chunks paired with their
+    resolved navigable links (:func:`_cited_chunks`). A
+    :data:`~meho_backplane.docs_search.answer_errors.LEG_CORPUS` /
+    ``LEG_EXPAND`` failure means retrieval never produced usable chunks, so
+    *chunks* is empty and the template shows the named banner alone — the
+    Ask mode passes whatever chunks it managed to retrieve (often none for
+    those legs).
+
+    This module-level (not nested) function is the seam #1917 imports; the
+    search path's own retrieve-only flow does not call it (search has no
+    synthesis leg to fail open from). It is added now so the answer-error
+    model (#1918) and the UI render are wired together in one place rather
+    than re-derived when #1917 lands the Ask toggle.
+    """
+    return {
+        "ask_fallback_leg": answer_error.leg,
+        "ask_fallback_cause": answer_error.cause,
+        "ask_fallback_message": str(answer_error),
+        "cited": _cited_chunks(chunks),
+    }
 
 
 def _search_or_error_context(exc: HTTPException) -> dict[str, object]:

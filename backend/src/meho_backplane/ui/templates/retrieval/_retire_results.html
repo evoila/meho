@@ -1,0 +1,209 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Retrieval Retire-Checklist results partial.
+
+  Initiative #1840 (G10.14 Retrieval diagnostics & quality console),
+  Task #1890. Swapped into ``#retrieval-retire-results`` by the HTMX
+  ``POST /ui/retrieval/retire-checklist``; also included into ``index.html``
+  for the initial render so both paths share identical markup.
+
+  Render branches (first match wins):
+    1. ``error_message`` set -> an inline error card (a cross-tenant 403 from
+       ``authorize_tenant_scope`` for a forged ``tenant_filter``, or a malformed
+       UUID). Never a 500.
+    2. ``checklist`` set -> the three-state ``overall_verdict`` pill heading the
+       fragment, the honesty-gap explainer (``rest_excluded`` /
+       ``counted_surfaces``), and per surface (in ``SURFACE_VERDICT_ORDER``) a
+       three-state verdict pill + the five-criterion table.
+    3. otherwise (initial render) -> a quiet prompt.
+
+  THREE-state verdict (load-bearing -- do NOT collapse to a binary toggle):
+    ``ChecklistVerdict`` is one of "READY TO RETIRE" / "REVIEW MANUALLY" /
+    "NOT YET". Each maps to a distinct daisyUI badge color via ``verdict_pill``:
+    "READY TO RETIRE" -> success (green), "REVIEW MANUALLY" -> warning (yellow),
+    "NOT YET" -> error (red). The token is rendered verbatim; only the color is
+    mapped here. The overall verdict is the worst across surfaces in scope.
+
+  Per-criterion dot (green/yellow/red):
+    Each ``CriterionResult`` carries a ``verdict`` of "green" / "yellow" / "red".
+    The dot maps that to a color via ``criterion_dot``; ``observed_value``,
+    ``threshold_summary``, and ``notes`` render verbatim from the service.
+
+  Criterion-4 yellow honesty note (load-bearing):
+    ``meho_vs_baseline`` stays yellow for v0.2 UI callers -- the backplane has no
+    server-side corpus snapshot and the UI does not (by design) offer a
+    baseline-entry form, so "READY TO RETIRE" is effectively unreachable via the
+    bare UI. When that criterion reads yellow, surface the explanatory note so an
+    operator understands the verdict ceiling is honest, not a bug.
+
+  Read-only:
+    There is deliberately NO purge / dry-run / execute-retirement affordance.
+    The only POST is the ``hx-post`` to ``/ui/retrieval/retire-checklist`` in
+    index.html. This partial renders no write form / button.
+
+  Context variables:
+    checklist       -- RetireChecklistReport | None: per-surface checklist
+    error_message   -- str | None: a cross-tenant 403 / malformed-UUID detail
+    platform_admin  -- bool: whether the tenant_filter selector was offered
+    tenant_filter   -- str: the submitted tenant_filter (for the input value)
+    csrf_token      -- str: minted double-submit token (un-rendered here; the
+                       form lives in index.html)
+-#}
+{#- Three-state surface/overall verdict -> daisyUI badge-color pill. The verdict
+    token is rendered verbatim; only the color class is mapped here. -#}
+{% macro verdict_pill(verdict) %}
+  {%- if verdict == "NOT YET" -%}
+    {% set badge_class = "badge-error" %}
+  {%- elif verdict == "REVIEW MANUALLY" -%}
+    {% set badge_class = "badge-warning" %}
+  {%- else -%}
+    {% set badge_class = "badge-success" %}
+  {%- endif -%}
+  <span
+    class="badge {{ badge_class }} badge-outline uppercase"
+    data-verdict="{{ verdict }}"
+    aria-label="Verdict {{ verdict }}"
+  >{{ verdict }}</span>
+{% endmacro %}
+{#- Per-criterion green/yellow/red dot. The band token is rendered into the
+    ``data-band`` attribute verbatim; only the color is mapped here. -#}
+{% macro criterion_dot(band) %}
+  {%- if band == "red" -%}
+    {% set dot_class = "bg-error" %}
+  {%- elif band == "yellow" -%}
+    {% set dot_class = "bg-warning" %}
+  {%- else -%}
+    {% set dot_class = "bg-success" %}
+  {%- endif -%}
+  <span
+    class="inline-block h-2.5 w-2.5 rounded-full {{ dot_class }}"
+    data-band="{{ band }}"
+    role="img"
+    aria-label="{{ band }}"
+    title="{{ band }}"
+  ></span>
+{% endmacro %}
+<div id="retrieval-retire-results" class="space-y-3">
+  {% set checklist = checklist | default(none) %}
+  {% set error_message = error_message | default(none) %}
+  {% if error_message %}
+    {# ---------- Inline error card (cross-tenant 403 / malformed UUID) ---------- #}
+    <div class="alert alert-error" role="alert" aria-live="assertive">
+      <div>
+        <h3 class="font-semibold">Retire checklist unavailable</h3>
+        <p class="text-sm opacity-90">{{ error_message }}</p>
+      </div>
+    </div>
+
+  {% elif checklist is not none %}
+    {# ---------- Overall verdict header ---------- #}
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <p class="text-sm opacity-70" aria-live="polite">
+        Retire checklist &middot;
+        <span class="font-mono">{{ checklist.ran_at.strftime("%Y-%m-%d %H:%M") }}</span> UTC
+      </p>
+      <div class="flex items-center gap-2">
+        <span class="text-sm opacity-70">Overall</span>
+        {{ verdict_pill(checklist.overall_verdict) }}
+      </div>
+    </div>
+
+    {# ---------- Honesty-gap explainer (rest_excluded / counted_surfaces) ----------
+       Criteria 1 (daily-use duration) + 2 (operator breadth) are fed only by the
+       audited /mcp search tools; the REST POST /api/v1/retrieve diagnostic
+       queries (this console's Diagnostics tab included) audit under their own
+       path and do not feed the retire decision. So a stuck criterion 1/2 clock
+       is not "no activity" -- it's "REST excluded". The badge disambiguates. #}
+    {% if checklist.rest_excluded %}
+      <div class="alert alert-info" role="status">
+        <div>
+          <h3 class="font-semibold">REST excluded &mdash; only audited /mcp search tools feed criteria 1 &amp; 2</h3>
+          <p class="text-sm opacity-90">
+            Daily-use duration and operator breadth are fed only by these audited
+            <span class="font-mono">/mcp</span> search tools. REST
+            <span class="font-mono">POST /api/v1/retrieve</span> diagnostic
+            queries (including this console's Diagnostics tab) audit under their
+            own path and do <strong>not</strong> advance the retire clock:
+          </p>
+          {% if checklist.counted_surfaces %}
+            <div class="mt-1 flex flex-wrap gap-1">
+              {% for surface in checklist.counted_surfaces %}
+                <span class="badge badge-ghost badge-outline font-mono">{{ surface }}</span>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    {# ---------- Per-surface checklists ---------- #}
+    {% for surface in checklist.surfaces %}
+      <div class="card bg-base-100 border-base-300 border shadow-sm">
+        <div class="card-body py-3 space-y-2">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="badge badge-ghost badge-outline">{{ surface.surface }}</span>
+            {{ verdict_pill(surface.verdict) }}
+          </div>
+          <div class="overflow-x-auto">
+            <table class="table table-xs" aria-label="Five-criterion retire checklist for {{ surface.surface }}">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Criterion</th>
+                  <th>Observed</th>
+                  <th>Threshold</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for criterion in surface.criteria %}
+                  <tr>
+                    <td>{{ criterion_dot(criterion.verdict) }}</td>
+                    <td class="font-medium" data-criterion="{{ criterion.name }}">{{ criterion.name }}</td>
+                    <td class="font-mono">{{ criterion.observed_value }}</td>
+                    <td class="font-mono">{{ criterion.threshold_summary }}</td>
+                  </tr>
+                  {% if criterion.notes %}
+                    <tr>
+                      <td></td>
+                      <td colspan="3" class="text-xs opacity-70">{{ criterion.notes }}</td>
+                    </tr>
+                  {% endif %}
+                  {#- Criterion-4 yellow honesty note: explain that "baseline did
+                      not run" is the expected v0.2 UI ceiling, not a bug, so
+                      "READY TO RETIRE" being unreachable via the bare UI reads as
+                      honest posture. Rendered only when the criterion is yellow. -#}
+                  {% if criterion.name == "meho_vs_baseline" and criterion.verdict == "yellow" %}
+                    <tr>
+                      <td></td>
+                      <td colspan="3" class="text-xs opacity-70">
+                        <span class="font-semibold">Baseline is CLI-only in v0.2.</span>
+                        The backplane has no server-side corpus snapshot, so this
+                        criterion stays yellow via the console and
+                        &ldquo;READY TO RETIRE&rdquo; is effectively unreachable
+                        here. Run the retire checklist from the CLI with a local
+                        baseline to evaluate this criterion for real.
+                      </td>
+                    </tr>
+                  {% endif %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+
+  {% else %}
+    {# ---------- Initial prompt (no run yet) ---------- #}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body text-center py-10">
+        <p class="text-base opacity-50">
+          Run the retire checklist to read back the five-criterion verdict per
+          surface (kb / memory / operations) and the overall retire decision.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

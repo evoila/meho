@@ -275,11 +275,66 @@
     {% include "retrieval/_eval_results.html" %}
   </div>
 
-  {# ---------- Placeholder tab panel (T3) ---------- #}
-  <div role="tabpanel" x-show="tab === 'retire'" x-cloak class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
-    <div class="card-body text-center py-10">
-      <p class="text-base opacity-50">Retire Checklist lands in a follow-up task.</p>
+  {# ---------- Retire Checklist tab panel (T3, #1890) ---------- #}
+  {#- ``POST /ui/retrieval/retire-checklist`` swaps ``#retrieval-retire-results``.
+      The form declares its OWN ``hx-headers`` ``X-CSRF-Token`` (HTMX does not
+      propagate ``hx-headers`` to a descendant form, #1693). READ-ONLY -- there is
+      no purge / dry-run / execute-retirement affordance; the only POST is this
+      checklist run. The ``tenant_filter`` UUID selector renders ONLY for a
+      platform admin (a soft-hide hint -- the POST handler re-checks server-side
+      via ``authorize_tenant_scope``); a non-platform-admin sees no selector and
+      is scoped to their own tenant. The UI sends NO ``blocker_counts`` /
+      ``baseline_overrides`` (CLI-fill-only). -#}
+  <div role="tabpanel" x-show="tab === 'retire'" x-cloak class="space-y-4">
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-4">
+        <form
+          id="retrieval-retire-form"
+          hx-post="/ui/retrieval/retire-checklist"
+          hx-target="#retrieval-retire-results"
+          hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
+          aria-label="Run the retire-decision checklist"
+        >
+          <p class="max-w-prose text-sm opacity-70">
+            Read back the five-criterion retire-decision verdict per surface
+            (kb / memory / operations) and the overall decision. Read-only &mdash;
+            no retirement is executed.
+          </p>
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
+            {% if platform_admin %}
+              {#- Platform-admin-only cross-tenant selector. A non-platform-admin
+                  never sees this field, so the form they can submit carries no
+                  ``tenant_filter`` and they stay own-tenant scoped. A forged
+                  cross-tenant value still hits the backend 403. -#}
+              <label class="form-control w-full sm:w-80">
+                <div class="label">
+                  <span class="label-text">Tenant filter <span class="opacity-50">(platform admin)</span></span>
+                </div>
+                <input
+                  type="text"
+                  name="tenant_filter"
+                  value="{{ tenant_filter }}"
+                  maxlength="64"
+                  placeholder="Tenant UUID (blank = own tenant)"
+                  class="input input-bordered w-full font-mono"
+                  aria-label="Cross-tenant filter (platform admin only)"
+                  autocomplete="off"
+                />
+              </label>
+            {% endif %}
+            <button type="submit" class="btn btn-primary gap-1" aria-label="Run the retire checklist">
+              {{ icon("shield-check") }}
+              Run checklist
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
+
+    {# ---------- Retire results region ---------- #}
+    {% include "retrieval/_retire_results.html" %}
   </div>
 </section>
 {% endblock %}

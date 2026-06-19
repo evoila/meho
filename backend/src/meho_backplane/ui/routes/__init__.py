@@ -97,6 +97,7 @@ from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
+from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
@@ -112,6 +113,7 @@ __all__ = [
     "build_dashboard_router",
     "build_kb_router",
     "build_memory_router",
+    "build_operations_router",
     "build_router",
     "build_runbooks_router",
     "build_runs_router",
@@ -175,5 +177,12 @@ def build_router() -> APIRouter:
     # literal-prefix routes register before the ``{trigger_id}`` detail
     # route inside that router so ``"create"`` is never bound as an id.
     router.include_router(build_scheduler_router())
+    # Operations launcher (G10.9-T1 #1879): ``/ui/operations`` +
+    # ``/ui/operations/search`` + ``/ui/operations/descriptor/{id}``. The
+    # only ``{param}`` route sits under the distinct
+    # ``/ui/operations/descriptor/`` prefix, so the literal ``search``
+    # segment can never bind as a descriptor id; registered before the
+    # stubs aggregate so its concrete paths win the first-match-wins lookup.
+    router.include_router(build_operations_router())
     router.include_router(build_stubs_router())
     return router

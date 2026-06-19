@@ -6493,6 +6493,18 @@ type UiMemoryListUiMemoryGetParams struct {
 	Tag   *string `form:"tag,omitempty" json:"tag,omitempty"`
 }
 
+// OperationsIndexUiOperationsGetParams defines parameters for OperationsIndexUiOperationsGet.
+type OperationsIndexUiOperationsGetParams struct {
+	ConnectorId *string `form:"connector_id,omitempty" json:"connector_id,omitempty"`
+	Q           *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
+// OperationsSearchUiOperationsSearchGetParams defines parameters for OperationsSearchUiOperationsSearchGet.
+type OperationsSearchUiOperationsSearchGetParams struct {
+	ConnectorId *string `form:"connector_id,omitempty" json:"connector_id,omitempty"`
+	Q           *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
 // RunbooksIndexUiRunbooksGetParams defines parameters for RunbooksIndexUiRunbooksGet.
 type RunbooksIndexUiRunbooksGetParams struct {
 	Status     *RunbooksIndexUiRunbooksGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -6829,6 +6841,9 @@ type UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody = UISessionC
 
 // UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody defines body for UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost for application/x-www-form-urlencoded ContentType.
 type UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody = BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost
+
+// OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody defines body for OperationsDescriptorUiOperationsDescriptorDescriptorIdGet for application/json ContentType.
+type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody = UISessionContext
 
 // RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody defines body for RunbooksEditorCreateUiRunbooksNewPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorCreateUiRunbooksNewPostFormdataRequestBody = BodyRunbooksEditorCreateUiRunbooksNewPost
@@ -8459,6 +8474,17 @@ type ClientInterface interface {
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OperationsIndexUiOperationsGet request
+	OperationsIndexUiOperationsGet(ctx context.Context, params *OperationsIndexUiOperationsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBody request with any body
+	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBody(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	OperationsDescriptorUiOperationsDescriptorDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// OperationsSearchUiOperationsSearchGet request
+	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RunbooksIndexUiRunbooksGet request
 	RunbooksIndexUiRunbooksGet(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11967,6 +11993,54 @@ func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx c
 
 func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithFormdataBody(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsIndexUiOperationsGet(ctx context.Context, params *OperationsIndexUiOperationsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsIndexUiOperationsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBody(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequestWithBody(c.Server, descriptorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsDescriptorUiOperationsDescriptorDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequest(c.Server, descriptorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewOperationsSearchUiOperationsSearchGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -24053,6 +24127,183 @@ func NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody(server 
 	return req, nil
 }
 
+// NewOperationsIndexUiOperationsGetRequest generates requests for OperationsIndexUiOperationsGet
+func NewOperationsIndexUiOperationsGetRequest(server string, params *OperationsIndexUiOperationsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ConnectorId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, *params.ConnectorId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequest calls the generic OperationsDescriptorUiOperationsDescriptorDescriptorIdGet builder with application/json body
+func NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequest(server string, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequestWithBody(server, descriptorId, "application/json", bodyReader)
+}
+
+// NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequestWithBody generates requests for OperationsDescriptorUiOperationsDescriptorDescriptorIdGet with any type of body
+func NewOperationsDescriptorUiOperationsDescriptorDescriptorIdGetRequestWithBody(server string, descriptorId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "descriptor_id", runtime.ParamLocationPath, descriptorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations/descriptor/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewOperationsSearchUiOperationsSearchGetRequest generates requests for OperationsSearchUiOperationsSearchGet
+func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *OperationsSearchUiOperationsSearchGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/operations/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ConnectorId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, *params.ConnectorId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewRunbooksIndexUiRunbooksGetRequest generates requests for RunbooksIndexUiRunbooksGet
 func NewRunbooksIndexUiRunbooksGetRequest(server string, params *RunbooksIndexUiRunbooksGetParams) (*http.Request, error) {
 	var err error
@@ -25986,6 +26237,17 @@ type ClientWithResponsesInterface interface {
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
 
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
+
+	// OperationsIndexUiOperationsGetWithResponse request
+	OperationsIndexUiOperationsGetWithResponse(ctx context.Context, params *OperationsIndexUiOperationsGetParams, reqEditors ...RequestEditorFn) (*OperationsIndexUiOperationsGetResponse, error)
+
+	// OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBodyWithResponse request with any body
+	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBodyWithResponse(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error)
+
+	OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error)
+
+	// OperationsSearchUiOperationsSearchGetWithResponse request
+	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
 
 	// RunbooksIndexUiRunbooksGetWithResponse request
 	RunbooksIndexUiRunbooksGetWithResponse(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*RunbooksIndexUiRunbooksGetResponse, error)
@@ -30512,6 +30774,72 @@ func (r UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse) StatusCode() 
 	return 0
 }
 
+type OperationsIndexUiOperationsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsIndexUiOperationsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsIndexUiOperationsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type OperationsSearchUiOperationsSearchGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r OperationsSearchUiOperationsSearchGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r OperationsSearchUiOperationsSearchGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RunbooksIndexUiRunbooksGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -33431,6 +33759,41 @@ func (c *ClientWithResponses) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostW
 		return nil, err
 	}
 	return ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp)
+}
+
+// OperationsIndexUiOperationsGetWithResponse request returning *OperationsIndexUiOperationsGetResponse
+func (c *ClientWithResponses) OperationsIndexUiOperationsGetWithResponse(ctx context.Context, params *OperationsIndexUiOperationsGetParams, reqEditors ...RequestEditorFn) (*OperationsIndexUiOperationsGetResponse, error) {
+	rsp, err := c.OperationsIndexUiOperationsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsIndexUiOperationsGetResponse(rsp)
+}
+
+// OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBodyWithResponse request with arbitrary body returning *OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse
+func (c *ClientWithResponses) OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBodyWithResponse(ctx context.Context, descriptorId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error) {
+	rsp, err := c.OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithBody(ctx, descriptorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, body OperationsDescriptorUiOperationsDescriptorDescriptorIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error) {
+	rsp, err := c.OperationsDescriptorUiOperationsDescriptorDescriptorIdGet(ctx, descriptorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse(rsp)
+}
+
+// OperationsSearchUiOperationsSearchGetWithResponse request returning *OperationsSearchUiOperationsSearchGetResponse
+func (c *ClientWithResponses) OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error) {
+	rsp, err := c.OperationsSearchUiOperationsSearchGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseOperationsSearchUiOperationsSearchGetResponse(rsp)
 }
 
 // RunbooksIndexUiRunbooksGetWithResponse request returning *RunbooksIndexUiRunbooksGetResponse
@@ -39453,6 +39816,84 @@ func ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp *http.Re
 	}
 
 	response := &UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsIndexUiOperationsGetResponse parses an HTTP response from a OperationsIndexUiOperationsGetWithResponse call
+func ParseOperationsIndexUiOperationsGetResponse(rsp *http.Response) (*OperationsIndexUiOperationsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsIndexUiOperationsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse parses an HTTP response from a OperationsDescriptorUiOperationsDescriptorDescriptorIdGetWithResponse call
+func ParseOperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse(rsp *http.Response) (*OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsDescriptorUiOperationsDescriptorDescriptorIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseOperationsSearchUiOperationsSearchGetResponse parses an HTTP response from a OperationsSearchUiOperationsSearchGetWithResponse call
+func ParseOperationsSearchUiOperationsSearchGetResponse(rsp *http.Response) (*OperationsSearchUiOperationsSearchGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &OperationsSearchUiOperationsSearchGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -1,0 +1,106 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operation detail drawer fragment (Initiative #1835 G10.9, Task #1879).
+
+  Swapped into ``#operations-drawer-container`` by a search-result row's
+  Detail button (``hx-get /ui/operations/descriptor/{descriptor_id}``).
+  Read-only: shows the resolved descriptor's operator-safe fields. The
+  shared ``app/modal-dialogs.js`` controller opens this ``<dialog>`` via
+  ``showModal()`` on swap and dismisses it on the close button / ESC /
+  backdrop.
+
+  RBAC (the same-template-both-roles trap)
+    The ``llm_instructions`` block -- the per-op agent prompt -- renders
+    ONLY when ``is_tenant_admin`` is true. The route threads
+    ``llm_instructions`` into the context ONLY for a tenant_admin render,
+    so a plain operator's response body never carries the prompt text
+    (leaking it is a prompt-injection vector, api/v1/operations.py).
+
+  Context:
+    descriptor       -- OperationDescriptor: the full read shape
+    is_tenant_admin  -- bool: gate for the llm_instructions block
+    llm_instructions -- dict | None: present (and non-null) only for admins
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="operations-drawer" class="modal" aria-label="Operation detail">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="operations-drawer-title">
+          {{ descriptor.op_id }}
+        </h3>
+        {% if descriptor.summary %}
+          <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
+        {% endif %}
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    <div class="mt-4 space-y-4 text-sm">
+      {#- Policy gates: safety_level + requires_approval. -#}
+      <div class="flex flex-wrap items-center gap-2">
+        {% set safety = descriptor.safety_level %}
+        {% if safety == "dangerous" %}
+          <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+        {% elif safety == "caution" %}
+          <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ safety }}</span>
+        {% else %}
+          <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ safety }}</span>
+        {% endif %}
+        {% if descriptor.requires_approval %}
+          <span class="badge badge-outline badge-sm" title="Requires approval">requires approval</span>
+        {% endif %}
+        {% if descriptor.group_key %}
+          <span class="badge badge-ghost badge-sm">group: {{ descriptor.group_key }}</span>
+        {% endif %}
+      </div>
+
+      {% if descriptor.description %}
+        <div>
+          <div class="meho-overline mb-1">Description</div>
+          <p class="opacity-80">{{ descriptor.description }}</p>
+        </div>
+      {% endif %}
+
+      {#- HTTP shape (operator-safe): method + path. -#}
+      {% if descriptor.method or descriptor.path %}
+        <div>
+          <div class="meho-overline mb-1">Request</div>
+          <p class="font-mono text-xs">
+            {% if descriptor.method %}<span class="font-semibold">{{ descriptor.method }}</span>{% endif %}
+            {% if descriptor.path %}<span>{{ descriptor.path }}</span>{% endif %}
+          </p>
+        </div>
+      {% endif %}
+
+      {#- Parameter schema (operator-safe): rendered as pretty JSON. -#}
+      <div>
+        <div class="meho-overline mb-1">Parameters</div>
+        {% if descriptor.parameter_schema %}
+          <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ descriptor.parameter_schema | tojson(indent=2) }}</code></pre>
+        {% else %}
+          <p class="text-xs opacity-60">No parameters.</p>
+        {% endif %}
+      </div>
+
+      {#- llm_instructions: tenant_admin only. The block is absent entirely
+          for a plain operator -- the context does not carry the prompt for
+          a non-admin render, so the body never contains the prompt text. -#}
+      {% if is_tenant_admin and llm_instructions %}
+        <div data-llm-instructions="true">
+          <div class="meho-overline mb-1">Agent prompt (tenant_admin)</div>
+          <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ llm_instructions | tojson(indent=2) }}</code></pre>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

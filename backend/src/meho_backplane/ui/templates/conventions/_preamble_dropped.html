@@ -1,0 +1,49 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Post-write "DROPPED" indicator for the Conventions author / edit modals
+  (Initiative #1838 Task #1896). Rendered into ``#conventions-write-result``
+  when a create / edit succeeds at the DB level but the just-written
+  ``operational`` rule was dropped from the assembled preamble on budget
+  overflow (``preamble_status.included is False``).
+
+  The operator MUST see this before navigating away -- the rule was saved
+  but agents will not see it. The fragment names every dropped slug
+  (``would_drop_slugs``) so the operator knows which rules lost the budget
+  contest, and offers a link onward to the list once acknowledged.
+-#}
+<div class="alert alert-warning items-start" role="alert" data-preamble-dropped>
+  <div class="space-y-2">
+    <div>
+      <span class="font-semibold">Saved, but DROPPED from the agent preamble.</span>
+    </div>
+    <p class="text-sm">
+      <span class="font-mono">{{ slug }}</span> was saved, but the preamble is over
+      budget so agents will not see this rule. The following operational rule{{ "" if
+      preamble_status.would_drop_slugs | length == 1 else "s" }}
+      {{ "is" if preamble_status.would_drop_slugs | length == 1 else "are" }} currently
+      dropped:
+    </p>
+    <ul class="flex flex-wrap gap-2" aria-label="Dropped conventions">
+      {% for dropped in preamble_status.would_drop_slugs %}
+        <li>
+          <span class="badge badge-error gap-1 font-mono" data-dropped-slug="{{ dropped }}">
+            {{ dropped }}
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+    <div>
+      <a
+        href="/ui/conventions"
+        class="btn btn-sm"
+        hx-get="/ui/conventions"
+        hx-target="body"
+        hx-push-url="true"
+      >
+        Back to conventions
+      </a>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,61 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Delete-confirm ``<dialog>`` gate for the Conventions surface
+  (Initiative #1838 Task #1896). Loaded into
+  ``#conventions-modal-container`` by the "Delete" button's ``hx-get`` to
+  ``/ui/conventions/{slug}/delete``.
+
+  The actual DELETE fires ONLY from the Confirm button inside this dialog
+  -- a plain row / detail click never deletes directly (the confirm gate
+  the issue's acceptance criterion requires). The service DELETE is
+  non-idempotent (404s on a missing row), so the route catches the
+  not-found and renders the benign "already deleted" fragment into
+  ``#conventions-write-result`` rather than surfacing a raw 404 on a
+  double-fire.
+
+  CSRF: the form echoes the token this render minted via ``hx-headers``
+  and the route set the matching ``meho_csrf`` cookie on this response.
+-#}
+<dialog id="conventions-delete-modal" class="modal">
+  <div class="modal-box">
+    <h3 class="font-semibold text-lg text-error" id="conventions-delete-modal-title">
+      Delete convention
+    </h3>
+
+    <div id="conventions-write-result" aria-live="assertive"></div>
+
+    <p class="py-3 text-sm">
+      Delete <span class="font-mono font-semibold">{{ slug }}</span>
+      &mdash; <em>{{ title }}</em> ({{ kind }})? This writes a history row and
+      cannot be undone. Operators relying on this rule will lose it from the
+      next session preamble.
+    </p>
+
+    <form
+      id="conventions-delete-form"
+      hx-delete="/ui/conventions/{{ slug | urlencode }}"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-target="#conventions-write-result"
+      hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          onclick="document.getElementById('conventions-delete-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="delete-confirm">
+          Delete
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

@@ -1,0 +1,75 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Debounced token-cost preview fragment for the Conventions author /
+  edit modals (Initiative #1838 Task #1896). Returned by
+  ``POST /ui/conventions/preview`` on every debounced keystroke from the
+  body textarea (and on the kind selector's change).
+
+  The estimated token cost comes from
+  :func:`~meho_backplane.conventions.schemas.estimate_tokens` server-side
+  -- the single source of truth, never a re-derived chars/token ratio on
+  the client. An ``operational`` body whose estimate exceeds the 600-token
+  budget renders in red (``data-over-budget="true"``); ``workflow`` /
+  ``reference`` bodies are exempt (they never enter the preamble) and
+  render in a calm style regardless of size.
+
+  The element id ``#conventions-token-preview`` matches the modal's HTMX
+  swap target; ``outerHTML`` replaces the element including its id so
+  subsequent swaps land on the same target. The modal's initial render
+  includes this same partial with no ``estimated_tokens`` in context, so
+  the ``is defined`` guard renders the empty placeholder first.
+-#}
+<div
+  id="conventions-token-preview"
+  class="space-y-2"
+  aria-live="polite"
+>
+  {% if estimated_tokens is defined %}
+    <div
+      class="rounded-box border p-2 text-sm
+        {% if over_budget %}border-error bg-error/10 text-error{% else %}border-base-300 bg-base-100{% endif %}"
+      data-token-preview
+      data-over-budget="{{ 'true' if over_budget else 'false' }}"
+      data-counts-against-budget="{{ 'true' if counts_against_budget else 'false' }}"
+    >
+      <span class="font-semibold">Token cost:</span>
+      <span class="font-mono" data-estimated-tokens="{{ estimated_tokens }}">
+        {{ estimated_tokens }} / {{ max_tokens }} tokens
+      </span>
+      {% if counts_against_budget %}
+        {% if over_budget %}
+          <span class="badge badge-error badge-sm ml-1">over budget</span>
+          <p class="mt-1 text-xs">
+            This operational rule exceeds the {{ max_tokens }}-token preamble budget and
+            will be rejected on save. Trim the body, or set kind to workflow / reference.
+          </p>
+        {% else %}
+          <span class="badge badge-success badge-sm ml-1">within budget</span>
+        {% endif %}
+      {% else %}
+        <span class="badge badge-ghost badge-sm ml-1">{{ kind }} &mdash; exempt</span>
+        <p class="mt-1 text-xs opacity-70">
+          Only operational rules are packed into the agent preamble; this kind is exempt
+          from the token budget.
+        </p>
+      {% endif %}
+    </div>
+    {% if body_html %}
+      <article
+        class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-3"
+        aria-label="Convention body preview"
+      >
+        {{ body_html }}
+      </article>
+    {% endif %}
+  {% else %}
+    <div
+      class="rounded-box border border-base-300 bg-base-100 p-2 text-sm opacity-50"
+      data-token-preview
+    >
+      Token cost will appear here as you type.
+    </div>
+  {% endif %}
+</div>

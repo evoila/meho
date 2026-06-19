@@ -93,6 +93,7 @@ from meho_backplane.ui.routes.agents.runs import build_runs_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
+from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
@@ -109,6 +110,7 @@ __all__ = [
     "build_approvals_router",
     "build_broadcast_router",
     "build_connectors_router",
+    "build_conventions_router",
     "build_corpus_router",
     "build_dashboard_router",
     "build_kb_router",
@@ -153,6 +155,14 @@ def build_router() -> APIRouter:
     router.include_router(build_topology_router())
     router.include_router(build_memory_router())
     router.include_router(build_connectors_router())
+    # Conventions console (G10.12-T1 #1895): ``/ui/conventions`` list +
+    # always-on preamble token-budget banner + ``/ui/conventions/{slug}``
+    # detail. The literal ``/ui/conventions`` list route is registered
+    # before the ``{slug}`` detail route inside that router so T2's
+    # static-prefix write routes (``/create`` + ``/preview``) drop in
+    # without binding a literal as a slug; included before the stubs
+    # aggregate so its concrete paths win the first-match-wins lookup.
+    router.include_router(build_conventions_router())
     # Agent-grants surface ahead of the agents surface: the literal
     # ``/ui/agents/grants`` path must win the first-match-wins lookup
     # against the agents surface's ``/ui/agents/{name}`` (which would

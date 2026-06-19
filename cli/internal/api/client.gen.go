@@ -6606,6 +6606,11 @@ type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 	Force *bool `form:"force,omitempty" json:"force,omitempty"`
 }
 
+// UiConventionsListUiConventionsGetParams defines parameters for UiConventionsListUiConventionsGet.
+type UiConventionsListUiConventionsGetParams struct {
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
 // KbIndexUiKbGetParams defines parameters for KbIndexUiKbGet.
 type KbIndexUiKbGetParams struct {
 	Q      *string `form:"q,omitempty" json:"q,omitempty"`
@@ -6939,6 +6944,12 @@ type UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody = UISessionCont
 
 // UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody defines body for UiConnectorsReprobeUiConnectorsNameProbePost for application/json ContentType.
 type UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody = UISessionContext
+
+// UiConventionsListUiConventionsGetJSONRequestBody defines body for UiConventionsListUiConventionsGet for application/json ContentType.
+type UiConventionsListUiConventionsGetJSONRequestBody = UISessionContext
+
+// UiConventionsDetailUiConventionsSlugGetJSONRequestBody defines body for UiConventionsDetailUiConventionsSlugGet for application/json ContentType.
+type UiConventionsDetailUiConventionsSlugGetJSONRequestBody = UISessionContext
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody defines body for UiCorpusCollectionsTableUiCorpusCollectionsGet for application/json ContentType.
 type UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody = UISessionContext
@@ -8569,6 +8580,16 @@ type ClientInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConventionsListUiConventionsGetWithBody request with any body
+	UiConventionsListUiConventionsGetWithBody(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConventionsListUiConventionsGet(ctx context.Context, params *UiConventionsListUiConventionsGetParams, body UiConventionsListUiConventionsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConventionsDetailUiConventionsSlugGetWithBody request with any body
+	UiConventionsDetailUiConventionsSlugGetWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConventionsDetailUiConventionsSlugGet(ctx context.Context, slug string, body UiConventionsDetailUiConventionsSlugGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CorpusIndexUiCorpusGet request
 	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11857,6 +11878,54 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx contex
 
 func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConventionsListUiConventionsGetWithBody(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConventionsListUiConventionsGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConventionsListUiConventionsGet(ctx context.Context, params *UiConventionsListUiConventionsGetParams, body UiConventionsListUiConventionsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConventionsListUiConventionsGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConventionsDetailUiConventionsSlugGetWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConventionsDetailUiConventionsSlugGetRequestWithBody(c.Server, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConventionsDetailUiConventionsSlugGet(ctx context.Context, slug string, body UiConventionsDetailUiConventionsSlugGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConventionsDetailUiConventionsSlugGetRequest(c.Server, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23856,6 +23925,115 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewUiConventionsListUiConventionsGetRequest calls the generic UiConventionsListUiConventionsGet builder with application/json body
+func NewUiConventionsListUiConventionsGetRequest(server string, params *UiConventionsListUiConventionsGetParams, body UiConventionsListUiConventionsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConventionsListUiConventionsGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConventionsListUiConventionsGetRequestWithBody generates requests for UiConventionsListUiConventionsGet with any type of body
+func NewUiConventionsListUiConventionsGetRequestWithBody(server string, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/conventions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConventionsDetailUiConventionsSlugGetRequest calls the generic UiConventionsDetailUiConventionsSlugGet builder with application/json body
+func NewUiConventionsDetailUiConventionsSlugGetRequest(server string, slug string, body UiConventionsDetailUiConventionsSlugGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConventionsDetailUiConventionsSlugGetRequestWithBody(server, slug, "application/json", bodyReader)
+}
+
+// NewUiConventionsDetailUiConventionsSlugGetRequestWithBody generates requests for UiConventionsDetailUiConventionsSlugGet with any type of body
+func NewUiConventionsDetailUiConventionsSlugGetRequestWithBody(server string, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/conventions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewCorpusIndexUiCorpusGetRequest generates requests for CorpusIndexUiCorpusGet
 func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -27658,6 +27836,16 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// UiConventionsListUiConventionsGetWithBodyWithResponse request with any body
+	UiConventionsListUiConventionsGetWithBodyWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error)
+
+	UiConventionsListUiConventionsGetWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, body UiConventionsListUiConventionsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error)
+
+	// UiConventionsDetailUiConventionsSlugGetWithBodyWithResponse request with any body
+	UiConventionsDetailUiConventionsSlugGetWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsDetailUiConventionsSlugGetResponse, error)
+
+	UiConventionsDetailUiConventionsSlugGetWithResponse(ctx context.Context, slug string, body UiConventionsDetailUiConventionsSlugGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsDetailUiConventionsSlugGetResponse, error)
 
 	// CorpusIndexUiCorpusGetWithResponse request
 	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
@@ -31891,6 +32079,50 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
+type UiConventionsListUiConventionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConventionsListUiConventionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConventionsListUiConventionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConventionsDetailUiConventionsSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConventionsDetailUiConventionsSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConventionsDetailUiConventionsSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type CorpusIndexUiCorpusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -35480,6 +35712,40 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 		return nil, err
 	}
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// UiConventionsListUiConventionsGetWithBodyWithResponse request with arbitrary body returning *UiConventionsListUiConventionsGetResponse
+func (c *ClientWithResponses) UiConventionsListUiConventionsGetWithBodyWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error) {
+	rsp, err := c.UiConventionsListUiConventionsGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConventionsListUiConventionsGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConventionsListUiConventionsGetWithResponse(ctx context.Context, params *UiConventionsListUiConventionsGetParams, body UiConventionsListUiConventionsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsListUiConventionsGetResponse, error) {
+	rsp, err := c.UiConventionsListUiConventionsGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConventionsListUiConventionsGetResponse(rsp)
+}
+
+// UiConventionsDetailUiConventionsSlugGetWithBodyWithResponse request with arbitrary body returning *UiConventionsDetailUiConventionsSlugGetResponse
+func (c *ClientWithResponses) UiConventionsDetailUiConventionsSlugGetWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConventionsDetailUiConventionsSlugGetResponse, error) {
+	rsp, err := c.UiConventionsDetailUiConventionsSlugGetWithBody(ctx, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConventionsDetailUiConventionsSlugGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConventionsDetailUiConventionsSlugGetWithResponse(ctx context.Context, slug string, body UiConventionsDetailUiConventionsSlugGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsDetailUiConventionsSlugGetResponse, error) {
+	rsp, err := c.UiConventionsDetailUiConventionsSlugGet(ctx, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConventionsDetailUiConventionsSlugGetResponse(rsp)
 }
 
 // CorpusIndexUiCorpusGetWithResponse request returning *CorpusIndexUiCorpusGetResponse
@@ -41580,6 +41846,58 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	}
 
 	response := &UiConnectorsReprobeUiConnectorsNameProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConventionsListUiConventionsGetResponse parses an HTTP response from a UiConventionsListUiConventionsGetWithResponse call
+func ParseUiConventionsListUiConventionsGetResponse(rsp *http.Response) (*UiConventionsListUiConventionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConventionsListUiConventionsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConventionsDetailUiConventionsSlugGetResponse parses an HTTP response from a UiConventionsDetailUiConventionsSlugGetWithResponse call
+func ParseUiConventionsDetailUiConventionsSlugGetResponse(rsp *http.Response) (*UiConventionsDetailUiConventionsSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConventionsDetailUiConventionsSlugGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

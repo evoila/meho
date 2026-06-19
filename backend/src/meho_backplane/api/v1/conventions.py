@@ -9,6 +9,17 @@ substrate (T1 #313). T3 (#315) layers CLI verbs over this
 surface; T4 (#316) layers the session-preamble assembler that
 reads through the same Pydantic shapes.
 
+G10.12-T0 (#1894): the CRUD + budget + history + pre-allocated-
+audit-id logic now lives in
+:class:`~meho_backplane.conventions.service.ConventionsService` so the
+in-process console BFF (T1/T2 #1838) can reuse it without copying the
+handlers. These handlers are a thin HTTP shell: they bind the audit
+contextvars, delegate to the service, and map the service's typed
+error vocabulary (:class:`ConventionNotFoundError` / :class:`ConventionConflictError`
+/ :class:`OverBudgetError`) onto ``HTTPException`` status codes. The
+wire behaviour (status codes, response bodies, audit rows, history
+rows) is identical to the pre-extraction inline implementation.
+
 Routes (all tenant-scoped; cross-tenant probes 404, never 403):
 
 * ``GET ``                              list (``?kind=`` filter, operator)
@@ -33,9 +44,9 @@ bound and exempt.
 Audit row + history row commit in the same transaction. The
 history row's ``audit_id`` soft-FK matches the chassis
 :class:`~meho_backplane.audit.AuditMiddleware` row's ``id`` --
-the handler pre-allocates the uuid via
-:func:`~meho_backplane.audit.bind_preallocated_audit_id` and the
-middleware honours it; G8's audit-query path joins on that
+:class:`~meho_backplane.conventions.service.ConventionsService`
+pre-allocates the uuid (binding it onto the audit contextvar) and
+the middleware honours it; G8's audit-query path joins on that
 soft-FK for forensic queries.
 
 Every route binds ``audit_op_id`` / ``audit_op_class`` /
@@ -46,42 +57,30 @@ classifies correctly even when the handler raises.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import delete as sql_delete
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.conventions.preamble import (
-    BLOCK_END as _CONVENTIONS_BLOCK_END,
-)
-from meho_backplane.conventions.preamble import (
-    assemble_preamble,
-    assemble_preamble_detailed,
-)
 from meho_backplane.conventions.schemas import (
-    DEFAULT_MAX_PREAMBLE_TOKENS,
-    BudgetStatus,
     Convention,
     ConventionCreate,
     ConventionHistoryEntry,
     ConventionKind,
     ConventionListResponse,
-    ConventionSummary,
     ConventionUpdate,
-    PreambleInclusion,
-    estimate_tokens,
+)
+from meho_backplane.conventions.service import (
+    ConventionConflictError,
+    ConventionNotFoundError,
+    ConventionsService,
+    OverBudgetError,
 )
 from meho_backplane.db.engine import get_session
-from meho_backplane.db.models import TenantConvention, TenantConventionHistory
 from meho_backplane.mcp.server import RESOURCES_SUBSCRIBE_ENABLED
 
 __all__ = ["router"]
@@ -103,6 +102,10 @@ router = APIRouter(prefix="/api/v1/conventions", tags=["conventions"])
 #: :mod:`~meho_backplane.api.v1.broadcast_overrides`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Single service instance -- stateless (no held session / connection),
+#: so one module-level object is safe to share across requests.
+_service = ConventionsService()
 
 
 #: Canonical operation identifiers bound into ``audit_op_id`` per
@@ -127,45 +130,23 @@ _OP_ID_HISTORY: Final[str] = "conventions.history"
 _SLUG_MAX_LENGTH: Final[int] = 128
 
 
-def _conventions_text_only(preamble_text: str) -> str:
-    """Return the conventions text band from a combined preamble string.
+def _not_found() -> HTTPException:
+    """The consistent 404 the tenant-boundary info-leak avoidance requires."""
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="convention_not_found",
+    )
 
-    G12.4-T2 (#1316). The assembled preamble may now stitch two text
-    bands: tenant conventions wrapped in
-    ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` followed by
-    runbook priming wrapped in
-    ``<<RUNBOOK_PRIMING — CRITICAL>> ... <<END_RUNBOOK_PRIMING>>``,
-    separated by a blank line. The list endpoint's ``budget_status``
-    reports the conventions-band token count only -- priming is
-    bounded by its own implicit cap (``MAX_PRIMING_BLOCKS``) and is
-    not charged to the conventions budget.
 
-    Strategy: slice up to and including the conventions terminator
-    (:data:`~meho_backplane.conventions.preamble.BLOCK_END`); whatever
-    follows is the priming band (or empty). When the preamble carries
-    only priming (no conventions), the terminator is absent and the
-    function returns the empty string -- ``estimate_tokens("") == 0``,
-    so the budget status correctly reports zero conventions weight
-    for a tenant whose preamble is priming-only.
-
-    The slice is a defensive read: it relies only on the wrapper-
-    emitted terminator (never substituted from user content per the
-    positional-wrapper discipline in
-    :mod:`meho_backplane.conventions.preamble`), so a malicious
-    convention body containing the literal terminator string cannot
-    cause the slice to mis-attribute priming text as conventions
-    text.
-    """
-    if not preamble_text:
-        return ""
-    end = preamble_text.find(_CONVENTIONS_BLOCK_END)
-    if end == -1:
-        # No conventions band in the assembled text -- it is
-        # priming-only (operator has runs but tenant has no
-        # operational conventions). The conventions-only weight is
-        # zero.
-        return ""
-    return preamble_text[: end + len(_CONVENTIONS_BLOCK_END)]
+def _over_budget_422(exc: OverBudgetError) -> HTTPException:
+    """Map the service's over-budget error to the 422 the wire contract names."""
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=(
+            f"convention body exceeds preamble budget "
+            f"(estimated={exc.estimated}, budget={exc.budget})"
+        ),
+    )
 
 
 def _maybe_emit_resource_updated(
@@ -226,234 +207,9 @@ def _maybe_emit_resource_updated(
     )
 
 
-def _enforce_budget(body: str, kind: ConventionKind) -> None:
-    """Raise 422 when an ``operational`` body exceeds the preamble budget.
-
-    The single-entry write-time gate the issue body calls out: a
-    convention whose own token estimate exceeds
-    :data:`DEFAULT_MAX_PREAMBLE_TOKENS` cannot fit the preamble at
-    any priority, so failing the write loudly is the correct
-    response (the alternative is silent drop at every future
-    preamble assembly -- the failure mode the "``kubectl apply
-    --dry-run=server`` discipline" is named for). The check is a
-    no-op for ``workflow`` and ``reference`` conventions (which
-    are not packed into the preamble).
-
-    Detail message names ``estimated`` vs ``budget`` per the
-    acceptance criterion's "detail names estimated vs budget"
-    requirement; the integer values are useful for CLI users
-    rewriting the body to fit.
-    """
-    if kind is not ConventionKind.OPERATIONAL:
-        return
-    estimated = estimate_tokens(body)
-    if estimated > DEFAULT_MAX_PREAMBLE_TOKENS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"convention body exceeds preamble budget "
-                f"(estimated={estimated}, budget={DEFAULT_MAX_PREAMBLE_TOKENS})"
-            ),
-        )
-
-
-def _resolve_patch_fields(
-    body: ConventionUpdate,
-    existing: TenantConvention,
-) -> tuple[str, str, int]:
-    """Pick post-PATCH ``(title, body, priority)`` honouring v2 set-vs-null.
-
-    Pydantic v2's :attr:`BaseModel.model_fields_set` distinguishes
-    "field absent from JSON" from "field present with null". For
-    each column in the PATCH surface: take the request body's
-    value iff the field was both explicitly set AND non-null;
-    otherwise fall through to the existing column. The type-
-    narrowing yields concrete ``str`` / ``int`` locals so the
-    handler's ORM assignments don't need ``cast`` calls.
-    """
-    explicit = body.model_fields_set
-    title = body.title if "title" in explicit and body.title is not None else existing.title
-    new_body = body.body if "body" in explicit and body.body is not None else existing.body
-    priority = (
-        body.priority if "priority" in explicit and body.priority is not None else existing.priority
-    )
-    return title, new_body, priority
-
-
-def _enforce_patch_budget(
-    body: ConventionUpdate,
-    new_body: str,
-    existing: TenantConvention,
-) -> None:
-    """Run the over-budget 422 gate iff the patch carries a body change.
-
-    Priority-only or title-only PATCHes against an oversize body
-    are intentionally not surfaced: the bug was already there at
-    the prior write; rejecting on an unrelated edit would be
-    confused-deputy behaviour. When ``body`` is in the patch, we
-    validate against the existing kind (PATCH cannot change kind
-    per :class:`ConventionUpdate`). An existing row carrying a
-    kind value outside the closed :class:`ConventionKind`
-    vocabulary (possible per T1's Out of scope on DB-level enum)
-    falls back to :attr:`ConventionKind.REFERENCE` -- the safe
-    direction; reference-kind never triggers the gate.
-    """
-    if "body" not in body.model_fields_set or body.body is None:
-        return
-    try:
-        existing_kind = ConventionKind(existing.kind)
-    except ValueError:
-        existing_kind = ConventionKind.REFERENCE
-    _enforce_budget(new_body, existing_kind)
-
-
-async def _compute_preamble_status(
-    *,
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    operator_sub: str,
-    slug: str,
-    kind: ConventionKind,
-) -> PreambleInclusion | None:
-    """Resolve preamble inclusion for the just-written *(tenant, slug)* pair.
-
-    G0.14-T8 (#1149, signal 18). Returns ``None`` for kinds that
-    don't enter the preamble (``workflow`` / ``reference``); a
-    populated :class:`PreambleInclusion` for ``operational`` rows.
-
-    The function runs
-    :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
-    through the route handler's *session* so the pack reflects the
-    in-progress write. SQLAlchemy 2.x reads within the same
-    transaction see flushed-but-not-committed rows, so the caller
-    must :meth:`session.flush` the convention INSERT/UPDATE before
-    calling; the read here will then include it. Threading the
-    route's session through (over opening a new one) means the
-    feedback reflects the same state the post-commit MCP
-    ``initialize`` handler will see -- no risk of an in-flight
-    concurrent write from another request changing the answer
-    mid-response.
-
-    Three reads from the detailed assembly drive the four output
-    fields:
-
-    * ``kept_slugs.index(slug) + 1`` -> ``position`` (1-based, or
-      ``None`` when this slug was dropped).
-    * ``slug in kept_slugs`` -> ``included``.
-    * ``token_counts[slug]`` -> ``token_count`` (own body weight).
-    * ``dropped_slugs`` -> ``would_drop_slugs`` (verbatim).
-
-    The ``slug`` argument is the slug as written (POST: ``body.slug``;
-    PATCH: the path parameter — PATCH cannot rename, so the slug
-    is stable across the update). ``kind`` is the convention's
-    current kind: POST uses the request body's kind; PATCH uses the
-    existing row's kind (PATCH cannot change kind per the
-    :class:`ConventionUpdate` schema).
-
-    G12.4-T2 (#1316) added the *operator_sub* parameter so the
-    assembler can include runbook priming in the assembled preamble
-    -- the post-write preview now reflects exactly what the operator's
-    MCP session receives, priming included. The
-    :class:`PreambleInclusion` projection (``position`` /
-    ``included`` / ``token_count`` / ``would_drop_slugs``) is
-    *conventions-only* -- those fields describe the conventions
-    pack; the priming portion is summarised on the detailed
-    assembly's ``runbook_block_count`` / ``runbook_summarized``
-    fields, which are not surfaced here (the route's
-    :class:`PreambleInclusion` schema is the slug-scoped feedback
-    surface, not a general preamble report).
-    """
-    if kind is not ConventionKind.OPERATIONAL:
-        # ``workflow`` / ``reference`` are not preamble-bound -- a
-        # write against them does not affect the assembled preamble,
-        # so the operator's "did this land in the preamble?" question
-        # doesn't apply. Returning ``None`` (over a stub
-        # ``PreambleInclusion(included=False, ...)``) keeps the
-        # response shape honest: ``preamble_status`` present iff the
-        # write was a preamble-bound one.
-        return None
-    assembly = await assemble_preamble_detailed(
-        tenant_id,
-        operator_sub,
-        session=session,
-    )
-    included = slug in assembly.kept_slugs
-    position = assembly.kept_slugs.index(slug) + 1 if included else None
-    # ``token_counts`` carries every considered slug (kept + dropped);
-    # the just-written slug must appear there because the assembler
-    # ran after the write flushed. The ``get`` fallback is paranoia
-    # against an unforeseen race (e.g. a concurrent DELETE) and
-    # short-circuits to 0 so the response shape still validates.
-    token_count = assembly.token_counts.get(slug, 0)
-    return PreambleInclusion(
-        included=included,
-        position=position,
-        token_count=token_count,
-        would_drop_slugs=assembly.dropped_slugs,
-    )
-
-
-async def _load_convention(
-    *,
-    session: AsyncSession,
-    tenant_id: uuid.UUID,
-    slug: str,
-) -> TenantConvention | None:
-    """Fetch the convention by ``(tenant_id, slug)`` or return ``None``.
-
-    Hits the composite-unique index
-    ``tenant_conventions_tenant_slug_idx`` (per the substrate's
-    declared index discipline) -- one btree probe. ``None`` means
-    "the row does not exist in this operator's tenant"; collapses
-    "wrong tenant" and "wrong slug" into the same return value so
-    the route layer can apply the consistent 404 the tenant
-    boundary's info-leak avoidance requires.
-    """
-    stmt = select(TenantConvention).where(
-        TenantConvention.tenant_id == tenant_id,
-        TenantConvention.slug == slug,
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
 # ---------------------------------------------------------------------------
 # GET /api/v1/conventions -- list
 # ---------------------------------------------------------------------------
-
-
-async def _compute_budget_status(operator: Operator) -> BudgetStatus:
-    """Compute the conventions preamble budget for *operator*'s tenant.
-
-    Runs the same :func:`assemble_preamble` primitive T4's MCP
-    ``initialize`` handler uses, so ``estimated_tokens`` on the list
-    response and the preamble actually delivered to agent sessions cannot
-    drift. The assembler opens its own DB session (the MCP ``initialize``
-    path is not a FastAPI request handler), adding one round-trip; that is
-    acceptable for the v0.2 budget contract and the natural unit for "what
-    the preamble actually weighs".
-
-    The ``budget_status`` arithmetic is **conventions-only**:
-    ``estimated_tokens`` measures the conventions band against
-    ``DEFAULT_MAX_PREAMBLE_TOKENS``. The other bands — priming (G12.4-T2
-    #1316, capped by ``MAX_PRIMING_BLOCKS``) and the doc-collection
-    catalogue (G4.6-T4 #1553, its own ``MAX_CATALOGUE_TOKENS``) — are not
-    charged to the conventions budget. The preamble is assembled with both
-    (``sub`` + ``capabilities``) so the list view reflects the exact wire
-    shape MCP ``initialize`` ships, then ``_conventions_text_only`` strips
-    everything after the conventions terminator before measuring — a tenant
-    with zero operational conventions reports ``estimated_tokens=0``
-    regardless of how many runs or entitled collections the operator has.
-    """
-    preamble = await assemble_preamble(
-        operator.tenant_id, operator.sub, capabilities=operator.capabilities
-    )
-    conventions_only_text = _conventions_text_only(preamble.text)
-    return BudgetStatus(
-        max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
-        estimated_tokens=estimate_tokens(conventions_only_text),
-        over_budget=bool(preamble.dropped_slugs),
-        dropped_slugs=preamble.dropped_slugs,
-    )
 
 
 @router.get("", response_model=ConventionListResponse)
@@ -499,20 +255,12 @@ async def list_conventions(
         audit_op_id=_OP_ID_LIST,
         audit_op_class="read",
     )
-    stmt = select(TenantConvention).where(
-        TenantConvention.tenant_id == operator.tenant_id,
+    entries, budget_status = await _service.list_conventions(
+        session=session,
+        operator=operator,
+        kind=kind,
     )
-    if kind is not None:
-        stmt = stmt.where(TenantConvention.kind == kind.value)
-    stmt = stmt.order_by(
-        TenantConvention.priority.desc(),
-        TenantConvention.created_at.asc(),
-    )
-    rows = (await session.execute(stmt)).scalars().all()
 
-    budget_status = await _compute_budget_status(operator)
-
-    entries = [ConventionSummary.model_validate(row) for row in rows]
     if envelope == "v2":
         return JSONResponse(
             wrap_v2_envelope(
@@ -549,17 +297,14 @@ async def show_convention(
         audit_op_class="read",
         audit_slug=slug,
     )
-    row = await _load_convention(
-        session=session,
-        tenant_id=operator.tenant_id,
-        slug=slug,
-    )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="convention_not_found",
+    try:
+        return await _service.get_convention(
+            session=session,
+            tenant_id=operator.tenant_id,
+            slug=slug,
         )
-    return Convention.model_validate(row)
+    except ConventionNotFoundError as exc:
+        raise _not_found() from exc
 
 
 # ---------------------------------------------------------------------------
@@ -589,79 +334,24 @@ async def create_convention(
         audit_op_class="write",
         audit_slug=body.slug,
     )
-    _enforce_budget(body.body, body.kind)
-
-    audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(audit_id)
-    now = datetime.now(UTC)
-    convention = TenantConvention(
-        id=uuid.uuid4(),
-        tenant_id=operator.tenant_id,
-        slug=body.slug,
-        title=body.title,
-        body=body.body,
-        kind=body.kind.value,
-        priority=body.priority,
-        created_by_sub=operator.sub,
-        created_at=now,
-        updated_at=now,
-    )
-    history = TenantConventionHistory(
-        id=uuid.uuid4(),
-        convention_id=convention.id,
-        body_before=None,
-        body_after=body.body,
-        actor_sub=operator.sub,
-        ts=now,
-        audit_id=audit_id,
-    )
-    session.add_all([convention, history])
     try:
-        await session.flush()
-    except IntegrityError as exc:
-        # Narrow the 409 to actual composite-unique-index violations
-        # on ``(tenant_id, slug)``; other IntegrityError shapes
-        # (CHECK / NOT NULL violations from a future tightening
-        # migration) propagate so a genuine corruption surfaces as
-        # a 500 rather than a misleading "already exists".
-        #
-        # PG via asyncpg: ``PostgresError.sqlstate == "23505"`` is
-        # the unique-violation code. SQLite: ``UNIQUE constraint
-        # failed`` substring is the documented form. Same shape the
-        # broadcast_overrides router uses for the same purpose.
-        orig = getattr(exc, "orig", None)
-        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-        orig_msg = str(orig or exc)
-        is_unique_violation = sqlstate == "23505" or "UNIQUE constraint failed" in orig_msg
-        if is_unique_violation:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"convention {body.slug!r} already exists",
-            ) from exc
-        raise
-    # Refresh so any DB-side defaults are visible on the returned
-    # row (mirrors the broadcast_overrides + memory surfaces).
-    await session.refresh(convention)
-    # G0.14-T8 (#1149, signal 18) preamble-status feedback.
-    # The convention has flushed inside the route's session (above
-    # at ``session.flush()``); reads through the same session see it,
-    # so the preamble assembler resolves the just-written slug's
-    # position against the post-write state. ``None`` for
-    # workflow/reference (preamble-unbound kinds).
-    preamble_status = await _compute_preamble_status(
-        session=session,
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        slug=body.slug,
-        kind=body.kind,
-    )
+        convention = await _service.create_convention(
+            session=session,
+            operator=operator,
+            body=body,
+        )
+    except OverBudgetError as exc:
+        raise _over_budget_422(exc) from exc
+    except ConventionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"convention {body.slug!r} already exists",
+        ) from exc
     # Conditional MCP resources/updated notification (T4 #316).
     # No-op while ``resources.subscribe`` is False; structured emit
     # call site is in place for the v0.2.next subscribe flip.
     _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=body.slug)
-    return Convention.model_validate(convention).model_copy(
-        update={"preamble_status": preamble_status},
-    )
+    return convention
 
 
 # ---------------------------------------------------------------------------
@@ -693,69 +383,22 @@ async def update_convention(
         audit_op_class="write",
         audit_slug=slug,
     )
-
-    existing = await _load_convention(
-        session=session,
-        tenant_id=operator.tenant_id,
-        slug=slug,
-    )
-    if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="convention_not_found",
-        )
-
-    new_title, new_body, new_priority = _resolve_patch_fields(body, existing)
-    _enforce_patch_budget(body, new_body, existing)
-
-    audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(audit_id)
-    now = datetime.now(UTC)
-    body_before = existing.body
-
-    existing.title = new_title
-    existing.body = new_body
-    existing.priority = new_priority
-    existing.updated_at = now
-
-    history = TenantConventionHistory(
-        id=uuid.uuid4(),
-        convention_id=existing.id,
-        body_before=body_before,
-        body_after=new_body,
-        actor_sub=operator.sub,
-        ts=now,
-        audit_id=audit_id,
-    )
-    session.add(history)
-    await session.flush()
-    await session.refresh(existing)
-    # G0.14-T8 (#1149, signal 18) preamble-status feedback. PATCH
-    # cannot change kind per :class:`ConventionUpdate`, so the
-    # post-PATCH kind is the existing row's kind; resolve back to
-    # the enum for the helper. An existing row carrying a kind
-    # outside the closed :class:`ConventionKind` vocabulary
-    # (possible per T1's Out of scope on DB-level enum) falls back
-    # to ``REFERENCE`` -- the safe direction; reference-kind
-    # short-circuits to ``preamble_status=None`` (preamble-unbound).
     try:
-        existing_kind = ConventionKind(existing.kind)
-    except ValueError:
-        existing_kind = ConventionKind.REFERENCE
-    preamble_status = await _compute_preamble_status(
-        session=session,
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        slug=slug,
-        kind=existing_kind,
-    )
+        convention = await _service.update_convention(
+            session=session,
+            operator=operator,
+            slug=slug,
+            body=body,
+        )
+    except ConventionNotFoundError as exc:
+        raise _not_found() from exc
+    except OverBudgetError as exc:
+        raise _over_budget_422(exc) from exc
     # Conditional MCP resources/updated notification (T4 #316).
     # No-op while ``resources.subscribe`` is False; structured emit
     # call site is in place for the v0.2.next subscribe flip.
     _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=slug)
-    return Convention.model_validate(existing).model_copy(
-        update={"preamble_status": preamble_status},
-    )
+    return convention
 
 
 # ---------------------------------------------------------------------------
@@ -790,44 +433,14 @@ async def delete_convention(
         audit_op_class="write",
         audit_slug=slug,
     )
-
-    existing = await _load_convention(
-        session=session,
-        tenant_id=operator.tenant_id,
-        slug=slug,
-    )
-    if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="convention_not_found",
+    try:
+        await _service.delete_convention(
+            session=session,
+            operator=operator,
+            slug=slug,
         )
-
-    audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(audit_id)
-    now = datetime.now(UTC)
-    convention_id = existing.id
-
-    history = TenantConventionHistory(
-        id=uuid.uuid4(),
-        convention_id=convention_id,
-        body_before=existing.body,
-        body_after=existing.body,
-        actor_sub=operator.sub,
-        ts=now,
-        audit_id=audit_id,
-    )
-    session.add(history)
-    # Flush the history row before the DELETE -- SQLAlchemy 2.x's
-    # session ordering between pending inserts and deletes is
-    # implementation-defined, and the explicit flush keeps the
-    # row-pair contract T4/T5 expect.
-    await session.flush()
-    await session.execute(
-        sql_delete(TenantConvention).where(
-            TenantConvention.id == convention_id,
-            TenantConvention.tenant_id == operator.tenant_id,
-        ),
-    )
+    except ConventionNotFoundError as exc:
+        raise _not_found() from exc
     # Conditional MCP resources/updated notification (T4 #316).
     # DELETE is also a resource-state change that subscribing
     # clients need to refresh on, per MCP 2025-06-18 §Resources.
@@ -862,22 +475,11 @@ async def list_history(
         audit_op_class="read",
         audit_slug=slug,
     )
-
-    existing = await _load_convention(
-        session=session,
-        tenant_id=operator.tenant_id,
-        slug=slug,
-    )
-    if existing is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="convention_not_found",
+    try:
+        return await _service.list_history(
+            session=session,
+            tenant_id=operator.tenant_id,
+            slug=slug,
         )
-
-    stmt = (
-        select(TenantConventionHistory)
-        .where(TenantConventionHistory.convention_id == existing.id)
-        .order_by(TenantConventionHistory.ts.desc())
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return [ConventionHistoryEntry.model_validate(row) for row in rows]
+    except ConventionNotFoundError as exc:
+        raise _not_found() from exc

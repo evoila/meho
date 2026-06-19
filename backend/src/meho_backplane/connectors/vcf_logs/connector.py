@@ -57,22 +57,35 @@ other value with a clear :exc:`NotImplementedError` naming both the
 target and the requested mode -- same posture the NSX, SDDC Manager,
 and VCF Automation precedents established.
 
-401 retry-once contract
------------------------
+Session-expiry retry-once contract
+----------------------------------
 
-On HTTP 401 from a downstream call, :meth:`_get_json_with_session_retry`
-invalidates the cached session token, re-establishes via
-``POST /api/v2/sessions``, and retries the original call **once**. A
-second 401 raises :exc:`RuntimeError` naming the target -- the wrapper's
-posture: re-login once on session-expiry, not a retry loop. Same shape
-the NSX precedent established.
+On a session-expiry status from a downstream call,
+:meth:`_get_json_with_session_retry` invalidates the cached session
+token, re-establishes via ``POST /api/v2/sessions``, and retries the
+original call **once**. vRLI signals an expired session two ways and the
+connector recovers from both (:data:`_SESSION_EXPIRED_STATUSES`):
+
+* **440** -- vRLI's own ``trait.authenticated.440``: *"the session ID has
+  expired; obtain a new session ID from ``/api/v2/sessions``"*. This is
+  the recoverable case the appliance emits once its in-memory session
+  idle-times out -- the one that bites scheduled / long-running consumers.
+* **401** -- ``trait.authenticated.401``: missing/invalid
+  ``Authorization`` header or session ID.
+
+A second session-expiry status (440 or 401) raises :exc:`RuntimeError`
+naming the target -- the wrapper's posture: re-login once on
+session-expiry, not a retry loop. Same shape the NSX precedent
+established.
 
 Session lifecycle
 -----------------
 
 vRLI's session has a documented TTL (default 30 days but operator-tunable
-via ``/api/v2/sessions/`` config); the connector does NOT proactively
-refresh. The 401-retry layer above re-establishes on demand.
+via ``/api/v2/sessions/`` config) and also idle-expires; the connector
+does NOT proactively refresh. The session-expiry retry layer above
+re-establishes on demand -- a 440 (idle-expired session) on the next call
+triggers a re-login + retry rather than failing until restart.
 :meth:`aclose` clears the in-memory token + credentials caches and tears
 down the httpx pool but does NOT issue a DELETE-revoke -- same posture
 NSX takes (revoke-on-close is v0.2.next).
@@ -144,6 +157,15 @@ _VERSION_PATH = "/api/v2/version"
 # permitted alternatives a target may declare via
 # :attr:`VcfLogsTargetLike.provider`.
 _DEFAULT_PROVIDER = "Local"
+
+# Downstream statuses that mean "the cached session token is no longer
+# accepted; re-login and retry once" -- vRLI's ``trait.authenticated.440``
+# (session expired, "obtain a new session ID") and ``.401`` (missing or
+# invalid Authorization). Both feed
+# :meth:`VcfLogsConnector._get_json_with_session_retry`; see the module
+# "Session-expiry retry-once contract" docstring above for why 440 is the
+# case that bites (#1909).
+_SESSION_EXPIRED_STATUSES: frozenset[int] = frozenset({401, 440})
 
 
 def _vrli_payload_builder(
@@ -360,13 +382,13 @@ class VcfLogsConnector(HttpConnector):
     async def _invalidate_session(self, target: VcfLogsTargetLike) -> None:
         """Drop the cached session token for *target*.
 
-        Called by :meth:`_get_json_with_session_retry` on 401 from a
-        downstream call so the subsequent :meth:`_session_token`
-        re-issues ``POST /api/v2/sessions`` from a clean state. Holds
-        the lock so a concurrent re-establish doesn't race with the
-        invalidation. Credentials cache is left intact -- the 401 means
-        the *session token* expired, not that the credentials are
-        wrong.
+        Called by :meth:`_get_json_with_session_retry` on a session-expiry
+        status (440 or 401) from a downstream call so the subsequent
+        :meth:`_session_token` re-issues ``POST /api/v2/sessions`` from a
+        clean state. Holds the lock so a concurrent re-establish doesn't
+        race with the invalidation. Credentials cache is left intact -- a
+        440/401 means the *session token* expired or was rejected, not
+        that the credentials are wrong.
         """
         async with self._session_lock:
             self._session_tokens.pop(target_cache_key(target), None)
@@ -379,7 +401,7 @@ class VcfLogsConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """GET *path* with single 401 -> re-login -> retry-once recovery.
+        """GET *path* with single session-expiry -> re-login -> retry-once recovery.
 
         Wraps the inherited :meth:`HttpConnector._get_json` (which
         carries tenacity's connection-error + 5xx retry decorator);
@@ -387,25 +409,33 @@ class VcfLogsConnector(HttpConnector):
         method just calls ``_get_json`` directly and the retry policy
         on the base method runs transparently.
 
-        On 401 from the inherited call, invalidates the cached session
-        token and re-tries once. A second 401 raises
-        :exc:`RuntimeError` naming the target -- the wrapper's posture:
-        re-login once on session-expiry, not a retry loop. Same shape
-        the NSX precedent established.
+        On a **session-expiry** status (:data:`_SESSION_EXPIRED_STATUSES`
+        -- vRLI's ``440`` *or* ``401``) from the inherited call,
+        invalidates the cached session token and re-tries once. ``440`` is
+        the case that bites in practice: it is vRLI's own
+        ``trait.authenticated.440`` -- *"the session ID has expired;
+        obtain a new session ID from ``/api/v2/sessions``"* -- emitted once
+        the appliance idle-times out the session. The cached token is
+        stale, not the credential, so a re-login recovers it. A second
+        session-expiry status (440 or 401) raises :exc:`RuntimeError`
+        naming the target -- the wrapper's posture: re-login once on
+        session-expiry, not a retry loop. Same shape the NSX precedent
+        established.
         """
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 401:
+            if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
                 raise
             await self._invalidate_session(target)
         try:
             return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
+            status_code = exc.response.status_code
+            if status_code in _SESSION_EXPIRED_STATUSES:
                 raise RuntimeError(
                     f"vrli session re-login failed for target {target.name!r}: "
-                    f"GET {path} returned HTTP 401 after refresh"
+                    f"GET {path} returned HTTP {status_code} after refresh"
                 ) from exc
             raise
 

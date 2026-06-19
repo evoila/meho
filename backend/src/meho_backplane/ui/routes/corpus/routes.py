@@ -78,7 +78,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.corpus import CorpusUnavailable
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import (
@@ -401,6 +401,11 @@ async def _render_corpus_index(
         "searched": False,
         "operator_sub": session.operator_sub,
         "entitlement_diagnostic": entitlement_diagnostic,
+        # Gates the unprovisioned empty-state's in-console register affordance
+        # (T2 #1883): a tenant_admin gets a "Register a collection" CTA, a
+        # plain operator gets a "a tenant administrator can register one" hint.
+        # Derived from the already-resolved operator (no extra JWT round-trip).
+        "is_tenant_admin": operator.tenant_role == TenantRole.TENANT_ADMIN,
         "csrf_token": csrf_token,
         "active_surface": "corpus",
         "page_title": "Docs Corpus",

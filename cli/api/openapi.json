@@ -11544,6 +11544,274 @@
         }
       }
     },
+    "/ui/corpus/collections/{collection_key}/probe": {
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collection Probe",
+        "description": "``POST /ui/corpus/collections/{collection_key}/probe``.",
+        "operationId": "ui_corpus_collection_probe_ui_corpus_collections__collection_key__probe_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/corpus/collections/{collection_key}/disable": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collection Disable Modal",
+        "description": "``GET /ui/corpus/collections/{collection_key}/disable`` -- confirm modal.",
+        "operationId": "ui_corpus_collection_disable_modal_ui_corpus_collections__collection_key__disable_get",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collection Disable",
+        "description": "``POST /ui/corpus/collections/{collection_key}/disable``.",
+        "operationId": "ui_corpus_collection_disable_ui_corpus_collections__collection_key__disable_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/corpus/collections/{collection_key}/enable": {
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collection Enable",
+        "description": "``POST /ui/corpus/collections/{collection_key}/enable``.",
+        "operationId": "ui_corpus_collection_enable_ui_corpus_collections__collection_key__enable_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/corpus/collections/{collection_key}": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Collection Detail",
+        "description": "``GET /ui/corpus/collections/{collection_key}`` -- the detail page.",
+        "operationId": "ui_corpus_collection_detail_ui_corpus_collections__collection_key__get",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/corpus": {
       "get": {
         "tags": [

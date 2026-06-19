@@ -1,0 +1,135 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus collection readiness-card fragment (Initiative #1836 Task
+  #1883). Surfaces a collection's lifecycle liveness: the ``status`` pill,
+  ``doc_count``, ``last_ingested_at``, and the ``readiness.index_built``
+  managed-RAG footgun flag (reachable != answerable). Hosts the re-probe
+  action.
+
+  Rendered in two contexts (mirrors the connectors ``_fingerprint_card.html``
+  swap pattern):
+    * Included by ``detail.html`` on the initial full-page render.
+    * Returned standalone by ``POST /ui/corpus/collections/{key}/probe`` so a
+      re-probe action swaps this fragment into ``#collection-readiness-card``
+      (``hx-swap="outerHTML"``) without a full-page reload.
+
+  The re-probe button is rendered only when ``is_tenant_admin``; the
+  server-side gate in the probe handler (``resolve_operator_or_403``) is the
+  authority -- the template hides the affordance from operators who can't use
+  it.
+
+  Probe is slow (a managed-RAG rebuild serializes per project), so the button
+  carries ``hx-disabled-elt="this"`` (disabled for the request duration) +
+  ``hx-indicator`` driving an inline spinner so a naive synchronous probe does
+  not look hung -- the same convention the connectors re-probe button uses.
+
+  CSRF: the button declares its OWN ``hx-headers`` ``X-CSRF-Token`` -- HTMX
+  does NOT propagate ``hx-headers`` to a swapped-in fragment from an ancestor
+  (#1693), and the success swap replaces this card's markup, so the token must
+  ride the element that issues the request. The route mints + re-sets the
+  ``meho_csrf`` cookie on every card render so the double-submit pair lines up.
+
+  Context contract (set by ``detail._render_readiness_card``):
+    * ``collection``      -- dict: the projected full read shape (status /
+                             doc_count / last_ingested_at / readiness / ...).
+    * ``is_tenant_admin`` -- bool: gates the re-probe button.
+    * ``csrf_token``      -- str: minted double-submit token.
+-#}
+<article
+  id="collection-readiness-card"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Collection readiness"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-center justify-between gap-2">
+      <h2 class="card-title text-base">Readiness</h2>
+      {% if is_tenant_admin %}
+        <button
+          type="button"
+          class="btn btn-primary btn-xs gap-1"
+          hx-post="/ui/corpus/collections/{{ collection.collection_key | urlencode }}/probe"
+          hx-target="#collection-readiness-card"
+          hx-swap="outerHTML"
+          hx-disabled-elt="this"
+          hx-indicator="#collection-reprobe-indicator"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          aria-label="Re-probe {{ collection.collection_key }}"
+        >
+          <span
+            id="collection-reprobe-indicator"
+            class="htmx-indicator loading loading-spinner loading-xs"
+            aria-hidden="true"
+          ></span>
+          Re-probe
+        </button>
+      {% endif %}
+    </header>
+
+    <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+      <dt class="opacity-60">status</dt>
+      <dd>
+        {% if collection.status == "ready" %}
+          <span class="badge badge-success badge-sm">ready</span>
+        {% elif collection.status == "provisioning" %}
+          <span class="badge badge-info badge-sm">provisioning</span>
+        {% elif collection.status == "rebuilding" %}
+          <span class="badge badge-warning badge-sm">rebuilding</span>
+        {% elif collection.status == "disabled" %}
+          <span class="badge badge-ghost badge-sm">disabled</span>
+        {% else %}
+          <span class="badge badge-ghost badge-sm">{{ collection.status }}</span>
+        {% endif %}
+      </dd>
+
+      <dt class="opacity-60">index built</dt>
+      <dd>
+        {% if collection.readiness and collection.readiness.get("index_built") %}
+          <span class="badge badge-success badge-xs">yes</span>
+        {% elif collection.readiness is not none %}
+          <span class="badge badge-warning badge-xs">no</span>
+          <span class="text-xs opacity-70">(reachable, not yet answerable)</span>
+        {% else %}
+          <span class="opacity-50">never probed</span>
+        {% endif %}
+      </dd>
+
+      <dt class="opacity-60">doc count</dt>
+      <dd class="tabular-nums">
+        {% if collection.doc_count is not none %}
+          {{ collection.doc_count }}
+        {% else %}
+          <span class="opacity-50">&mdash;</span>
+        {% endif %}
+      </dd>
+
+      <dt class="opacity-60">last ingested</dt>
+      <dd class="text-xs">
+        {% if collection.last_ingested_at is not none %}
+          {{ collection.last_ingested_at.isoformat() }}
+        {% else %}
+          <span class="opacity-50">never</span>
+        {% endif %}
+      </dd>
+    </dl>
+
+    {% if collection.status == "provisioning" %}
+      <p class="text-xs opacity-70">
+        Registered but not yet searchable. Re-probe to confirm the backend
+        index is built and promote the collection to <code>ready</code>.
+      </p>
+    {% elif collection.status == "disabled" %}
+      <p class="text-xs opacity-70">
+        Hidden from search. Enable the collection to return it to service.
+      </p>
+    {% endif %}
+
+    {% if collection.readiness %}
+      <details class="mt-1">
+        <summary class="cursor-pointer text-xs opacity-70">Raw readiness JSON</summary>
+        <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ collection.readiness | tojson(indent=2) }}</pre>
+      </details>
+    {% endif %}
+  </div>
+</article>

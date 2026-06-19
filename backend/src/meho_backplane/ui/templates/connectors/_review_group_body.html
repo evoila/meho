@@ -1,0 +1,35 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connector review drawer -- ONE group's per-op rows (Initiative #1839
+  Task #1887 T3). Returned by
+  ``GET /ui/connectors/registry/{connector_id}/review/groups/{group_key}``
+  and swapped into the group's ``<details>`` body on first open (the
+  drawer shell's ``hx-trigger="toggle once"``). This is the lazy half of
+  the big-payload guard: the per-op rows for a group materialise ONLY when
+  the operator expands that group, never in the initial drawer paint.
+
+  Each op row is the ``_review_op_row.html`` partial (the
+  ``hx-swap="outerHTML"`` edit unit). Iterating the partial here keeps the
+  per-op-edit re-render and the group-body render sharing one row shape.
+
+  Context contract:
+    * ``connector_id``   -- str: the ``<impl_id>-<version>`` key.
+    * ``group_key``      -- str: the group whose ops these are.
+    * ``ops``            -- list[dict]: the per-op row dicts.
+    * ``is_tenant_admin``-- bool: drives the edit-control soft-hide in
+                            each row.
+    * ``csrf_token``     -- str: minted token the per-row edit forms echo.
+-#}
+{% if ops %}
+  <ul class="divide-y divide-base-300" role="list" data-group-ops="{{ group_key }}">
+    {% for op in ops %}
+      {% include "connectors/_review_op_row.html" %}
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="text-xs opacity-60" data-group-empty="{{ group_key }}">
+    No operations in this group.
+  </p>
+{% endif %}

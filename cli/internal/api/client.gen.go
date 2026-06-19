@@ -1708,6 +1708,35 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 	Version    *string           `json:"version,omitempty"`
 }
 
+// BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch defines model for Body_ui_connectors_registry_op_edit_ui_connectors_registry__connector_id__operations__op_id__patch.
+type BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch struct {
+	CustomDescription *string `json:"custom_description"`
+	IsEnabled         *bool   `json:"is_enabled"`
+	RequiresApproval  *bool   `json:"requires_approval"`
+	SafetyLevel       *string `json:"safety_level"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
 // BodyUiConventionsCreateSubmitUiConventionsCreatePost defines model for Body_ui_conventions_create_submit_ui_conventions_create_post.
 type BodyUiConventionsCreateSubmitUiConventionsCreatePost struct {
 	Body     string `json:"body"`
@@ -7125,6 +7154,15 @@ type UiConnectorsRegistryEnableReadsModalUiConnectorsRegistryConnectorIdEnableRe
 // UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody defines body for UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost for application/json ContentType.
 type UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody = UISessionContext
 
+// UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody defines body for UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch for application/x-www-form-urlencoded ContentType.
+type UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody = BodyUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch
+
+// UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody defines body for UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet for application/json ContentType.
+type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody = UISessionContext
+
+// UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody defines body for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet for application/json ContentType.
+type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody = UISessionContext
+
 // UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
 type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
 
@@ -8841,6 +8879,21 @@ type ClientInterface interface {
 	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBody request with any body
+	UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithFormdataBody(ctx context.Context, connectorId string, opId string, body UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBody request with any body
+	UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet(ctx context.Context, connectorId string, body UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBody request with any body
+	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBody(ctx context.Context, connectorId string, groupKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12374,6 +12427,78 @@ func (c *Client) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdE
 
 func (c *Client) UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPost(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithBody(c.Server, connectorId, opId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithFormdataBody(ctx context.Context, connectorId string, opId string, body UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithFormdataBody(c.Server, connectorId, opId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBody(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequestWithBody(c.Server, connectorId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet(ctx context.Context, connectorId string, body UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequest(c.Server, connectorId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBody(ctx context.Context, connectorId string, groupKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequestWithBody(c.Server, connectorId, groupKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequest(c.Server, connectorId, groupKey, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25130,6 +25255,161 @@ func NewUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableRead
 	return req, nil
 }
 
+// NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithFormdataBody calls the generic UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch builder with application/x-www-form-urlencoded body
+func NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithFormdataBody(server string, connectorId string, opId string, body UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithBody(server, connectorId, opId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithBody generates requests for UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatch with any type of body
+func NewUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchRequestWithBody(server string, connectorId string, opId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/operations/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequest calls the generic UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet builder with application/json body
+func NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequest(server string, connectorId string, body UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequestWithBody(server, connectorId, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequestWithBody generates requests for UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet with any type of body
+func NewUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetRequestWithBody(server string, connectorId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/review", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequest calls the generic UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet builder with application/json body
+func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequest(server string, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequestWithBody(server, connectorId, groupKey, "application/json", bodyReader)
+}
+
+// NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequestWithBody generates requests for UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet with any type of body
+func NewUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetRequestWithBody(server string, connectorId string, groupKey string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "group_key", runtime.ParamLocationPath, groupKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/registry/%s/review/groups/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
 func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -29905,6 +30185,21 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse, error)
 
+	// UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBodyWithResponse request with any body
+	UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse, error)
+
+	UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithFormdataBodyWithResponse(ctx context.Context, connectorId string, opId string, body UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse, error)
+
+	// UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse, error)
+
+	UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse, error)
+
+	// UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBodyWithResponse request with any body
+	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
+
+	UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error)
+
 	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
 
@@ -34370,6 +34665,72 @@ func (r UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableRead
 	return 0
 }
 
+type UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsDetailUiConnectorsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -38521,6 +38882,57 @@ func (c *ClientWithResponses) UiConnectorsRegistryEnableReadsUiConnectorsRegistr
 		return nil, err
 	}
 	return ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse(rsp)
+}
+
+// UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse
+func (c *ClientWithResponses) UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse, error) {
+	rsp, err := c.UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithBody(ctx, connectorId, opId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithFormdataBodyWithResponse(ctx context.Context, connectorId string, opId string, body UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse, error) {
+	rsp, err := c.UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithFormdataBody(ctx, connectorId, opId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse(rsp)
+}
+
+// UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBodyWithResponse(ctx context.Context, connectorId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithBody(ctx, connectorId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, body UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGet(ctx, connectorId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse(rsp)
+}
+
+// UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse
+func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithBody(ctx, connectorId, groupKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse(ctx context.Context, connectorId string, groupKey string, body UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error) {
+	rsp, err := c.UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGet(ctx, connectorId, groupKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp)
 }
 
 // UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
@@ -45118,6 +45530,84 @@ func ParseUiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableRe
 	}
 
 	response := &UiConnectorsRegistryEnableReadsUiConnectorsRegistryConnectorIdEnableReadsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse parses an HTTP response from a UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchWithResponse call
+func ParseUiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse(rsp *http.Response) (*UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryOpEditUiConnectorsRegistryConnectorIdOperationsOpIdPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse parses an HTTP response from a UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetWithResponse call
+func ParseUiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse(rsp *http.Response) (*UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryReviewUiConnectorsRegistryConnectorIdReviewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse parses an HTTP response from a UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetWithResponse call
+func ParseUiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse(rsp *http.Response) (*UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsRegistryReviewGroupUiConnectorsRegistryConnectorIdReviewGroupsGroupKeyGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

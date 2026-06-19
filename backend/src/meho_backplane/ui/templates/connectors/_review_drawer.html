@@ -1,0 +1,147 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connector **review drawer** shell (Initiative #1839 Task #1887 T3).
+  Loaded into ``#connectors-modal-container`` on the registry list page by
+  a row's "Review" button ``hx-get`` to
+  ``/ui/connectors/registry/{connector_id}/review``, or after a successful
+  ingest (T2). The shared app-shell modal controller
+  (``modal-dialogs.js``) opens the inserted ``<dialog class="modal">`` via
+  ``showModal()`` on ``htmx:afterSwap`` and dismisses on close / ESC /
+  backdrop (#1803).
+
+  Big-payload guard (the load-bearing constraint): the vmware-rest review
+  payload is THOUSANDS of ops, so this shell renders each group as a
+  COLLAPSED ``<details>`` carrying ONLY ``name`` / ``review_status`` /
+  ``op_count`` -- it does NOT render the per-op rows. Each group's body
+  lazy-loads its ops via ``hx-get=".../review/groups/{group_key}"`` fired
+  on the native ``<details>`` ``toggle`` event (htmx 2.0.9,
+  https://htmx.org/attributes/hx-trigger/), with ``once`` so the body
+  loads exactly once on first open. A connector with thousands of ops thus
+  never renders every op on first paint.
+
+  Soft-hide: the edit controls are gated on ``is_tenant_admin`` inside the
+  per-op rows (the group body), not here -- an operator sees the read
+  drawer with no edit affordances. The PATCH route is the security
+  authority regardless.
+
+  CSRF: each lazy group-body GET re-mints the ``meho_csrf`` token + cookie;
+  the per-op edit forms in the body carry the token on their OWN
+  ``hx-headers``. This shell's minted ``csrf_token`` seeds the first
+  group-body fetch via the drawer-level ``hx-headers`` so the GET (a read,
+  not CSRF-gated) and any same-token edit line up; the body re-mints
+  regardless.
+
+  Context contract:
+    * ``connector_id``   -- str: the ``<impl_id>-<version>`` key.
+    * ``product`` / ``version`` / ``impl_id`` -- str: the parsed triple.
+    * ``total_op_count`` -- int: the across-all-groups op total.
+    * ``groups``         -- list[dict]: {group_key, name, when_to_use,
+                            review_status, op_count} -- NO ops (lazy).
+    * ``is_tenant_admin``-- bool: forwarded to each lazy group body.
+    * ``csrf_token``     -- str: minted double-submit token.
+-#}
+{% from "_icons.html" import icon %}
+<dialog
+  id="connectors-review-drawer"
+  class="modal"
+  aria-label="Review connector operations"
+  data-review-drawer
+  data-connector-id="{{ connector_id }}"
+>
+  <div class="modal-box max-w-3xl">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <h3 class="text-lg font-semibold" id="connectors-review-drawer-title">
+          Review operations
+        </h3>
+        <p class="mt-1 text-xs opacity-70">
+          <code class="font-mono">{{ connector_id }}</code>
+          &middot; {{ product }}/{{ version }}
+          &middot; {{ total_op_count }} operation{{ "" if total_op_count == 1 else "s" }}
+          in {{ groups | length }} group{{ "" if groups | length == 1 else "s" }}
+        </p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {% if not is_tenant_admin %}
+      <div role="alert" class="alert alert-info mt-3 text-xs" data-readonly-note>
+        <span>
+          You have read access. Per-op governance edits
+          (safety level / approval / enable / description) require
+          <span class="font-semibold">tenant_admin</span>.
+        </span>
+      </div>
+    {% endif %}
+
+    {% if groups %}
+      <div class="mt-4 space-y-2">
+        {% for group in groups %}
+          {#- Each group is a COLLAPSED <details>. The per-op rows are NOT
+              here -- the body lazy-loads on first open. The inner div
+              carries the hx-get + ``hx-trigger="toggle once"`` so the
+              fetch fires when the operator expands the accordion (the
+              native ``toggle`` event bubbles from <details> to this
+              child), exactly once. -#}
+          <details
+            class="rounded-box border border-base-300 bg-base-50"
+            data-group-key="{{ group.group_key }}"
+          >
+            <summary class="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-semibold">
+              <span>{{ group.name }}</span>
+              {%- set status = group.review_status -%}
+              {% if status == "enabled" %}
+                <span class="badge badge-success badge-xs" data-review-status>{{ status }}</span>
+              {% elif status == "disabled" %}
+                <span class="badge badge-ghost badge-xs" data-review-status>{{ status }}</span>
+              {% else %}
+                <span class="badge badge-warning badge-xs" data-review-status>{{ status }}</span>
+              {% endif %}
+              <span class="ml-auto text-xs opacity-60" data-op-count>
+                {{ group.op_count }} op{{ "" if group.op_count == 1 else "s" }}
+              </span>
+            </summary>
+            <div
+              class="border-t border-base-300 px-3 py-2"
+              hx-get="/ui/connectors/registry/{{ connector_id }}/review/groups/{{ group.group_key }}"
+              hx-trigger="toggle once"
+              hx-swap="innerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+              data-group-body
+            >
+              {#- Lazy placeholder: replaced by the group's per-op rows on
+                  first <details> open. The big-payload guard lives here --
+                  no op markup ships in the initial drawer HTML. -#}
+              <p class="text-xs opacity-50" data-group-loading>
+                Loading operations&hellip;
+              </p>
+            </div>
+          </details>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="mt-4 text-sm opacity-60" data-no-groups>
+        This connector has no grouped operations to review.
+      </p>
+    {% endif %}
+
+    <div class="modal-action">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('connectors-review-drawer').close()"
+      >
+        Close
+      </button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

@@ -82,11 +82,28 @@
       </div>
     </td>
     <td class="w-px whitespace-nowrap text-right">
+      {#- Review drawer entry point (Task #1887 T3). Operator-readable:
+          the drawer GET gates on ``operator`` and soft-hides the per-op
+          edit controls from non-admins, so the button shows for EVERY
+          operator (not just tenant_admin). It is a read (not CSRF-gated);
+          the drawer's own lazy group-body fetches + per-op edit forms
+          carry their own tokens. -#}
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        hx-get="/ui/connectors/registry/{{ row.connector_id }}/review"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Review operations of {{ row.connector_id }}"
+        data-review-open
+      >
+        Review
+      </button>
       {% if is_tenant_admin %}
         {#- Per-row action buttons -- tenant_admin only. The write routes
             re-check the role server-side via ``resolve_operator_or_403``;
             this hide is the UX affordance, not the gate. Each confirm
-            modal is HTMX-loaded into the shared modal container; the row's
+            modal is HTML-loaded into the shared modal container; the row's
             own result slot receives the OOB row-swap (success) or the
             inline error panel (409 / 404). -#}
         <div class="flex items-center justify-end gap-1" data-row-actions>
@@ -135,8 +152,6 @@
             Delete
           </button>
         </div>
-      {% else %}
-        <span class="text-xs opacity-40">read-only</span>
       {% endif %}
     </td>
   {%- endif -%}

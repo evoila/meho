@@ -205,6 +205,13 @@ The client attempted dynamic client registration (RFC 7591) and Keycloak rejecte
 
 The operator's token carries a `tenant_role` claim below the role rank any registered tool requires (`read_only < operator < tenant_admin`). v0.2 ships only `meho.status` (`read_only` minimum), so an empty list means the JWT lacks the `tenant_role` claim entirely or carries a role below `read_only`. Walk back through the realm's `tenant_role` mapper.
 
+### Newly-shipped tools don't appear after a backplane upgrade
+
+After upgrading the backplane, a newly-shipped MCP tool (e.g. `enable_reads`) can stay invisible to a client that was already connected — `tools/list` keeps returning the pre-upgrade catalog. **Re-initialize the MCP client/session** (restart the client, or disconnect and reconnect the connector); a mere transport reconnect on the same session may not refresh the cached tool list. Two independent reasons make this expected rather than a backplane defect:
+
+- **The client caches the catalog at `initialize`.** MEHO's tool registry is built once at process startup and never mutates at runtime, so the backplane advertises `tools.listChanged: false` in its `initialize` response and never emits a `notifications/tools/list_changed`. A spec-conforming client that cached the `tools/list` from its `initialize` handshake therefore has no signal to refetch until it re-initializes. (The catalog itself is served fresh per request and RBAC-filtered — there is no server-side `tools/list` cache; see [`docs/codebase/mcp.md` § Known issues](../codebase/mcp.md#known-issues).)
+- **The deploy may not have replaced the process.** A new tool only exists in a *new* backplane process. Confirm the rollout actually cycled the pods/process (`kubectl rollout status` / check the deployed build via the `meho status` CLI command, or the `initialize` response's `serverInfo.version`) — an upgrade that left the old process serving will keep listing the old catalog regardless of client behaviour.
+
 ### Audit row missing for a successful call
 
 The MCP audit writer fails closed: an unauditable call returns JSON-RPC `INTERNAL_ERROR` (-32603). A *successful* call with no audit row means the row was rolled back — most commonly a DB connectivity issue mid-request. The chassis structlog stream will carry a `mcp_audit_write_failed` event with the exception class; check there before suspecting the writer.

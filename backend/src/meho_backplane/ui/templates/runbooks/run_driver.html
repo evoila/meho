@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook run driver page: the step-by-step execution surface a junior
+  operator uses to drive a *started* run to completion or a reasoned
+  abort. Renders the run coordinates + ONLY the current step (via the
+  ``_run_step.html`` fragment) + the Advance / Abort / Reassign controls.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1893 (T2).
+
+  OPACITY: the step body lives entirely in ``_run_step.html`` and shows
+  only the ONE current step (``step_view``). This page never receives or
+  renders the full template step list — that would re-open the #1198
+  skip-ahead leak.
+
+  Context variables:
+    run_id          -- str: the run's id
+    template_slug   -- str | None: run's pinned template slug (live runs)
+    template_version-- int | None: run's pinned template version (live runs)
+    step_view       -- _StepView | None (see _run_step.html)
+    terminal_state  -- "completed" | "abandoned" | None
+    is_assignee     -- bool: caller == run.assigned_to (gates Advance)
+    is_admin        -- bool: caller is tenant_admin (gates Reassign)
+    csrf_token      -- str: double-submit token
+
+  Template blocks:
+    * ``page_title`` — overrides the ``<title>`` suffix.
+    * ``content`` — overrides the base.html main pane.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Runbook run &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+  {# ---------- Header ---------- #}
+  <header class="space-y-2">
+    <div class="flex flex-wrap items-center gap-3">
+      <a href="/ui/runbooks/runs" class="btn btn-ghost btn-sm" aria-label="Back to runbook runs">
+        &larr; Runs
+      </a>
+      <h1 class="text-2xl font-semibold">Run driver</h1>
+      {% if template_slug %}
+        <span class="font-mono opacity-70">
+          {{ template_slug }}<span class="opacity-60">@v{{ template_version }}</span>
+        </span>
+      {% endif %}
+    </div>
+    <p class="font-mono text-xs opacity-50">run {{ run_id }}</p>
+  </header>
+
+  {# ---------- Sub-tab nav (Templates / Runs) ---------- #}
+  {% include "runbooks/_tabs.html" %}
+
+  {# ---------- Current step + action controls ---------- #}
+  {% include "runbooks/_run_step.html" %}
+</section>
+{% endblock %}

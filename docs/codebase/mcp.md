@@ -266,6 +266,21 @@ resource.
   transitional lenience. The strict-mode contract (header required,
   missing → HTTP 400) is gated behind a future settings flag whose
   rollout requires consumer migration ahead.
+* **A newly-shipped tool is invisible to an already-connected
+  client until it re-initializes.** The registry is populated once at
+  startup (`eager_import_mcp_modules`) and never mutates at runtime, so
+  `initialize` advertises `tools.listChanged: false` and the server
+  never emits `notifications/tools/list_changed`. `handle_tools_list`
+  builds the response fresh per request (`all_tools_for(operator)` →
+  `to_wire()`, RBAC-filtered — no `lru_cache`/`@cache` anywhere in
+  `mcp/`), so the staleness is entirely client-side: a client that
+  cached the `tools/list` from its `initialize` handshake has no signal
+  to refetch until it re-initializes (a transport reconnect on the same
+  session is not enough). This is by design for a per-process-immutable
+  registry; the operator-facing remediation (re-initialize the client;
+  also confirm the upgrade actually replaced the backplane process) is
+  in [`docs/cross-repo/mcp-client-setup.md` § Newly-shipped tools don't
+  appear after a backplane upgrade](../cross-repo/mcp-client-setup.md#newly-shipped-tools-dont-appear-after-a-backplane-upgrade).
 
 ## References
 

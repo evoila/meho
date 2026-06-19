@@ -12781,6 +12781,92 @@
         }
       }
     },
+    "/ui/operations/run/{descriptor_id}": {
+      "get": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Run",
+        "description": "Render the run-confirm modal fragment for *descriptor_id* (T3).\n\nThe unmissable safety gate before a dispatch: shows the op's\n``safety_level`` / ``requires_approval`` banner, the target /\nparams / optional ``work_ref`` inputs, and a confirm button carrying\nits OWN CSRF ``hx-headers`` echo. Mints + re-sets the ``meho_csrf``\ncookie so the double-submit pair lines up after the HTMX swap rotated\nit. Run is in the OPERATOR capability set -- no tenant_admin step.",
+        "operationId": "operations_run_ui_operations_run__descriptor_id__get",
+        "parameters": [
+          {
+            "name": "descriptor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Descriptor Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/operations/call": {
+      "post": {
+        "tags": [
+          "ui-operations"
+        ],
+        "summary": "Operations Call",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_session``-gated; calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.",
+        "operationId": "operations_call_ui_operations_call_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_operations_call_ui_operations_call_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations": {
       "get": {
         "tags": [
@@ -14254,6 +14340,44 @@
           "file"
         ],
         "title": "Body_kb_upload_single_ui_kb_upload_post"
+      },
+      "Body_operations_call_ui_operations_call_post": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Op Id"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "params": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Params",
+            "default": ""
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Work Ref",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id"
+        ],
+        "title": "Body_operations_call_ui_operations_call_post"
       },
       "Body_operations_preview_ui_operations_preview_post": {
         "properties": {

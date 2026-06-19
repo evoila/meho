@@ -558,12 +558,16 @@ def _seed_ingested_op(
     method: str = "POST",
     path: str = "/repos/{owner}/{repo}/issues",
     parameter_schema: dict[str, Any] | None = None,
+    safety_level: str = "caution",
+    requires_approval: bool = False,
 ) -> uuid.UUID:
     """Seed one enabled ``source_kind='ingested'`` gh-rest descriptor row.
 
-    Returns the descriptor id (so the drawer + preview form can be exercised
-    end to end through the BFF). The default schema models a gh-rest
-    issue-create -- ``owner`` / ``repo`` path params + a ``body`` container.
+    Returns the descriptor id (so the drawer + preview / run forms can be
+    exercised end to end through the BFF). The default schema models a
+    gh-rest issue-create -- ``owner`` / ``repo`` path params + a ``body``
+    container. ``requires_approval=True`` routes a dispatch through the
+    policy gate's approval-queue branch (the T3 awaiting_approval path).
     """
     if parameter_schema is None:
         parameter_schema = {
@@ -594,8 +598,8 @@ def _seed_ingested_op(
                     description="Ingested write test op.",
                     parameter_schema=parameter_schema,
                     llm_instructions=None,
-                    safety_level="caution",
-                    requires_approval=False,
+                    safety_level=safety_level,
+                    requires_approval=requires_approval,
                     is_enabled=True,
                 )
             )
@@ -841,3 +845,367 @@ def test_operations_ui_drawer_renders_preview_form_for_ingested_op() -> None:
     assert 'id="operations-preview-region"' in body
     # The drawer GET re-set the CSRF cookie so the form's double-submit lines up.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+# ---------------------------------------------------------------------------
+# Run modal + confirm-gated POST /ui/operations/call (Task #1881, T3)
+# ---------------------------------------------------------------------------
+
+
+def _patch_call_operation(
+    monkeypatch: pytest.MonkeyPatch, envelope: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Patch the route module's ``call_operation`` to return *envelope*.
+
+    Records the ``arguments`` dict each call receives so a test can assert the
+    BFF threaded the form fields (connector_id / op_id / target / params /
+    work_ref) through unchanged. The dispatch contract itself --
+    ``call_operation`` returning the structured envelope -- is exhaustively
+    covered by ``test_api_v1_operations`` / ``test_operations_meta_tools``;
+    these BFF tests verify the route wiring + the inline-render branches.
+    """
+    received: list[dict[str, Any]] = []
+
+    async def _fake_call_operation(operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        received.append(arguments)
+        return envelope
+
+    monkeypatch.setattr(
+        "meho_backplane.ui.routes.operations.routes.call_operation",
+        _fake_call_operation,
+    )
+    return received
+
+
+def test_operations_ui_run_call_ok_renders_result_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed call for a successful op renders the result inline (status=ok)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    ok_envelope = {
+        "status": "ok",
+        "op_id": "POST:/repos/{owner}/{repo}/issues",
+        "result": {"number": 7, "html_url": "https://github.com/evoila/meho/issues/7"},
+        "error": None,
+        "duration_ms": 42.0,
+        "handle": None,
+        "extras": {},
+    }
+    received = _patch_call_operation(monkeypatch, ok_envelope)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {"title": "go"}}',
+                "work_ref": "gh:evoila/meho#7",
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-run-status="ok"' in body
+    # The result payload renders inline (not a handle metadata branch).
+    assert 'data-run-result="inline"' in body
+    assert "html_url" in body
+    # The BFF threaded the form fields through to the meta-tool unchanged.
+    assert len(received) == 1
+    args = received[0]
+    assert args["connector_id"] == "gh-rest-3"
+    assert args["op_id"] == "POST:/repos/{owner}/{repo}/issues"
+    assert args["target"] == "gh-prod"
+    assert args["params"] == {"owner": "evoila", "repo": "meho", "body": {"title": "go"}}
+    assert args["work_ref"] == "gh:evoila/meho#7"
+
+
+def test_operations_ui_run_call_awaiting_approval_deep_links_to_approvals() -> None:
+    """A ``requires_approval`` op renders the approval banner + a /ui/approvals link.
+
+    End-to-end through the real dispatch: a human OPERATOR running a
+    ``requires_approval`` op is routed to the approval queue (G11.7-T1
+    #1401), which creates a durable ``ApprovalRequest`` row and returns
+    ``status="awaiting_approval"`` with ``extras["approval_request_id"]``.
+    The fragment must surface that id with a deep-link, NEVER a silent
+    empty success.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(
+        tenant_id=None,
+        op_id="POST:/repos/{owner}/{repo}/locks",
+        path="/repos/{owner}/{repo}/locks",
+        requires_approval=True,
+    )
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/locks",
+                "target": "gh-prod",
+                "params": '{"owner": "evoila", "repo": "meho", "body": {}}',
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-run-status="awaiting_approval"' in body
+    # The pending-row id is surfaced + the deep-link targets the approvals
+    # surface (and ideally the per-id detail).
+    assert "data-approval-request-id" in body
+    assert "/ui/approvals/" in body
+    assert "data-approval-deep-link" in body
+    # The recording connector must NOT have executed -- the op was parked.
+    connector = get_or_create_connector_instance(_RecordingHttpConnector)
+    assert isinstance(connector, _RecordingHttpConnector)
+    assert connector.calls == []
+
+
+def test_operations_ui_run_call_handle_renders_metadata_not_blob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ok`` result carrying a ``handle`` renders the handle metadata, not a blob."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    handle_id = uuid.uuid4()
+    sentinel_blob = "DO-NOT-INLINE-THIS-HUGE-BLOB"
+    handle_envelope = {
+        "status": "ok",
+        "op_id": "POST:/repos/{owner}/{repo}/issues",
+        # ``result`` carries the reduced summary, never the full set; the
+        # handle is the signal the full payload spilled out-of-band.
+        "result": {"summary": "1000 rows"},
+        "error": None,
+        "duration_ms": 88.0,
+        "handle": {
+            "handle_id": str(handle_id),
+            "summary_md": "1000 issues matched",
+            "schema_": {"type": "object"},
+            "total_rows": 1000,
+            "sample_rows": [{"hidden": sentinel_blob}],
+            "ttl_seconds": 3600,
+            "fetch_more": None,
+        },
+        "extras": {},
+    }
+    _patch_call_operation(monkeypatch, handle_envelope)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-run-status="ok"' in body
+    # The handle metadata branch -- handle_id present, full sample rows NOT.
+    assert 'data-run-result="handle"' in body
+    assert str(handle_id) in body
+    assert "1000" in body
+    # The full payload blob must NOT be dumped into the modal.
+    assert sentinel_blob not in body
+    assert 'data-run-result="inline"' not in body
+
+
+def test_operations_ui_run_call_error_envelope_renders_error_code() -> None:
+    """An unknown op's structured-error envelope renders inline (HTTP 200)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/does/not/exist",
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    # The dispatcher's structured-error envelope rides on a 200 body.
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-run-status="error"' in body
+    assert "data-run-error-code" in body
+
+
+def test_operations_ui_run_modal_requires_approval_renders_safety_banner() -> None:
+    """The run modal for a ``requires_approval`` op renders the unmissable banner."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    desc_id = _seed_ingested_op(tenant_id=None, requires_approval=True)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get(f"/ui/operations/run/{desc_id}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The confirm gate is rendered for a requires_approval op.
+    assert 'data-run-gate="confirm"' in body
+    assert "data-run-requires-approval" in body
+    # The confirm POST targets the call route and carries its own CSRF echo.
+    assert 'hx-post="/ui/operations/call"' in body
+    assert "X-CSRF-Token" in body
+    # The drawer GET re-set the CSRF cookie so the double-submit lines up.
+    assert CSRF_COOKIE_NAME in response.cookies
+
+
+def test_operations_ui_run_call_without_csrf_token_is_403() -> None:
+    """A call POST omitting the CSRF header is rejected by the middleware (403)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            # No X-CSRF-Token header -> the double-submit pair is incomplete.
+            headers={"HX-Request": "true"},
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 403, response.text
+
+
+def test_operations_ui_run_call_with_csrf_token_is_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call POST carrying the CSRF header passes the middleware (200)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    _patch_call_operation(
+        monkeypatch,
+        {
+            "status": "ok",
+            "op_id": "POST:/repos/{owner}/{repo}/issues",
+            "result": {"ok": True},
+            "error": None,
+            "duration_ms": 1.0,
+            "handle": None,
+            "extras": {},
+        },
+    )
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 200, response.text
+
+
+def test_operations_ui_run_call_operator_role_can_run_tenant_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RBAC: a plain operator can run; tenant scoping comes from the session.
+
+    The route lifts the operator from the validated session and passes
+    ``operator`` (carrying ``tenant_id``) to ``call_operation`` -- there is
+    no tenant field on the form. A plain operator (not tenant_admin) runs
+    without a 403.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(
+        monkeypatch,
+        {
+            "status": "ok",
+            "op_id": "POST:/repos/{owner}/{repo}/issues",
+            "result": {"ok": True},
+            "error": None,
+            "duration_ms": 1.0,
+            "handle": None,
+            "extras": {},
+        },
+    )
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                # No tenant field on the form -- scoping is session-derived.
+                "target": "gh-prod",
+                "params": "{}",
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert 'data-run-status="ok"' in response.text
+    # The lifted operator (the run's tenant scope) reached the meta-tool; the
+    # form carried no tenant field for the caller to spoof.
+    assert len(received) == 1
+
+
+def test_operations_ui_run_call_malformed_params_json_is_inline_400() -> None:
+    """A malformed ``params`` JSON renders an inline 400 form error, not a 422/500."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_recording_gh_connector()
+    _seed_ingested_op(tenant_id=None)
+    _seed_gh_target(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/operations/call",
+            headers=_csrf_headers(csrf),
+            data={
+                "connector_id": "gh-rest-3",
+                "op_id": "POST:/repos/{owner}/{repo}/issues",
+                "target": "gh-prod",
+                "params": "{not valid json",
+            },
+        )
+    assert response.status_code == 400, response.text
+    assert 'data-run-status="form_error"' in response.text

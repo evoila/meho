@@ -11,6 +11,13 @@
   ``showModal()`` on swap and dismisses it on the close button / ESC /
   backdrop.
 
+  Run button (Task #1881, T3)
+    The header carries a Run button that ``hx-get``s the run-confirm modal
+    (``operations/_run_modal.html``) into the SAME drawer container,
+    replacing this read-only drawer. The unmissable safety gate + the
+    CSRF-bound dispatch POST live in that modal; this button is just the
+    navigation into it. Run is in the operator capability set.
+
   RBAC (the same-template-both-roles trap)
     The ``llm_instructions`` block -- the per-op agent prompt -- renders
     ONLY when ``is_tenant_admin`` is true. The route threads
@@ -51,11 +58,29 @@
           <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
         {% endif %}
       </div>
-      <form method="dialog">
-        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
-          {{ icon("x", class="size-4") }}
+      <div class="flex shrink-0 items-center gap-1">
+        {#- Run button (Task #1881, T3): swaps the run-confirm modal into the
+            same drawer container, replacing this read-only drawer. The
+            confirm gate (safety banner + CSRF-bound POST) lives in that
+            modal -- this is just the navigation into it, so no CSRF here. -#}
+        <button
+          type="button"
+          class="btn btn-primary btn-sm gap-1"
+          aria-label="Run operation"
+          data-action="open-run"
+          hx-get="/ui/operations/run/{{ descriptor.id }}"
+          hx-target="#operations-drawer-container"
+          hx-swap="innerHTML"
+        >
+          {{ icon("zap", class="size-4") }}
+          Run
         </button>
-      </form>
+        <form method="dialog">
+          <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+            {{ icon("x", class="size-4") }}
+          </button>
+        </form>
+      </div>
     </div>
 
     <div class="mt-4 space-y-4 text-sm">

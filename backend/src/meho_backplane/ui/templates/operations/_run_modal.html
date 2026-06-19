@@ -1,0 +1,193 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operation run-confirm modal fragment (Initiative #1835 G10.9, Task #1881).
+
+  Swapped into ``#operations-drawer-container`` by the detail drawer's Run
+  button (``hx-get /ui/operations/run/{descriptor_id}``). This is the
+  console's highest-blast-radius surface: confirming dispatches a REAL
+  connector op against a live target. The safety gate must be UNMISSABLE.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  confirm button's OWN ``hx-headers`` (HTMX does not inherit ``hx-headers``
+  to children -- the element that issues the request must carry it). The run
+  GET minted the token + re-set the matching ``meho_csrf`` cookie. The
+  confirm button disables itself during dispatch (``hx-disabled-elt``) so a
+  high-impact op cannot be double-fired.
+
+  The result swaps into ``#operations-run-result-region`` inside this modal
+  (``operations/_result.html``); the modal stays open so the operator reads
+  the OperationResult / the awaiting_approval deep-link in place.
+
+  Run is in the OPERATOR capability set -- no tenant_admin step. The policy
+  gate (NOT RBAC) is what escalates a ``requires_approval`` op to
+  ``awaiting_approval`` once dispatched.
+
+  Context:
+    descriptor            -- OperationDescriptor: the full read shape
+    connector_id          -- str: the dispatchable <impl_id>-<version> id,
+                             posted back by the confirm form
+    requires_confirmation -- bool: safety_level != "safe" OR requires_approval;
+                             drives the loud warning banner treatment
+    csrf_token            -- str: minted double-submit token for the call POST
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="operations-drawer" class="modal" aria-label="Run operation">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="operations-run-title">
+          Run {{ descriptor.op_id }}
+        </h3>
+        {% if descriptor.summary %}
+          <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
+        {% endif %}
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {#- UNMISSABLE safety gate. A non-"safe" op (caution / dangerous) or an
+        op the policy gate will route to approval gets the loud warning
+        banner; a plain read-safe op gets a quiet note. The banner names the
+        safety_level + the requires_approval flag explicitly so an operator
+        cannot miss that confirming executes a real, possibly irreversible,
+        action against a live target. -#}
+    {% set safety = descriptor.safety_level %}
+    {% if requires_confirmation %}
+      <div
+        role="alert"
+        class="alert {{ 'alert-error' if safety == 'dangerous' else 'alert-warning' }} mt-4 items-start"
+        data-run-gate="confirm"
+        data-safety-level="{{ safety }}"
+      >
+        {{ icon("shield-check", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">
+            {% if safety == "dangerous" %}
+              Dangerous operation &mdash; irreversible or high-impact
+            {% elif safety == "caution" %}
+              State-changing operation
+            {% else %}
+              Confirm before running
+            {% endif %}
+          </h4>
+          <p class="text-xs [overflow-wrap:anywhere]">
+            This dispatches a real request against the selected target.
+            {% if descriptor.requires_approval %}
+              This operation <span class="font-semibold">requires approval</span>:
+              running it parks a request for a reviewer rather than executing
+              immediately.
+            {% endif %}
+          </p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-sm {{ 'badge-error' if safety == 'dangerous' else 'badge-warning' }}" data-run-safety>
+              safety: {{ safety }}
+            </span>
+            {% if descriptor.requires_approval %}
+              <span class="badge badge-outline badge-sm" data-run-requires-approval>requires approval</span>
+            {% endif %}
+            {% if descriptor.method or descriptor.path %}
+              <span class="badge badge-ghost badge-sm font-mono">
+                {%- if descriptor.method %}{{ descriptor.method }} {% endif -%}
+                {{ descriptor.path }}
+              </span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="mt-4 flex flex-wrap items-center gap-2 text-sm" data-run-gate="safe" data-safety-level="{{ safety }}">
+        <span class="badge badge-ghost badge-sm" data-run-safety>safety: {{ safety }}</span>
+        {% if descriptor.method or descriptor.path %}
+          <span class="badge badge-ghost badge-sm font-mono">
+            {%- if descriptor.method %}{{ descriptor.method }} {% endif -%}
+            {{ descriptor.path }}
+          </span>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <form
+      class="mt-4 space-y-3"
+      hx-post="/ui/operations/call"
+      hx-target="#operations-run-result-region"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[data-action='run']"
+    >
+      <input type="hidden" name="connector_id" value="{{ connector_id }}" />
+      <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Target <span class="opacity-50">(name; leave blank for a target-less op)</span></span>
+        <input
+          type="text"
+          name="target"
+          maxlength="256"
+          class="input input-bordered input-sm w-full font-mono"
+          placeholder="e.g. rdc-vcenter"
+          aria-label="Target name"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Params <span class="opacity-50">(JSON object)</span></span>
+        <textarea
+          name="params"
+          rows="5"
+          maxlength="65536"
+          class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+          placeholder='{"path": "secret/data/app"}'
+          aria-label="Operation params as JSON"
+        ></textarea>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">
+          Work ref <span class="opacity-50">(optional change-ticket reference, e.g. gh:evoila/meho#7)</span>
+        </span>
+        <input
+          type="text"
+          name="work_ref"
+          maxlength="512"
+          class="input input-bordered input-sm w-full font-mono"
+          placeholder="gh:evoila/meho#7"
+          aria-label="Work reference"
+          autocomplete="off"
+        />
+      </label>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onclick="document.getElementById('operations-drawer').close()"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          data-action="run"
+          class="btn btn-sm gap-1 {{ 'btn-error' if safety == 'dangerous' else ('btn-warning' if requires_confirmation else 'btn-primary') }}"
+        >
+          {{ icon("zap", class="size-4") }}
+          {% if descriptor.requires_approval %}Run (request approval){% else %}Confirm &amp; run{% endif %}
+        </button>
+      </div>
+    </form>
+
+    {#- Swap target for the rendered OperationResult fragment. Empty until the
+        operator confirms; the modal stays open so the result / the
+        awaiting_approval deep-link reads in place. -#}
+    <div id="operations-run-result-region" class="mt-4"></div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

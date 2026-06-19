@@ -11,14 +11,19 @@
 
   Render branches (first match wins):
     1. ``error_status`` set -> a typed error card (403 / 409 / 503 / 422).
-    2. ``chunks`` non-empty -> one cited-chunk card each.
+    2. ``cited`` non-empty -> one cited-chunk card each.
     3. ``searched`` true (a query ran, no error, no hits) -> "no results".
     4. otherwise (initial render, no query yet) -> a quiet prompt.
 
   Context variables:
     query          -- str: the submitted query (for the heading + empty state)
-    chunks         -- list[DocsChunk]: ranked cited chunks (content, source_url,
-                      score, collection)
+    cited          -- list[{chunk, link}]: ranked cited chunks, each paired with
+                      its resolved navigable source link (#1919). ``chunk`` is a
+                      DocsChunk (content, source_url, score, collection); ``link``
+                      is a CitationLink (label, href, kind, clickable). The raw
+                      gs:// ``source_url`` is resolved to a canonical web URL
+                      (KB / http(s)) or a non-clickable label -- never a broken
+                      gs:// href.
     searched       -- bool: whether a query actually ran
     error_status   -- int | unset: HTTP status of a search failure
     error_message  -- str | unset: human detail of the failure
@@ -44,30 +49,46 @@
       </div>
     </div>
 
-  {% elif chunks %}
+  {% elif cited %}
     {# ---------- Cited-chunk result cards ---------- #}
     <p class="text-sm opacity-70" aria-live="polite">
-      {{ chunks | length }} cited chunk{% if chunks | length != 1 %}s{% endif %}
+      {{ cited | length }} cited chunk{% if cited | length != 1 %}s{% endif %}
       for <em>&ldquo;{{ query }}&rdquo;</em>
     </p>
     <ul class="space-y-3" role="list" aria-label="Cited chunks">
-      {% for chunk in chunks %}
+      {% for entry in cited %}
+        {% set chunk = entry.chunk %}
+        {% set link = entry.link %}
         <li class="card bg-base-100 border-base-300 border shadow-sm">
           <div class="card-body py-3 space-y-2">
             <div class="flex flex-wrap items-start justify-between gap-2">
-              <h3 class="card-title text-sm font-mono opacity-80">
-                {% if chunk.source_url %}
-                  <a
-                    href="{{ chunk.source_url }}"
-                    class="link link-primary"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Open source document for this chunk"
-                  >{{ chunk.document_id }}</a>
-                {% else %}
-                  {{ chunk.document_id }}
+              {# Title as link text -> the resolved canonical URL (#1919). A raw
+                 gs:// source_url is resolved to a navigable web link or, when no
+                 canonical link exists, a non-clickable label -- never a broken
+                 gs:// anchor. #}
+              <div class="min-w-0">
+                <h3 class="card-title text-sm font-semibold">
+                  {% if link.clickable %}
+                    <a
+                      href="{{ link.href }}"
+                      class="link link-primary"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label="Open source document for this chunk"
+                    >{{ link.label }}</a>
+                  {% else %}
+                    {{ link.label }}
+                  {% endif %}
+                </h3>
+                {# Show the underlying object path for provenance when it is not
+                   itself the (clickable) link -- so a non-navigable source still
+                   surfaces where it came from, without pretending to be a link. #}
+                {% if chunk.source_url and not link.clickable %}
+                  <p class="text-xs font-mono opacity-50 break-all" title="Source object path">
+                    {{ chunk.source_url }}
+                  </p>
                 {% endif %}
-              </h3>
+              </div>
               <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Chunk metadata">
                 {% if chunk.collection %}
                   <span class="badge badge-ghost badge-outline" title="Source collection">

@@ -466,6 +466,10 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     citation = payload["citations"][0]
     assert citation["chunk_id"] == "nsx-9.0-maximums-0007"
     assert citation["source_url"].endswith("/maximums")
+    # The citation carries a resolved navigable link (#1919): an already-https
+    # source passes through as the clickable href.
+    assert citation["link"]["clickable"] is True
+    assert citation["link"]["href"] == "https://docs.example.com/nsx/9.0/maximums"
 
     # The optional refinements reached the backend and the operator identity
     # was forwarded.
@@ -475,6 +479,61 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_resolves_gs_kb_citation_to_canonical_link(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A KB ``gs://`` citation resolves to a clickable Broadcom KB link (#1919).
+
+    The corpus returns a raw ``gs://`` object path an operator cannot open; the
+    ``ask_docs`` payload must carry a resolved ``link`` pointing at the
+    canonical ``knowledge.broadcom.com`` article URL, never the broken ``gs://``
+    path. The raw ``source_url`` stays on the citation for provenance.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    kb_chunk = CorpusChunk(
+        chunk_id="kb-414551-0001",
+        document_id="broadcom-kb-414551",
+        content="vCenter Server scaling maximums for vSphere 9.0.",
+        source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+        score=0.95,
+    )
+    corpus = _fake_corpus(kb_chunk)
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "vCenter scaling maximums are documented in KB 414551.",
+                "cited_chunk_ids": ["kb-414551-0001"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {"query": "What are the vCenter scaling maximums?", "collection": "vmware"},
+                call_id=6,
+            ),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    payload = json.loads(body["result"]["content"][0]["text"])
+    citation = payload["citations"][0]
+
+    # Raw object path preserved for provenance.
+    assert citation["source_url"].startswith("gs://")
+    # Resolved navigable link points at the canonical KB article, not gs://.
+    link = citation["link"]
+    assert link["kind"] == "broadcom_kb"
+    assert link["clickable"] is True
+    assert link["href"] == "https://knowledge.broadcom.com/external/article/414551"
+    assert not link["href"].startswith("gs://")
 
 
 # ---------------------------------------------------------------------------

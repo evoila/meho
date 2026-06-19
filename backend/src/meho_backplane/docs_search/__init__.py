@@ -38,6 +38,11 @@ from meho_backplane.docs_search.backends import (
     resolve_backend,
     resolve_backend_or_label,
 )
+from meho_backplane.docs_search.citation_links import (
+    CitationLink,
+    citation_link_payload,
+    resolve_citation_link,
+)
 from meho_backplane.docs_search.collection_access import (
     CollectionAccessError,
     CollectionDisabledError,
@@ -80,6 +85,7 @@ from meho_backplane.docs_search.synthesis import (
 __all__ = [
     "MAX_QUERY_VARIANTS",
     "NO_GROUNDED_ANSWER",
+    "CitationLink",
     "CollectionAccessError",
     "CollectionDisabledError",
     "CollectionForbiddenError",
@@ -97,11 +103,13 @@ __all__ = [
     "SearchBackend",
     "UnknownCollectionError",
     "build_docs_scope",
+    "citation_link_payload",
     "collection_capability_key",
     "expand_docs_query",
     "parse_collection_scope",
     "resolve_backend",
     "resolve_backend_or_label",
+    "resolve_citation_link",
     "resolve_entitled_ready_collection",
     "resolve_entitled_ready_collections",
     "retrieve_multi_query",

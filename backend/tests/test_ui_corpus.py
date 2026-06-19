@@ -509,6 +509,108 @@ def test_corpus_search_renders_cited_chunks() -> None:
     assert "2 cited chunks" in body
 
 
+def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:
+    """A KB ``gs://`` chunk renders a clickable Broadcom KB link (#1919).
+
+    The raw ``gs://`` object path an operator cannot open is resolved to the
+    canonical ``knowledge.broadcom.com`` article URL; the rendered anchor never
+    carries a broken ``gs://`` href.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    result = DocsSearchResult(
+        chunks=[
+            _chunk(
+                chunk_id="kb-1",
+                document_id="broadcom-kb-414551",
+                content="vCenter scaling maximums.",
+                source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+                score=0.9,
+            ),
+        ]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "vcenter maximums"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Clickable canonical KB link, with the human label (document id fallback)
+    # as link text.
+    assert 'href="https://knowledge.broadcom.com/external/article/414551"' in body
+    assert "broadcom-kb-414551" in body
+    # The broken gs:// path is never rendered as an anchor href.
+    assert 'href="gs://' not in body
+
+
+def test_corpus_search_degrades_community_gs_source_to_non_clickable() -> None:
+    """A community ``gs://`` chunk degrades to a non-clickable label (#1919).
+
+    The mirror path carries no recoverable original post URL, so the citation
+    renders title + path text rather than a broken ``gs://`` anchor.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    community_url = (
+        "gs://meho-knowledge-vmware-corpus/community/williamlam/blog/quiesce-snapshots.md"
+    )
+    result = DocsSearchResult(
+        chunks=[
+            _chunk(
+                chunk_id="comm-1",
+                document_id="williamlam-quiesce",
+                content="Community guidance on quiescing snapshots.",
+                source_url=community_url,
+                score=0.7,
+            ),
+        ]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "quiesce snapshots"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # No broken gs:// anchor anywhere.
+    assert 'href="gs://' not in body
+    # The label is rendered (document id fallback) and the raw path is shown
+    # as provenance text (not a link).
+    assert "williamlam-quiesce" in body
+    assert community_url in body
+
+
 def test_corpus_search_renders_collection_tag_on_fanout_chunk() -> None:
     """A chunk carrying a ``collection`` provenance tag renders the tag."""
     _seed_tenant(_TENANT_A, "tenant-a")

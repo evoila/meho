@@ -101,12 +101,14 @@ from meho_backplane.docs_search import (
     CollectionForbiddenError,
     CollectionScope,
     ConflictingCollectionScopeError,
+    DocsChunk,
     DocsScope,
     DocsSearchResult,
     MissingDocsFilterError,
     NoEntitledReadyCollectionError,
     UnknownCollectionError,
     build_docs_scope,
+    citation_link_payload,
     expand_docs_query,
     parse_collection_scope,
     resolve_entitled_ready_collection,
@@ -570,8 +572,29 @@ async def _ask_docs_handler(
     answer = await synthesize_docs_answer(query, retrieval)
     return {
         "answer": answer.answer,
-        "citations": [chunk.model_dump(mode="json") for chunk in answer.citations],
+        "citations": [_citation_payload(chunk) for chunk in answer.citations],
     }
+
+
+def _citation_payload(chunk: DocsChunk) -> dict[str, Any]:
+    """Serialise a cited chunk with its resolved navigable ``link`` (#1919).
+
+    The chunk's ``source_url`` is, for the GCS-backed vendor corpus, a raw
+    ``gs://`` object path an operator cannot open. :func:`citation_link_payload`
+    resolves it to a navigable canonical URL + human label under the ``link``
+    key (KB -> ``knowledge.broadcom.com``, community -> title+path, ``http(s)``
+    -> pass-through, anything else -> non-clickable label -- never a broken
+    ``gs://`` href). The raw ``source_url`` stays on the citation for provenance
+    / callers that want the underlying object path. The same helper backs the
+    ``/ui/corpus`` render and a future REST ``ask_docs`` (#1917) so every face
+    resolves citations identically.
+    """
+    payload = chunk.model_dump(mode="json")
+    payload["link"] = citation_link_payload(
+        chunk.source_url,
+        document_id=chunk.document_id,
+    )
+    return payload
 
 
 register_mcp_tool(

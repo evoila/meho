@@ -110,8 +110,10 @@ from meho_backplane.mcp.tools._connector_shared import (
     _TENANT_ID_PROPERTY,
     _coerce_tenant_id,
     _model_dump_json_safe,
+    raise_invalid_params_for_ambiguous_scope,
 )
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     ConnectorStatusFilter,
     ReviewService,
     list_ingested_connectors,
@@ -159,7 +161,15 @@ async def _review_handler(
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = ReviewService(operator)
-    payload = await service.get_review_payload(connector_id, tenant_id)
+    try:
+        payload = await service.get_review_payload(connector_id, tenant_id)
+    except AmbiguousConnectorScopeError as exc:
+        # A label that resolves to both a tenant-curated and a built-in
+        # row maps to a structured -32602 carrying the candidate scopes
+        # (MCP↔REST parity, #1801); without this it would fall through to
+        # the dispatcher's bare -32603. See
+        # raise_invalid_params_for_ambiguous_scope.
+        raise_invalid_params_for_ambiguous_scope(exc)
     return _model_dump_json_safe(payload)
 
 
@@ -268,7 +278,14 @@ async def _enable_reads_handler(
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = ReviewService(operator)
-    ops_enabled = await service.enable_reads(connector_id, tenant_id=tenant_id)
+    try:
+        ops_enabled = await service.enable_reads(connector_id, tenant_id=tenant_id)
+    except AmbiguousConnectorScopeError as exc:
+        # Same ambiguous-scope mapping as _review_handler: structured
+        # -32602 with the candidate scopes instead of a bare -32603
+        # (#1801 / this is #1910). enable_reads shares the resolver with
+        # the review read path, so it can raise the same error.
+        raise_invalid_params_for_ambiguous_scope(exc)
     return {
         "connector_id": connector_id,
         "ops_enabled": ops_enabled,

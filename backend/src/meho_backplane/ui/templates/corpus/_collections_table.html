@@ -1,0 +1,85 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus Collections table-rows fragment (Initiative #1836 Task
+  #1882). One row per collection in the tenant's registry: collection_key
+  / vendor / products / status pill / doc_count / last_ingested_at.
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``collections.html`` on the
+      full-page render.
+    * As a standalone fragment ``GET /ui/corpus/collections`` returns when
+      the ``HX-Request`` header is set.
+
+  The status pill maps the four lifecycle states to DaisyUI badge colours:
+  ``ready`` -> success (live for search), ``provisioning`` -> info
+  (registered, awaiting a probe), ``rebuilding`` -> warning (index rebuild
+  in flight), ``disabled`` -> ghost (hidden from search). A local pill
+  (the G10.7 #1775 readiness-pill component is the global backplane health
+  pill, not a per-collection status component).
+
+  Context contract:
+    * ``collection_rows`` -- list[dict]: each carries ``collection_key`` /
+      ``vendor`` / ``products`` (list[str]) / ``status`` / ``doc_count``
+      (int | None) / ``last_ingested_at`` (datetime | None).
+-#}
+<tbody id="corpus-collections-table-body">
+  {% if collection_rows %}
+    {% for row in collection_rows %}
+      <tr data-collection-key="{{ row.collection_key }}">
+        <td class="font-mono">
+          {# Link to the per-collection detail page (T2 #1883): identity +
+             readiness card + re-probe + enable/disable. #}
+          <a
+            href="/ui/corpus/collections/{{ row.collection_key | urlencode }}"
+            class="link link-hover"
+          >{{ row.collection_key }}</a>
+        </td>
+        <td>{{ row.vendor }}</td>
+        <td class="text-xs">
+          {% if row.products %}
+            {{ row.products | join(", ") }}
+          {% else %}
+            <span class="opacity-50">&mdash;</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.status == "ready" %}
+            <span class="badge badge-success badge-sm">ready</span>
+          {% elif row.status == "provisioning" %}
+            <span class="badge badge-info badge-sm">provisioning</span>
+          {% elif row.status == "rebuilding" %}
+            <span class="badge badge-warning badge-sm">rebuilding</span>
+          {% elif row.status == "disabled" %}
+            <span class="badge badge-ghost badge-sm">disabled</span>
+          {% else %}
+            <span class="badge badge-ghost badge-sm">{{ row.status }}</span>
+          {% endif %}
+        </td>
+        <td class="text-right tabular-nums">
+          {% if row.doc_count is not none %}
+            {{ row.doc_count }}
+          {% else %}
+            <span class="opacity-50">&mdash;</span>
+          {% endif %}
+        </td>
+        <td class="text-xs">
+          {% if row.last_ingested_at is not none %}
+            <span title="{{ row.last_ingested_at.isoformat() }}">
+              {{ row.last_ingested_at.strftime("%Y-%m-%d") }}
+            </span>
+          {% else %}
+            <span class="opacity-50">never</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="6" class="text-center text-sm opacity-60 py-6">
+        No collections registered for this tenant yet.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

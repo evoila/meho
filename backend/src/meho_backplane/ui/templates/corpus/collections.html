@@ -1,0 +1,102 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Docs Corpus -- admin Collections lifecycle table (Initiative #1836
+  Task #1882). The second tab on ``/ui/corpus`` (the first is the G10.7
+  #1777 Search surface). Lists the tenant's FULL doc-collection registry
+  (NOT entitlement-filtered -- a ``tenant_admin`` manages rows their own
+  identity may not hold ``meho-docs:<key>`` for), with a "Register
+  collection" affordance shown only to admins.
+
+  Extends ``base.html`` so the chrome matches the rest of the console and
+  sets ``active_surface="corpus"`` so the sidebar highlight is identical to
+  the Search tab.
+
+  HTMX wiring:
+    * The "Register collection" button ``hx-get``s
+      ``/ui/corpus/collections/register`` into
+      ``#corpus-collections-modal-container`` (``hx-swap="innerHTML"``);
+      the shared modal controller (#1803) opens the inserted
+      ``<dialog class="modal">`` via ``showModal()`` on swap.
+    * The register form ``hx-post``s back, swapping the same container --
+      a 422/409 re-renders the modal with field errors; success returns
+      204 + ``HX-Redirect: /ui/corpus/collections`` so HTMX reloads the
+      table with the new ``provisioning`` row.
+
+  Context contract (set by ``collections._render_table``):
+    * ``collection_rows`` -- list[dict]: one per collection (key / vendor /
+      products / status / doc_count / last_ingested_at).
+    * ``is_tenant_admin`` -- bool: gates the "Register collection" button.
+    * ``csrf_token``      -- str: minted double-submit token.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Docs Corpus &middot; Collections &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Docs Corpus</h1>
+      <p class="text-sm opacity-70">
+        Manage the tenant&rsquo;s doc-collection registry: register a
+        collection, then probe it to make it searchable.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Tab strip: Search | Collections ---------- #}
+  {% set active_tab = "collections" %}
+  {% include "corpus/_tabs.html" %}
+
+  {# HTMX modal mount point -- the register modal fragment is swapped in
+     here; the shared modal controller opens the inserted
+     ``<dialog class="modal">`` via ``showModal()`` on swap (#1803). #}
+  <div id="corpus-collections-modal-container"></div>
+
+  {# ---------- Collections table ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body gap-4 py-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-lg font-semibold">Collections</h2>
+        {# "Register collection" button -- tenant_admin only. The register
+           routes re-check the role server-side via
+           ``resolve_operator_or_403`` (403 for a non-admin); this hide is
+           the UX affordance, not the security gate. #}
+        {% if is_tenant_admin %}
+          <button
+            type="button"
+            class="btn btn-primary btn-sm"
+            hx-get="/ui/corpus/collections/register"
+            hx-target="#corpus-collections-modal-container"
+            hx-swap="innerHTML"
+            aria-label="Register collection"
+          >
+            Register collection
+          </button>
+        {% endif %}
+      </div>
+
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Collection</th>
+              <th>Vendor</th>
+              <th>Products</th>
+              <th>Status</th>
+              <th>Docs</th>
+              <th>Last ingested</th>
+            </tr>
+          </thead>
+          {% include "corpus/_collections_table.html" %}
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}

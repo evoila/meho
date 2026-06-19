@@ -53,6 +53,10 @@
     </div>
   </header>
 
+  {# ---------- Tab strip: Search | Collections (#1882) ---------- #}
+  {% set active_tab = "search" %}
+  {% include "corpus/_tabs.html" %}
+
   {# ---------- Collection picker + query form ---------- #}
   <div class="card bg-base-100 border-base-300 border shadow-sm">
     <div class="card-body py-4">
@@ -148,14 +152,29 @@
       {% else %}
         {# No entitled collections AND none visible at all -- the tenant is
            genuinely unprovisioned for any docs corpus. Distinct from the
-           diagnosable missing-capability case above and from a zero-results
-           search. #}
-        <div class="text-center py-8">
+           diagnosable missing-capability case above (which keeps its own
+           "Ask an administrator to grant" copy unchanged) and from a
+           zero-results search. T2 (#1883) repoints this unprovisioned arm at
+           the in-console register flow for a tenant_admin (who can register a
+           collection right here) rather than the old "ask an administrator"
+           dead end. #}
+        <div class="text-center py-8 space-y-3">
           <p class="text-lg opacity-60">No doc collections available</p>
-          <p class="text-sm opacity-40">
-            This tenant is not entitled to any docs corpus yet. Ask an
-            administrator to register and entitle a collection.
-          </p>
+          {% if is_tenant_admin %}
+            <p class="text-sm opacity-50">
+              This tenant has no doc collections registered yet. Register one
+              from the Collections tab to provision the docs corpus.
+            </p>
+            <a href="/ui/corpus/collections" class="btn btn-primary btn-sm">
+              Register a collection
+            </a>
+          {% else %}
+            <p class="text-sm opacity-40">
+              This tenant has no doc collections registered yet. A tenant
+              administrator can register one from the
+              <a href="/ui/corpus/collections" class="link link-hover">Collections tab</a>.
+            </p>
+          {% endif %}
         </div>
       {% endif %}
     </div>

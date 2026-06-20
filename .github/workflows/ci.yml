@@ -548,7 +548,23 @@ jobs:
         # data files standalone (cheap), not co-resident with live workers.
         # Uses .coveragerc.ci (relative_files=true) so paths are repo-relative
         # for SonarCloud cross-job mapping (#1987 AC6).
+        #
+        # `if: always()` so a non-zero pytest exit (a single flaky test in a
+        # 8.3k-test sweep) still combines + uploads whatever coverage the run
+        # DID produce, rather than GitHub skipping this step and silently
+        # dropping all coverage for the push. Partial coverage beats none here
+        # — this whole job is non-blocking, and SonarCloud merging slightly
+        # incomplete new-code coverage is far better than a "no data" gap on
+        # every push that happens to hit a flake. The `[ -f .coverage* ]` guard
+        # keeps the step from erroring with "No data to combine" when pytest
+        # crashed before any worker wrote a data file (genuine no-coverage case
+        # → the upload step's hashFiles guard then skips cleanly).
+        if: always()
         run: |
+          if ! ls .coverage.* >/dev/null 2>&1; then
+            echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
+            exit 0
+          fi
           uv run coverage combine --rcfile=.coveragerc.ci
           uv run coverage xml --rcfile=.coveragerc.ci -o coverage.xml
           # Sanity: the file must exist and carry the empty <source></source>

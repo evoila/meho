@@ -1,0 +1,176 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  secret.move confirm modal (Initiative #1942 G10.18, Task #1957 T2).
+
+  Swapped into ``#vault-write-modal-container`` by the browser's "Move
+  secret" affordance (``hx-get /ui/vault/move/confirm``). ``secret.move`` is
+  a SEPARATE connector (``secret-broker-1.x``, NOT vault-1.x):
+  safety_level=dangerous + requires_approval=True. It copies one credential
+  field server-side from a source store to a sink store; the value is read,
+  hashed, and written entirely inside the backplane.
+
+  VALUE-FREE CONTRACT (load-bearing -- the no-``--value`` invariant):
+  the move submits ONLY ``<kind>:<ref>`` references (``from`` / ``to``) and an
+  optional reason. There is DELIBERATELY no value input -- the value never
+  enters the op params, the response, a log event, or the audit row. The
+  result render surfaces only {status, value_sha256, length}. Do NOT add a
+  value/secret field here.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  confirm button's OWN ``hx-headers``; the confirm GET minted the token +
+  re-set the matching ``meho_csrf`` cookie. The confirm button disables
+  itself during dispatch. The result swaps into ``#vault-write-result-region``
+  (``_write_result.html``).
+
+  Move is OPERATOR-tier -- no tenant_admin step; the policy gate (NOT RBAC)
+  escalates the requires_approval op to awaiting_approval on dispatch.
+
+  Context:
+    verb ("move") / op_id ("secret.move") / safety_level ("dangerous") /
+    connector_id (the secret-broker-1.x id, None -> hint) / csrf_token.
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="vault-write-modal" class="modal" aria-label="Move secret">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="vault-move-title">
+          Move secret
+        </h3>
+        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {% if not connector_id %}
+      {#- No secret-broker connector ingested: render a hint, not a confirm
+          form that would 404 on dispatch. -#}
+      <div role="alert" class="alert alert-warning mt-4" data-vault-write-error="no_secret_broker_connector">
+        <div>
+          <h4 class="text-sm font-semibold">No secret-broker connector available</h4>
+          <p class="text-xs">
+            No ingested <code>secret-broker</code> connector is visible to your
+            tenant. The move action needs it (it is a different connector than
+            the vault KV browser).
+          </p>
+        </div>
+      </div>
+    {% else %}
+      {#- UNMISSABLE dangerous gate. Change-class; routes through the approval
+          gate; the value never leaves the backplane. -#}
+      <div
+        role="alert"
+        class="alert alert-error mt-4 items-start"
+        data-vault-write-gate="confirm"
+        data-safety-level="{{ safety_level }}"
+      >
+        {{ icon("shield-check", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">Change-class operation &mdash; references only</h4>
+          <p class="text-xs [overflow-wrap:anywhere]">
+            This moves a single credential field from the source store to the
+            sink store <span class="font-semibold">server-side</span>: the
+            value is read, hashed, and written entirely inside the backplane
+            and is <span class="font-semibold">never returned</span> -- you
+            submit only <code>&lt;kind&gt;:&lt;ref&gt;</code> references, never
+            a value. It <span class="font-semibold">requires approval</span>:
+            confirming parks a request for a reviewer rather than executing
+            immediately.
+          </p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-error badge-sm" data-vault-write-safety>safety: {{ safety_level }}</span>
+            <span class="badge badge-outline badge-sm" data-vault-write-requires-approval>requires approval</span>
+          </div>
+        </div>
+      </div>
+
+      {#- References only. There is NO value input by design (the no-``--value``
+          invariant the CLI keeps). -#}
+      <form
+        class="mt-4 space-y-3"
+        hx-post="/ui/vault/move"
+        hx-target="#vault-write-result-region"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="find button[data-action='vault-move']"
+        data-vault-write-form="move"
+      >
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            From <span class="opacity-50">(source <code>&lt;kind&gt;:&lt;ref&gt;</code>, e.g. vault:secret/db/prod#password)</span>
+          </span>
+          <input
+            type="text"
+            name="from"
+            maxlength="1024"
+            class="input input-bordered input-sm w-full font-mono"
+            placeholder="vault:secret/db/prod#password"
+            aria-label="Source reference"
+            autocomplete="off"
+            required
+          />
+        </label>
+
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            To <span class="opacity-50">(destination <code>&lt;kind&gt;:&lt;ref&gt;</code>)</span>
+          </span>
+          <input
+            type="text"
+            name="to"
+            maxlength="1024"
+            class="input input-bordered input-sm w-full font-mono"
+            placeholder="vault:secret/db/staging#password"
+            aria-label="Destination reference"
+            autocomplete="off"
+            required
+          />
+        </label>
+
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            Reason <span class="opacity-50">(optional; recorded for the approver -- must not contain a secret value)</span>
+          </span>
+          <input
+            type="text"
+            name="reason"
+            maxlength="1024"
+            class="input input-bordered input-sm w-full font-mono"
+            placeholder="why this move is needed"
+            aria-label="Reason"
+            autocomplete="off"
+          />
+        </label>
+
+        <div class="flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onclick="document.getElementById('vault-write-modal').close()"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            data-action="vault-move"
+            class="btn btn-error btn-sm gap-1"
+          >
+            {{ icon("arrow-right", class="size-4") }}
+            Move (request approval)
+          </button>
+        </div>
+      </form>
+
+      <div id="vault-write-result-region" class="mt-4"></div>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

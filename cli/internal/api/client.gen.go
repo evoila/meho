@@ -2186,6 +2186,30 @@ type BodyUiSchedulerValidateCronUiSchedulerValidateCronPost struct {
 	Timezone   *string           `json:"timezone,omitempty"`
 }
 
+// BodyVaultDeleteUiVaultDeletePost defines model for Body_vault_delete_ui_vault_delete_post.
+type BodyVaultDeleteUiVaultDeletePost struct {
+	Mount    *string `json:"mount,omitempty"`
+	Path     *string `json:"path,omitempty"`
+	Target   *string `json:"target,omitempty"`
+	Versions *string `json:"versions,omitempty"`
+}
+
+// BodyVaultMoveUiVaultMovePost defines model for Body_vault_move_ui_vault_move_post.
+type BodyVaultMoveUiVaultMovePost struct {
+	From   *string `json:"from,omitempty"`
+	Reason *string `json:"reason,omitempty"`
+	To     *string `json:"to,omitempty"`
+}
+
+// BodyVaultPutUiVaultPutPost defines model for Body_vault_put_ui_vault_put_post.
+type BodyVaultPutUiVaultPutPost struct {
+	Cas    *string `json:"cas,omitempty"`
+	Data   *string `json:"data,omitempty"`
+	Mount  *string `json:"mount,omitempty"`
+	Path   *string `json:"path,omitempty"`
+	Target *string `json:"target,omitempty"`
+}
+
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 -- catches a
@@ -7152,8 +7176,22 @@ type TimelineUiTopologyTimelineGetParams struct {
 	Cursor *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
+// VaultDeleteConfirmUiVaultDeleteConfirmGetParams defines parameters for VaultDeleteConfirmUiVaultDeleteConfirmGet.
+type VaultDeleteConfirmUiVaultDeleteConfirmGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
 // VaultListUiVaultListGetParams defines parameters for VaultListUiVaultListGet.
 type VaultListUiVaultListGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// VaultPutConfirmUiVaultPutConfirmGetParams defines parameters for VaultPutConfirmUiVaultPutConfirmGet.
+type VaultPutConfirmUiVaultPutConfirmGetParams struct {
 	Target *string `form:"target,omitempty" json:"target,omitempty"`
 	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
 	Path   *string `form:"path,omitempty" json:"path,omitempty"`
@@ -7670,6 +7708,15 @@ type BulkImportUiTopologyEdgesBulkPostMultipartRequestBody = BodyBulkImportUiTop
 
 // UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody defines body for UiTopologyNodeDetailUiTopologyNodeNodeIdGet for application/json ContentType.
 type UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody = UISessionContext
+
+// VaultDeleteUiVaultDeletePostFormdataRequestBody defines body for VaultDeleteUiVaultDeletePost for application/x-www-form-urlencoded ContentType.
+type VaultDeleteUiVaultDeletePostFormdataRequestBody = BodyVaultDeleteUiVaultDeletePost
+
+// VaultMoveUiVaultMovePostFormdataRequestBody defines body for VaultMoveUiVaultMovePost for application/x-www-form-urlencoded ContentType.
+type VaultMoveUiVaultMovePostFormdataRequestBody = BodyVaultMoveUiVaultMovePost
+
+// VaultPutUiVaultPutPostFormdataRequestBody defines body for VaultPutUiVaultPutPost for application/x-www-form-urlencoded ContentType.
+type VaultPutUiVaultPutPostFormdataRequestBody = BodyVaultPutUiVaultPutPost
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -9718,8 +9765,32 @@ type ClientInterface interface {
 	// VaultIndexUiVaultGet request
 	VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// VaultDeleteUiVaultDeletePostWithBody request with any body
+	VaultDeleteUiVaultDeletePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	VaultDeleteUiVaultDeletePostWithFormdataBody(ctx context.Context, body VaultDeleteUiVaultDeletePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultDeleteConfirmUiVaultDeleteConfirmGet request
+	VaultDeleteConfirmUiVaultDeleteConfirmGet(ctx context.Context, params *VaultDeleteConfirmUiVaultDeleteConfirmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// VaultListUiVaultListGet request
 	VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultMoveUiVaultMovePostWithBody request with any body
+	VaultMoveUiVaultMovePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	VaultMoveUiVaultMovePostWithFormdataBody(ctx context.Context, body VaultMoveUiVaultMovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultMoveConfirmUiVaultMoveConfirmGet request
+	VaultMoveConfirmUiVaultMoveConfirmGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultPutUiVaultPutPostWithBody request with any body
+	VaultPutUiVaultPutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	VaultPutUiVaultPutPostWithFormdataBody(ctx context.Context, body VaultPutUiVaultPutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultPutConfirmUiVaultPutConfirmGet request
+	VaultPutConfirmUiVaultPutConfirmGet(ctx context.Context, params *VaultPutConfirmUiVaultPutConfirmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VaultReadUiVaultReadGet request
 	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15251,8 +15322,116 @@ func (c *Client) VaultIndexUiVaultGet(ctx context.Context, reqEditors ...Request
 	return c.Client.Do(req)
 }
 
+func (c *Client) VaultDeleteUiVaultDeletePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultDeleteUiVaultDeletePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultDeleteUiVaultDeletePostWithFormdataBody(ctx context.Context, body VaultDeleteUiVaultDeletePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultDeleteUiVaultDeletePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultDeleteConfirmUiVaultDeleteConfirmGet(ctx context.Context, params *VaultDeleteConfirmUiVaultDeleteConfirmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultDeleteConfirmUiVaultDeleteConfirmGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewVaultListUiVaultListGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultMoveUiVaultMovePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultMoveUiVaultMovePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultMoveUiVaultMovePostWithFormdataBody(ctx context.Context, body VaultMoveUiVaultMovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultMoveUiVaultMovePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultMoveConfirmUiVaultMoveConfirmGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultMoveConfirmUiVaultMoveConfirmGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultPutUiVaultPutPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultPutUiVaultPutPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultPutUiVaultPutPostWithFormdataBody(ctx context.Context, body VaultPutUiVaultPutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultPutUiVaultPutPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultPutConfirmUiVaultPutConfirmGet(ctx context.Context, params *VaultPutConfirmUiVaultPutConfirmGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultPutConfirmUiVaultPutConfirmGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -32358,6 +32537,127 @@ func NewVaultIndexUiVaultGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewVaultDeleteUiVaultDeletePostRequestWithFormdataBody calls the generic VaultDeleteUiVaultDeletePost builder with application/x-www-form-urlencoded body
+func NewVaultDeleteUiVaultDeletePostRequestWithFormdataBody(server string, body VaultDeleteUiVaultDeletePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewVaultDeleteUiVaultDeletePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewVaultDeleteUiVaultDeletePostRequestWithBody generates requests for VaultDeleteUiVaultDeletePost with any type of body
+func NewVaultDeleteUiVaultDeletePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/delete")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewVaultDeleteConfirmUiVaultDeleteConfirmGetRequest generates requests for VaultDeleteConfirmUiVaultDeleteConfirmGet
+func NewVaultDeleteConfirmUiVaultDeleteConfirmGetRequest(server string, params *VaultDeleteConfirmUiVaultDeleteConfirmGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/delete/confirm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVaultListUiVaultListGetRequest generates requests for VaultListUiVaultListGet
 func NewVaultListUiVaultListGetRequest(server string, params *VaultListUiVaultListGetParams) (*http.Request, error) {
 	var err error
@@ -32368,6 +32668,194 @@ func NewVaultListUiVaultListGetRequest(server string, params *VaultListUiVaultLi
 	}
 
 	operationPath := fmt.Sprintf("/ui/vault/list")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultMoveUiVaultMovePostRequestWithFormdataBody calls the generic VaultMoveUiVaultMovePost builder with application/x-www-form-urlencoded body
+func NewVaultMoveUiVaultMovePostRequestWithFormdataBody(server string, body VaultMoveUiVaultMovePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewVaultMoveUiVaultMovePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewVaultMoveUiVaultMovePostRequestWithBody generates requests for VaultMoveUiVaultMovePost with any type of body
+func NewVaultMoveUiVaultMovePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/move")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewVaultMoveConfirmUiVaultMoveConfirmGetRequest generates requests for VaultMoveConfirmUiVaultMoveConfirmGet
+func NewVaultMoveConfirmUiVaultMoveConfirmGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/move/confirm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultPutUiVaultPutPostRequestWithFormdataBody calls the generic VaultPutUiVaultPutPost builder with application/x-www-form-urlencoded body
+func NewVaultPutUiVaultPutPostRequestWithFormdataBody(server string, body VaultPutUiVaultPutPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewVaultPutUiVaultPutPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewVaultPutUiVaultPutPostRequestWithBody generates requests for VaultPutUiVaultPutPost with any type of body
+func NewVaultPutUiVaultPutPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/put")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewVaultPutConfirmUiVaultPutConfirmGetRequest generates requests for VaultPutConfirmUiVaultPutConfirmGet
+func NewVaultPutConfirmUiVaultPutConfirmGetRequest(server string, params *VaultPutConfirmUiVaultPutConfirmGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/put/confirm")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -33890,8 +34378,32 @@ type ClientWithResponsesInterface interface {
 	// VaultIndexUiVaultGetWithResponse request
 	VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error)
 
+	// VaultDeleteUiVaultDeletePostWithBodyWithResponse request with any body
+	VaultDeleteUiVaultDeletePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error)
+
+	VaultDeleteUiVaultDeletePostWithFormdataBodyWithResponse(ctx context.Context, body VaultDeleteUiVaultDeletePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error)
+
+	// VaultDeleteConfirmUiVaultDeleteConfirmGetWithResponse request
+	VaultDeleteConfirmUiVaultDeleteConfirmGetWithResponse(ctx context.Context, params *VaultDeleteConfirmUiVaultDeleteConfirmGetParams, reqEditors ...RequestEditorFn) (*VaultDeleteConfirmUiVaultDeleteConfirmGetResponse, error)
+
 	// VaultListUiVaultListGetWithResponse request
 	VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error)
+
+	// VaultMoveUiVaultMovePostWithBodyWithResponse request with any body
+	VaultMoveUiVaultMovePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultMoveUiVaultMovePostResponse, error)
+
+	VaultMoveUiVaultMovePostWithFormdataBodyWithResponse(ctx context.Context, body VaultMoveUiVaultMovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultMoveUiVaultMovePostResponse, error)
+
+	// VaultMoveConfirmUiVaultMoveConfirmGetWithResponse request
+	VaultMoveConfirmUiVaultMoveConfirmGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultMoveConfirmUiVaultMoveConfirmGetResponse, error)
+
+	// VaultPutUiVaultPutPostWithBodyWithResponse request with any body
+	VaultPutUiVaultPutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultPutUiVaultPutPostResponse, error)
+
+	VaultPutUiVaultPutPostWithFormdataBodyWithResponse(ctx context.Context, body VaultPutUiVaultPutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultPutUiVaultPutPostResponse, error)
+
+	// VaultPutConfirmUiVaultPutConfirmGetWithResponse request
+	VaultPutConfirmUiVaultPutConfirmGetWithResponse(ctx context.Context, params *VaultPutConfirmUiVaultPutConfirmGetParams, reqEditors ...RequestEditorFn) (*VaultPutConfirmUiVaultPutConfirmGetResponse, error)
 
 	// VaultReadUiVaultReadGetWithResponse request
 	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
@@ -40643,6 +41155,50 @@ func (r VaultIndexUiVaultGetResponse) StatusCode() int {
 	return 0
 }
 
+type VaultDeleteUiVaultDeletePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultDeleteUiVaultDeletePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultDeleteUiVaultDeletePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultDeleteConfirmUiVaultDeleteConfirmGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultDeleteConfirmUiVaultDeleteConfirmGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultDeleteConfirmUiVaultDeleteConfirmGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VaultListUiVaultListGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -40659,6 +41215,93 @@ func (r VaultListUiVaultListGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r VaultListUiVaultListGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultMoveUiVaultMovePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultMoveUiVaultMovePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultMoveUiVaultMovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultMoveConfirmUiVaultMoveConfirmGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultMoveConfirmUiVaultMoveConfirmGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultMoveConfirmUiVaultMoveConfirmGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultPutUiVaultPutPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultPutUiVaultPutPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultPutUiVaultPutPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultPutConfirmUiVaultPutConfirmGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultPutConfirmUiVaultPutConfirmGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultPutConfirmUiVaultPutConfirmGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -44710,6 +45353,32 @@ func (c *ClientWithResponses) VaultIndexUiVaultGetWithResponse(ctx context.Conte
 	return ParseVaultIndexUiVaultGetResponse(rsp)
 }
 
+// VaultDeleteUiVaultDeletePostWithBodyWithResponse request with arbitrary body returning *VaultDeleteUiVaultDeletePostResponse
+func (c *ClientWithResponses) VaultDeleteUiVaultDeletePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error) {
+	rsp, err := c.VaultDeleteUiVaultDeletePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultDeleteUiVaultDeletePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) VaultDeleteUiVaultDeletePostWithFormdataBodyWithResponse(ctx context.Context, body VaultDeleteUiVaultDeletePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error) {
+	rsp, err := c.VaultDeleteUiVaultDeletePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultDeleteUiVaultDeletePostResponse(rsp)
+}
+
+// VaultDeleteConfirmUiVaultDeleteConfirmGetWithResponse request returning *VaultDeleteConfirmUiVaultDeleteConfirmGetResponse
+func (c *ClientWithResponses) VaultDeleteConfirmUiVaultDeleteConfirmGetWithResponse(ctx context.Context, params *VaultDeleteConfirmUiVaultDeleteConfirmGetParams, reqEditors ...RequestEditorFn) (*VaultDeleteConfirmUiVaultDeleteConfirmGetResponse, error) {
+	rsp, err := c.VaultDeleteConfirmUiVaultDeleteConfirmGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultDeleteConfirmUiVaultDeleteConfirmGetResponse(rsp)
+}
+
 // VaultListUiVaultListGetWithResponse request returning *VaultListUiVaultListGetResponse
 func (c *ClientWithResponses) VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error) {
 	rsp, err := c.VaultListUiVaultListGet(ctx, params, reqEditors...)
@@ -44717,6 +45386,58 @@ func (c *ClientWithResponses) VaultListUiVaultListGetWithResponse(ctx context.Co
 		return nil, err
 	}
 	return ParseVaultListUiVaultListGetResponse(rsp)
+}
+
+// VaultMoveUiVaultMovePostWithBodyWithResponse request with arbitrary body returning *VaultMoveUiVaultMovePostResponse
+func (c *ClientWithResponses) VaultMoveUiVaultMovePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultMoveUiVaultMovePostResponse, error) {
+	rsp, err := c.VaultMoveUiVaultMovePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultMoveUiVaultMovePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) VaultMoveUiVaultMovePostWithFormdataBodyWithResponse(ctx context.Context, body VaultMoveUiVaultMovePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultMoveUiVaultMovePostResponse, error) {
+	rsp, err := c.VaultMoveUiVaultMovePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultMoveUiVaultMovePostResponse(rsp)
+}
+
+// VaultMoveConfirmUiVaultMoveConfirmGetWithResponse request returning *VaultMoveConfirmUiVaultMoveConfirmGetResponse
+func (c *ClientWithResponses) VaultMoveConfirmUiVaultMoveConfirmGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultMoveConfirmUiVaultMoveConfirmGetResponse, error) {
+	rsp, err := c.VaultMoveConfirmUiVaultMoveConfirmGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultMoveConfirmUiVaultMoveConfirmGetResponse(rsp)
+}
+
+// VaultPutUiVaultPutPostWithBodyWithResponse request with arbitrary body returning *VaultPutUiVaultPutPostResponse
+func (c *ClientWithResponses) VaultPutUiVaultPutPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultPutUiVaultPutPostResponse, error) {
+	rsp, err := c.VaultPutUiVaultPutPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultPutUiVaultPutPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) VaultPutUiVaultPutPostWithFormdataBodyWithResponse(ctx context.Context, body VaultPutUiVaultPutPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*VaultPutUiVaultPutPostResponse, error) {
+	rsp, err := c.VaultPutUiVaultPutPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultPutUiVaultPutPostResponse(rsp)
+}
+
+// VaultPutConfirmUiVaultPutConfirmGetWithResponse request returning *VaultPutConfirmUiVaultPutConfirmGetResponse
+func (c *ClientWithResponses) VaultPutConfirmUiVaultPutConfirmGetWithResponse(ctx context.Context, params *VaultPutConfirmUiVaultPutConfirmGetParams, reqEditors ...RequestEditorFn) (*VaultPutConfirmUiVaultPutConfirmGetResponse, error) {
+	rsp, err := c.VaultPutConfirmUiVaultPutConfirmGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultPutConfirmUiVaultPutConfirmGetResponse(rsp)
 }
 
 // VaultReadUiVaultReadGetWithResponse request returning *VaultReadUiVaultReadGetResponse
@@ -53137,6 +53858,58 @@ func ParseVaultIndexUiVaultGetResponse(rsp *http.Response) (*VaultIndexUiVaultGe
 	return response, nil
 }
 
+// ParseVaultDeleteUiVaultDeletePostResponse parses an HTTP response from a VaultDeleteUiVaultDeletePostWithResponse call
+func ParseVaultDeleteUiVaultDeletePostResponse(rsp *http.Response) (*VaultDeleteUiVaultDeletePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultDeleteUiVaultDeletePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultDeleteConfirmUiVaultDeleteConfirmGetResponse parses an HTTP response from a VaultDeleteConfirmUiVaultDeleteConfirmGetWithResponse call
+func ParseVaultDeleteConfirmUiVaultDeleteConfirmGetResponse(rsp *http.Response) (*VaultDeleteConfirmUiVaultDeleteConfirmGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultDeleteConfirmUiVaultDeleteConfirmGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseVaultListUiVaultListGetResponse parses an HTTP response from a VaultListUiVaultListGetWithResponse call
 func ParseVaultListUiVaultListGetResponse(rsp *http.Response) (*VaultListUiVaultListGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -53146,6 +53919,100 @@ func ParseVaultListUiVaultListGetResponse(rsp *http.Response) (*VaultListUiVault
 	}
 
 	response := &VaultListUiVaultListGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultMoveUiVaultMovePostResponse parses an HTTP response from a VaultMoveUiVaultMovePostWithResponse call
+func ParseVaultMoveUiVaultMovePostResponse(rsp *http.Response) (*VaultMoveUiVaultMovePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultMoveUiVaultMovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultMoveConfirmUiVaultMoveConfirmGetResponse parses an HTTP response from a VaultMoveConfirmUiVaultMoveConfirmGetWithResponse call
+func ParseVaultMoveConfirmUiVaultMoveConfirmGetResponse(rsp *http.Response) (*VaultMoveConfirmUiVaultMoveConfirmGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultMoveConfirmUiVaultMoveConfirmGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseVaultPutUiVaultPutPostResponse parses an HTTP response from a VaultPutUiVaultPutPostWithResponse call
+func ParseVaultPutUiVaultPutPostResponse(rsp *http.Response) (*VaultPutUiVaultPutPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultPutUiVaultPutPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultPutConfirmUiVaultPutConfirmGetResponse parses an HTTP response from a VaultPutConfirmUiVaultPutConfirmGetWithResponse call
+func ParseVaultPutConfirmUiVaultPutConfirmGetResponse(rsp *http.Response) (*VaultPutConfirmUiVaultPutConfirmGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultPutConfirmUiVaultPutConfirmGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

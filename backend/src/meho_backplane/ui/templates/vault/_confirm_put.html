@@ -1,0 +1,193 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV put confirm modal (Initiative #1942 G10.18, Task #1957 T2).
+
+  Swapped into ``#vault-write-modal-container`` by the browser's "Write
+  secret" affordance (``hx-get /ui/vault/put/confirm``). ``vault.kv.put``
+  is safety_level=caution + requires_approval=True: writing replaces the
+  latest KV-v2 version WHOLESALE (no merge). The confirm gate must be
+  UNMISSABLE.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  confirm button's OWN ``hx-headers`` (HTMX does not inherit ``hx-headers``
+  to children -- the element issuing the request must carry it). The confirm
+  GET minted the token + re-set the matching ``meho_csrf`` cookie. The
+  confirm button disables itself during dispatch (``hx-disabled-elt``) so a
+  high-impact write cannot be double-fired.
+
+  The result swaps into ``#vault-write-result-region`` inside this modal
+  (``vault/_write_result.html``); the modal stays open so the operator reads
+  the awaiting_approval deep-link in place.
+
+  Put is OPERATOR-tier -- no tenant_admin step. The policy gate (NOT RBAC) is
+  what escalates the requires_approval op to awaiting_approval once dispatched.
+
+  REDACTION: the ``data`` field is operator-supplied secret material. It is
+  posted to the BFF, which forwards it to the dispatcher WITHOUT logging it;
+  it never lands in a server log, audit row, or telemetry frame.
+
+  Context:
+    verb          -- "put"
+    op_id         -- "vault.kv.put"
+    safety_level  -- "caution"
+    connector_id  -- str | None: the dispatchable vault-1.x id (None -> hint)
+    default_mount -- str: the mount the field pre-fills ("secret")
+    default_path  -- str: the path the field pre-fills (tenant prefix)
+    target        -- str: the (optional) target name carried from the browser
+    csrf_token    -- str: minted double-submit token for the put POST
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="vault-write-modal" class="modal" aria-label="Write secret">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="vault-put-title">
+          Write secret
+        </h3>
+        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {% if not connector_id %}
+      {#- No vault connector ingested: render a hint, not a confirm form that
+          would 404 on dispatch. -#}
+      <div role="alert" class="alert alert-warning mt-4" data-vault-write-error="no_vault_connector">
+        <div>
+          <h4 class="text-sm font-semibold">No Vault connector available</h4>
+          <p class="text-xs">
+            No ingested <code>vault</code> connector is visible to your tenant.
+          </p>
+        </div>
+      </div>
+    {% else %}
+      {#- UNMISSABLE caution gate. vault.kv.put replaces the latest version
+          wholesale and routes through the approval gate. -#}
+      <div
+        role="alert"
+        class="alert alert-warning mt-4 items-start"
+        data-vault-write-gate="confirm"
+        data-safety-level="{{ safety_level }}"
+      >
+        {{ icon("shield-check", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">State-changing operation</h4>
+          <p class="text-xs [overflow-wrap:anywhere]">
+            This writes a new version of the secret and replaces the latest
+            version <span class="font-semibold">wholesale</span> (KV v2 does
+            not merge -- carry forward any keys that must survive). It
+            <span class="font-semibold">requires approval</span>: confirming
+            parks a request for a reviewer rather than executing immediately.
+          </p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-warning badge-sm" data-vault-write-safety>safety: {{ safety_level }}</span>
+            <span class="badge badge-outline badge-sm" data-vault-write-requires-approval>requires approval</span>
+          </div>
+        </div>
+      </div>
+
+      <form
+        class="mt-4 space-y-3"
+        hx-post="/ui/vault/put"
+        hx-target="#vault-write-result-region"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="find button[data-action='vault-put']"
+        data-vault-write-form="put"
+      >
+        <input type="hidden" name="target" value="{{ target }}" />
+
+        <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_1fr]">
+          <label class="form-control">
+            <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+            <input
+              type="text"
+              name="mount"
+              value="{{ default_mount }}"
+              maxlength="256"
+              class="input input-bordered input-sm w-full font-mono"
+              aria-label="KV mount"
+              autocomplete="off"
+            />
+          </label>
+          <label class="form-control">
+            <span class="label-text mb-1 text-xs opacity-70">Path</span>
+            <input
+              type="text"
+              name="path"
+              value="{{ default_path }}"
+              maxlength="1024"
+              placeholder="tenants/&lt;tenant&gt;/&lt;target&gt;"
+              class="input input-bordered input-sm w-full font-mono"
+              aria-label="KV path"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            Secret data <span class="opacity-50">(JSON object; replaces the latest version)</span>
+          </span>
+          <textarea
+            name="data"
+            rows="5"
+            maxlength="65536"
+            class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+            placeholder='{"password": "..."}'
+            aria-label="Secret data as JSON"
+            autocomplete="off"
+          ></textarea>
+        </label>
+
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            CAS <span class="opacity-50">(optional Check-And-Set; 0 = write only if absent, N = only if current version is N; blank = unconditional)</span>
+          </span>
+          <input
+            type="number"
+            name="cas"
+            min="0"
+            step="1"
+            class="input input-bordered input-sm w-full font-mono sm:max-w-[12rem]"
+            placeholder="(blank)"
+            aria-label="Check-And-Set version guard"
+            autocomplete="off"
+          />
+        </label>
+
+        <div class="flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onclick="document.getElementById('vault-write-modal').close()"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            data-action="vault-put"
+            class="btn btn-warning btn-sm gap-1"
+          >
+            {{ icon("key-round", class="size-4") }}
+            Write (request approval)
+          </button>
+        </div>
+      </form>
+
+      {#- Swap target for the rendered write result. Empty until the operator
+          confirms; the modal stays open so the awaiting_approval deep-link
+          reads in place. -#}
+      <div id="vault-write-result-region" class="mt-4"></div>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

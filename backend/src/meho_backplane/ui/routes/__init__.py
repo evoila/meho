@@ -99,6 +99,7 @@ from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
+from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
@@ -120,6 +121,7 @@ __all__ = [
     "build_corpus_router",
     "build_dashboard_router",
     "build_kb_router",
+    "build_keycloak_router",
     "build_memory_router",
     "build_operations_router",
     "build_retrieval_router",
@@ -136,11 +138,11 @@ __all__ = [
 # A flat router-registration aggregator: every console surface contributes
 # exactly one ``router.include_router(...)`` call plus an inline
 # first-match-wins ordering rationale; the length is the count of console
-# surfaces this function wires (now incl. the vault KV browser), not
-# per-function complexity. The single registration ORDER is load-bearing (the
-# docstring documents why literal-before-param + real-before-stubs ordering
-# must hold), so splitting it into phase helpers would fracture that one
-# ordered sequence for no readability gain.
+# surfaces this function wires (now incl. the keycloak realm browser and the
+# vault KV browser), not per-function complexity. The single registration
+# ORDER is load-bearing (the docstring documents why literal-before-param +
+# real-before-stubs ordering must hold), so splitting it into phase helpers
+# would fracture that one ordered sequence for no readability gain.
 # code-quality-allow: function-size -- registration aggregator, see above.
 def build_router() -> APIRouter:
     """Aggregate the dashboard + surface routers (broadcast … runbooks).
@@ -220,6 +222,17 @@ def build_router() -> APIRouter:
     # segment can never bind as a descriptor id; registered before the
     # stubs aggregate so its concrete paths win the first-match-wins lookup.
     router.include_router(build_operations_router())
+    # Keycloak console (Initiative #1943, G10.x-T1 #1959): the read-only realm
+    # browser -- ``/ui/keycloak`` (realm-config card + client list +
+    # client-scope list) + ``/ui/keycloak/clients/{client_uuid}`` (per-client
+    # detail). All surfaces dispatch the curated ``keycloak.*`` read ops
+    # in-process through ``call_operation`` against the PINNED
+    # ``connector_id="keycloak-admin-26.x"`` (never the bare ``keycloak``
+    # slug). The only ``{param}`` route sits under the distinct
+    # ``/ui/keycloak/clients/`` prefix, so a future literal ``/ui/keycloak/users``
+    # (T2) registered before any ``{param}`` route binds first; included before
+    # the stubs aggregate so its concrete paths win the first-match-wins lookup.
+    router.include_router(build_keycloak_router())
     # Audit-query forensic console (G10.15-T1 #1944): ``/ui/audit`` (filter
     # form + first result page) + ``/ui/audit/results`` (filter-submit +
     # forward-cursor "Load more" fragment). Reads dispatch the

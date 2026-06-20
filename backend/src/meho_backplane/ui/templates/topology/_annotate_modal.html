@@ -1,0 +1,155 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Curated-edge **annotate** modal (Initiative #1941 Task #1953). Rendered
+  by ``GET /ui/topology/edges/annotate`` (modal-open) and re-rendered by
+  ``POST /ui/topology/edges`` on a recoverable error (ambiguous node,
+  unknown node, invalid kind).
+
+  The form posts ``hx-post="/ui/topology/edges"`` carrying the CSRF
+  double-submit token on its OWN ``hx-headers`` (HTMX does not inherit
+  ``hx-headers`` to children -- the element issuing the request must carry
+  it). On success the response swaps in the created-edge fragment + fires an
+  ``HX-Trigger`` the graph view listens for; on a recoverable error this
+  modal re-renders with the typed banner (and, for an ambiguous node, the
+  candidate ``kinds``).
+
+  ``from`` is a Python-reserved word, so the wire fields are ``from_name`` /
+  ``from_kind`` -- the BFF never posts a raw ``from`` JSON key; it builds the
+  ``NodeRef`` server-side.
+-#}
+<div
+  id="topology-edge-modal"
+  class="card bg-base-100 border-base-300 border shadow-md"
+  x-data="{ open: true }"
+  x-show="open"
+  aria-label="Annotate curated edge"
+>
+  <div class="card-body space-y-3">
+    <header class="flex items-start justify-between gap-2">
+      <h2 class="card-title text-base">Annotate curated edge</h2>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        aria-label="Close annotate modal"
+        @click="open = false"
+      >
+        Close
+      </button>
+    </header>
+
+    {% if error_message %}
+      <div role="alert" class="alert alert-error text-sm" data-test="annotate-error">
+        <span>{{ error_message }}</span>
+      </div>
+    {% endif %}
+
+    {% if ambiguous_kinds %}
+      <div class="text-sm" data-test="ambiguous-kinds">
+        <p class="opacity-70">
+          Candidate kinds for <span class="font-mono">{{ ambiguous_name }}</span>:
+        </p>
+        <ul class="mt-1 flex flex-wrap gap-1">
+          {% for k in ambiguous_kinds %}
+            <li><span class="badge badge-outline badge-sm font-mono">{{ k }}</span></li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    <form
+      hx-post="/ui/topology/edges"
+      hx-target="#topology-edge-modal"
+      hx-swap="outerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      class="space-y-3"
+    >
+      <fieldset class="grid grid-cols-2 gap-2">
+        <label class="form-control">
+          <span class="label-text text-xs opacity-70">from (name)</span>
+          <input
+            type="text" name="from_name" required
+            value="{{ submitted.from_name | default('') }}"
+            class="input input-bordered input-sm font-mono"
+            aria-label="From node name"
+          />
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs opacity-70">from kind (optional)</span>
+          <input
+            type="text" name="from_kind"
+            value="{{ submitted.from_kind | default('') }}"
+            class="input input-bordered input-sm font-mono"
+            aria-label="From node kind"
+          />
+        </label>
+      </fieldset>
+
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">edge kind</span>
+        <select
+          name="kind" required
+          class="select select-bordered select-sm font-mono"
+          aria-label="Edge kind"
+        >
+          <option value="" disabled {{ 'selected' if not submitted.get('kind') else '' }}>
+            Select a kind…
+          </option>
+          {% for k in edge_kind_options %}
+            <option value="{{ k }}" {{ 'selected' if submitted.get('kind') == k else '' }}>{{ k }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <fieldset class="grid grid-cols-2 gap-2">
+        <label class="form-control">
+          <span class="label-text text-xs opacity-70">to (name)</span>
+          <input
+            type="text" name="to_name" required
+            value="{{ submitted.to_name | default('') }}"
+            class="input input-bordered input-sm font-mono"
+            aria-label="To node name"
+          />
+        </label>
+        <label class="form-control">
+          <span class="label-text text-xs opacity-70">to kind (optional)</span>
+          <input
+            type="text" name="to_kind"
+            value="{{ submitted.to_kind | default('') }}"
+            class="input input-bordered input-sm font-mono"
+            aria-label="To node kind"
+          />
+        </label>
+      </fieldset>
+
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">note (optional)</span>
+        <textarea
+          name="note" rows="2" maxlength="{{ max_note_length }}"
+          class="textarea textarea-bordered textarea-sm"
+          aria-label="Annotation note"
+        >{{ submitted.note | default('') }}</textarea>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">evidence_url (optional)</span>
+        <input
+          type="url" name="evidence_url" maxlength="{{ max_evidence_url_length }}"
+          value="{{ submitted.evidence_url | default('') }}"
+          class="input input-bordered input-sm font-mono"
+          aria-label="Evidence URL"
+        />
+      </label>
+
+      <footer class="flex justify-end gap-2">
+        <button type="button" class="btn btn-ghost btn-sm" @click="open = false">
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-primary btn-sm" data-test="annotate-submit">
+          Annotate edge
+        </button>
+      </footer>
+    </form>
+  </div>
+</div>

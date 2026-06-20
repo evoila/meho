@@ -1,0 +1,154 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak client-detail fragment (Initiative #1943, Task #1959).
+
+  The swap target for a client row's "Detail" button on the realm browser.
+  Dispatches ``keycloak.client.get`` keyed on the client's INTERNAL UUID
+  (the ``id`` from a list row, NOT the human clientId) and renders
+  PROJECTED, redaction-trusting fields only: clientId, enabled,
+  publicClient, redirect URIs, web origins, protocol mappers.
+
+  Secret handling (load-bearing): the client ``secret`` is already scrubbed
+  by the connector (the ``REDACTED`` sentinel). This fragment NEVER dumps
+  the raw ``OperationResult`` envelope into the page -- it reads named
+  fields off the already-redacted ``client`` dict, so a future op that
+  forgot to scrub a field cannot leak it through a verbatim blob here.
+
+  Cross-link (do not duplicate): when a client backs an agent principal the
+  canonical kill switch stays on ``/ui/agents/principals`` (#1831/#1866);
+  this surface only links there.
+
+  The drawer open/close is Alpine-driven (``x-data``); dismiss on close or
+  Escape.
+
+  Context keys: ``client_uuid``, ``target``, ``client``, ``error``,
+  ``is_tenant_admin`` (see ``keycloak/routes.py``).
+-#}
+{% from "_icons.html" import icon %}
+
+<div
+  class="card border border-base-300 bg-base-100 shadow-lg"
+  data-keycloak-client-detail
+  data-client-uuid="{{ client_uuid }}"
+  x-data="{ open: true }"
+  x-show="open"
+  @keydown.escape.window="open = false"
+>
+  <div class="card-body gap-3">
+    <div class="flex items-start justify-between gap-3">
+      <h3 class="card-title text-base">
+        {{ icon("plug", class="size-4 opacity-70") }}
+        Client detail
+      </h3>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs btn-square"
+        aria-label="Close client detail"
+        @click="open = false"
+      >{{ icon("x", class="size-4") }}</button>
+    </div>
+
+    {% if error %}
+      <div role="alert" class="alert alert-warning" data-keycloak-error>
+        <p class="text-xs">{{ error }}</p>
+      </div>
+    {% elif client %}
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="font-mono text-sm font-semibold">{{ client.get("clientId") | default("—", true) }}</span>
+        {% if client.get("enabled") %}
+          <span class="badge badge-success badge-sm">enabled</span>
+        {% else %}
+          <span class="badge badge-ghost badge-sm">disabled</span>
+        {% endif %}
+        {% if client.get("publicClient") %}
+          <span class="badge badge-ghost badge-sm">public</span>
+        {% else %}
+          <span class="badge badge-outline badge-sm">confidential</span>
+        {% endif %}
+      </div>
+
+      <dl class="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+        <div>
+          <dt class="text-xs opacity-60">Internal UUID</dt>
+          <dd class="font-mono break-all text-xs">{{ client.get("id") | default(client_uuid, true) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs opacity-60">Protocol</dt>
+          <dd>{{ client.get("protocol") | default("openid-connect", true) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs opacity-60">Standard flow</dt>
+          <dd>{{ client.get("standardFlowEnabled") | default("—", true) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs opacity-60">Service accounts</dt>
+          <dd>{{ client.get("serviceAccountsEnabled") | default("—", true) }}</dd>
+        </div>
+      </dl>
+
+      {#- Redirect URIs -#}
+      <div data-client-redirect-uris>
+        <h4 class="mb-1 text-xs font-semibold opacity-60">Redirect URIs</h4>
+        {% if client.get("redirectUris") %}
+          <ul class="space-y-1">
+            {% for uri in client.get("redirectUris") %}
+              <li class="font-mono text-xs break-all">{{ uri }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-xs opacity-60">None configured.</p>
+        {% endif %}
+      </div>
+
+      {#- Web origins -#}
+      {% if client.get("webOrigins") %}
+        <div data-client-web-origins>
+          <h4 class="mb-1 text-xs font-semibold opacity-60">Web origins</h4>
+          <ul class="space-y-1">
+            {% for origin in client.get("webOrigins") %}
+              <li class="font-mono text-xs break-all">{{ origin }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      {#- Protocol mappers (names only -- the projected view, not the raw
+          mapper config blob). -#}
+      <div data-client-protocol-mappers>
+        <h4 class="mb-1 text-xs font-semibold opacity-60">Protocol mappers</h4>
+        {% if client.get("protocolMappers") %}
+          <ul class="space-y-1">
+            {% for mapper in client.get("protocolMappers") %}
+              <li class="text-xs">
+                <span class="font-mono">{{ mapper.get("name") | default("—", true) }}</span>
+                <span class="opacity-60">— {{ mapper.get("protocolMapper") | default("", true) }}</span>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-xs opacity-60">None configured.</p>
+        {% endif %}
+      </div>
+
+      {#- Cross-link to the agent-principals kill switch. The canonical
+          register/revoke surface stays there (#1831/#1866); this is a
+          navigation hint, not a duplicate. -#}
+      <div class="mt-1 border-t border-base-300 pt-3">
+        <a
+          href="/ui/agents/principals"
+          class="link link-hover inline-flex items-center gap-1 text-xs"
+          data-principals-cross-link
+        >
+          {{ icon("shield-check", class="size-3.5") }}
+          Manage agent principals
+        </a>
+      </div>
+    {% else %}
+      <div role="alert" class="alert alert-warning" data-keycloak-error>
+        <p class="text-xs">Client not found.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>

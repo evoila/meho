@@ -175,12 +175,17 @@ class IngestedRequest:
         body: The raw, unwrapped JSON request body (``loc=="body"``), or
             ``None`` when the op declares no body param -- the same value
             passed as httpx's ``json=``.
+        headers: The header-located params bucket (``loc=="header"``), or
+            ``None`` when the op declares no header param -- merged onto the
+            connector's :meth:`~meho_backplane.connectors.adapters.http.HttpConnector.auth_headers`
+            as the transport's ``extra_headers=``.
     """
 
     method: str
     path: str
     query: dict[str, Any] | None
     body: Any
+    headers: dict[str, Any] | None
 
 
 async def resolve_ingested_request(
@@ -213,7 +218,7 @@ async def resolve_ingested_request(
             f"ingested descriptor {descriptor.op_id!r} missing method or path "
             f"(method={descriptor.method!r}, path={descriptor.path!r})"
         )
-    path_params, query_params, _header_params, body_params = _split_ingested_params(
+    path_params, query_params, header_params, body_params = _split_ingested_params(
         descriptor.parameter_schema,
         params,
     )
@@ -231,6 +236,7 @@ async def resolve_ingested_request(
         path=substituted,
         query=query_params or None,
         body=_unwrap_body(body_params),
+        headers=header_params or None,
     )
 
 
@@ -244,10 +250,13 @@ async def dispatch_ingested(
 ) -> Any:
     """Execute an ``source_kind='ingested'`` op via the connector's HTTP transport.
 
-    v0.2 routes through :meth:`HttpConnector._request_json` for idempotent
+    Routes through :meth:`HttpConnector._request_json` for idempotent
     verbs (GET / HEAD / OPTIONS) -- the only verbs the ingest pipeline
     declares as safe-to-retry. POST / PUT / DELETE / PATCH route through
-    :meth:`HttpConnector._post_json` (the same client pool, no retry).
+    :meth:`HttpConnector._post_json` (the same client pool, no retry),
+    each carrying its *actual* declared verb -- a PUT/PATCH/DELETE is no
+    longer silently downgraded to a POST. Header-located params are
+    forwarded to both transport seams as ``extra_headers``.
     The connector instance MUST be an :class:`HttpConnector` -- the
     dispatcher type-checks via ``hasattr(connector, "_request_json")``
     rather than an :func:`isinstance` import to avoid a circular
@@ -292,10 +301,14 @@ async def dispatch_ingested(
             operator=operator,
             params=request.query,
             json=request.body,
+            extra_headers=request.headers,
         )
-    # Non-idempotent verb -- POST / PUT / PATCH / DELETE. v0.2 routes
-    # through ``_post_json``-shaped httpx call (no retry). The connector
-    # owns the auth header injection + per-target client pool.
+    # Non-idempotent verb -- POST / PUT / PATCH / DELETE. Routes through
+    # ``_post_json`` (no retry), forwarding the *actual* declared verb so a
+    # PUT/PATCH/DELETE reaches the wire with its real method rather than a
+    # hardcoded POST. The connector owns the auth header injection + the
+    # per-target client pool; header-located params ride along as
+    # ``extra_headers``.
     post_json = getattr(connector, "_post_json", None)
     if post_json is None:
         raise RuntimeError(
@@ -306,7 +319,9 @@ async def dispatch_ingested(
         target,
         request.path,
         operator=operator,
+        verb=request.method,
         json=request.body,
+        extra_headers=request.headers,
     )
 
 

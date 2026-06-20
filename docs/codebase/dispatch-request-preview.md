@@ -54,11 +54,14 @@ Out of scope (honouring #1683's dispositions):
 ## Key types
 
 - `meho_backplane.operations._branches.IngestedRequest` — a frozen
-  dataclass holding the four artefacts a `source_kind='ingested'`
+  dataclass holding the artefacts a `source_kind='ingested'`
   dispatch puts on the wire: `method`, `path` (placeholders substituted
   *and* the connector's `mount_op_path` prefix applied), `query`
-  (the httpx `params=` value, or `None`), and `body` (the **raw**,
-  unwrapped JSON request body, or `None`).
+  (the httpx `params=` value, or `None`), `body` (the **raw**,
+  unwrapped JSON request body, or `None`), and `headers` (the
+  header-located params bucket forwarded to the transport as
+  `extra_headers=`, or `None`). The preview envelope surfaces the first
+  four; `headers` is consumed by `dispatch_ingested` only.
 - `meho_backplane.operations._branches.resolve_ingested_request(...)` —
   the single source of truth for "what method/path/query/body does an
   ingested dispatch send". Shared verbatim by `dispatch_ingested` (which

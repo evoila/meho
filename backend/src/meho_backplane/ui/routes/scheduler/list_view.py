@@ -40,6 +40,7 @@ mapped by id, so a busy list does not issue one lookup per row.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
@@ -48,6 +49,7 @@ from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.scheduler.service import SchedulerAdminService
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.scheduler.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
@@ -166,8 +168,8 @@ def build_list_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        kind: KindFilterValue | None = Query(default=None),
-        status: StatusFilterValue | None = Query(default=None),
+        kind: Annotated[KindFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
+        status: Annotated[StatusFilterValue | None, EMPTY_STR_TO_NONE, Query()] = None,
         work_ref: str | None = Query(default=None, max_length=256),
         session_ctx: UISessionContext = _require_session_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,

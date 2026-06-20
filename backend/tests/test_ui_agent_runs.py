@@ -290,6 +290,23 @@ def test_list_invalid_status_filter_is_422() -> None:
     assert response.status_code == 422
 
 
+def test_list_empty_status_filter_is_200_unfiltered() -> None:
+    """An empty ``?status=`` (the "All" option) returns the unfiltered list at 200.
+
+    The HTMX status ``<select>``'s "All" option carries ``value=""``; picking
+    it (or clearing the filter) submits ``?status=``. Without the empty-string
+    coercion that empty value fails the ``AgentRunStatus`` enum validation and
+    422s, so HTMX never swaps and the control silently no-ops. The unfiltered
+    row must come back at 200.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs", params={"status": ""})
+    assert response.status_code == 200, response.text
+    assert str(rid)[:8] in response.text
+
+
 def test_list_is_tenant_isolated() -> None:
     """Tenant B's runs never appear on tenant A's list."""
     _seed_tenant(_TENANT_A, "tenant-a")

@@ -483,6 +483,30 @@ def test_runbooks_list_invalid_status_returns_422() -> None:
     assert response.status_code == 422
 
 
+def test_runbooks_list_empty_status_filter_is_200_unfiltered() -> None:
+    """An empty ``?status=`` (the "All" option) returns the unfiltered catalog at 200.
+
+    The status ``<select>``'s "All" option carries ``value=""``; selecting it
+    submits ``?status=``. Without the empty-string coercion that empty value
+    fails the ``_StatusFilter`` literal and 422s, so HTMX never swaps. The
+    unfiltered template must come back at 200 on both the list fragment and the
+    full index (the two registrations sharing the ``_StatusFilter`` param).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        list_response = client.get("/ui/runbooks/list", params={"status": ""})
+        index_response = client.get("/ui/runbooks", params={"status": ""})
+
+    assert list_response.status_code == 200, list_response.text
+    assert "drain-node" in list_response.text
+    assert index_response.status_code == 200, index_response.text
+    assert "drain-node" in index_response.text
+
+
 # ---------------------------------------------------------------------------
 # GET /ui/runbooks/<slug> -- detail (admin / post-completion sees full steps)
 # ---------------------------------------------------------------------------

@@ -230,6 +230,7 @@ class VcfOperationsConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Merge the auth-source query param into *params* before the base call.
 
@@ -257,6 +258,7 @@ class VcfOperationsConnector(HttpConnector):
             operator=operator,
             params=final_params,
             json=json,
+            extra_headers=extra_headers,
         )
 
     async def fingerprint(

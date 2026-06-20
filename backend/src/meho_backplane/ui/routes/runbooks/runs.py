@@ -94,7 +94,7 @@ References
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
@@ -123,6 +123,7 @@ from meho_backplane.runbooks.service import (
 )
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import mint_csrf_token
+from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.runbooks.editor import set_csrf_cookie
 from meho_backplane.ui.templating import get_templates
 
@@ -448,7 +449,7 @@ def register_runs_routes(router: APIRouter) -> None:
         request: Request,
         session: UISessionContext = _require_session,
         assignee: str | None = Query(default=None, max_length=_MAX_ASSIGNEE_LENGTH),
-        status: _RunStateFilter | None = Query(default=None),
+        status: Annotated[_RunStateFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
     ) -> HTMLResponse:
         return await _render_runs(request, session, assignee, status)
 

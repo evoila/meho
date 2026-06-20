@@ -6909,6 +6909,16 @@ type KbEntryPreviewUiKbSlugPreviewGetParams struct {
 	Q *string `form:"q,omitempty" json:"q,omitempty"`
 }
 
+// KeycloakIndexUiKeycloakGetParams defines parameters for KeycloakIndexUiKeycloakGet.
+type KeycloakIndexUiKeycloakGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+}
+
+// KeycloakClientDetailUiKeycloakClientsClientUuidGetParams defines parameters for KeycloakClientDetailUiKeycloakClientsClientUuidGet.
+type KeycloakClientDetailUiKeycloakClientsClientUuidGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+}
+
 // UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
 type UiMemoryListUiMemoryGetParams struct {
 	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
@@ -7350,6 +7360,12 @@ type KbUploadSingleUiKbUploadPostMultipartRequestBody = BodyKbUploadSingleUiKbUp
 
 // KbUploadBulkUiKbUploadBulkPostMultipartRequestBody defines body for KbUploadBulkUiKbUploadBulkPost for multipart/form-data ContentType.
 type KbUploadBulkUiKbUploadBulkPostMultipartRequestBody = BodyKbUploadBulkUiKbUploadBulkPost
+
+// KeycloakIndexUiKeycloakGetJSONRequestBody defines body for KeycloakIndexUiKeycloakGet for application/json ContentType.
+type KeycloakIndexUiKeycloakGetJSONRequestBody = UISessionContext
+
+// KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody defines body for KeycloakClientDetailUiKeycloakClientsClientUuidGet for application/json ContentType.
+type KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody = UISessionContext
 
 // UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
 type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
@@ -9188,6 +9204,16 @@ type ClientInterface interface {
 
 	// KbEntryPreviewUiKbSlugPreviewGet request
 	KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakIndexUiKeycloakGetWithBody request with any body
+	KeycloakIndexUiKeycloakGetWithBody(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakIndexUiKeycloakGet(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, body KeycloakIndexUiKeycloakGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBody request with any body
+	KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBody(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakClientDetailUiKeycloakClientsClientUuidGet(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, body KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiMemoryListUiMemoryGet request
 	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13532,6 +13558,54 @@ func (c *Client) KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqE
 
 func (c *Client) KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewKbEntryPreviewUiKbSlugPreviewGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakIndexUiKeycloakGetWithBody(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakIndexUiKeycloakGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakIndexUiKeycloakGet(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, body KeycloakIndexUiKeycloakGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakIndexUiKeycloakGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBody(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequestWithBody(c.Server, clientUuid, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakClientDetailUiKeycloakClientsClientUuidGet(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, body KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequest(c.Server, clientUuid, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27961,6 +28035,137 @@ func NewKbEntryPreviewUiKbSlugPreviewGetRequest(server string, slug string, para
 	return req, nil
 }
 
+// NewKeycloakIndexUiKeycloakGetRequest calls the generic KeycloakIndexUiKeycloakGet builder with application/json body
+func NewKeycloakIndexUiKeycloakGetRequest(server string, params *KeycloakIndexUiKeycloakGetParams, body KeycloakIndexUiKeycloakGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewKeycloakIndexUiKeycloakGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewKeycloakIndexUiKeycloakGetRequestWithBody generates requests for KeycloakIndexUiKeycloakGet with any type of body
+func NewKeycloakIndexUiKeycloakGetRequestWithBody(server string, params *KeycloakIndexUiKeycloakGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequest calls the generic KeycloakClientDetailUiKeycloakClientsClientUuidGet builder with application/json body
+func NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequest(server string, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, body KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequestWithBody(server, clientUuid, params, "application/json", bodyReader)
+}
+
+// NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequestWithBody generates requests for KeycloakClientDetailUiKeycloakClientsClientUuidGet with any type of body
+func NewKeycloakClientDetailUiKeycloakClientsClientUuidGetRequestWithBody(server string, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "client_uuid", runtime.ParamLocationPath, clientUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/clients/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiMemoryListUiMemoryGetRequest generates requests for UiMemoryListUiMemoryGet
 func NewUiMemoryListUiMemoryGetRequest(server string, params *UiMemoryListUiMemoryGetParams) (*http.Request, error) {
 	var err error
@@ -31380,6 +31585,16 @@ type ClientWithResponsesInterface interface {
 
 	// KbEntryPreviewUiKbSlugPreviewGetWithResponse request
 	KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error)
+
+	// KeycloakIndexUiKeycloakGetWithBodyWithResponse request with any body
+	KeycloakIndexUiKeycloakGetWithBodyWithResponse(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakIndexUiKeycloakGetResponse, error)
+
+	KeycloakIndexUiKeycloakGetWithResponse(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, body KeycloakIndexUiKeycloakGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakIndexUiKeycloakGetResponse, error)
+
+	// KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBodyWithResponse request with any body
+	KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBodyWithResponse(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse, error)
+
+	KeycloakClientDetailUiKeycloakClientsClientUuidGetWithResponse(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, body KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse, error)
 
 	// UiMemoryListUiMemoryGetWithResponse request
 	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
@@ -36758,6 +36973,50 @@ func (r KbEntryPreviewUiKbSlugPreviewGetResponse) StatusCode() int {
 	return 0
 }
 
+type KeycloakIndexUiKeycloakGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakIndexUiKeycloakGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakIndexUiKeycloakGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiMemoryListUiMemoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -40838,6 +41097,40 @@ func (c *ClientWithResponses) KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx c
 		return nil, err
 	}
 	return ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp)
+}
+
+// KeycloakIndexUiKeycloakGetWithBodyWithResponse request with arbitrary body returning *KeycloakIndexUiKeycloakGetResponse
+func (c *ClientWithResponses) KeycloakIndexUiKeycloakGetWithBodyWithResponse(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakIndexUiKeycloakGetResponse, error) {
+	rsp, err := c.KeycloakIndexUiKeycloakGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakIndexUiKeycloakGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakIndexUiKeycloakGetWithResponse(ctx context.Context, params *KeycloakIndexUiKeycloakGetParams, body KeycloakIndexUiKeycloakGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakIndexUiKeycloakGetResponse, error) {
+	rsp, err := c.KeycloakIndexUiKeycloakGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakIndexUiKeycloakGetResponse(rsp)
+}
+
+// KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBodyWithResponse request with arbitrary body returning *KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse
+func (c *ClientWithResponses) KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBodyWithResponse(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse, error) {
+	rsp, err := c.KeycloakClientDetailUiKeycloakClientsClientUuidGetWithBody(ctx, clientUuid, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakClientDetailUiKeycloakClientsClientUuidGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakClientDetailUiKeycloakClientsClientUuidGetWithResponse(ctx context.Context, clientUuid string, params *KeycloakClientDetailUiKeycloakClientsClientUuidGetParams, body KeycloakClientDetailUiKeycloakClientsClientUuidGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse, error) {
+	rsp, err := c.KeycloakClientDetailUiKeycloakClientsClientUuidGet(ctx, clientUuid, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakClientDetailUiKeycloakClientsClientUuidGetResponse(rsp)
 }
 
 // UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
@@ -48120,6 +48413,58 @@ func ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp *http.Response) (*KbEntry
 	}
 
 	response := &KbEntryPreviewUiKbSlugPreviewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakIndexUiKeycloakGetResponse parses an HTTP response from a KeycloakIndexUiKeycloakGetWithResponse call
+func ParseKeycloakIndexUiKeycloakGetResponse(rsp *http.Response) (*KeycloakIndexUiKeycloakGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakIndexUiKeycloakGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakClientDetailUiKeycloakClientsClientUuidGetResponse parses an HTTP response from a KeycloakClientDetailUiKeycloakClientsClientUuidGetWithResponse call
+func ParseKeycloakClientDetailUiKeycloakClientsClientUuidGetResponse(rsp *http.Response) (*KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakClientDetailUiKeycloakClientsClientUuidGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

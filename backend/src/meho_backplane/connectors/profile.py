@@ -65,6 +65,7 @@ from typing import Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
+    "DEFAULT_EXPIRY_STATUSES",
     "NAMED_AUTH_SCHEMES",
     "RESERVED_AUTH_SCHEMES",
     "AuthSchemeName",
@@ -76,6 +77,22 @@ __all__ = [
     "UnknownAuthSchemeError",
     "validate_execution_profile",
 ]
+
+
+#: The default session-expiry / auth-failure status set a profile declares
+#: when it does not override ``expiry_statuses``. ``401`` is the
+#: connector-agnostic load-bearing case (every session connector re-logs in
+#: once on a 401); appliances with their own expiry code add it explicitly
+#: (vRLI declares ``{401, 440}``). This is the **single profile-declared
+#: source** consumed by both the session-retry harness (T4 #1970) and the
+#: dispatcher's auth-class classification arm
+#: (:func:`~meho_backplane.operations._errors.is_auth_failed_status`): the
+#: status set is parameterised once on the profile, never duplicated across
+#: a connector-side ``_SESSION_EXPIRED_STATUSES`` and a dispatcher-side
+#: ``_AUTH_FAILED_STATUSES``. It carries **no** per-status remediation /
+#: action — classification stays central (#1973); the profile only narrows
+#: the closed status *set*.
+DEFAULT_EXPIRY_STATUSES: frozenset[int] = frozenset({401})
 
 
 #: The closed catalog of named auth schemes a profile may declare. Each
@@ -272,6 +289,15 @@ class ExecutionProfile(BaseModel):
     the session/token machinery the schemes drive lands in T4 (#1970), the
     profile-driven fingerprint/probe + pagination in T6 (#1972).
 
+    T7 (#1973) adds :attr:`expiry_statuses`, the single profile-declared
+    session-expiry / auth-failure status set consumed by **both** the
+    session-retry harness (T4 #1970) and the dispatcher's auth-class
+    classification arm — replacing the duplicated connector-side
+    ``_SESSION_EXPIRED_STATUSES`` + dispatcher-side ``_AUTH_FAILED_STATUSES``
+    for profiled connectors. It parameterises the closed status *set* only;
+    no per-status remediation grammar is introduced (classification stays
+    central).
+
     Frozen and ``extra="forbid"`` — a profile is a reviewed artifact; an
     unrecognized key is a malformed profile, not a forward-compat
     extension point.
@@ -288,12 +314,59 @@ class ExecutionProfile(BaseModel):
     auth: AuthSpec = Field(
         description="The named auth scheme + secret-field names for this profile."
     )
+    expiry_statuses: frozenset[int] = Field(
+        default=DEFAULT_EXPIRY_STATUSES,
+        description=(
+            "The non-2xx HTTP statuses this connector treats as a session "
+            "expiry / auth failure. The SINGLE source of truth feeding both "
+            "the session-retry harness (re-login once on one of these) and "
+            "the dispatcher's auth-class classification arm. Defaults to "
+            "{401}; an appliance with its own expiry code declares it here "
+            "(vRLI: {401, 440}). NOT a status->action map — classification "
+            "stays central; this only narrows the closed status set."
+        ),
+    )
 
     @field_validator("product", "version")
     @classmethod
     def _identity_nonblank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("product and version must be non-blank")
+        return value
+
+    @field_validator("expiry_statuses")
+    @classmethod
+    def _expiry_statuses_valid(cls, value: frozenset[int]) -> frozenset[int]:
+        """Constrain the set to the connector-agnostic 401 floor plus vendor codes.
+
+        Two rules, both keeping classification central rather than opening a
+        status grammar:
+
+        * ``401`` must be present. It is the connector-agnostic session-expiry
+          floor every session connector re-logs in on; a profile that drops
+          it would silently stop classifying the universal case.
+        * Every other code must be a 4xx **vendor session-expiry** code
+          (``>= 440``, ``< 500``) — the band vRLI's ``440`` lives in.
+          The dispatcher classifies ``403`` (insufficient permission) and
+          ``422`` (invalid payload) on their own dedicated arms, and treats
+          ``404`` / ``429`` / 5xx as non-auth ``connector_error``; admitting
+          any of those into the expiry set would let a profile silently
+          re-route a status the central classifier owns. The closed
+          ``{401} plus [440, 500)`` shape is a narrowing of the recognised
+          set, not a per-status action map.
+        """
+        if not value:
+            raise ValueError("expiry_statuses must name at least one status code")
+        if 401 not in value:
+            raise ValueError("expiry_statuses must include 401 (the session-expiry floor)")
+        offending = sorted(code for code in value if code != 401 and not 440 <= code < 500)
+        if offending:
+            raise ValueError(
+                f"expiry_statuses may only add 4xx vendor session-expiry codes "
+                f"(>=440, like vRLI's 440) to the 401 floor; got {offending}. "
+                f"403/422 are classified on their own dispatcher arms and "
+                f"404/429/5xx are non-auth — classification stays central."
+            )
         return value
 
 

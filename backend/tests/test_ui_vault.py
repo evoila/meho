@@ -543,6 +543,77 @@ def test_vault_ui_read_renders_values_reveal_gated_and_unlogged(
     assert _count_audit_rows() == audit_before + 1
 
 
+def test_vault_ui_read_secret_value_does_not_break_out_of_x_data_attr(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A ``"``-containing secret value cannot break out of the ``x-data`` attribute.
+
+    Regression for the reflected-XSS / attribute-breakout class fixed on PR
+    #1044 for the broadcast templates: the secret value is rendered via
+    ``{{ v | tojson }}`` into Alpine's ``x-data`` initialiser, and ``tojson``
+    does NOT escape the double-quote (it emits a raw ``"`` as ``\\"``). With a
+    DOUBLE-quoted ``x-data="..."`` a value of ``"><img src=x onerror=...>``
+    would terminate the attribute and inject live markup. The attribute is
+    SINGLE-quoted, so ``tojson``'s ``'`` -> ``\\u0027`` escaping makes the
+    value breakout-proof and the payload rides harmlessly inside the
+    initialiser.
+
+    A KV value is operator-writable, so any tenant writer controls this
+    reflection point -- on a secrets console this is high severity.
+    """
+    payload = '"><img src=x onerror=alert(1)>'
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    install_fake_client(monkeypatch, secret={"breakout": payload}, kv_version=1)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with caplog.at_level(logging.DEBUG), mock:
+        response = client.get(
+            "/ui/vault/read",
+            params={"mount": "secret", "path": _tenant_path(_TENANT_A, "app/db")},
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-vault-secret="ok"' in body
+
+    # The reveal-gated row is rendered with a SINGLE-quoted x-data initialiser
+    # (the breakout-proof form). The double-quoted form is the vulnerable one.
+    assert "x-data='{ shown: false, value: " in body
+    assert 'x-data="{ shown: false, value: ' not in body
+
+    # The raw breakout payload must NOT appear verbatim in the body: ``tojson``
+    # JSON-string-escapes the leading ``"`` to ``\\"`` and Jinja's
+    # ``htmlsafe_json_dumps`` escapes ``<`` / ``>`` to ``\\u003c`` / ``\\u003e``,
+    # so no live ``<img`` tag is emitted and the attribute is never closed
+    # early.
+    assert payload not in body
+    # The decisive breakout signature: a literal ``"><img`` would mean the
+    # attribute was terminated and a live element injected. It must be absent.
+    assert '"><img' not in body
+    # No live ``<img`` element reaches the markup at all (the payload's ``<``
+    # is unicode-escaped inside the JS string, not emitted as a tag).
+    assert "<img" not in body
+
+    # The redaction invariant still holds for this payload: it must not leak
+    # into any application log record (driver-level SQL echo excluded, as in
+    # the sibling read test).
+    _driver_loggers = ("aiosqlite", "sqlalchemy")
+    for record in caplog.records:
+        if record.name.split(".")[0] in _driver_loggers:
+            continue
+        assert payload not in record.getMessage(), (
+            f"secret value leaked into a log record message: {record.name}/{record.levelname}"
+        )
+    # ...and not into any audit-trail-visible payload.
+    for visible in _audit_visible_payloads():
+        assert payload not in visible, "secret value leaked into a visible audit payload"
+
+
 # ---------------------------------------------------------------------------
 # vault.kv.versions: metadata table, no values
 # ---------------------------------------------------------------------------

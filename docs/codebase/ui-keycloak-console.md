@@ -1,22 +1,59 @@
-# `ui/routes/keycloak` — the read-only Keycloak realm browser
+# `ui/routes/keycloak` — the Keycloak realm browser + user management
 
 Initiative [#1943](https://github.com/evoila/meho/issues/1943) (G10.x
-Keycloak console), Task [#1959](https://github.com/evoila/meho/issues/1959)
-(T1). The read-only scaffold the two write tasks (T2 user management, T3
-scope/mapper management) build on. It gives an operator a domain-shaped
-view of the managed Keycloak realm — realm configuration, clients (with a
-per-client detail drill-in), and client scopes — directly in the operator
-console, where before the only way to read realm config from MEHO was the
+Keycloak console), Tasks
+[#1959](https://github.com/evoila/meho/issues/1959) (T1, read-only
+scaffold) and [#1960](https://github.com/evoila/meho/issues/1960) (T2, user
+management). It gives an operator a domain-shaped view of the managed
+Keycloak realm — realm configuration, clients (with a per-client detail
+drill-in), and client scopes — plus the day-to-day human-user admin
+(list / create / reset-password / role-assign), directly in the operator
+console, where before the only way to do this from MEHO was the
 `meho keycloak ...` CLI.
 
 ## Overview
 
-Two routes, both `require_ui_session`-gated (GET reads need no CSRF):
+Reads are `require_ui_session`-gated only (GET reads need no CSRF); every
+write is CSRF-gated by the `ui/csrf.py` double-submit middleware AND
+hard-gated to `tenant_admin`:
 
 | Method · path | Role | Purpose |
 |---|---|---|
 | `GET /ui/keycloak` | operator | Full-page realm browser: a tenant-scoped target picker + realm-config card + client list + client-scope list. |
 | `GET /ui/keycloak/clients/{client_uuid}` | operator | Client-detail fragment (HTMX-swapped into a drawer container), keyed on the client's **internal UUID**. |
+| `GET /ui/keycloak/users` | operator | Full-page user list (`keycloak.user.list`, `safe`) + optional `?username=` filter. Write affordances soft-hidden from non-admins. |
+| `GET /ui/keycloak/users/create` | tenant_admin | Create-user confirm modal (CSRF token minted + cookie re-set). |
+| `POST /ui/keycloak/users/create` | tenant_admin | Dispatch `keycloak.user.create` (`caution`, requires approval). |
+| `GET /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Reset-password confirm modal. |
+| `POST /ui/keycloak/users/{user_uuid}/reset-password` | tenant_admin | Dispatch `keycloak.user.reset_password` (`caution`, requires approval). |
+| `GET /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Role-assign confirm modal (a **privilege grant**; reads current roles via `keycloak.role_mapping.get`). |
+| `POST /ui/keycloak/users/{user_uuid}/roles/assign` | tenant_admin | Dispatch `keycloak.role_mapping.assign` (`dangerous`, requires approval). |
+
+## User management writes — confirm, approval handoff, Vault-ref passwords
+
+The three writes (create / reset-password / role-assign) share one
+contract. Each renders an **unmissable confirm** modal before the POST; the
+confirm button carries the OWASP signed double-submit CSRF token on its own
+form's `hx-headers` (HTMX does **not** inherit `hx-headers` to children),
+and `hx-disabled-elt` blocks a double-fire. Every write op is registered
+`requires_approval=True`, so the dispatcher's policy gate routes a confirmed
+write to `status="awaiting_approval"` with `extras["approval_request_id"]`
+rather than executing immediately. The shared `_write_result.html` fragment
+surfaces that id with a **deep-link into `/ui/approvals`** — without it the
+operator would think the write silently no-op'd.
+
+Passwords are **Vault-ref, never inline**. The create and reset-password
+forms collect a Vault KV path (`password_secret_ref` + optional
+`password_secret_mount` / `password_secret_key` / `temporary`) and have **no
+plaintext password field**. The backend reads the password from Vault at
+dispatch time; the value never lands in form params, request logs, or the
+audit row — mirroring the CLI's `passwordSecretFlags` bundle.
+
+Role-assign is the **highest-blast** write: granting a realm role widens the
+user's authority, so it is `safety_level="dangerous"` and the confirm banner
+names it a privilege grant explicitly. `roles` is a string list of realm
+role names; the dispatch params are `{"roles": [...], "id": <uuid>}` (the
+grant is idempotent server-side).
 
 ## Control flow
 
@@ -70,14 +107,24 @@ mappers, …) and never dump the verbatim `OperationResult` blob into the
 page — so a future op that forgot to scrub a field cannot leak it through
 a raw-blob render here.
 
-## RBAC: reads are operator-tier
+## RBAC: reads operator-tier, writes tenant_admin
 
-The dispatch is gated only by `require_ui_session`; the underlying
+Reads are gated only by `require_ui_session`; the underlying
 `POST /api/v1/operations/call` floor is `TenantRole.OPERATOR`, so a plain
-operator can read every surface here. The page threads an
-`is_tenant_admin` flag (via the soft-failing `resolve_role_probe`) so T2/T3
-can hide their write affordances from operators — but a non-admin render
-must succeed.
+operator can read every browse surface (realm/client/scope list and the
+user list). The user-list page threads an `is_tenant_admin` flag (via the
+soft-failing `resolve_role_probe`) so the create / reset / assign buttons
+are **soft-hidden** from a plain operator — but a non-admin render must
+still succeed.
+
+The soft-hide is only a UX hint. The three write POSTs are the
+server-side authority: they depend on `_resolve_admin_or_403` (a
+keycloak-local mirror of `connectors/operator.py::resolve_operator_or_403`
+with a keycloak-appropriate 403 `detail`), so a forged POST from a plain
+operator gets a hard `403` and never dispatches. The dispatch floor itself
+is operator-tier; this BFF-layer `tenant_admin` gate is layered on top for
+blast radius (create/reset are caution writes, role-assign is a privilege
+grant), the same pattern existing UI write routes use.
 
 ## Authoring writes (T3, #1961)
 
@@ -159,27 +206,39 @@ which stays the canonical agent-principal surface via
 
 ## Route ordering
 
-`build_keycloak_router` registers the literal
-`/ui/keycloak/clients/{client_uuid}` route before the bare `/ui/keycloak`
-index; the only `{param}` route sits under the distinct
-`/ui/keycloak/clients/` prefix, so a future literal `/ui/keycloak/users`
-(T2) registered ahead of any `{param}` route binds first (first-match-wins).
-The router is included before the stubs aggregate in
+`build_keycloak_router` registers, in order: the user-management routes
+(via `_register_user_routes` → `_register_user_password_role_routes`), then
+the literal `/ui/keycloak/clients/{client_uuid}`, then the bare
+`/ui/keycloak` index, then the client-scope / protocol-mapper authoring
+write routes (via `include_router(build_keycloak_write_router())` from
+`ui/routes/keycloak/write.py`, T3 #1961). The literal `users` and
+`users/create` segments are registered ahead of any `{user_uuid}` route, so
+`create` is never captured as a UUID (first-match-wins). The registration is
+split across helper functions purely to keep each function under the
+code-quality size budget; the call order in the factory preserves the
+ordering invariant. The router is included before the stubs aggregate in
 `ui/routes/__init__.py::build_router`.
 
 ## Dependencies
 
-- `operations.meta_tools.call_operation` — the in-process dispatch entry.
+- `operations.meta_tools.call_operation` — the in-process dispatch entry
+  (reads and writes).
 - `connectors/keycloak/ops_read.py` — the curated `keycloak.*` read ops
-  (`realm.get`, `client.list`, `client.get`, `client_scope.list` used here).
+  (`realm.get`, `client.list`, `client.get`, `client_scope.list`,
+  `user.list`, `role_mapping.get`).
+- `connectors/keycloak/ops_write.py` — the write ops (`user.create`,
+  `user.reset_password`, `role_mapping.assign`, `client_scope.create`,
+  `protocol_mapper.create`), all `requires_approval=True`.
+- `ui/csrf.py` (`mint_csrf_token`) + `ui/routes/approvals/render.py`
+  (`set_csrf_cookie`) — the double-submit token minted on each write modal.
 - `ui/routes/connectors/operator.py::resolve_role_probe` — the soft-failing
   role probe driving `is_tenant_admin`.
 - `db.models.Target` — the tenant-scoped target picker source.
 
 ## Known limitations
 
-- Read scaffold (T1) + client-scope/protocol-mapper authoring (T3, #1961);
-  user management is T2 (#1960).
+- Read scaffold (T1, #1959) + user management (T2, #1960) +
+  client-scope/protocol-mapper authoring (T3, #1961).
 - The authoring forms collect the common representation fields directly
   (name / protocol / mapper type) plus an optional advanced JSON block for
   the rest (attributes, embedded `protocolMappers`, the mapper `config`);
@@ -190,11 +249,22 @@ The router is included before the stubs aggregate in
   client relation view is read-only assembly over T1's reads.
 - Single managed realm per target (the connector resolves the realm from
   the target's `managed_realm`); no realm selector.
+- The role-assign picker collects free-text realm role names rather than a
+  catalog dropdown (the realm role catalog op is not in this task's verb
+  set); current realm roles are shown for context via `role_mapping.get`.
+- `routes.py` exceeds the 600-line code-quality file-size budget (warning,
+  pre-existing from the T1 scaffold); the route handlers are FastAPI Form
+  closures whose param lists trip PLR0913. Both are recorded as warnings,
+  not blockers.
 
 ## References
 
-- Task [#1959](https://github.com/evoila/meho/issues/1959), Initiative
+- Tasks [#1959](https://github.com/evoila/meho/issues/1959) (T1) +
+  [#1960](https://github.com/evoila/meho/issues/1960) (T2) +
+  [#1961](https://github.com/evoila/meho/issues/1961) (T3), Initiative
   [#1943](https://github.com/evoila/meho/issues/1943).
+- Approval handoff surface: `/ui/approvals`
+  ([#1778](https://github.com/evoila/meho/issues/1778)).
 - Operations console precedent:
   [#1835](https://github.com/evoila/meho/issues/1835)
   (`docs/codebase/ui.md`, `ui/routes/operations/routes.py`).

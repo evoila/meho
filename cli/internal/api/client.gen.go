@@ -1206,6 +1206,17 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
+type BodyAnnotateUiTopologyEdgesPost struct {
+	EvidenceUrl *string `json:"evidence_url,omitempty"`
+	FromKind    *string `json:"from_kind,omitempty"`
+	FromName    string  `json:"from_name"`
+	Kind        string  `json:"kind"`
+	Note        *string `json:"note,omitempty"`
+	ToKind      *string `json:"to_kind,omitempty"`
+	ToName      string  `json:"to_name"`
+}
+
 // BodyApprovalApproveUiApprovalsRequestIdApprovePost defines model for Body_approval_approve_ui_approvals__request_id__approve_post.
 type BodyApprovalApproveUiApprovalsRequestIdApprovePost struct {
 	Reason *string `json:"reason,omitempty"`
@@ -1309,6 +1320,31 @@ type BodyKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersC
 	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Target     *string           `json:"target,omitempty"`
+}
+
+// BodyKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost defines model for Body_keycloak_role_assign_ui_keycloak_users__user_uuid__roles_assign_post.
+type BodyKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost struct {
+	Roles  *[]string `json:"roles,omitempty"`
+	Target *string   `json:"target,omitempty"`
+}
+
+// BodyKeycloakUserCreateUiKeycloakUsersCreatePost defines model for Body_keycloak_user_create_ui_keycloak_users_create_post.
+type BodyKeycloakUserCreateUiKeycloakUsersCreatePost struct {
+	PasswordSecretKey   *string `json:"password_secret_key,omitempty"`
+	PasswordSecretMount *string `json:"password_secret_mount,omitempty"`
+	PasswordSecretRef   *string `json:"password_secret_ref,omitempty"`
+	Representation      *string `json:"representation,omitempty"`
+	Target              *string `json:"target,omitempty"`
+	Temporary           *bool   `json:"temporary,omitempty"`
+}
+
+// BodyKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost defines model for Body_keycloak_user_reset_password_ui_keycloak_users__user_uuid__reset_password_post.
+type BodyKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost struct {
+	PasswordSecretKey   *string `json:"password_secret_key,omitempty"`
+	PasswordSecretMount *string `json:"password_secret_mount,omitempty"`
+	PasswordSecretRef   *string `json:"password_secret_ref,omitempty"`
+	Target              *string `json:"target,omitempty"`
+	Temporary           *bool   `json:"temporary,omitempty"`
 }
 
 // BodyOperationsCallUiOperationsCallPost defines model for Body_operations_call_ui_operations_call_post.
@@ -6989,6 +7025,27 @@ type KeycloakProtocolMapperCreateModalUiKeycloakClientsClientUuidProtocolMappers
 	Target *string `form:"target,omitempty" json:"target,omitempty"`
 }
 
+// KeycloakUserListUiKeycloakUsersGetParams defines parameters for KeycloakUserListUiKeycloakUsersGet.
+type KeycloakUserListUiKeycloakUsersGetParams struct {
+	Target   *string `form:"target,omitempty" json:"target,omitempty"`
+	Username *string `form:"username,omitempty" json:"username,omitempty"`
+}
+
+// KeycloakUserCreateModalUiKeycloakUsersCreateGetParams defines parameters for KeycloakUserCreateModalUiKeycloakUsersCreateGet.
+type KeycloakUserCreateModalUiKeycloakUsersCreateGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+}
+
+// KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams defines parameters for KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet.
+type KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+}
+
+// KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams defines parameters for KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet.
+type KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+}
+
 // UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
 type UiMemoryListUiMemoryGetParams struct {
 	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
@@ -7063,6 +7120,27 @@ type UiTopologyTableUiTopologyGetParams struct {
 	ToKind    *string             `form:"to_kind,omitempty" json:"to_kind,omitempty"`
 	Depth     *int                `form:"depth,omitempty" json:"depth,omitempty"`
 	MaxHops   *int                `form:"max_hops,omitempty" json:"max_hops,omitempty"`
+}
+
+// VaultListUiVaultListGetParams defines parameters for VaultListUiVaultListGet.
+type VaultListUiVaultListGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// VaultReadUiVaultReadGetParams defines parameters for VaultReadUiVaultReadGet.
+type VaultReadUiVaultReadGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// VaultVersionsUiVaultVersionsGetParams defines parameters for VaultVersionsUiVaultVersionsGet.
+type VaultVersionsUiVaultVersionsGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
 }
 
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
@@ -7449,6 +7527,18 @@ type KeycloakProtocolMapperCreateModalUiKeycloakClientsClientUuidProtocolMappers
 // KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostFormdataRequestBody defines body for KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePost for application/x-www-form-urlencoded ContentType.
 type KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostFormdataRequestBody = BodyKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePost
 
+// KeycloakUserListUiKeycloakUsersGetJSONRequestBody defines body for KeycloakUserListUiKeycloakUsersGet for application/json ContentType.
+type KeycloakUserListUiKeycloakUsersGetJSONRequestBody = UISessionContext
+
+// KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody defines body for KeycloakUserCreateUiKeycloakUsersCreatePost for application/x-www-form-urlencoded ContentType.
+type KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody = BodyKeycloakUserCreateUiKeycloakUsersCreatePost
+
+// KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody defines body for KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost for application/x-www-form-urlencoded ContentType.
+type KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody = BodyKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost
+
+// KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody defines body for KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost for application/x-www-form-urlencoded ContentType.
+type KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody = BodyKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost
+
 // UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
 type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
 
@@ -7541,6 +7631,12 @@ type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody = UISess
 
 // UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody defines body for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost for application/json ContentType.
 type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISessionContext
+
+// AnnotateUiTopologyEdgesPostFormdataRequestBody defines body for AnnotateUiTopologyEdgesPost for application/x-www-form-urlencoded ContentType.
+type AnnotateUiTopologyEdgesPostFormdataRequestBody = BodyAnnotateUiTopologyEdgesPost
+
+// UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody defines body for UiTopologyNodeDetailUiTopologyNodeNodeIdGet for application/json ContentType.
+type UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody = UISessionContext
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -9317,6 +9413,35 @@ type ClientInterface interface {
 
 	KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostWithFormdataBody(ctx context.Context, clientUuid string, body KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// KeycloakUserListUiKeycloakUsersGetWithBody request with any body
+	KeycloakUserListUiKeycloakUsersGetWithBody(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakUserListUiKeycloakUsersGet(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, body KeycloakUserListUiKeycloakUsersGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakUserCreateModalUiKeycloakUsersCreateGet request
+	KeycloakUserCreateModalUiKeycloakUsersCreateGet(ctx context.Context, params *KeycloakUserCreateModalUiKeycloakUsersCreateGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakUserCreateUiKeycloakUsersCreatePostWithBody request with any body
+	KeycloakUserCreateUiKeycloakUsersCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakUserCreateUiKeycloakUsersCreatePostWithFormdataBody(ctx context.Context, body KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet request
+	KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet(ctx context.Context, userUuid string, params *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBody request with any body
+	KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBody(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithFormdataBody(ctx context.Context, userUuid string, body KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet request
+	KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet(ctx context.Context, userUuid string, params *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBody request with any body
+	KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBody(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithFormdataBody(ctx context.Context, userUuid string, body KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiMemoryListUiMemoryGet request
 	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9523,8 +9648,33 @@ type ClientInterface interface {
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiTopologyNodeDetailUiTopologyNodeNodeIdGet request
-	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AnnotateUiTopologyEdgesPostWithBody request with any body
+	AnnotateUiTopologyEdgesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AnnotateUiTopologyEdgesPostWithFormdataBody(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AnnotateModalUiTopologyEdgesAnnotateGet request
+	AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnannotateUiTopologyEdgesEdgeIdDelete request
+	UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody request with any body
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultIndexUiVaultGet request
+	VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultListUiVaultListGet request
+	VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultReadUiVaultReadGet request
+	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultVersionsUiVaultVersionsGet request
+	VaultVersionsUiVaultVersionsGet(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13814,6 +13964,138 @@ func (c *Client) KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocol
 	return c.Client.Do(req)
 }
 
+func (c *Client) KeycloakUserListUiKeycloakUsersGetWithBody(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserListUiKeycloakUsersGetRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserListUiKeycloakUsersGet(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, body KeycloakUserListUiKeycloakUsersGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserListUiKeycloakUsersGetRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserCreateModalUiKeycloakUsersCreateGet(ctx context.Context, params *KeycloakUserCreateModalUiKeycloakUsersCreateGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserCreateModalUiKeycloakUsersCreateGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserCreateUiKeycloakUsersCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserCreateUiKeycloakUsersCreatePostWithFormdataBody(ctx context.Context, body KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet(ctx context.Context, userUuid string, params *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetRequest(c.Server, userUuid, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBody(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithBody(c.Server, userUuid, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithFormdataBody(ctx context.Context, userUuid string, body KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithFormdataBody(c.Server, userUuid, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet(ctx context.Context, userUuid string, params *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetRequest(c.Server, userUuid, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBody(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithBody(c.Server, userUuid, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithFormdataBody(ctx context.Context, userUuid string, body KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithFormdataBody(c.Server, userUuid, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiMemoryListUiMemoryGetRequest(c.Server, params)
 	if err != nil {
@@ -14762,8 +15044,116 @@ func (c *Client) UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTop
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId)
+func (c *Client) AnnotateUiTopologyEdgesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateUiTopologyEdgesPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateUiTopologyEdgesPostWithFormdataBody(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateModalUiTopologyEdgesAnnotateGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(c.Server, edgeId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(c.Server, nodeId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultIndexUiVaultGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultListUiVaultListGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultReadUiVaultReadGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultVersionsUiVaultVersionsGet(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultVersionsUiVaultVersionsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -28582,6 +28972,379 @@ func NewKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCr
 	return req, nil
 }
 
+// NewKeycloakUserListUiKeycloakUsersGetRequest calls the generic KeycloakUserListUiKeycloakUsersGet builder with application/json body
+func NewKeycloakUserListUiKeycloakUsersGetRequest(server string, params *KeycloakUserListUiKeycloakUsersGetParams, body KeycloakUserListUiKeycloakUsersGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewKeycloakUserListUiKeycloakUsersGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewKeycloakUserListUiKeycloakUsersGetRequestWithBody generates requests for KeycloakUserListUiKeycloakUsersGet with any type of body
+func NewKeycloakUserListUiKeycloakUsersGetRequestWithBody(server string, params *KeycloakUserListUiKeycloakUsersGetParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Username != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "username", runtime.ParamLocationQuery, *params.Username); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKeycloakUserCreateModalUiKeycloakUsersCreateGetRequest generates requests for KeycloakUserCreateModalUiKeycloakUsersCreateGet
+func NewKeycloakUserCreateModalUiKeycloakUsersCreateGetRequest(server string, params *KeycloakUserCreateModalUiKeycloakUsersCreateGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithFormdataBody calls the generic KeycloakUserCreateUiKeycloakUsersCreatePost builder with application/x-www-form-urlencoded body
+func NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithFormdataBody(server string, body KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithBody generates requests for KeycloakUserCreateUiKeycloakUsersCreatePost with any type of body
+func NewKeycloakUserCreateUiKeycloakUsersCreatePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetRequest generates requests for KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet
+func NewKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetRequest(server string, userUuid string, params *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "user_uuid", runtime.ParamLocationPath, userUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/%s/reset-password", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithFormdataBody calls the generic KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost builder with application/x-www-form-urlencoded body
+func NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithFormdataBody(server string, userUuid string, body KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithBody(server, userUuid, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithBody generates requests for KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPost with any type of body
+func NewKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostRequestWithBody(server string, userUuid string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "user_uuid", runtime.ParamLocationPath, userUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/%s/reset-password", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetRequest generates requests for KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet
+func NewKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetRequest(server string, userUuid string, params *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "user_uuid", runtime.ParamLocationPath, userUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/%s/roles/assign", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithFormdataBody calls the generic KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost builder with application/x-www-form-urlencoded body
+func NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithFormdataBody(server string, userUuid string, body KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithBody(server, userUuid, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithBody generates requests for KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPost with any type of body
+func NewKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostRequestWithBody(server string, userUuid string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "user_uuid", runtime.ParamLocationPath, userUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/keycloak/users/%s/roles/assign", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiMemoryListUiMemoryGetRequest generates requests for UiMemoryListUiMemoryGet
 func NewUiMemoryListUiMemoryGetRequest(server string, params *UiMemoryListUiMemoryGetParams) (*http.Request, error) {
 	var err error
@@ -30981,8 +31744,120 @@ func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTab
 	return req, nil
 }
 
-// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest generates requests for UiTopologyNodeDetailUiTopologyNodeNodeIdGet
-func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId openapi_types.UUID) (*http.Request, error) {
+// NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody calls the generic AnnotateUiTopologyEdgesPost builder with application/x-www-form-urlencoded body
+func NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody(server string, body AnnotateUiTopologyEdgesPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewAnnotateUiTopologyEdgesPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewAnnotateUiTopologyEdgesPostRequestWithBody generates requests for AnnotateUiTopologyEdgesPost with any type of body
+func NewAnnotateUiTopologyEdgesPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewAnnotateModalUiTopologyEdgesAnnotateGetRequest generates requests for AnnotateModalUiTopologyEdgesAnnotateGet
+func NewAnnotateModalUiTopologyEdgesAnnotateGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/annotate")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest generates requests for UnannotateUiTopologyEdgesEdgeIdDelete
+func NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(server string, edgeId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "edge_id", runtime.ParamLocationPath, edgeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest calls the generic UiTopologyNodeDetailUiTopologyNodeNodeIdGet builder with application/json body
+func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(server, nodeId, "application/json", bodyReader)
+}
+
+// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody generates requests for UiTopologyNodeDetailUiTopologyNodeNodeIdGet with any type of body
+func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(server string, nodeId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -31005,6 +31880,278 @@ func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewVaultIndexUiVaultGetRequest generates requests for VaultIndexUiVaultGet
+func NewVaultIndexUiVaultGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultListUiVaultListGetRequest generates requests for VaultListUiVaultListGet
+func NewVaultListUiVaultListGetRequest(server string, params *VaultListUiVaultListGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/list")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultReadUiVaultReadGetRequest generates requests for VaultReadUiVaultReadGet
+func NewVaultReadUiVaultReadGetRequest(server string, params *VaultReadUiVaultReadGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/read")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultVersionsUiVaultVersionsGetRequest generates requests for VaultVersionsUiVaultVersionsGet
+func NewVaultVersionsUiVaultVersionsGetRequest(server string, params *VaultVersionsUiVaultVersionsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/versions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -32032,6 +33179,35 @@ type ClientWithResponsesInterface interface {
 
 	KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostWithFormdataBodyWithResponse(ctx context.Context, clientUuid string, body KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostResponse, error)
 
+	// KeycloakUserListUiKeycloakUsersGetWithBodyWithResponse request with any body
+	KeycloakUserListUiKeycloakUsersGetWithBodyWithResponse(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserListUiKeycloakUsersGetResponse, error)
+
+	KeycloakUserListUiKeycloakUsersGetWithResponse(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, body KeycloakUserListUiKeycloakUsersGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserListUiKeycloakUsersGetResponse, error)
+
+	// KeycloakUserCreateModalUiKeycloakUsersCreateGetWithResponse request
+	KeycloakUserCreateModalUiKeycloakUsersCreateGetWithResponse(ctx context.Context, params *KeycloakUserCreateModalUiKeycloakUsersCreateGetParams, reqEditors ...RequestEditorFn) (*KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse, error)
+
+	// KeycloakUserCreateUiKeycloakUsersCreatePostWithBodyWithResponse request with any body
+	KeycloakUserCreateUiKeycloakUsersCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserCreateUiKeycloakUsersCreatePostResponse, error)
+
+	KeycloakUserCreateUiKeycloakUsersCreatePostWithFormdataBodyWithResponse(ctx context.Context, body KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserCreateUiKeycloakUsersCreatePostResponse, error)
+
+	// KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetWithResponse request
+	KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetWithResponse(ctx context.Context, userUuid string, params *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse, error)
+
+	// KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBodyWithResponse request with any body
+	KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBodyWithResponse(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse, error)
+
+	KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithFormdataBodyWithResponse(ctx context.Context, userUuid string, body KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse, error)
+
+	// KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetWithResponse request
+	KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetWithResponse(ctx context.Context, userUuid string, params *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse, error)
+
+	// KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBodyWithResponse request with any body
+	KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBodyWithResponse(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse, error)
+
+	KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithFormdataBodyWithResponse(ctx context.Context, userUuid string, body KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse, error)
+
 	// UiMemoryListUiMemoryGetWithResponse request
 	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
 
@@ -32238,8 +33414,33 @@ type ClientWithResponsesInterface interface {
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
 
-	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request
-	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+	// AnnotateUiTopologyEdgesPostWithBodyWithResponse request with any body
+	AnnotateUiTopologyEdgesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error)
+
+	AnnotateUiTopologyEdgesPostWithFormdataBodyWithResponse(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error)
+
+	// AnnotateModalUiTopologyEdgesAnnotateGetWithResponse request
+	AnnotateModalUiTopologyEdgesAnnotateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error)
+
+	// UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request
+	UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse request with any body
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+
+	// VaultIndexUiVaultGetWithResponse request
+	VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error)
+
+	// VaultListUiVaultListGetWithResponse request
+	VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error)
+
+	// VaultReadUiVaultReadGetWithResponse request
+	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
+
+	// VaultVersionsUiVaultVersionsGetWithResponse request
+	VaultVersionsUiVaultVersionsGetWithResponse(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*VaultVersionsUiVaultVersionsGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -37541,6 +38742,160 @@ func (r KeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCr
 	return 0
 }
 
+type KeycloakUserListUiKeycloakUsersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakUserListUiKeycloakUsersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakUserListUiKeycloakUsersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakUserCreateUiKeycloakUsersCreatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakUserCreateUiKeycloakUsersCreatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakUserCreateUiKeycloakUsersCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiMemoryListUiMemoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -38592,6 +39947,71 @@ func (r UiTopologyTableUiTopologyGetResponse) StatusCode() int {
 	return 0
 }
 
+type AnnotateUiTopologyEdgesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnotateUiTopologyEdgesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnotateUiTopologyEdgesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AnnotateModalUiTopologyEdgesAnnotateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnotateModalUiTopologyEdgesAnnotateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnotateModalUiTopologyEdgesAnnotateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnannotateUiTopologyEdgesEdgeIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UnannotateUiTopologyEdgesEdgeIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnannotateUiTopologyEdgesEdgeIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -38608,6 +40028,93 @@ func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultIndexUiVaultGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultIndexUiVaultGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultIndexUiVaultGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultListUiVaultListGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultListUiVaultListGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultListUiVaultListGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultReadUiVaultReadGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultReadUiVaultReadGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultReadUiVaultReadGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultVersionsUiVaultVersionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultVersionsUiVaultVersionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultVersionsUiVaultVersionsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -41725,6 +43232,101 @@ func (c *ClientWithResponses) KeycloakProtocolMapperCreateUiKeycloakClientsClien
 	return ParseKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappersCreatePostResponse(rsp)
 }
 
+// KeycloakUserListUiKeycloakUsersGetWithBodyWithResponse request with arbitrary body returning *KeycloakUserListUiKeycloakUsersGetResponse
+func (c *ClientWithResponses) KeycloakUserListUiKeycloakUsersGetWithBodyWithResponse(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserListUiKeycloakUsersGetResponse, error) {
+	rsp, err := c.KeycloakUserListUiKeycloakUsersGetWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserListUiKeycloakUsersGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakUserListUiKeycloakUsersGetWithResponse(ctx context.Context, params *KeycloakUserListUiKeycloakUsersGetParams, body KeycloakUserListUiKeycloakUsersGetJSONRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserListUiKeycloakUsersGetResponse, error) {
+	rsp, err := c.KeycloakUserListUiKeycloakUsersGet(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserListUiKeycloakUsersGetResponse(rsp)
+}
+
+// KeycloakUserCreateModalUiKeycloakUsersCreateGetWithResponse request returning *KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse
+func (c *ClientWithResponses) KeycloakUserCreateModalUiKeycloakUsersCreateGetWithResponse(ctx context.Context, params *KeycloakUserCreateModalUiKeycloakUsersCreateGetParams, reqEditors ...RequestEditorFn) (*KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse, error) {
+	rsp, err := c.KeycloakUserCreateModalUiKeycloakUsersCreateGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserCreateModalUiKeycloakUsersCreateGetResponse(rsp)
+}
+
+// KeycloakUserCreateUiKeycloakUsersCreatePostWithBodyWithResponse request with arbitrary body returning *KeycloakUserCreateUiKeycloakUsersCreatePostResponse
+func (c *ClientWithResponses) KeycloakUserCreateUiKeycloakUsersCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserCreateUiKeycloakUsersCreatePostResponse, error) {
+	rsp, err := c.KeycloakUserCreateUiKeycloakUsersCreatePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserCreateUiKeycloakUsersCreatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakUserCreateUiKeycloakUsersCreatePostWithFormdataBodyWithResponse(ctx context.Context, body KeycloakUserCreateUiKeycloakUsersCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserCreateUiKeycloakUsersCreatePostResponse, error) {
+	rsp, err := c.KeycloakUserCreateUiKeycloakUsersCreatePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserCreateUiKeycloakUsersCreatePostResponse(rsp)
+}
+
+// KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetWithResponse request returning *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse
+func (c *ClientWithResponses) KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetWithResponse(ctx context.Context, userUuid string, params *KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetParams, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse, error) {
+	rsp, err := c.KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGet(ctx, userUuid, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse(rsp)
+}
+
+// KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBodyWithResponse request with arbitrary body returning *KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse
+func (c *ClientWithResponses) KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBodyWithResponse(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse, error) {
+	rsp, err := c.KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithBody(ctx, userUuid, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithFormdataBodyWithResponse(ctx context.Context, userUuid string, body KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse, error) {
+	rsp, err := c.KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithFormdataBody(ctx, userUuid, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse(rsp)
+}
+
+// KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetWithResponse request returning *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse
+func (c *ClientWithResponses) KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetWithResponse(ctx context.Context, userUuid string, params *KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetParams, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse, error) {
+	rsp, err := c.KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGet(ctx, userUuid, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse(rsp)
+}
+
+// KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBodyWithResponse request with arbitrary body returning *KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse
+func (c *ClientWithResponses) KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBodyWithResponse(ctx context.Context, userUuid string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse, error) {
+	rsp, err := c.KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithBody(ctx, userUuid, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithFormdataBodyWithResponse(ctx context.Context, userUuid string, body KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse, error) {
+	rsp, err := c.KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithFormdataBody(ctx, userUuid, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse(rsp)
+}
+
 // UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
 func (c *ClientWithResponses) UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error) {
 	rsp, err := c.UiMemoryListUiMemoryGet(ctx, params, reqEditors...)
@@ -42405,13 +44007,92 @@ func (c *ClientWithResponses) UiTopologyTableUiTopologyGetWithResponse(ctx conte
 	return ParseUiTopologyTableUiTopologyGetResponse(rsp)
 }
 
-// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
-func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
-	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx, nodeId, reqEditors...)
+// AnnotateUiTopologyEdgesPostWithBodyWithResponse request with arbitrary body returning *AnnotateUiTopologyEdgesPostResponse
+func (c *ClientWithResponses) AnnotateUiTopologyEdgesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateUiTopologyEdgesPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateUiTopologyEdgesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AnnotateUiTopologyEdgesPostWithFormdataBodyWithResponse(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateUiTopologyEdgesPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateUiTopologyEdgesPostResponse(rsp)
+}
+
+// AnnotateModalUiTopologyEdgesAnnotateGetWithResponse request returning *AnnotateModalUiTopologyEdgesAnnotateGetResponse
+func (c *ClientWithResponses) AnnotateModalUiTopologyEdgesAnnotateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error) {
+	rsp, err := c.AnnotateModalUiTopologyEdgesAnnotateGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp)
+}
+
+// UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request returning *UnannotateUiTopologyEdgesEdgeIdDeleteResponse
+func (c *ClientWithResponses) UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
+	rsp, err := c.UnannotateUiTopologyEdgesEdgeIdDelete(ctx, edgeId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse(rsp)
+}
+
+// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse request with arbitrary body returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
+func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx, nodeId, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx, nodeId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
+}
+
+// VaultIndexUiVaultGetWithResponse request returning *VaultIndexUiVaultGetResponse
+func (c *ClientWithResponses) VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error) {
+	rsp, err := c.VaultIndexUiVaultGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultIndexUiVaultGetResponse(rsp)
+}
+
+// VaultListUiVaultListGetWithResponse request returning *VaultListUiVaultListGetResponse
+func (c *ClientWithResponses) VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error) {
+	rsp, err := c.VaultListUiVaultListGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultListUiVaultListGetResponse(rsp)
+}
+
+// VaultReadUiVaultReadGetWithResponse request returning *VaultReadUiVaultReadGetResponse
+func (c *ClientWithResponses) VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error) {
+	rsp, err := c.VaultReadUiVaultReadGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultReadUiVaultReadGetResponse(rsp)
+}
+
+// VaultVersionsUiVaultVersionsGetWithResponse request returning *VaultVersionsUiVaultVersionsGetResponse
+func (c *ClientWithResponses) VaultVersionsUiVaultVersionsGetWithResponse(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*VaultVersionsUiVaultVersionsGetResponse, error) {
+	rsp, err := c.VaultVersionsUiVaultVersionsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultVersionsUiVaultVersionsGetResponse(rsp)
 }
 
 // VersionVersionGetWithResponse request returning *VersionVersionGetResponse
@@ -49178,6 +50859,188 @@ func ParseKeycloakProtocolMapperCreateUiKeycloakClientsClientUuidProtocolMappers
 	return response, nil
 }
 
+// ParseKeycloakUserListUiKeycloakUsersGetResponse parses an HTTP response from a KeycloakUserListUiKeycloakUsersGetWithResponse call
+func ParseKeycloakUserListUiKeycloakUsersGetResponse(rsp *http.Response) (*KeycloakUserListUiKeycloakUsersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakUserListUiKeycloakUsersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakUserCreateModalUiKeycloakUsersCreateGetResponse parses an HTTP response from a KeycloakUserCreateModalUiKeycloakUsersCreateGetWithResponse call
+func ParseKeycloakUserCreateModalUiKeycloakUsersCreateGetResponse(rsp *http.Response) (*KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakUserCreateModalUiKeycloakUsersCreateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakUserCreateUiKeycloakUsersCreatePostResponse parses an HTTP response from a KeycloakUserCreateUiKeycloakUsersCreatePostWithResponse call
+func ParseKeycloakUserCreateUiKeycloakUsersCreatePostResponse(rsp *http.Response) (*KeycloakUserCreateUiKeycloakUsersCreatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakUserCreateUiKeycloakUsersCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse parses an HTTP response from a KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetWithResponse call
+func ParseKeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse(rsp *http.Response) (*KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakUserResetPasswordModalUiKeycloakUsersUserUuidResetPasswordGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse parses an HTTP response from a KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostWithResponse call
+func ParseKeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse(rsp *http.Response) (*KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakUserResetPasswordUiKeycloakUsersUserUuidResetPasswordPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse parses an HTTP response from a KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetWithResponse call
+func ParseKeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse(rsp *http.Response) (*KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakRoleAssignModalUiKeycloakUsersUserUuidRolesAssignGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse parses an HTTP response from a KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostWithResponse call
+func ParseKeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse(rsp *http.Response) (*KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KeycloakRoleAssignUiKeycloakUsersUserUuidRolesAssignPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiMemoryListUiMemoryGetResponse parses an HTTP response from a UiMemoryListUiMemoryGetWithResponse call
 func ParseUiMemoryListUiMemoryGetResponse(rsp *http.Response) (*UiMemoryListUiMemoryGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -50376,6 +52239,74 @@ func ParseUiTopologyTableUiTopologyGetResponse(rsp *http.Response) (*UiTopologyT
 	return response, nil
 }
 
+// ParseAnnotateUiTopologyEdgesPostResponse parses an HTTP response from a AnnotateUiTopologyEdgesPostWithResponse call
+func ParseAnnotateUiTopologyEdgesPostResponse(rsp *http.Response) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnotateUiTopologyEdgesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse parses an HTTP response from a AnnotateModalUiTopologyEdgesAnnotateGetWithResponse call
+func ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp *http.Response) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnotateModalUiTopologyEdgesAnnotateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse parses an HTTP response from a UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse call
+func ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse(rsp *http.Response) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnannotateUiTopologyEdgesEdgeIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse parses an HTTP response from a UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse call
 func ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp *http.Response) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -50385,6 +52316,100 @@ func ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp *http.Response
 	}
 
 	response := &UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultIndexUiVaultGetResponse parses an HTTP response from a VaultIndexUiVaultGetWithResponse call
+func ParseVaultIndexUiVaultGetResponse(rsp *http.Response) (*VaultIndexUiVaultGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultIndexUiVaultGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseVaultListUiVaultListGetResponse parses an HTTP response from a VaultListUiVaultListGetWithResponse call
+func ParseVaultListUiVaultListGetResponse(rsp *http.Response) (*VaultListUiVaultListGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultListUiVaultListGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultReadUiVaultReadGetResponse parses an HTTP response from a VaultReadUiVaultReadGetWithResponse call
+func ParseVaultReadUiVaultReadGetResponse(rsp *http.Response) (*VaultReadUiVaultReadGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultReadUiVaultReadGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultVersionsUiVaultVersionsGetResponse parses an HTTP response from a VaultVersionsUiVaultVersionsGetWithResponse call
+func ParseVaultVersionsUiVaultVersionsGetResponse(rsp *http.Response) (*VaultVersionsUiVaultVersionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultVersionsUiVaultVersionsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

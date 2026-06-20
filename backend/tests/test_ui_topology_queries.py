@@ -452,7 +452,13 @@ def test_path_overlay_unreachable_returns_no_path_state() -> None:
 
 
 def test_graph_full_page_includes_polling_trigger() -> None:
-    """The data-island wrapper carries ``hx-trigger="every 30s"``."""
+    """The data-island wrapper carries the 30s poll + edge-changed trigger.
+
+    The trigger is a comma-separated list: the original ``every 30s`` poll
+    plus ``meho:topology-edge-changed from:body`` (Task #1953) so a
+    curated-edge write re-pulls the graph immediately rather than waiting up
+    to 30s for the next poll.
+    """
     _seed_tenant_row(_TENANT_A, "tenant-a")
     _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1")
 
@@ -462,7 +468,9 @@ def test_graph_full_page_includes_polling_trigger() -> None:
         response = client.get("/ui/topology?view=graph")
     body = response.text
     assert 'id="topology-graph-data-wrapper"' in body
-    assert 'hx-trigger="every 30s"' in body
+    assert "hx-trigger=" in body
+    assert "every 30s" in body
+    assert "meho:topology-edge-changed from:body" in body
     assert 'hx-swap="outerHTML"' in body
     # The refresh URL re-fetches the same view.
     assert 'hx-get="/ui/topology?view=graph' in body
@@ -493,7 +501,8 @@ def test_htmx_fragment_returns_data_island_wrapper_only() -> None:
     # But it carries the data islands the controller reads.
     assert 'id="topology-graph-data-wrapper"' in body
     assert 'id="topology-graph-data"' in body
-    assert 'hx-trigger="every 30s"' in body
+    assert "every 30s" in body
+    assert "meho:topology-edge-changed from:body" in body
 
 
 def test_htmx_fragment_carries_overlay_data() -> None:

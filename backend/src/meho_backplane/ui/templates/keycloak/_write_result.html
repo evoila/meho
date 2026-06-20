@@ -2,27 +2,32 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  Keycloak authoring write-result fragment (Initiative #1943, Task #1961).
+  Keycloak write-result fragment (Initiative #1943, Tasks #1960 + #1961).
 
-  Swapped into the create modal's result region by the confirm button
-  (``hx-post`` to the client-scope / protocol-mapper create route). Renders
-  the dispatched op's structured envelope inline -- the authoring outcome
-  surface.
+  The shared swap target for ALL keycloak console writes:
+    * user-management writes (#1960): create / reset-password / role-assign
+    * authoring writes (#1961): client-scope create / protocol-mapper create
 
-  Both ops are ``requires_approval=True``, so the EXPECTED success path is
-  ``awaiting_approval``: the policy gate parked the write and created a
-  durable ApprovalRequest. That branch surfaces ``extras.approval_request_id``
-  and DEEP-LINKS ``/ui/approvals`` -- the operator is never shown a silent
-  success. The render NEVER dumps the raw envelope blob.
+  Swapped into a create/action modal's result region by the confirm button
+  (``hx-post`` to the relevant write route). Renders the dispatched op's
+  structured ``call_operation`` envelope inline -- the console's write outcome
+  surface. The render NEVER dumps the raw envelope blob.
+
+  Every keycloak write op is ``requires_approval=True``, so the EXPECTED clean
+  outcome is ``awaiting_approval``: the policy gate parked the op and created a
+  durable ApprovalRequest. This MUST be surfaced with
+  ``extras.approval_request_id`` and a DEEP-LINK into ``/ui/approvals`` --
+  otherwise the operator thinks the write silently no-op'd (#1778).
 
   Render branches:
     * ``error_message`` set (no ``envelope``) -> inline form error (HTTP 400):
-      a bad target name or malformed advanced JSON. The op was never
-      dispatched; the operator stays in the modal.
+      a malformed representation/advanced JSON or a missing/bad required
+      field. The op was never dispatched; the operator stays in the modal.
     * ``status == "awaiting_approval"`` -> the requires-approval handoff:
       request id + deep-link into ``/ui/approvals``.
-    * ``status == "ok"`` -> the write executed (a non-approval path, e.g. an
-      idempotent 409-already-exists folded to success). Quiet confirmation.
+    * ``status == "ok"`` -> a non-approval success path, e.g. an idempotent
+      409-already-exists folded to ``ok`` by the connector. Quiet
+      confirmation; projects any named ``result`` fields when present.
     * ``status in ("error", "denied")`` -> the structured fault + the human
       error string.
 
@@ -36,7 +41,7 @@
 {% if error_message %}
   <div role="alert" class="alert alert-error" data-write-status="form_error">
     <div>
-      <h4 class="text-sm font-semibold">Cannot create</h4>
+      <h4 class="text-sm font-semibold">Cannot submit</h4>
       <p class="text-xs [overflow-wrap:anywhere]">{{ error_message }}</p>
     </div>
   </div>
@@ -89,37 +94,43 @@
 {% elif envelope.status == "ok" %}
   {#- A non-approval success path -- e.g. an idempotent 409-already-exists
       folded to ``ok`` by the connector. Render the projected named fields
-      from ``result`` (never the raw envelope blob). -#}
+      from ``result`` when present (never the raw envelope blob); degrade to a
+      quiet confirmation otherwise. -#}
   {%- set result = envelope.get("result") or {} -%}
   <div role="status" class="alert alert-success items-start" data-write-status="ok">
     {{ icon("check", class="size-5 shrink-0") }}
     <div>
-      <h4 class="text-sm font-semibold">Created</h4>
-      <dl class="mt-1 space-y-1 text-xs">
-        {% if result.get("name") %}
-          <div class="flex gap-2">
-            <dt class="opacity-60">Name</dt>
-            <dd class="font-mono" data-write-name>{{ result.get("name") }}</dd>
-          </div>
-        {% endif %}
-        {% if result.get("mapper_name") %}
-          <div class="flex gap-2">
-            <dt class="opacity-60">Mapper</dt>
-            <dd class="font-mono" data-write-mapper-name>{{ result.get("mapper_name") }}</dd>
-          </div>
-        {% endif %}
-        {% if result.get("conflict") %}
-          <div class="flex gap-2">
-            <dt class="opacity-60">Status</dt>
-            <dd data-write-conflict>already existed (idempotent)</dd>
-          </div>
-        {% endif %}
-      </dl>
+      <h4 class="text-sm font-semibold">Done</h4>
+      {% if result.get("name") or result.get("mapper_name") or result.get("conflict") %}
+        <dl class="mt-1 space-y-1 text-xs">
+          {% if result.get("name") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Name</dt>
+              <dd class="font-mono" data-write-name>{{ result.get("name") }}</dd>
+            </div>
+          {% endif %}
+          {% if result.get("mapper_name") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Mapper</dt>
+              <dd class="font-mono" data-write-mapper-name>{{ result.get("mapper_name") }}</dd>
+            </div>
+          {% endif %}
+          {% if result.get("conflict") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Status</dt>
+              <dd data-write-conflict>already existed (idempotent)</dd>
+            </div>
+          {% endif %}
+        </dl>
+      {% else %}
+        <p class="text-xs">The operation completed.</p>
+      {% endif %}
     </div>
   </div>
 {% else %}
   {#- status in ("error", "denied") -- the dispatcher's structured fault,
       surfaced inline (HTTP 200, not 4xx). -#}
+  {%- set extras = envelope.get("extras") or {} -%}
   <div
     role="alert"
     class="alert {{ 'alert-warning' if envelope.status == 'denied' else 'alert-error' }} items-start"
@@ -127,7 +138,6 @@
   >
     {{ icon("ban", class="size-5 shrink-0") }}
     <div>
-      {%- set extras = envelope.get("extras") or {} -%}
       <h4 class="text-sm font-semibold">
         {% if envelope.status == "denied" %}Operation denied{% else %}Operation failed{% endif %}
         {% if extras.get("error_code") %}

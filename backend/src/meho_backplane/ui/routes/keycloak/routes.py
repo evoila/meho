@@ -103,21 +103,24 @@ documents). The router is registered ahead of the stubs aggregate in
 
 from __future__ import annotations
 
+import json
 from typing import Any, Final
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.csrf import mint_csrf_token
+from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_role_probe,
@@ -146,10 +149,52 @@ KEYCLOAK_PRODUCT: Final[str] = "keycloak"
 #: at the form boundary (422) before it reaches the dispatch.
 _MAX_TARGET_LENGTH: Final[int] = 256
 
+#: Maximum length accepted for a Vault KV path / username / role-name form
+#: field. A KV path is a short slug-ish string; the bound rejects an
+#: oversized paste at the form boundary (422) before it reaches the dispatch.
+_MAX_FORM_FIELD_LENGTH: Final[int] = 512
+
+#: Maximum length accepted for the create-user ``UserRepresentation`` JSON
+#: textarea. A UserRepresentation is small (username + a few attributes);
+#: the bound matches the operations Run modal's params textarea.
+_MAX_REPRESENTATION_LENGTH: Final[int] = 65536
+
+
+async def _resolve_admin_or_403(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> Operator:
+    """FastAPI dependency: lift the operator and hard-403 a non-tenant_admin.
+
+    The server-side authority for the three high-blast keycloak writes
+    (create / reset-password / role-assign). Mirrors
+    :func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`
+    but raises a keycloak-appropriate 403 ``detail`` (the connectors
+    dependency's string is ``"re-probe requires tenant_admin"`` -- wrong
+    surface) so a forged POST from a plain operator gets a legible
+    ``403`` the template's ``hx-on::after-request`` alert can branch on,
+    not a silent dispatch.
+
+    The lift re-verifies the session's access token through the JWT chain
+    (catching a same-session role demotion) -- the same round-trip the read
+    probe and the operations console use. The soft-failing
+    :func:`resolve_role_probe` drives the template's button-hide; THIS gate
+    is what actually stops the write.
+    """
+    operator = await _resolve_operator(session)
+    if operator.tenant_role != TenantRole.TENANT_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="keycloak user management requires tenant_admin",
+        )
+    return operator
+
+
 #: Module-level ``Depends`` closures -- built once (rather than inline) to
 #: satisfy ruff B008, matching the operations / approvals / kb routers.
 _require_session = Depends(require_ui_session)
 _role_probe_dep = Depends(resolve_role_probe)
+_require_admin = Depends(_resolve_admin_or_403)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:
@@ -240,6 +285,89 @@ async def _dispatch_read(
     )
 
 
+async def _dispatch_write(
+    operator: Operator,
+    *,
+    op_id: str,
+    target: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch one keycloak WRITE op in-process against the pinned connector.
+
+    Identical wiring to :func:`_dispatch_read` -- the dispatcher's contract
+    is "always return a structured envelope": ``ok`` / ``error`` /
+    ``denied`` / ``awaiting_approval`` all come back INSIDE the envelope,
+    never as an exception. Every keycloak write op is
+    ``requires_approval=True``, so the policy gate routes a confirmed write
+    to ``status="awaiting_approval"`` with ``extras["approval_request_id"]``
+    rather than executing immediately; the result template surfaces that
+    id with a deep-link into ``/ui/approvals``.
+    """
+    return await call_operation(
+        operator,
+        {
+            "connector_id": KEYCLOAK_CONNECTOR_ID,
+            "op_id": op_id,
+            "target": target,
+            "params": params,
+        },
+    )
+
+
+def _parse_representation(raw: str) -> dict[str, Any]:
+    """Parse the create-user form's ``UserRepresentation`` JSON textarea.
+
+    A blank field is rejected (a create needs at least a ``username``). A
+    non-blank field must be a JSON **object**; a malformed body or a
+    non-object value raises :class:`ValueError` with an operator-legible
+    message the caller renders inline -- the op's ``representation`` param
+    is a dict (the Keycloak ``UserRepresentation``).
+    """
+    text = raw.strip()
+    if not text:
+        raise ValueError("Provide a UserRepresentation JSON object (at least a username).")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        msg = f"representation is not valid JSON: {exc.msg} (line {exc.lineno})"
+        raise ValueError(msg) from exc
+    if not isinstance(value, dict):
+        raise ValueError('representation must be a JSON object (e.g. {"username": "operator-a"}).')
+    return value
+
+
+def _password_secret_params(
+    *,
+    secret_ref: str,
+    secret_mount: str,
+    secret_key: str,
+    temporary: bool,
+) -> dict[str, Any]:
+    """Build the Vault-ref password params from the form fields.
+
+    The password VALUE is never collected -- only its Vault KV location
+    (``password_secret_ref`` + the optional mount / key / temporary
+    overrides), mirroring the CLI's ``passwordSecretFlags`` bundle. Only
+    non-empty overrides are written so the connector's defaults (mount
+    ``secret``, key ``password``) apply. The password therefore never lands
+    in form params, request logs, or the audit row -- the backend reads it
+    from Vault at dispatch time.
+    """
+    params: dict[str, Any] = {}
+    ref = secret_ref.strip()
+    if ref:
+        params["password_secret_ref"] = ref
+    mount = secret_mount.strip()
+    if mount:
+        params["password_secret_mount"] = mount
+    key = secret_key.strip()
+    if key:
+        params["password_secret_key"] = key
+    if temporary:
+        params["temporary"] = True
+    return params
+
+
 def build_keycloak_router() -> APIRouter:
     """Construct the ``/ui/keycloak*`` :class:`APIRouter`.
 
@@ -257,12 +385,16 @@ def build_keycloak_router() -> APIRouter:
 
     router = APIRouter(tags=["ui-keycloak"])
 
-    # NOTE: the literal ``/ui/keycloak/clients/{client_uuid}`` route is
-    # registered BEFORE the bare ``/ui/keycloak`` index. The only ``{param}``
-    # route sits under the distinct ``/ui/keycloak/clients/`` prefix, so a
-    # future literal segment (``/ui/keycloak/users`` in T2) registered ahead
-    # of any ``{param}`` route binds first (first-match-wins -- the ordering
-    # discipline the operations / approvals routers document).
+    # ROUTE ORDERING (first-match-wins). The literal user-management routes
+    # are registered FIRST, with the literal segments (``users``,
+    # ``users/create``) ahead of any ``{user_uuid}`` route, then the literal
+    # ``clients/{client_uuid}`` route, then the bare ``/ui/keycloak`` index.
+    # The only ``{param}`` routes sit under the distinct ``users/`` and
+    # ``clients/`` prefixes; a literal ``users/create`` registered before
+    # ``users/{user_uuid}/...`` binds first so ``create`` is never captured
+    # as a UUID -- the ordering discipline the operations / approvals routers
+    # document.
+    _register_user_routes(router)
 
     @router.get("/ui/keycloak/clients/{client_uuid}", response_class=HTMLResponse)
     async def keycloak_client_detail(
@@ -308,6 +440,189 @@ def build_keycloak_router() -> APIRouter:
     router.include_router(build_keycloak_write_router())
 
     return router
+
+
+def _register_user_routes(router: APIRouter) -> None:
+    """Register the user-management routes on *router* (Task #1960).
+
+    Split out of :func:`build_keycloak_router` to keep each factory small.
+    The literal ``users`` / ``users/create`` segments are registered ahead of
+    any ``{user_uuid}`` route so ``create`` is never captured as a UUID
+    (first-match-wins). The list read is OPERATOR-tier; the three writes
+    (create / reset-password / role-assign) hard-gate on tenant_admin via
+    :data:`_require_admin` and render an unmissable confirm before POST.
+    """
+
+    # ---- User management: list (read, operator-tier) -------------------
+    @router.get("/ui/keycloak/users", response_class=HTMLResponse)
+    async def keycloak_user_list(
+        request: Request,
+        session: UISessionContext = _require_session,
+        target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
+        username: str = Query(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        role_probe: OperatorRoleProbe = _role_probe_dep,
+    ) -> HTMLResponse:
+        """Render the realm's user list (read; OPERATOR-tier).
+
+        Dispatches ``keycloak.user.list`` (``safety_level="safe"``); an
+        optional ``username`` filter maps to Keycloak's ``?username=``.
+        Credential material is redacted from every row by the connector;
+        this render projects named fields only and never dumps the raw
+        envelope. The create / reset / assign affordances are soft-hidden
+        from a plain operator (``is_tenant_admin`` from the soft-failing
+        role probe); the write POSTs are hard-gated server-side.
+        """
+        return await _render_user_list(request, session, target, username, role_probe)
+
+    # ---- User management: create (write, tenant_admin) -----------------
+    @router.get("/ui/keycloak/users/create", response_class=HTMLResponse)
+    async def keycloak_user_create_modal(
+        request: Request,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
+    ) -> HTMLResponse:
+        """Render the create-user confirm modal (tenant_admin only).
+
+        Collects a ``UserRepresentation`` JSON body + a Vault KV path for
+        the password (NO plaintext password field). Mints + re-sets the
+        ``meho_csrf`` cookie so the confirm button's own ``hx-headers`` echo
+        lines up after the HTMX swap rotated it.
+        """
+        return _render_user_create_modal(request, session, target)
+
+    @router.post("/ui/keycloak/users/create", response_class=HTMLResponse)
+    async def keycloak_user_create(
+        request: Request,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
+        representation: str = Form(default="", max_length=_MAX_REPRESENTATION_LENGTH),
+        password_secret_ref: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        password_secret_mount: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        password_secret_key: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        temporary: bool = Form(default=False),
+    ) -> HTMLResponse:
+        """Dispatch ``keycloak.user.create``; render the write result inline.
+
+        CSRF-gated (a ``POST`` under ``/ui/``) and tenant_admin-gated. The
+        password is supplied as a Vault KV path only -- it never lands in
+        form params, request logs, or the audit row. The op is
+        ``requires_approval=True``, so a clean dispatch returns
+        ``status="awaiting_approval"`` with the approval-request deep-link.
+        """
+        return await _render_user_create_result(
+            request,
+            operator,
+            target=target,
+            representation=representation,
+            password_secret_ref=password_secret_ref,
+            password_secret_mount=password_secret_mount,
+            password_secret_key=password_secret_key,
+            temporary=temporary,
+        )
+
+    _register_user_password_role_routes(router)
+
+
+def _register_user_password_role_routes(router: APIRouter) -> None:
+    """Register the reset-password + role-assign write routes (Task #1960).
+
+    Split from :func:`_register_user_routes` to keep each registration
+    function small. These are the two ``{user_uuid}``-parametrised writes;
+    they must be registered AFTER the literal ``users`` / ``users/create``
+    routes (the caller orders the two registration calls), so ``create`` is
+    never captured as a UUID. Both hard-gate on tenant_admin
+    (:data:`_require_admin`) and are CSRF-gated.
+    """
+
+    # ---- User management: reset-password (write, tenant_admin) ---------
+    @router.get("/ui/keycloak/users/{user_uuid}/reset-password", response_class=HTMLResponse)
+    async def keycloak_user_reset_password_modal(
+        request: Request,
+        user_uuid: str,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
+    ) -> HTMLResponse:
+        """Render the reset-password confirm modal (tenant_admin only).
+
+        Keyed on the user's internal UUID. Collects only a Vault KV path
+        (NO plaintext password field). Mints + re-sets the ``meho_csrf``
+        cookie for the confirm button's own ``hx-headers`` echo.
+        """
+        return _render_reset_password_modal(request, session, user_uuid, target)
+
+    @router.post("/ui/keycloak/users/{user_uuid}/reset-password", response_class=HTMLResponse)
+    async def keycloak_user_reset_password(
+        request: Request,
+        user_uuid: str,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
+        password_secret_ref: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        password_secret_mount: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        password_secret_key: str = Form(default="", max_length=_MAX_FORM_FIELD_LENGTH),
+        temporary: bool = Form(default=False),
+    ) -> HTMLResponse:
+        """Dispatch ``keycloak.user.reset_password``; render the result inline.
+
+        CSRF-gated and tenant_admin-gated. Keyed on the user UUID. The new
+        password is supplied as a Vault KV path only -- never inline. The op
+        is ``requires_approval=True`` (``awaiting_approval`` deep-link).
+        """
+        return await _render_reset_password_result(
+            request,
+            operator,
+            user_uuid=user_uuid,
+            target=target,
+            password_secret_ref=password_secret_ref,
+            password_secret_mount=password_secret_mount,
+            password_secret_key=password_secret_key,
+            temporary=temporary,
+        )
+
+    # ---- User management: role-assign (write, tenant_admin) ------------
+    @router.get("/ui/keycloak/users/{user_uuid}/roles/assign", response_class=HTMLResponse)
+    async def keycloak_role_assign_modal(
+        request: Request,
+        user_uuid: str,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
+    ) -> HTMLResponse:
+        """Render the role-assign confirm modal (tenant_admin only).
+
+        A PRIVILEGE GRANT (``safety_level="dangerous"``). Reads the user's
+        current realm/client role mappings (``keycloak.role_mapping.get``)
+        for context, then collects realm role names to grant. The confirm
+        banner names it a privilege grant and surfaces ``dangerous``.
+        """
+        return await _render_role_assign_modal(request, session, operator, user_uuid, target)
+
+    @router.post("/ui/keycloak/users/{user_uuid}/roles/assign", response_class=HTMLResponse)
+    async def keycloak_role_assign(
+        request: Request,
+        user_uuid: str,
+        session: UISessionContext = _require_session,
+        operator: Operator = _require_admin,
+        target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
+        roles: list[str] = Form(default_factory=list),
+    ) -> HTMLResponse:
+        """Dispatch ``keycloak.role_mapping.assign``; render the result inline.
+
+        CSRF-gated and tenant_admin-gated. A privilege grant. ``roles`` is a
+        list of realm role names (string list); the dispatched params are
+        ``{"roles": [...], "id": <uuid>}``. The op is
+        ``requires_approval=True`` (``awaiting_approval`` deep-link).
+        """
+        return await _render_role_assign_result(
+            request,
+            operator,
+            user_uuid=user_uuid,
+            target=target,
+            roles=roles,
+        )
 
 
 async def _render_index(
@@ -436,3 +751,311 @@ def _render_client_detail_error(
         context,
         status_code=status.HTTP_400_BAD_REQUEST,
     )
+
+
+async def _resolve_active_target(operator: Operator, target: str) -> str | None:
+    """Resolve a query/form ``target`` against the operator's keycloak targets.
+
+    Returns the target name only when it is in the operator's tenant-scoped
+    keycloak target list, or the sole target when exactly one exists and no
+    explicit selection was made. A cross-tenant / unknown slug resolves to
+    ``None`` -- the no-tenant-override posture: a cross-tenant slug can never
+    drive a dispatch.
+    """
+    target = target.strip()
+    targets = await _list_keycloak_targets(operator)
+    target_names = {t["name"] for t in targets}
+    if target and target in target_names:
+        return target
+    if not target and len(targets) == 1:
+        return str(targets[0]["name"])
+    return None
+
+
+# ---------------------------------------------------------------------------
+# User list (read; operator-tier)
+# ---------------------------------------------------------------------------
+
+
+async def _render_user_list(
+    request: Request,
+    session: UISessionContext,
+    target: str,
+    username: str,
+    role_probe: OperatorRoleProbe,
+) -> HTMLResponse:
+    """Assemble + render the user-list page (``keycloak.user.list``).
+
+    OPERATOR-tier read. The write affordances (create / reset / assign) are
+    threaded behind ``is_tenant_admin`` so a plain operator never sees them;
+    the write POSTs are the server-side authority. Credential material is
+    redacted from every row by the connector -- this render projects named
+    fields only.
+    """
+    operator = await _resolve_operator(session)
+    targets = await _list_keycloak_targets(operator)
+    active_target = await _resolve_active_target(operator, target)
+    username_filter = username.strip()
+
+    context: dict[str, Any] = {
+        "active_surface": "keycloak",
+        "page_title": "Keycloak users",
+        "connector_id": KEYCLOAK_CONNECTOR_ID,
+        "targets": targets,
+        "active_target": active_target,
+        "username_filter": username_filter,
+        "is_tenant_admin": role_probe.is_tenant_admin,
+        "users": [],
+        "error": None,
+    }
+
+    if active_target is not None:
+        params: dict[str, Any] = {}
+        if username_filter:
+            params["username"] = username_filter
+        users_env = await _dispatch_read(
+            operator, op_id="keycloak.user.list", target=active_target, params=params
+        )
+        context["error"] = _dispatch_failed(users_env)
+        # The connector redacts credential material inside ``result``; read
+        # the named ``rows`` projection, never the raw envelope.
+        context["users"] = (users_env.get("result") or {}).get("rows", [])
+
+    return get_templates().TemplateResponse(request, "keycloak/users.html", context)
+
+
+# ---------------------------------------------------------------------------
+# Write modals + results (tenant_admin; CSRF-gated; approval handoff)
+# ---------------------------------------------------------------------------
+
+
+def _render_write_result(request: Request, envelope: dict[str, Any]) -> HTMLResponse:
+    """Render a keycloak write op's structured envelope inline.
+
+    The shared result fragment for all three writes. The dispatcher's
+    contract is "always return a structured envelope" -- ``ok`` /
+    ``awaiting_approval`` / ``error`` / ``denied`` all come back inside it
+    (HTTP 200). Because every keycloak write is ``requires_approval=True``,
+    the expected clean outcome is ``awaiting_approval``: the fragment
+    surfaces ``extras["approval_request_id"]`` with a deep-link into
+    ``/ui/approvals`` so the operator is never shown a silent / empty
+    success.
+    """
+    return get_templates().TemplateResponse(
+        request,
+        "keycloak/_write_result.html",
+        {"envelope": envelope, "error_message": None},
+    )
+
+
+def _render_write_form_error(request: Request, message: str) -> HTMLResponse:
+    """Render the write-result fragment with an inline form error (HTTP 400).
+
+    Covers a malformed ``representation`` JSON or a missing required field
+    (no Vault ref / no roles). The op was never dispatched; the operator
+    stays in the modal to correct the input.
+    """
+    return get_templates().TemplateResponse(
+        request,
+        "keycloak/_write_result.html",
+        {"envelope": None, "error_message": message},
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _render_user_create_modal(
+    request: Request,
+    session: UISessionContext,
+    target: str,
+) -> HTMLResponse:
+    """Render the create-user confirm modal with a fresh CSRF token.
+
+    Mints + re-sets the ``meho_csrf`` cookie so the confirm button's own
+    ``hx-headers`` double-submit pair lines up after the HTMX swap rotated
+    it (the cookie-desync defence the operations Run modal applies).
+    """
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context: dict[str, Any] = {
+        "connector_id": KEYCLOAK_CONNECTOR_ID,
+        "target": target.strip(),
+        "csrf_token": csrf_token,
+    }
+    response = get_templates().TemplateResponse(
+        request, "keycloak/_user_create_modal.html", context
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _render_user_create_result(
+    request: Request,
+    operator: Operator,
+    *,
+    target: str,
+    representation: str,
+    password_secret_ref: str,
+    password_secret_mount: str,
+    password_secret_key: str,
+    temporary: bool,
+) -> HTMLResponse:
+    """Validate + dispatch ``keycloak.user.create``; render the result."""
+    active_target = await _resolve_active_target(operator, target)
+    if active_target is None:
+        return _render_write_form_error(request, "Select a Keycloak target first.")
+    try:
+        rep = _parse_representation(representation)
+    except ValueError as exc:
+        return _render_write_form_error(request, str(exc))
+
+    params: dict[str, Any] = {"representation": rep}
+    # Vault-ref password ONLY -- the value is never collected. ``create``
+    # allows an SSO-only user with no password, so the ref is optional here.
+    params.update(
+        _password_secret_params(
+            secret_ref=password_secret_ref,
+            secret_mount=password_secret_mount,
+            secret_key=password_secret_key,
+            temporary=temporary,
+        )
+    )
+    envelope = await _dispatch_write(
+        operator, op_id="keycloak.user.create", target=active_target, params=params
+    )
+    return _render_write_result(request, envelope)
+
+
+def _render_reset_password_modal(
+    request: Request,
+    session: UISessionContext,
+    user_uuid: str,
+    target: str,
+) -> HTMLResponse:
+    """Render the reset-password confirm modal with a fresh CSRF token."""
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context: dict[str, Any] = {
+        "connector_id": KEYCLOAK_CONNECTOR_ID,
+        "user_uuid": user_uuid,
+        "target": target.strip(),
+        "csrf_token": csrf_token,
+    }
+    response = get_templates().TemplateResponse(
+        request, "keycloak/_reset_password_modal.html", context
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _render_reset_password_result(
+    request: Request,
+    operator: Operator,
+    *,
+    user_uuid: str,
+    target: str,
+    password_secret_ref: str,
+    password_secret_mount: str,
+    password_secret_key: str,
+    temporary: bool,
+) -> HTMLResponse:
+    """Validate + dispatch ``keycloak.user.reset_password``; render the result."""
+    active_target = await _resolve_active_target(operator, target)
+    if active_target is None:
+        return _render_write_form_error(request, "Select a Keycloak target first.")
+    if not password_secret_ref.strip():
+        return _render_write_form_error(
+            request, "A Vault KV path (password secret ref) is required to reset a password."
+        )
+
+    # Keyed on the user UUID. Vault-ref password ONLY -- never inline.
+    params: dict[str, Any] = {"id": user_uuid}
+    params.update(
+        _password_secret_params(
+            secret_ref=password_secret_ref,
+            secret_mount=password_secret_mount,
+            secret_key=password_secret_key,
+            temporary=temporary,
+        )
+    )
+    envelope = await _dispatch_write(
+        operator, op_id="keycloak.user.reset_password", target=active_target, params=params
+    )
+    return _render_write_result(request, envelope)
+
+
+async def _render_role_assign_modal(
+    request: Request,
+    session: UISessionContext,
+    operator: Operator,
+    user_uuid: str,
+    target: str,
+) -> HTMLResponse:
+    """Render the role-assign confirm modal (a privilege grant).
+
+    Reads the user's CURRENT realm/client role mappings
+    (``keycloak.role_mapping.get``) for context so the operator can see what
+    the user already holds before granting more. Mints + re-sets the
+    ``meho_csrf`` cookie for the confirm button's own ``hx-headers`` echo.
+    The confirm banner names it a privilege grant + surfaces ``dangerous``.
+    """
+    active_target = await _resolve_active_target(operator, target)
+    current_roles: list[str] = []
+    error: str | None = None
+    if active_target is None:
+        error = "Select a Keycloak target first."
+    else:
+        env = await _dispatch_read(
+            operator,
+            op_id="keycloak.role_mapping.get",
+            target=active_target,
+            params={"id": user_uuid},
+        )
+        error = _dispatch_failed(env)
+        if error is None:
+            mappings = (env.get("result") or {}).get("role_mappings") or {}
+            realm_mappings = mappings.get("realmMappings") or []
+            current_roles = [
+                str(r.get("name")) for r in realm_mappings if isinstance(r, dict) and r.get("name")
+            ]
+
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context: dict[str, Any] = {
+        "connector_id": KEYCLOAK_CONNECTOR_ID,
+        "user_uuid": user_uuid,
+        "target": active_target or target.strip(),
+        "current_roles": current_roles,
+        "error": error,
+        "csrf_token": csrf_token,
+    }
+    response = get_templates().TemplateResponse(
+        request, "keycloak/_role_assign_modal.html", context
+    )
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def _render_role_assign_result(
+    request: Request,
+    operator: Operator,
+    *,
+    user_uuid: str,
+    target: str,
+    roles: list[str],
+) -> HTMLResponse:
+    """Validate + dispatch ``keycloak.role_mapping.assign``; render the result.
+
+    A privilege grant. ``roles`` is a string list of realm role names; the
+    dispatched params are ``{"roles": [...], "id": <uuid>}``.
+    """
+    active_target = await _resolve_active_target(operator, target)
+    if active_target is None:
+        return _render_write_form_error(request, "Select a Keycloak target first.")
+    role_names = [r.strip() for r in roles if r.strip()]
+    if not role_names:
+        return _render_write_form_error(request, "Select at least one realm role to grant.")
+
+    envelope = await _dispatch_write(
+        operator,
+        op_id="keycloak.role_mapping.assign",
+        target=active_target,
+        params={"roles": role_names, "id": user_uuid},
+    )
+    return _render_write_result(request, envelope)

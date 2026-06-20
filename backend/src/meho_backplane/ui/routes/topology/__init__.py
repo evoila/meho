@@ -30,8 +30,17 @@ Module layout:
   and the graph view (HTMX node-tap handler) with node properties,
   incoming/outgoing edges, recent audit operations on the node's
   target (when one is attached), and a "show dependents" link.
+* :mod:`~meho_backplane.ui.routes.topology.edges` -- the curated-edge
+  **write** routes (``GET /ui/topology/edges/annotate`` modal,
+  ``POST /ui/topology/edges`` annotate, ``DELETE
+  /ui/topology/edges/{edge_id}`` unannotate). ``require_ui_session`` +
+  CSRF-gated + ``tenant_admin`` (Initiative #1941 Task #1953); calls the
+  :mod:`~meho_backplane.topology.annotate` service in-process. The literal
+  ``edges`` / ``annotate`` segments are registered **before** the detail
+  router's ``node/{node_id}`` param route so the first-match-wins lookup
+  never binds them as a node id.
 
-The umbrella :func:`build_router` aggregates both. It is mounted
+The umbrella :func:`build_router` aggregates all three. It is mounted
 **before** :func:`meho_backplane.ui.routes.stubs.build_stubs_router`
 in :func:`meho_backplane.ui.routes.build_router` so the real
 ``/ui/topology`` handler wins the first-match-wins lookup -- a later
@@ -46,6 +55,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.topology.detail import build_detail_router
+from meho_backplane.ui.routes.topology.edges import build_edges_router
 from meho_backplane.ui.routes.topology.table import build_table_router
 
 __all__ = ["build_router"]
@@ -62,5 +72,13 @@ def build_router() -> APIRouter:
     """
     router = APIRouter()
     router.include_router(build_table_router())
+    # Edge-write routes BEFORE the detail router: the literal
+    # ``/ui/topology/edges/annotate`` must win the first-match-wins lookup
+    # against ``detail.py``'s ``/ui/topology/node/{node_id}`` param route.
+    # (The two literal segments ``edges`` / ``annotate`` cannot bind as a
+    # ``{node_id}`` UUID anyway, but registering ahead keeps the ordering
+    # discipline explicit and robust against a future bare ``{param}``
+    # route landing in this aggregator.)
+    router.include_router(build_edges_router())
     router.include_router(build_detail_router())
     return router

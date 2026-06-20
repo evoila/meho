@@ -57,6 +57,7 @@ from meho_backplane.ui.auth.session_store import load_session
 
 __all__ = [
     "OperatorRoleProbe",
+    "lift_operator_from_session",
     "resolve_operator_or_403",
     "resolve_role_probe",
 ]
@@ -132,12 +133,17 @@ def _assert_identity_matches(operator: Operator, session_ctx: UISessionContext) 
         )
 
 
-async def _lift_operator(session_ctx: UISessionContext) -> Operator:
+async def lift_operator_from_session(session_ctx: UISessionContext) -> Operator:
     """Lift the full :class:`Operator` from the BFF session row.
 
     Common helper for the read-only role probe and the write-gating
     403 dependency. The JWT chain caches the JWKS in process so the
     round-trip is local-only after the first hit.
+
+    Public so sibling console surfaces that need the same
+    JWT-revalidated operator (e.g. the topology curated-edge write gate,
+    Task #1953) reuse one identity-assertion path rather than
+    re-implementing the load + verify + identity-match chain.
     """
     access_token = await _load_access_token_or_401(session_ctx)
     settings = get_settings()
@@ -147,6 +153,13 @@ async def _lift_operator(session_ctx: UISessionContext) -> Operator:
     )
     _assert_identity_matches(operator, session_ctx)
     return operator
+
+
+#: Backwards-compatible private alias. The helper was introduced as
+#: ``_lift_operator`` (used by the two dependencies below); promoting it to
+#: the public name keeps both internal call sites working without churning
+#: this module's own references.
+_lift_operator = lift_operator_from_session
 
 
 async def resolve_role_probe(

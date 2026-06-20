@@ -1,0 +1,185 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV browser (Initiative #1942 G10.18, Task #1956 T1).
+
+  The read-only entry surface for the console's secrets browser: a
+  connector/target picker, a mount/path picker defaulted to the
+  operator's tenant prefix, and three HTMX swap regions (key list,
+  secret read, version history) that the controls populate.
+
+  connector_id shape: the dispatchable id is ``vault-1.x`` (the
+  ``<impl_id>-<version>`` id sourced from the ingested-connector list),
+  NEVER the bare product slug ``vault``. The picker option carries the
+  resolved id as its value so a re-version (``vault-2.x``) flows through
+  without a template edit; an empty ``connector_id`` (no vault connector
+  ingested) renders a hint instead of a dead-end form.
+
+  Tenant scope: the mount/path picker defaults to the operator's
+  ``secret`` mount + ``tenants/<tenant_id>`` path so the common case
+  never trips the default-on per-tenant guard.
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Vault &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold">
+        {{ icon("lock", class="size-5 opacity-70") }}
+        Vault
+      </h1>
+      <p class="text-sm opacity-70">
+        Browse the KV secret tree within your tenant scope: list keys,
+        read a secret's latest value, and view its version history.
+        Read-only.
+      </p>
+    </div>
+  </header>
+
+  {% if not connector_id %}
+    {#- No vault connector ingested for this operator's visibility. Render
+        the hint, not a dead-end picker that 404s on every dispatch. -#}
+    <div role="alert" class="alert alert-warning" data-vault-error="no_vault_connector">
+      <div>
+        <h3 class="text-sm font-semibold">No Vault connector available</h3>
+        <p class="text-xs">
+          No ingested <code>vault</code> connector is visible to your
+          tenant. Ingest the Vault connector from the
+          <a href="/ui/connectors/registry" class="link">Connector Registry</a>
+          before browsing secrets.
+        </p>
+      </div>
+    </div>
+  {% else %}
+    {#- The KV browser form. All three controls share the mount/path/target
+        fields via ``hx-include`` and swap into their own regions, so an
+        operator can list, then read or inspect versions of one key without
+        re-typing the path. The form itself does not submit; each button
+        drives its own ``hx-get``. -#}
+    <form
+      class="grid gap-3 sm:grid-cols-[minmax(0,16rem)_minmax(0,12rem)_1fr]"
+      data-vault-browser
+      role="search"
+      aria-label="Browse Vault secrets"
+      onsubmit="return false"
+    >
+      <input type="hidden" name="connector_id" value="{{ connector_id }}" data-vault-connector-id />
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Target</span>
+        <input
+          type="text"
+          name="target"
+          value=""
+          placeholder="(optional) target name"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="Target name"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+        <input
+          type="text"
+          name="mount"
+          value="{{ default_mount }}"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="KV mount"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Path</span>
+        <input
+          type="text"
+          name="path"
+          value="{{ default_path }}"
+          placeholder="tenants/&lt;tenant&gt;/&lt;target&gt;"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="KV path"
+          autocomplete="off"
+        />
+      </label>
+
+      <div class="flex flex-wrap gap-2 sm:col-span-3">
+        <button
+          type="button"
+          class="btn btn-primary btn-sm gap-1"
+          hx-get="/ui/vault/list"
+          hx-target="#vault-keys-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-keys-region"
+        >
+          {{ icon("table", class="size-4") }}
+          List keys
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-sm gap-1"
+          hx-get="/ui/vault/read"
+          hx-target="#vault-secret-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-secret-region"
+        >
+          {{ icon("lock", class="size-4") }}
+          Read secret
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-sm gap-1"
+          hx-get="/ui/vault/versions"
+          hx-target="#vault-versions-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-versions-region"
+        >
+          {{ icon("clock", class="size-4") }}
+          Versions
+        </button>
+      </div>
+    </form>
+
+    {#- Three independent swap regions. Each starts with an empty-state
+        prompt; the matching control swaps its partial in. They are
+        separate so reading a secret does not wipe the key list. -#}
+    <div class="grid gap-5 lg:grid-cols-2">
+      <section aria-label="Keys" class="space-y-2">
+        <h2 class="text-sm font-semibold opacity-80">Keys</h2>
+        <div id="vault-keys-region">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+            List a path to see its child keys.
+          </div>
+        </div>
+      </section>
+
+      <section aria-label="Secret" class="space-y-2">
+        <h2 class="text-sm font-semibold opacity-80">Secret</h2>
+        <div id="vault-secret-region">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+            Read a secret to reveal its values.
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section aria-label="Version history" class="space-y-2">
+      <h2 class="text-sm font-semibold opacity-80">Version history</h2>
+      <div id="vault-versions-region">
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+          Inspect a secret's version history.
+        </div>
+      </div>
+    </section>
+  {% endif %}
+</section>
+{% endblock %}

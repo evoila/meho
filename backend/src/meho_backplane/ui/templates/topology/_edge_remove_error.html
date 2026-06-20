@@ -1,0 +1,31 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Recoverable edge-removal error banner (Initiative #1941 Task #1953).
+  Swapped in over the per-edge row after a ``DELETE /ui/topology/edges/{id}``
+  that the service refused.
+
+  Two cases:
+
+  * ``auto_edge_deletion`` (HTTP 409) -- the §3 auto-edge no-op rule of
+    Initiative #364. Auto edges resurrect on the next refresh, so removing
+    one is meaningless; the banner tells the operator to annotate OVER the
+    auto edge first. This must NOT surface as a dead 500/empty error -- the
+    operator has a concrete recovery path.
+  * ``edge_not_found`` (HTTP 404) -- a missing / cross-tenant id (the
+    tenant boundary is opaque, so cross-tenant ids read as missing).
+
+  The banner stays in place (it replaces the row's controls region) so the
+  operator reads the remediation without losing the rest of the drawer.
+-#}
+<li
+  class="text-sm"
+  data-test="edge-remove-error"
+  data-error-kind="{{ error_kind }}"
+  data-edge-id="{{ edge_id }}"
+>
+  <div role="alert" class="alert alert-warning text-sm">
+    <span>{{ error_message }}</span>
+  </div>
+</li>

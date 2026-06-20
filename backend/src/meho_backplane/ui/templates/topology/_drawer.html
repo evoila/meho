@@ -13,13 +13,49 @@
     2. Properties -- key fields rendered as a description list, plus
        the raw JSON properties bag in a <pre> for forensic shape.
     3. Outgoing + incoming edges -- per-direction list with edge
-       kind + neighbour name + source (auto/curated).
+       kind + neighbour name + source (auto/curated). For a
+       ``tenant_admin`` (``is_tenant_admin``), curated edges carry a
+       confirm-gated Remove control (Task #1953).
     4. Recent operations -- the last few audit_log rows on this
        node's target (empty when target_id is null).
-    5. "Show dependents" link -- hands off to the future T3 graph
-       view; URL contract surfaces today so the link works as soon
-       as T3 lands.
+    5. "Show dependents" link -- hands off to the T3 graph view.
+
+  Curated-edge writes (Task #1953):
+    * The "Annotate edge" button (header, ``tenant_admin``-only soft-hide)
+      ``hx-get``s ``/ui/topology/edges/annotate`` into the
+      ``#topology-edge-modal`` slot.
+    * Each curated edge's Remove control ``hx-delete``s
+      ``/ui/topology/edges/{id}`` behind a native confirm; both carry the
+      CSRF double-submit token on their OWN ``hx-headers`` (HTMX does not
+      inherit ``hx-headers`` to children).
+    * The server-side ``tenant_admin`` gate on those routes is the
+      authority; the soft-hidden button is UX only.
 -#}
+{#-
+  Per-curated-edge Remove control. Confirm-gated via ``hx-confirm`` (the
+  destructive-removal confirm the issue requires: unannotate is a hard
+  DELETE 204). ``hx-delete`` carries the CSRF token on its OWN element. On
+  success the response swaps the row's ``<li>`` (``outerHTML``, targeting
+  the stable ``#topology-edge-row-{id}`` container) to the removed / error
+  fragment; a 409 ``auto_edge_deletion`` -- which only fires if the row's
+  ``source`` raced from curated to auto -- renders the recoverable banner.
+-#}
+{% macro _edge_remove_control(edge, csrf_token) -%}
+  <button
+    type="button"
+    class="btn btn-error btn-xs ml-auto"
+    data-test="edge-remove"
+    data-edge-id="{{ edge.id }}"
+    aria-label="Remove curated edge {{ edge.id }}"
+    hx-delete="/ui/topology/edges/{{ edge.id }}"
+    hx-target="#topology-edge-row-{{ edge.id }}"
+    hx-swap="outerHTML"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+    hx-confirm="Remove this curated edge? This cannot be undone."
+  >
+    Remove
+  </button>
+{%- endmacro %}
 <aside
   id="node-drawer"
   class="card bg-base-100 border-base-300 border shadow-sm"
@@ -44,21 +80,51 @@
         ``hx-*`` attributes leaves the inline ``onclick`` as the sole
         handler -- no network round trip required for a Close.
       -#}
-      <button
-        type="button"
-        class="btn btn-ghost btn-xs"
-        aria-label="Close node detail drawer"
-        onclick="
-          const el = document.getElementById('node-drawer');
-          if (el) {
-            el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Select a row to inspect a node.</div></aside>';
-          }
-          return false;
-        "
-      >
-        Close
-      </button>
+      <div class="flex items-center gap-1">
+        {#-
+          Annotate-edge affordance -- soft-hidden for non-admins. The
+          server-side ``tenant_admin`` gate on ``/ui/topology/edges*`` is
+          the authority; this button is a UX hint. ``hx-get`` opens the
+          annotate modal into the slot below; the modal mints its own CSRF
+          token, so the GET needs none.
+        -#}
+        {% if is_tenant_admin %}
+          <button
+            type="button"
+            class="btn btn-primary btn-xs"
+            data-test="annotate-edge-open"
+            aria-label="Annotate a curated edge"
+            hx-get="{{ annotate_modal_href }}"
+            hx-target="#topology-edge-modal"
+            hx-swap="outerHTML"
+          >
+            Annotate edge
+          </button>
+        {% endif %}
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs"
+          aria-label="Close node detail drawer"
+          onclick="
+            const el = document.getElementById('node-drawer');
+            if (el) {
+              el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Select a row to inspect a node.</div></aside>';
+            }
+            return false;
+          "
+        >
+          Close
+        </button>
+      </div>
     </header>
+
+    {#-
+      Annotate-modal mount slot. Empty until the "Annotate edge" button
+      ``hx-get``s the modal fragment into it; the fragment's outer element
+      shares this id so the swap is stable, and a successful POST swaps the
+      created-edge fragment back into the same slot.
+    -#}
+    <div id="topology-edge-modal" data-test="edge-modal-slot"></div>
 
     {# ---------- Properties ---------- #}
     <section aria-label="Node properties">
@@ -99,12 +165,15 @@
       {% if outgoing_edges %}
         <ul class="space-y-1 text-sm">
           {% for edge in outgoing_edges %}
-            <li class="flex items-center gap-2">
+            <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
               <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
               <span class="opacity-60">&rarr;</span>
               <span class="font-mono">{{ edge.to_endpoint.name }}</span>
               <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
               <span class="text-xs opacity-50">({{ edge.source }})</span>
+              {% if is_tenant_admin and edge.source == "curated" %}
+                {{ _edge_remove_control(edge, csrf_token) }}
+              {% endif %}
             </li>
           {% endfor %}
         </ul>
@@ -121,12 +190,15 @@
       {% if incoming_edges %}
         <ul class="space-y-1 text-sm">
           {% for edge in incoming_edges %}
-            <li class="flex items-center gap-2">
+            <li id="topology-edge-row-{{ edge.id }}" class="flex items-center gap-2">
               <span class="font-mono">{{ edge.from_endpoint.name }}</span>
               <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
               <span class="opacity-60">&rarr;</span>
               <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
               <span class="text-xs opacity-50">({{ edge.source }})</span>
+              {% if is_tenant_admin and edge.source == "curated" %}
+                {{ _edge_remove_control(edge, csrf_token) }}
+              {% endif %}
             </li>
           {% endfor %}
         </ul>

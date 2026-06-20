@@ -8529,13 +8529,121 @@
         }
       }
     },
+    "/ui/topology/edges/annotate": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Annotate Modal",
+        "description": "``GET /ui/topology/edges/annotate`` \u2014 render the annotate modal.",
+        "operationId": "annotate_modal_ui_topology_edges_annotate_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/edges": {
+      "post": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Annotate",
+        "description": "``POST /ui/topology/edges`` \u2014 annotate a curated edge in-process.",
+        "operationId": "annotate_ui_topology_edges_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_annotate_ui_topology_edges_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/edges/{edge_id}": {
+      "delete": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Unannotate",
+        "description": "``DELETE /ui/topology/edges/{edge_id}`` \u2014 remove a curated edge.",
+        "operationId": "unannotate_ui_topology_edges__edge_id__delete",
+        "parameters": [
+          {
+            "name": "edge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Edge Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/topology/node/{node_id}": {
       "get": {
         "tags": [
           "ui-topology"
         ],
         "summary": "Ui Topology Node Detail",
-        "description": "``GET /ui/topology/node/{node_id}``.\n\nResolves the node tenant-scoped, then pulls the incoming +\noutgoing edges via :func:`list_edges` and the recent\noperations directly from ``audit_log``. Renders the\n``topology/_drawer.html`` fragment with the full context.",
+        "description": "``GET /ui/topology/node/{node_id}`` -- delegates to the renderer.",
         "operationId": "ui_topology_node_detail_ui_topology_node__node_id__get",
         "parameters": [
           {
@@ -8549,6 +8657,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -17157,6 +17276,54 @@
         ],
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "Body_annotate_ui_topology_edges_post": {
+        "properties": {
+          "from_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "From Name"
+          },
+          "from_kind": {
+            "type": "string",
+            "title": "From Kind",
+            "default": ""
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Kind"
+          },
+          "to_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "To Name"
+          },
+          "to_kind": {
+            "type": "string",
+            "title": "To Kind",
+            "default": ""
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Note",
+            "default": ""
+          },
+          "evidence_url": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Evidence Url",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "from_name",
+          "kind",
+          "to_name"
+        ],
+        "title": "Body_annotate_ui_topology_edges_post"
       },
       "Body_approval_approve_ui_approvals__request_id__approve_post": {
         "properties": {

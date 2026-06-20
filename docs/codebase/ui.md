@@ -1141,6 +1141,61 @@ the template.
 | `topology/_drawer.html` | Drawer fragment with node properties (id, kind, name, target_id, first_seen, last_seen, discovered_by, raw JSON), outgoing + incoming edges, recent operations on the node's target (empty for inner graph nodes with no `target_id`), and the "Show dependents" link handing off to T2/T3's graph view. |
 | `topology/_drawer_not_found.html` | 404 drawer fragment for an unknown / cross-tenant node id. Same outer `aside#node-drawer` shape so the HTMX `outerHTML` swap remains semantically consistent. |
 
+### Curated-edge writes (Task #1953)
+
+Initiative [#1941](https://github.com/evoila/meho/issues/1941) (G10.17),
+Task #1953 (T1) layers the curated-edge **annotate / unannotate** write
+verbs onto the read-only drawer. The console face is an **in-process BFF**:
+the `/api/v1/topology/edges` routes are Bearer-gated, so a session-cookie
+browser cannot auth them; instead `meho_backplane.ui.routes.topology.edges`
+adds `/ui/topology/edges*` sub-routes that are `require_ui_session` +
+CSRF-gated and call the `meho_backplane.topology.annotate` **service**
+(`annotate_edge` / `unannotate_edge`) directly — the same pattern the
+approvals / connectors surfaces use. No new `/api/v1` route or service
+function is introduced.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/topology/edges/annotate` | Annotate-modal fragment. Mints + sets a fresh `meho_csrf` cookie so the POST carries a valid double-submit token. The literal `edges` / `annotate` segments register **before** `detail.py`'s `node/{node_id}` param route (first-match-wins). `tenant_admin`-gated. |
+| `POST` | `/ui/topology/edges` | Annotate a curated edge in-process. Builds two `NodeRef(name, kind)` endpoints (never posts a raw `from` JSON key — `from` is a Python keyword) and calls `annotate_edge`. Renders the created edge inline + fires `HX-Trigger: meho:topology-edge-changed`. CSRF + `tenant_admin`. |
+| `DELETE` | `/ui/topology/edges/{edge_id}` | Hard-delete a curated edge (confirm-gated via `hx-confirm`). Calls `unannotate_edge`; on success swaps the row out + fires the graph-refresh trigger. CSRF + `tenant_admin`. |
+
+**RBAC tier split.** Curated-edge writes are `tenant_admin` at the REST
+layer; the BFF mirrors this two ways. The drawer (`_drawer.html`)
+**soft-hides** the annotate / per-edge-remove controls behind
+`is_tenant_admin` (projected via `connectors.operator.resolve_role_probe`,
+fail-soft); every write route additionally **hard-403s** a non-admin via
+`_require_topology_admin` (mirrors `connectors.operator.resolve_operator_or_403`,
+reusing the promoted `lift_operator_from_session` JWT-revalidation helper).
+The same template serving both roles is the regression trap — the
+soft-hidden button is UX only; a forged POST still 403s.
+
+**Recoverable typed errors.** The service raises HTTP-agnostic `ValueError`
+subclasses; the BFF maps each to a re-rendered fragment (mirroring the REST
+status codes) rather than a dead 5xx:
+
+* `AmbiguousNodeError` → re-render the annotate modal (`_annotate_modal.html`)
+  with the candidate `kinds` listed (409) so the operator re-submits with a
+  disambiguating `kind`.
+* `NodeNotFoundError` (404) / `InvalidEdgeKindError` (422) → re-render the
+  modal with a typed banner.
+* `AutoEdgeDeletionError` → re-render `_edge_remove_error.html` with the
+  recoverable "this is an auto edge; annotate over it first" banner (409,
+  the §3 auto-edge no-op rule of Initiative #364). Auto edges resurrect on
+  the next refresh, so a naive DELETE retry would confuse the operator.
+
+**Graph reflects the write.** The annotate / unannotate responses fire
+`HX-Trigger: meho:topology-edge-changed`; `_graph_data_island.html`'s
+wrapper listens via `hx-trigger="… , meho:topology-edge-changed from:body"`
+and re-pulls the graph JSON, so a just-written / removed edge shows without
+a hard reload (in addition to the existing 30s poll).
+
+**OpenAPI snapshot.** `/ui/*` routes DO register into the snapshot, so the
+three new `/ui/topology/edges*` paths land in `cli/api/openapi.json` +
+`cli/internal/api/client.gen.go` (regenerated via `cd cli && make
+snapshot-openapi && make generate`; the "CLI API snapshot freshness" CI
+lane enforces it).
+
 ### HTMX wiring
 
 * **Sort + filter on `/ui/topology`** — the filter form uses

@@ -14,24 +14,40 @@ triage results without drowning in false positives.
 ## How analysis runs
 
 ```
-push / PR ──► CI workflow ──► uploads python-coverage artifact (backend/coverage.xml)
+push to main ──► CI workflow ──► python-coverage job uploads python-coverage
+                  │               artifact (backend/coverage.xml)   [push only]
                   │
                   └─ on success ──► Quality Gate workflow (workflow_run)
                                        ├─ downloads python-coverage into backend/
                                        └─ SonarSource/sonarqube-scan-action  ──► SonarCloud
 ```
 
+The coverage artifact is produced **on push to main only**, by a dedicated
+non-required `python-coverage` job — NOT on PRs, and NOT by the required unit
+lane. PRs therefore see SonarCloud coverage update "one merge late" (the pre-#771
+behaviour). Why: running the unit suite under coverage peaks the pytest tree at
+~12.5–14 GiB (vs ~7.9 GiB no-cov), which OOM-killed the memory-limited
+`meho-runners-ci-heavy` pod when coverage rode on the required lane (#1982). The
+coverage tax is intrinsic to measuring the whole `meho_backplane` package across
+the ~8.3k-test suite and barely moves with xdist worker count — see #1987 for the
+peak-memory measurement table. The coverage job is **job-level
+`continue-on-error: true`** so an OOM degrades to "no coverage for this push" and
+never fails the CI run conclusion (which would also suppress this gate's
+`workflow_run` trigger).
+
 | Concern | Where |
 |---|---|
 | Project + scope config | [`sonar-project.properties`](../../sonar-project.properties) |
 | Scan trigger + coverage handoff | [`.github/workflows/quality-gate.yml`](../../.github/workflows/quality-gate.yml) |
-| Coverage production | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — `Pytest (unit + coverage)` |
-| Coverage path portability | `[tool.coverage.run] relative_files` ([`backend/pyproject.toml`](../../backend/pyproject.toml)) + quality-gate.yml's `Point coverage report at the backend/ source root` step (injects `<source>backend</source>` so paths resolve from the repo root) |
+| Coverage production | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — `python-coverage` job (push to main only, offline `coverage combine`+`xml`) |
+| Coverage config (CI offline-combine) | [`backend/.coveragerc.ci`](../../backend/.coveragerc.ci) — `parallel`, `source`, `relative_files` |
+| Coverage path portability | `[tool.coverage.run] relative_files` ([`backend/pyproject.toml`](../../backend/pyproject.toml)) + the same key in `.coveragerc.ci` + quality-gate.yml's `Point coverage report at the backend/ source root` step (injects `<source>backend</source>` so paths resolve from the repo root) |
 | Auth | `SONAR_TOKEN` repo secret (write/scan only) |
 
-Coverage is the **unit sweep only** (`--cov=meho_backplane`); integration tests
-run in a separate job without `--cov`. The gate is `continue-on-error: true` — it
-is **advisory**, never blocks merges, until the baseline below is fixed.
+Coverage is the **unit sweep only** (`--cov`-equivalent over `meho_backplane`);
+integration tests run in a separate job without coverage. The gate is
+`continue-on-error: true` — it is **advisory**, never blocks merges, until the
+baseline below is fixed.
 
 ## ⚠️ The new-code baseline is broken — fix it once
 

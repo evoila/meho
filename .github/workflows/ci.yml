@@ -117,20 +117,22 @@ jobs:
     # pool scales from 0, so an idle period costs one cold-start on the
     # next run. Provisioned RDC-side in rdc-gitops#55.
     runs-on: meho-runners-ci-heavy
-    # 20-min cap: ~2x the observed ~9.3-min job wall after #771/#799
-    # removed the per-test descriptor re-embedding that had dominated
-    # this job. pytest is ~8m33s with --cov+sysmon (run 26245676016,
-    # the post-#799 push) / ~7m35s without; everything else in the job
-    # (uv sync, ruff, mypy, drift-guard) is <1 min combined. History:
-    # the combined serial sweep once blew the 10→20→40→50-min caps
+    # 25-min cap (raised from 20): the unit lane was OOM-killed on the heavy
+    # runner near end-of-run (null Pytest step, no log, `failure`, ~17-21 min,
+    # NOT reproducible locally, worker-count-independent). Root cause + fix are
+    # detailed in the perf-budget `run:` block: coverage's combine peaked the
+    # pytest tree at 13.67 GiB (vs 7.86 GiB without), over the pod's memory
+    # limit; the fix drops `--cov` from this gate and keeps -n 3 (lower base
+    # memory). No-cov -n 3 wall is ~13-18 min, so 25 min keeps a hang-backstop
+    # margin above the budget_s early-warning gate. ~8m33s with --cov+sysmon was
+    # the pre-growth -n 4 wall (run 26245676016).
+    # History: the combined serial sweep once blew the 10→20→40→50-min caps
     # (runs 25910787068, 25970564527, 25972807988, 25987329377,
     # 25992737115) before the integration split (#570), xdist
     # (#585/#603), and the #799 re-embed fix landed; the 50-min cap was
-    # generous headroom from that era. Retuned down now that real
-    # multi-core wall-clock is observed, exactly as the prior comment
-    # instructed. Job name is intentionally unchanged so the existing
-    # branch-protection required check stays satisfied.
-    timeout-minutes: 20
+    # generous headroom from that era. Job name is intentionally unchanged so
+    # the existing branch-protection required check stays satisfied.
+    timeout-minutes: 25
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
@@ -303,8 +305,10 @@ jobs:
         # `-n auto --dist loadscope` 2007/0/0 — identical, empty
         # failure set; local wall-clock serial 10:18 → xdist 6:14
         # (limited by core count; CI multi-core gets the ~49→~10 min).
-        # Worker count is -n 4 (lowered from -n 6 per #1901 — see the rationale in
-        # the perf-budget `run:` block below). The original -n 6 reasoning, kept
+        # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
+        # then -n 4 → -n 3 for MEMORY headroom when the lane OOM-killed the pod —
+        # see the root-cause analysis in the perf-budget `run:` block below; fewer
+        # workers => lower base memory). The original -n 6 reasoning, kept
         # for context: pinned, matched to the dedicated `meho-runners-ci-heavy`
         # scale set's 6000m guaranteed cores (#761). History: -n auto
         # was inconsistent on the shared 4-core pool (run 26164020459
@@ -326,31 +330,25 @@ jobs:
         # worker, not per test. --maxfail=1 preserves the old `-x`
         # fast-fail (xdist ignores `-x`). --ignore=tests/integration →
         # the container-heavy subtree runs in the sibling
-        # `python-integration` job. Coverage is the unit sweep only;
-        # combined cov is #564.
-        # Coverage runs on BOTH push and PR. #726 had gated --cov to
-        # push-only on the belief that pytest-cov was the unit job's
-        # dominant cost; the #771 diagnostic (#793) disproved that — the
-        # real cost was per-test descriptor re-embedding (fixed #799),
-        # not coverage. With that fixed + sysmon, --cov adds only ~1 min
-        # (pytest ~8m33s with cov vs ~7m35s without; run 26245676016),
-        # so the job stays ~9.3 min — under the Goal #11 10-min budget —
-        # while PRs regain SonarCloud Clean-as-You-Code new-code-coverage
-        # decoration (no more "no data" on the PR widget) instead of it
-        # updating one merge late. quality-gate.yml stays whole-job
-        # continue-on-error, so a missing/late artifact still never
-        # blocks merge. --cov-report is xml only — term is purely
-        # cosmetic and serializes through xdist workers.
-        # COVERAGE_CORE=sysmon swaps coverage.py's default C tracer
-        # (per-line `sys.settrace` callbacks) for the PEP 669
-        # `sys.monitoring` backend (Python 3.12+, coverage.py 7.4+; lock
-        # pins 7.14). sysmon's event-driven model roughly halves the
-        # tax; locally the line counts matched the C tracer exactly
-        # (2913/11832 in both), which is what SonarCloud parity needs.
-        # Branch-coverage is OFF in this project (no `--cov-branch`, no
-        # `[tool.coverage.run] branch=true`), so the sysmon branch-
-        # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`)
-        # does not apply.
+        # `python-integration` job.
+        # COVERAGE REMOVED from this required gate (was `COVERAGE_CORE=sysmon
+        # ... --cov=meho_backplane --cov-report=xml`). The xdist coverage combine
+        # peaked the pytest tree at 13.67 GiB (vs 7.86 GiB without — measured via
+        # cgroup memory.peak at -n 3, 8243 passed), OOM-killing the heavy runner
+        # pod near end-of-run and leaving the lane red on main for every PR. The
+        # +5.8 GiB is coverage's session-end merge (all workers' data + the
+        # controller's combine, co-resident); the coverage config has no
+        # per-test contexts to trim (only `[tool.coverage.run] relative_files`).
+        # Coverage was non-blocking anyway — quality-gate.yml is whole-job
+        # continue-on-error and a missing/late artifact never blocks merge — so
+        # dropping it to keep this gate GREEN is the right priority over the
+        # SonarCloud Clean-as-You-Code decoration it fed. FOLLOW-UP: restore that
+        # decoration memory-safely (offline `coverage combine`+`xml` after the
+        # xdist workers exit; a push-only serial-cov job; or a larger-memory
+        # pool). History (for whoever restores it): cov on PR+push came from
+        # #726/#771/#793/#799 after the #799 re-embed fix made --cov ~+1 min, and
+        # COVERAGE_CORE=sysmon (PEP 669, coverage.py 7.4+, lock 7.14) halved the
+        # tracer tax with line counts matching the C tracer (2913/11832).
         run: |
           # Perf-budget guard — early warning for CI-perf creep (the #898 / G3.6
           # timeout class). The Goal #11 unit budget is 10 min, but it was
@@ -363,22 +361,34 @@ jobs:
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
-          # -n 4 (lowered from -n 6, #1901): under full 6-core subscription on the
-          # heavy runner the GHA agent + xdist coordinator were starved and the unit
-          # lane died with "runner lost communication" at ~15min (resource-starvation
-          # hang) once the cumulative UI-console test wave (grants / approvals /
-          # agent-run-console+SSE) grew the suite — main red for every PR, NOT
-          # reproducible locally (full suite ~6:45, 7902 passed). -n 4 leaves 2-core
-          # headroom for the agent / coordinator / DinD / OS. budget_s raised 600 ->
-          # 1020 to match the slower-but-stable wall: fewer workers => longer wall by
-          # DESIGN here, not perf creep; still well under the 20-min timeout-minutes
-          # hang-backstop, so the early-warning function is preserved.
-          budget_s=1020
+          # ROOT CAUSE (corrected): the unit lane died with a null Pytest step,
+          # no log, `failure`, at ~17-21min on the heavy runner — NOT reproducible
+          # locally and worker-count-INDEPENDENT (it recurred identically after
+          # -n 4 → -n 3, just ~3min later in wall-clock). That rules out the #1901
+          # CPU-starvation class and points at an OOM kill of the runner pod near
+          # end-of-run. Measured peak memory of the pytest tree (cgroup memory.peak,
+          # -n 3, 8243 passed): 13.67 GiB WITH `--cov`+sysmon vs 7.86 GiB WITHOUT —
+          # coverage's combine (all xdist workers' data + the controller's merge,
+          # co-resident at session end) adds ~5.8 GiB and tips the pod over its
+          # memory limit (<13.67 GiB; the lane passes on a 62 GiB dev box). The
+          # alembic migration round-trip cluster (schema 0048+, each reversibility
+          # test replays the whole upgrade→downgrade chain — ~45 of the slowest 60
+          # tests) plus the new /ui console wave grew both wall AND peak until cov
+          # pushed it over. FIX: drop `--cov` from this required gate (peak 13.67 →
+          # 7.86 GiB) and keep -n 3 (fewer workers => lower base memory: ~7.86 GiB
+          # vs ~10 GiB at -n 4) for headroom. Coverage is non-blocking by design
+          # (quality-gate.yml is whole-job continue-on-error; a missing artifact only
+          # degrades the SonarCloud signal, never blocks merge) — so dropping it to
+          # keep the gate GREEN is the right priority. FOLLOW-UP: restore SonarCloud
+          # coverage memory-safely (offline `coverage combine`+`xml` after workers
+          # exit, a push-only serial-cov job, or a larger-memory pool). budget_s set
+          # to 1320 for the no-cov -n 3 wall (local 816s/13:34; runner expected
+          # ~15-18min) with creep-detection headroom, under the 25-min timeout.
+          budget_s=1320
           start=$(date +%s)
-          COVERAGE_CORE=sysmon uv run pytest -n 4 --dist loadscope --maxfail=1 --ignore=tests/integration \
-            --cov=meho_backplane --cov-report=xml tests/
+          uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
           dur=$(( $(date +%s) - start ))
-          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = Goal #11 10-min; hard cap = job timeout-minutes)"
+          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = no-cov -n 3 wall; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
             echo "::error title=Unit perf budget exceeded::unit pytest ${dur}s > budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s: MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py (#793/#827). Amortize the cost; do not just bump the budget."
             exit 1

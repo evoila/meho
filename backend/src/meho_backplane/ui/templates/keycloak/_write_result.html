@@ -1,0 +1,109 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak write-result fragment (Initiative #1943, Task #1960).
+
+  The shared swap target for all three keycloak user-management writes
+  (create / reset-password / role-assign). Renders the dispatched op's
+  structured ``call_operation`` envelope inline -- the console's write
+  outcome surface.
+
+  Every keycloak write op is ``requires_approval=True``, so the EXPECTED
+  clean outcome is ``awaiting_approval``: the policy gate parked the op and
+  created a durable ApprovalRequest. This MUST be surfaced with the
+  ``extras.approval_request_id`` and a DEEP-LINK into ``/ui/approvals`` --
+  otherwise the operator thinks the write silently no-op'd.
+
+  Render branches:
+    * ``error_message`` set (no ``envelope``) -> inline form error (400):
+      a malformed representation JSON or a missing required field. The op
+      was never dispatched; the operator stays in the modal.
+    * ``status == "awaiting_approval"`` -> the approval banner + deep-link.
+    * ``status == "ok"`` -> the (rare for these ops) immediate success.
+    * ``status in ("error", "denied")`` -> the structured fault.
+
+  Context:
+    envelope      -- dict | None: the call_operation envelope
+    error_message -- str | None: the inline form-error message (400 branch)
+-#}
+{% from "_icons.html" import icon %}
+
+{% if error_message %}
+  <div role="alert" class="alert alert-error" data-write-status="form_error">
+    <div>
+      <h4 class="text-sm font-semibold">Cannot submit</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">{{ error_message }}</p>
+    </div>
+  </div>
+{% elif envelope.status == "awaiting_approval" %}
+  {%- set extras = envelope.get("extras") or {} -%}
+  {%- set approval_id = extras.get("approval_request_id") -%}
+  <div role="alert" class="alert alert-info items-start" data-write-status="awaiting_approval">
+    {{ icon("clock", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Awaiting approval</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">
+        This operation requires approval before it executes. A request has
+        been parked for a reviewer &mdash; it has <span class="font-semibold">not</span>
+        run yet.
+      </p>
+      {% if approval_id %}
+        <p class="mt-1 text-xs opacity-70">
+          Request id <code data-approval-request-id>{{ approval_id }}</code>
+        </p>
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals/{{ approval_id }}"
+          hx-get="/ui/approvals/{{ approval_id }}"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Review in approvals
+        </a>
+      {% else %}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals"
+          hx-get="/ui/approvals"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Open approvals
+        </a>
+      {% endif %}
+    </div>
+  </div>
+{% elif envelope.status == "ok" %}
+  <div role="status" class="alert alert-success items-start" data-write-status="ok">
+    {{ icon("check", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Done</h4>
+      <p class="text-xs">The operation completed.</p>
+    </div>
+  </div>
+{% else %}
+  {%- set extras = envelope.get("extras") or {} -%}
+  <div
+    role="alert"
+    class="alert {{ 'alert-warning' if envelope.status == 'denied' else 'alert-error' }} items-start"
+    data-write-status="{{ envelope.status }}"
+  >
+    {{ icon("ban", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">
+        {% if envelope.status == "denied" %}Operation denied{% else %}Operation failed{% endif %}
+        {% if extras.get("error_code") %}
+          <code class="ml-1 text-xs" data-write-error-code>{{ extras.get("error_code") }}</code>
+        {% endif %}
+      </h4>
+      {% if envelope.get("error") %}
+        <p class="text-xs [overflow-wrap:anywhere]">{{ envelope.get("error") }}</p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}

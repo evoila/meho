@@ -64,7 +64,12 @@ from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
 )
-from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.csrf import (
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    CSRFMiddleware,
+    mint_csrf_token,
+)
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_keycloak_router
 from meho_backplane.ui.routes import build_router as build_ui_router
@@ -229,6 +234,47 @@ def _client_with_role(
     client = TestClient(_build_app(), follow_redirects=False)
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     return client, mock
+
+
+def _client_with_role_and_session(
+    *,
+    tenant_id: uuid.UUID,
+    operator_sub: str,
+    role: TenantRole,
+) -> tuple[TestClient, respx.MockRouter, uuid.UUID]:
+    """Like :func:`_client_with_role` but also returns the seeded session id.
+
+    The write tests need the session id to mint the matching double-submit
+    CSRF token (the token is derived from the session id, so a forged POST
+    without it -- or with a token minted from a different session -- fails
+    the ``ui/csrf.py`` gate).
+    """
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=operator_sub,
+        tenant_id=str(tenant_id),
+        tenant_role=role.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=tenant_id,
+        access_token=access_token,
+        operator_sub=operator_sub,
+    )
+    mock = respx.mock(assert_all_called=False)
+    _mock_discovery_and_jwks(mock, jwks)
+    client = TestClient(_build_app(), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    return client, mock, session_id
+
+
+def _csrf_kwargs(session_id: uuid.UUID) -> dict[str, Any]:
+    """Header + cookie kwargs that satisfy the double-submit CSRF check."""
+    token = mint_csrf_token(str(session_id))
+    return {
+        "headers": {CSRF_HEADER_NAME: token},
+        "cookies": {CSRF_COOKIE_NAME: token},
+    }
 
 
 def _patch_call_operation(
@@ -561,3 +607,406 @@ def test_keycloak_ui_client_detail_route_resolves_to_detail_handler() -> None:
     detail_idx = paths.index("/ui/keycloak/clients/{client_uuid}")
     index_idx = paths.index("/ui/keycloak")
     assert detail_idx < index_idx
+
+
+# ---------------------------------------------------------------------------
+# User management (Task #1960): list + create / reset-password / role-assign
+# ---------------------------------------------------------------------------
+
+
+def _awaiting_approval(op_id: str, approval_request_id: str) -> dict[str, Any]:
+    """Build an ``awaiting_approval`` envelope like the policy gate returns.
+
+    Every keycloak write op is ``requires_approval=True``, so a confirmed
+    write returns ``status="awaiting_approval"`` with the durable
+    ApprovalRequest id under ``extras["approval_request_id"]``.
+    """
+    return {
+        "status": "awaiting_approval",
+        "op_id": op_id,
+        "result": None,
+        "error": None,
+        "duration_ms": 1.0,
+        "handle": None,
+        "extras": {"approval_request_id": approval_request_id},
+    }
+
+
+def _seed_user_target_and_envs(
+    *, users: list[dict[str, Any]] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Seed tenant A + a keycloak target; return the user.list envelope map."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    rows = (
+        users
+        if users is not None
+        else [
+            {
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "username": "operator-a",
+                "email": "operator-a@example.com",
+                "enabled": True,
+                "emailVerified": True,
+            }
+        ]
+    )
+    return {"keycloak.user.list": _ok("keycloak.user.list", {"rows": rows, "total": len(rows)})}
+
+
+# ---- user list: read is operator-tier, writes soft-hidden ------------------
+
+
+def test_keycloak_ui_user_list_operator_sees_no_write_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain operator renders the user list but sees NO write affordances.
+
+    Reads are operator-tier (``keycloak.user.list`` is ``safe``); the
+    create / reset / assign buttons are soft-hidden from a non-admin via the
+    ``resolve_role_probe``-driven ``is_tenant_admin`` flag.
+    """
+    received = _patch_call_operation(monkeypatch, _seed_user_target_and_envs())
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/keycloak/users")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The list renders with the projected user row.
+    assert "data-keycloak-users" in body
+    assert "operator-a" in body
+    # No write affordances for a plain operator.
+    assert "data-keycloak-user-create" not in body
+    assert "data-keycloak-reset-password" not in body
+    assert "data-keycloak-role-assign" not in body
+    # The read pinned the connector id (never the bare slug).
+    assert len(received) == 1
+    assert received[0]["connector_id"] == KEYCLOAK_CONNECTOR_ID
+    assert received[0]["op_id"] == "keycloak.user.list"
+
+
+def test_keycloak_ui_user_list_admin_sees_write_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant_admin sees the create / reset / assign affordances."""
+    _patch_call_operation(monkeypatch, _seed_user_target_and_envs())
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        response = client.get("/ui/keycloak/users")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-keycloak-user-create" in body
+    assert "data-keycloak-reset-password" in body
+    assert "data-keycloak-role-assign" in body
+
+
+# ---- create: awaiting_approval banner + deep-link --------------------------
+
+
+def test_keycloak_ui_user_create_awaiting_approval_deep_links_to_approvals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirmed create whose dispatch returns ``awaiting_approval`` renders
+    the approval banner with the request id AND a link to ``/ui/approvals``.
+
+    The operator is never shown a silent / empty success: every keycloak
+    write is ``requires_approval=True``, so the result MUST surface the
+    parked ApprovalRequest with a deep-link into the approvals surface.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    approval_id = "33333333-3333-3333-3333-333333333333"
+    received = _patch_call_operation(
+        monkeypatch,
+        {"keycloak.user.create": _awaiting_approval("keycloak.user.create", approval_id)},
+    )
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        response = client.post(
+            "/ui/keycloak/users/create",
+            data={
+                "target": _TARGET_NAME,
+                "representation": '{"username": "operator-a", "enabled": true}',
+                "password_secret_ref": "rdc/keycloak/operator-a",
+            },
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-write-status="awaiting_approval"' in body
+    assert approval_id in body
+    assert f'href="/ui/approvals/{approval_id}"' in body
+    # The dispatch pinned the connector id + carried the representation.
+    assert len(received) == 1
+    assert received[0]["connector_id"] == KEYCLOAK_CONNECTOR_ID
+    assert received[0]["op_id"] == "keycloak.user.create"
+
+
+# ---- Vault-ref password, never inline --------------------------------------
+
+
+def test_keycloak_ui_user_create_password_is_vault_ref_never_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create dispatches a ``password_secret_ref`` and NO plaintext password.
+
+    The create form exposes a Vault KV path field and no plaintext password
+    field; the dispatched params carry ``password_secret_ref`` and contain
+    no key named ``password`` / ``value`` and no plaintext secret.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(
+        monkeypatch,
+        {"keycloak.user.create": _awaiting_approval("keycloak.user.create", "id-1")},
+    )
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    # The modal GET exposes the Vault-ref field and no plaintext password.
+    with mock:
+        modal = client.get(f"/ui/keycloak/users/create?target={_TARGET_NAME}")
+        assert modal.status_code == 200, modal.text
+        assert 'name="password_secret_ref"' in modal.text
+        assert 'name="password"' not in modal.text
+        assert 'type="password"' not in modal.text
+        # The dispatched params carry only the Vault ref, never a value.
+        response = client.post(
+            "/ui/keycloak/users/create",
+            data={
+                "target": _TARGET_NAME,
+                "representation": '{"username": "operator-a"}',
+                "password_secret_ref": "rdc/keycloak/operator-a",
+            },
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 200, response.text
+    assert len(received) == 1
+    params = received[0]["params"]
+    assert params["password_secret_ref"] == "rdc/keycloak/operator-a"
+    assert "password" not in params
+    assert "value" not in params
+    # The representation carries no credentials block / plaintext secret.
+    assert "password" not in params["representation"]
+
+
+# ---- role-assign: privilege-grant confirm + CSRF ---------------------------
+
+
+def test_keycloak_ui_role_assign_modal_names_privilege_grant_and_dangerous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The role-assign modal names it a privilege grant + surfaces dangerous."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    user_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    _patch_call_operation(
+        monkeypatch,
+        {
+            "keycloak.role_mapping.get": _ok(
+                "keycloak.role_mapping.get",
+                {"role_mappings": {"realmMappings": [{"name": "viewer"}], "clientMappings": {}}},
+            )
+        },
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        response = client.get(f"/ui/keycloak/users/{user_uuid}/roles/assign?target={_TARGET_NAME}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-keycloak-privilege-grant" in body
+    assert "Privilege grant" in body
+    assert "data-keycloak-safety>safety: dangerous" in body
+    # Current realm roles render for context.
+    assert "viewer" in body
+
+
+def test_keycloak_ui_role_assign_without_csrf_403_with_csrf_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST .../roles/assign`` without CSRF -> 403; with it -> dispatches.
+
+    The dispatch carries ``{"roles": [...], "id": <uuid>}`` with roles as a
+    string list, and the op id is ``keycloak.role_mapping.assign``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    user_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    received = _patch_call_operation(
+        monkeypatch,
+        {
+            "keycloak.role_mapping.assign": _awaiting_approval(
+                "keycloak.role_mapping.assign", "approval-rm-1"
+            )
+        },
+    )
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        # No CSRF token -> the double-submit middleware rejects with 403.
+        no_csrf = client.post(
+            f"/ui/keycloak/users/{user_uuid}/roles/assign",
+            data={"target": _TARGET_NAME, "roles": ["operator", "auditor"]},
+        )
+        assert no_csrf.status_code == 403, no_csrf.text
+        assert received == []
+        # With the matching CSRF pair -> dispatches.
+        ok = client.post(
+            f"/ui/keycloak/users/{user_uuid}/roles/assign",
+            data={"target": _TARGET_NAME, "roles": ["operator", "auditor"]},
+            **_csrf_kwargs(session_id),
+        )
+    assert ok.status_code == 200, ok.text
+    assert 'data-write-status="awaiting_approval"' in ok.text
+    assert len(received) == 1
+    args = received[0]
+    assert args["op_id"] == "keycloak.role_mapping.assign"
+    assert args["connector_id"] == KEYCLOAK_CONNECTOR_ID
+    assert args["params"] == {"roles": ["operator", "auditor"], "id": user_uuid}
+
+
+# ---- RBAC: non-admin write POST hard-403s ----------------------------------
+
+
+def test_keycloak_ui_user_create_non_admin_post_is_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forged create POST from a plain operator hard-403s (server-side gate).
+
+    The soft-hide hides the button; ``_resolve_admin_or_403`` is the
+    authority -- a non-admin POST never dispatches.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    received = _patch_call_operation(
+        monkeypatch,
+        {"keycloak.user.create": _awaiting_approval("keycloak.user.create", "id-x")},
+    )
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            "/ui/keycloak/users/create",
+            data={
+                "target": _TARGET_NAME,
+                "representation": '{"username": "operator-a"}',
+                "password_secret_ref": "rdc/keycloak/operator-a",
+            },
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 403, response.text
+    # The dispatch never happened.
+    assert received == []
+
+
+def test_keycloak_ui_reset_password_non_admin_post_is_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forged reset-password POST from a plain operator hard-403s."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    user_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    received = _patch_call_operation(monkeypatch, {})
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            f"/ui/keycloak/users/{user_uuid}/reset-password",
+            data={"target": _TARGET_NAME, "password_secret_ref": "rdc/keycloak/operator-a"},
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 403, response.text
+    assert received == []
+
+
+def test_keycloak_ui_role_assign_non_admin_post_is_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forged role-assign POST from a plain operator hard-403s."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    user_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    received = _patch_call_operation(monkeypatch, {})
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.post(
+            f"/ui/keycloak/users/{user_uuid}/roles/assign",
+            data={"target": _TARGET_NAME, "roles": ["operator"]},
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 403, response.text
+    assert received == []
+
+
+# ---- reset-password: Vault-ref, awaiting_approval --------------------------
+
+
+def test_keycloak_ui_reset_password_vault_ref_awaiting_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reset-password collects a Vault ref (no plaintext) + deep-links approvals."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A)
+    user_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    received = _patch_call_operation(
+        monkeypatch,
+        {
+            "keycloak.user.reset_password": _awaiting_approval(
+                "keycloak.user.reset_password", "approval-rp-1"
+            )
+        },
+    )
+    client, mock, session_id = _client_with_role_and_session(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        modal = client.get(f"/ui/keycloak/users/{user_uuid}/reset-password?target={_TARGET_NAME}")
+        assert modal.status_code == 200, modal.text
+        assert 'name="password_secret_ref"' in modal.text
+        assert 'type="password"' not in modal.text
+        response = client.post(
+            f"/ui/keycloak/users/{user_uuid}/reset-password",
+            data={"target": _TARGET_NAME, "password_secret_ref": "rdc/keycloak/operator-a"},
+            **_csrf_kwargs(session_id),
+        )
+    assert response.status_code == 200, response.text
+    assert 'data-write-status="awaiting_approval"' in response.text
+    assert len(received) == 1
+    params = received[0]["params"]
+    assert params["id"] == user_uuid
+    assert params["password_secret_ref"] == "rdc/keycloak/operator-a"
+    assert "password" not in params
+    assert "value" not in params
+
+
+# ---- route order: literal users/create before users/{uuid} -----------------
+
+
+def test_keycloak_ui_user_routes_literal_before_param() -> None:
+    """The literal ``users/create`` is registered before ``users/{user_uuid}``.
+
+    First-match-wins: ``create`` must never be captured as a ``{user_uuid}``.
+    """
+    router = build_keycloak_router()
+    paths = [getattr(route, "path", None) for route in router.routes]
+    assert "/ui/keycloak/users" in paths
+    assert "/ui/keycloak/users/create" in paths
+    create_idx = paths.index("/ui/keycloak/users/create")
+    # Every parametrised user route sits after the literal create route.
+    param_paths = [p for p in paths if p and p.startswith("/ui/keycloak/users/{user_uuid}")]
+    assert param_paths, "expected at least one /ui/keycloak/users/{user_uuid} route"
+    for p in param_paths:
+        assert create_idx < paths.index(p)

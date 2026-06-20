@@ -1,0 +1,143 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak role-assign confirm modal (Initiative #1943, Task #1960).
+
+  Swapped into ``#keycloak-user-modal-container`` by a user row's "Assign
+  roles" button. Dispatches ``keycloak.role_mapping.assign`` -- a PRIVILEGE
+  GRANT (``safety_level="dangerous"``, ``requires_approval=True``), keyed on
+  the user's internal UUID.
+
+  The confirm banner MUST name it a privilege grant and surface the
+  ``dangerous`` safety level -- granting a realm role widens the user's
+  authority, so the gate is the loudest of the three.
+
+  Current roles: the user's existing realm role mappings
+  (``keycloak.role_mapping.get``) are shown for context so the operator sees
+  what the user already holds before granting more. The grant is idempotent
+  server-side (re-assigning a held role is a no-op).
+
+  Roles input: one or more realm role NAMES (a string list). The form posts
+  repeated ``roles`` fields -> FastAPI collects them as ``list[str]`` -> the
+  dispatch params are ``{"roles": [...], "id": <uuid>}``.
+
+  CSRF: confirm POST carries the double-submit token on the FORM's own
+  ``hx-headers`` (not inherited to children); the GET minted + re-set the
+  matching ``meho_csrf`` cookie. ``hx-disabled-elt`` blocks a double-fire.
+
+  Context: ``connector_id``, ``user_uuid``, ``target``, ``current_roles``,
+  ``error``, ``csrf_token``.
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="keycloak-user-modal" class="modal modal-open" aria-label="Assign Keycloak realm roles" data-keycloak-modal="role-assign">
+  <div class="modal-box max-w-lg">
+    <div class="flex items-start justify-between gap-4">
+      <h3 class="text-lg font-semibold">Assign realm roles</h3>
+      <button type="button" class="btn btn-ghost btn-square btn-sm" aria-label="Close"
+              onclick="document.getElementById('keycloak-user-modal').close()">
+        {{ icon("x", class="size-4") }}
+      </button>
+    </div>
+
+    <p class="mt-1 text-xs opacity-60">
+      User <code class="font-mono" data-user-uuid>{{ user_uuid }}</code>
+    </p>
+
+    {#- PRIVILEGE-GRANT banner. The loudest of the three writes: granting a
+        realm role widens the user's authority. Names it a privilege grant +
+        surfaces the dangerous safety level explicitly. -#}
+    <div role="alert" class="alert alert-error mt-4 items-start" data-keycloak-confirm="dangerous">
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold" data-keycloak-privilege-grant>
+          Privilege grant &mdash; widens this user's authority
+        </h4>
+        <p class="text-xs">
+          Assigning a realm role is a privilege grant: it gives the user every
+          permission the role carries. It is approval-gated &mdash; confirming
+          parks a request for a reviewer rather than executing immediately.
+        </p>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="badge badge-error badge-sm" data-keycloak-safety>safety: dangerous</span>
+          <span class="badge badge-outline badge-sm" data-keycloak-requires-approval>requires approval</span>
+        </div>
+      </div>
+    </div>
+
+    {% if error %}
+      <div role="alert" class="alert alert-warning mt-3" data-keycloak-error>
+        <p class="text-xs">Could not read current roles: <code>{{ error }}</code></p>
+      </div>
+    {% else %}
+      <div class="mt-3" data-keycloak-current-roles>
+        <span class="text-xs opacity-60">Currently assigned realm roles:</span>
+        {% if current_roles %}
+          <div class="mt-1 flex flex-wrap gap-1">
+            {% for role in current_roles %}
+              <span class="badge badge-ghost badge-sm font-mono">{{ role }}</span>
+            {% endfor %}
+          </div>
+        {% else %}
+          <span class="text-xs opacity-50">none</span>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <form
+      class="mt-4 space-y-3"
+      x-data="{ roles: [''] }"
+      hx-post="/ui/keycloak/users/{{ user_uuid }}/roles/assign"
+      hx-target="#keycloak-role-assign-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[data-action='submit']"
+    >
+      <input type="hidden" name="target" value="{{ target }}" />
+
+      <div class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Realm role names to grant</span>
+        <template x-for="(role, idx) in roles" :key="idx">
+          <div class="mb-1 flex gap-1">
+            <input
+              type="text"
+              name="roles"
+              maxlength="512"
+              x-model="roles[idx]"
+              class="input input-bordered input-sm w-full font-mono"
+              placeholder="realm-role-name"
+              aria-label="Realm role name to grant"
+              autocomplete="off"
+            />
+            <button type="button" class="btn btn-ghost btn-sm btn-square"
+                    aria-label="Remove role"
+                    @click="roles.length > 1 && roles.splice(idx, 1)">
+              {{ icon("x", class="size-4") }}
+            </button>
+          </div>
+        </template>
+        <button type="button" class="btn btn-ghost btn-xs gap-1 self-start"
+                @click="roles.push('')" data-keycloak-add-role>
+          {{ icon("user", class="size-3.5") }}
+          Add another role
+        </button>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button type="button" class="btn btn-ghost btn-sm"
+                onclick="document.getElementById('keycloak-user-modal').close()">
+          Cancel
+        </button>
+        <button type="submit" data-action="submit" class="btn btn-sm btn-error gap-1">
+          {{ icon("shield-check", class="size-4") }}
+          Grant roles (request approval)
+        </button>
+      </div>
+    </form>
+
+    <div id="keycloak-role-assign-result" class="mt-4"></div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

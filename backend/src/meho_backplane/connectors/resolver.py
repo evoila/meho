@@ -66,24 +66,25 @@ When two or more connectors advertise support for a target's
    version" and shouldn't compete with a connector that names a
    specific version triple.
 
-1b. **Hand-rolled class beats auto-shim.** The spec-ingestion pipeline
-   auto-registers a ``GenericRestConnector`` shim (see
-   :mod:`meho_backplane.operations.ingest.connector_registration`) per
-   ingested ``(product, version, impl_id)`` so a freshly ingested spec
-   resolves before any per-product class exists. On first ingest under a
-   *novel* impl_id, that shim becomes a candidate for the whole
-   ``(product, version)`` label alongside a shipped hand-rolled class.
-   The shim's ``derive_supported_version_range(version)``
-   pins a *narrower* range around the exact ingested version than a
-   hand-rolled class's broad range, so without this rung the shim would
-   win the most-specific-version-match step before ``priority`` is ever
-   consulted — a stray probe ingest shadowing a shipped connector for
-   everyone on a shared registry (#1750). When any hand-rolled candidate
-   is present, every ``GenericRestConnector`` candidate is dropped: a
-   hand-rolled class always outranks an auto-shim for the same label,
-   independent of version-range span or ``priority``. When only shims
-   exist for a label (a genuine catalog-first staging connector not yet
-   replaced), this rung is a no-op and the shim still resolves.
+1b. **A more-dispatchable connector tier beats a less-dispatchable one.**
+   Candidates are classified by the tri-state
+   :func:`~meho_backplane.connectors.base.shim_kind` ladder (G0.28-T1
+   #1967): ``"none"`` (hand-coded) > ``"profiled"``
+   (:class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`) >
+   ``"bare"`` (the ``GenericRestConnector`` auto-shim the spec-ingestion
+   pipeline registers per ingested ``(product, version, impl_id)`` so a
+   freshly ingested spec resolves before any per-product class exists).
+   Only the highest tier present survives; every lower-tier candidate is
+   dropped *before* the specificity step. This is load-bearing because both
+   a bare shim's ``derive_supported_version_range(version)`` and a profiled
+   connector's bounded range pin a range *narrower* than a hand-coded
+   class's broad range, so without this rung the lower tier would win the
+   most-specific-version-match step before ``priority`` is ever consulted —
+   a stray probe ingest (or a vetted profile) shadowing a shipped connector
+   for everyone on a shared registry (#1750/#1798). When only one tier is
+   present (a single hand-coded class, or a genuine catalog-first staging
+   connector still only a bare shim), this rung is a no-op and that
+   candidate still resolves.
 
 2. **Most-specific-version-match wins.** A connector with
    ``supported_version_range=">=9.0,<10.0"`` (span = 1.0 minor versions)
@@ -133,7 +134,7 @@ import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 
 __all__ = [
@@ -373,38 +374,56 @@ def _demote_wildcards(candidates: list[_Candidate]) -> list[_Candidate]:
     return candidates
 
 
-def _demote_auto_shims(candidates: list[_Candidate]) -> list[_Candidate]:
-    """Step 1b — hand-rolled class beats auto-shim.
+def _demote_lower_dispatch_tiers(candidates: list[_Candidate]) -> list[_Candidate]:
+    """Step 1b — a more-dispatchable connector tier beats a less-dispatchable one.
 
-    The spec-ingestion pipeline auto-registers a ``GenericRestConnector``
-    shim per ingested ``(product, version, impl_id)`` so a freshly
-    ingested spec resolves before any per-product class exists; on first
-    ingest under a *novel* impl_id, that shim becomes a candidate for the
-    whole ``(product, version)`` label alongside a shipped hand-rolled
-    class. The shim's ``derive_supported_version_range(version)`` pins a
-    *narrower* range around the exact ingested version than a hand-rolled
-    class's broad range, so without this rung the shim would win the
-    most-specific-version-match step before the hand-rolled class's
-    ``priority`` is ever consulted — a stray probe ingest shadowing a
-    shipped connector for everyone on a shared registry (v0.15.0 dogfood
-    signal, #1750). Drop every shim candidate the moment any hand-rolled
-    candidate is present: a hand-rolled class always outranks an
-    auto-shim for the same label, independent of version-range span or
-    ``priority``. When only shims exist (a genuine catalog-first staging
-    connector not yet replaced), this is a no-op and the shim still wins.
+    G0.28-T1 (#1967) generalised the original "hand-rolled beats auto-shim"
+    rung to the tri-state dispatchability ladder
+    (:func:`~meho_backplane.connectors.base.shim_kind`):
 
-    The ``GenericRestConnector`` import is function-local on purpose: it
-    keeps the ``connectors/`` → ``operations/ingest/`` module edge off
-    import time (the registration module already imports from
-    ``connectors/``, so a module-level import here would close a cycle).
+        ``"none"`` (hand-coded) > ``"profiled"`` > ``"bare"`` (auto-shim)
+
+    Keep only the highest tier present and demote every lower-tier
+    candidate. The two demotions this enforces:
+
+    * **Hand-coded beats bare auto-shim** (the original #1750 fix). The
+      spec-ingestion pipeline auto-registers a ``GenericRestConnector`` shim
+      per ingested ``(product, version, impl_id)`` so a freshly ingested
+      spec resolves before any per-product class exists. The shim's
+      ``derive_supported_version_range(version)`` pins a *narrower* range
+      around the exact ingested version than a hand-coded class's broad
+      range, so without this rung the shim would win the
+      most-specific-version-match step before ``priority`` is ever consulted
+      — a stray probe ingest shadowing a shipped connector for everyone on a
+      shared registry (v0.15.0 dogfood signal, #1750).
+    * **Hand-coded beats profiled, profiled beats bare.** A
+      :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+      carries a bounded ``supported_version_range`` that can be narrower
+      than a hand-coded class's broad range, so the same specificity-shadow
+      footgun applies — a vetted profile must never out-resolve a bespoke
+      hand-coded connector for the same label. Demoting by tier *before*
+      the specificity step makes a hand-coded class always win, independent
+      of version-range span or ``priority``; a profiled connector still
+      beats a bare shim (it is dispatchable, the shim is not).
+
+    When only one tier is present (the common case: a single hand-coded
+    class, or a genuine catalog-first staging connector that is still only a
+    bare shim), this is a no-op and the candidate set is returned unchanged
+    so the lone candidate still resolves.
+
+    Reads the tier off the class attribute via :func:`shim_kind`, so no
+    ``operations/ingest/`` import is needed here at all — which also keeps
+    the ``connectors/`` → ``operations/ingest/`` module edge off import time.
     """
-    from meho_backplane.operations.ingest.connector_registration import (
-        GenericRestConnector,
-    )
-
-    hand_rolled = [c for c in candidates if not issubclass(c.cls, GenericRestConnector)]
-    if hand_rolled and len(hand_rolled) < len(candidates):
-        return hand_rolled
+    if any(shim_kind(c.cls) == "none" for c in candidates):
+        kept = [c for c in candidates if shim_kind(c.cls) == "none"]
+    elif any(shim_kind(c.cls) == "profiled" for c in candidates):
+        kept = [c for c in candidates if shim_kind(c.cls) == "profiled"]
+    else:
+        # Only bare shims remain — nothing to demote against.
+        return candidates
+    if kept and len(kept) < len(candidates):
+        return kept
     return candidates
 
 
@@ -452,8 +471,11 @@ def _run_tie_break_ladder(
       ended with two or more candidates still tied.
     * ``reason`` — the step that picked the winner
       (``"versioned_over_wildcard"`` / ``"hand_rolled_over_shim"`` /
-      ``"specificity"`` / ``"operator_preference"`` / ``"priority"``)
-      or ``"ambiguous"``.
+      ``"profiled_over_shim"`` / ``"specificity"`` /
+      ``"operator_preference"`` / ``"priority"``) or ``"ambiguous"``. The
+      dispatch-tier rung reports ``"hand_rolled_over_shim"`` when a
+      hand-coded class survived and ``"profiled_over_shim"`` when a profiled
+      connector beat a bare shim (G0.28-T1 #1967).
     * ``remaining`` — the post-ladder candidate list. When ``winner`` is
       ``None`` the caller raises ``AmbiguousConnectorResolution`` with
       these as the candidates the operator must disambiguate.
@@ -474,12 +496,21 @@ def _run_tie_break_ladder(
         if len(candidates) == 1:
             return candidates[0], "versioned_over_wildcard", candidates
 
-    # Step 1b — hand-rolled class beats auto-shim.
-    demoted = _demote_auto_shims(candidates)
+    # Step 1b — a more-dispatchable tier beats a less-dispatchable one
+    # (hand-coded > profiled > bare auto-shim; G0.28-T1 #1967).
+    demoted = _demote_lower_dispatch_tiers(candidates)
     if len(demoted) < len(candidates):
         candidates = demoted
+        # All survivors share the highest surviving tier; name the rung by
+        # it so the resolution log distinguishes a hand-coded win from a
+        # profiled-over-shim win.
+        reason = (
+            "hand_rolled_over_shim"
+            if shim_kind(candidates[0].cls) == "none"
+            else "profiled_over_shim"
+        )
         if len(candidates) == 1:
-            return candidates[0], "hand_rolled_over_shim", candidates
+            return candidates[0], reason, candidates
 
     # Step 2 — most-specific-version-match.
     best_score = min(c.specificity_score for c in candidates)

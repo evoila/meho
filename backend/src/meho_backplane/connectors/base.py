@@ -11,7 +11,7 @@ in T5 once G0.3 lands the Target model.
 
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import (
@@ -22,11 +22,33 @@ from meho_backplane.connectors.schemas import (
     TopologyHints,
 )
 
-__all__ = ["Connector"]
+__all__ = ["Connector", "ShimKind", "shim_kind"]
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
 type Target = Any
+
+#: G0.28-T1 (#1967) — tri-state dispatchability classification of a
+#: connector class, replacing the binary ``issubclass(GenericRestConnector)``
+#: predicate that the resolver, dispatcher, ingest-registration, and
+#: delete-connector sites used as a "this is a dead shim" discriminator.
+#:
+#: * ``"none"`` — a hand-coded connector (the default for every
+#:   :class:`Connector` subclass): a bespoke per-product class. Fully
+#:   dispatchable; the resolver's most-dispatchable tier.
+#: * ``"profiled"`` — a
+#:   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`:
+#:   an ingested REST connector made dispatchable by a reviewed declarative
+#:   ``ExecutionProfile`` (G0.28 Initiative #1965). Dispatchable, but loses
+#:   the resolver tie-break to a more-specific hand-coded class so a vetted
+#:   profile cannot shadow a bespoke connector (the #1750/#1798 footgun).
+#: * ``"bare"`` — a
+#:   :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+#:   auto-shim: scaffolded on first ingest so a spec resolves before any
+#:   per-product class exists, but non-dispatchable (its ``auth_headers`` /
+#:   ``execute`` raise :class:`NotImplementedError`). The resolver demotes
+#:   it whenever any dispatchable candidate is present.
+ShimKind = Literal["bare", "profiled", "none"]
 
 
 class Connector(ABC):
@@ -65,6 +87,14 @@ class Connector(ABC):
     impl_id: str = ""
     supported_version_range: str | None = None
     priority: int = 0
+
+    # G0.28-T1 (#1967) — tri-state dispatchability classification. The
+    # default ``"none"`` marks every connector a hand-coded class unless it
+    # explicitly opts into a shim tier: ``GenericRestConnector`` sets
+    # ``"bare"`` and ``ProfiledRestConnector`` sets ``"profiled"``. Read via
+    # the module-level :func:`shim_kind` helper, never ``issubclass``. See
+    # :data:`ShimKind`.
+    _shim_kind: ShimKind = "none"
 
     @abstractmethod
     async def fingerprint(
@@ -172,3 +202,22 @@ class Connector(ABC):
         create`` to register them.
         """
         return []
+
+
+def shim_kind(connector: type[Connector] | Connector) -> ShimKind:
+    """Return the tri-state dispatchability classification of *connector*.
+
+    Reads the :attr:`Connector._shim_kind` class attribute off either a
+    connector **class** (the resolver / ingest-registration / delete sites,
+    which classify ``type[Connector]`` candidates) or a connector
+    **instance** (the dispatcher, which classifies the live
+    ``connector_instance`` it is about to call). The attribute is inherited,
+    so the dynamically-synthesised ``AutoShim_*`` subclasses of
+    :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+    report ``"bare"`` without setting it themselves.
+
+    This is the single classification seam the G0.28 tri-state predicate
+    (#1967) routes every former ``issubclass(GenericRestConnector)`` site
+    through; see :data:`ShimKind` for the tier semantics.
+    """
+    return connector._shim_kind

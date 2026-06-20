@@ -1,0 +1,76 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit-query result list partial (Initiative #1841 G10.15, Task #1944).
+
+  The HTMX swap target for the filter form (full block) and -- via the
+  extracted pager -- the forward-cursor "Load more" append. Also included
+  directly into ``index.html`` for the first (server-rendered) page so both
+  paths share identical markup.
+
+  Pager wiring (forward cursor, no back button):
+    * The substrate cursor is forward-only (``AuditQueryResult.next_cursor``):
+      "Load more" fetches ``/ui/audit/results?...&cursor=<next>&partial=rows``,
+      which returns ONLY the bare ``<li>`` rows (appended via
+      ``hx-swap="beforeend"`` so paging never drops the rows already shown)
+      plus an out-of-band re-render of the pager so its ``cursor`` advances to
+      the next page. Paging "back" is re-running the filter from page 1 -- no
+      back button is rendered.
+    * The "Load more" button ``hx-include``s the filter form so the next page
+      re-applies the active filters alongside the new cursor.
+
+  Error / empty states never 500: a bad ``since`` / ``until`` shorthand
+  renders ``duration_error`` inline; an unsupported filter renders
+  ``filter_error`` inline; a tampered cursor was already reset to page 1 by
+  the route. ``params`` / raw payload are not projected -- the row detail
+  drawer is T2.
+
+  Context variables:
+    rows            -- list[dict]: projected rows (id / ts / principal_sub /
+                       principal_name / target_name / op_id / op_class /
+                       badge_class / result_status / work_ref /
+                       agent_session_id / replay_enabled)
+    next_cursor     -- str | None: forward continuation token for "Load more"
+    has_more        -- bool: whether a further page exists
+    duration_error  -- str | None: inline since/until parse error
+    filter_error    -- str | None: inline unsupported-filter error
+    page_size       -- int: rows requested per page
+-#}
+<div id="audit-results-inner" class="space-y-4">
+  {% if duration_error %}
+    <div role="alert" class="alert alert-warning">
+      <span>
+        Could not parse the time window: <span class="font-mono">{{ duration_error }}</span>.
+        Use a duration like <span class="font-mono">24h</span> /
+        <span class="font-mono">7d</span> or an ISO date.
+      </span>
+    </div>
+  {% elif filter_error %}
+    <div role="alert" class="alert alert-warning">
+      <span>{{ filter_error }}</span>
+    </div>
+  {% elif rows %}
+    <ul
+      id="audit-results-rows"
+      class="divide-base-content/8 divide-y rounded-box border border-base-300 bg-base-100"
+      role="list"
+      aria-label="Audit rows"
+    >
+      {% include "audit/_results_rows.html" %}
+    </ul>
+
+    {# Forward-cursor pager (rendered inline here; re-rendered OOB on each
+       "Load more" append so the cursor advances). #}
+    {% include "audit/_results_pager.html" %}
+  {% else %}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body items-center py-10 text-center">
+        <p class="text-base opacity-60">No audit rows match these filters</p>
+        <p class="text-sm opacity-40">
+          Widen the time window or clear a filter to see more history.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

@@ -1,0 +1,148 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Account page (G10.11-T1 #1892). Extends ``base.html`` so the chrome
+  matches the rest of the console. Two regions:
+
+    * Identity card -- operator_sub, tenant (reusing the chassis
+      ``session_tenant`` shape), the live role (read from the
+      freshly-verified token by the route, never a value cached on the
+      session row), and the current session's expiry (absolute + "in
+      X").
+    * Active sessions card -- the per-operator session list with a
+      "This device" badge on the current row, a per-row revoke (the
+      current row's revoke carries an explicit self-logout warning), and
+      a "Revoke all other sessions" action. The list body is the
+      ``account/_sessions.html`` fragment, swapped in place after a
+      revoke via HTMX.
+
+  Out of scope (Keycloak-owned / future): role editing, tenant
+  switching (a slot is left below the tenant row), password / MFA.
+-#}
+{% extends "base.html" %}
+{% from "_icons.html" import icon %}
+{# The expiry-relative renderer lives with the session fragment so the
+   page + fragment share one implementation. #}
+{% from "account/_sessions.html" import expires_in with context %}
+
+{% block page_title %}Account &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="mx-auto max-w-3xl space-y-6"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="space-y-1">
+    <h1 class="flex items-center gap-2 text-xl font-semibold">
+      {{ icon("user", class="size-5 opacity-70") }}
+      <span>Account</span>
+    </h1>
+    <p class="text-sm opacity-70">
+      Your signed-in identity and active sessions. Role is owned by
+      Keycloak and shown read-only; revoke a session to sign that device out.
+    </p>
+  </header>
+
+  {# ---------- Identity card ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body space-y-3">
+      <h2 class="card-title text-base">Identity</h2>
+      <dl class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <dt class="meho-overline mb-1">Operator</dt>
+          <dd
+            class="truncate font-mono text-sm"
+            data-field="operator-sub"
+            title="{{ operator_sub }}"
+          >{{ operator_sub }}</dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Role</dt>
+          <dd>
+            <span class="badge badge-ghost font-mono text-xs" data-field="role">{{ role_value }}</span>
+          </dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Tenant</dt>
+          <dd class="truncate font-mono text-sm" data-field="tenant">
+            {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}&mdash;{% endif %}
+          </dd>
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Session expires</dt>
+          <dd class="text-sm" data-field="expires-at">
+            {% if expires_at is not none %}
+              <span title="{{ expires_at.isoformat() }}">
+                {{ expires_at.strftime("%Y-%m-%d %H:%M UTC") }}
+                <span class="opacity-60">({{ expires_in(expires_at) }})</span>
+              </span>
+            {% else %}
+              <span class="text-warning">expired</span>
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
+      {#- Future tenant selector slot (T4 #865 is not yet filed for the
+          *selector* surface; ship nothing). A cross-tenant switch would
+          drop in here as a `<select>` posting to its own route. -#}
+    </div>
+  </div>
+
+  {# ---------- Active sessions card ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body space-y-3">
+      <div class="flex items-center justify-between gap-2">
+        <h2 class="card-title text-base">Active sessions</h2>
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="open-revoke-others"
+          aria-label="Revoke all other sessions"
+          onclick="document.getElementById('account-revoke-others-modal').showModal()"
+        >
+          {{ icon("ban", class="size-3.5 opacity-70") }}
+          <span>Revoke others</span>
+        </button>
+      </div>
+      <p class="text-xs opacity-60">
+        These devices are signed in to your account. Revoking a session
+        signs that device out on its next request.
+      </p>
+
+      {# Session list -- swapped in place by the revoke actions. #}
+      {% include "account/_sessions.html" %}
+    </div>
+  </div>
+
+  {# ---------- Revoke-others confirm modal ---------- #}
+  <dialog id="account-revoke-others-modal" class="modal">
+    <div class="modal-box">
+      <h3 class="text-lg font-semibold">Revoke all other sessions?</h3>
+      <p class="py-2 text-sm opacity-80">
+        Every other device signed in to your account will be signed out on
+        its next request. The device you are using now stays signed in.
+      </p>
+      <div class="modal-action">
+        <form method="dialog">
+          <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+        </form>
+        <button
+          type="button"
+          class="btn btn-sm btn-error"
+          data-action="confirm-revoke-others"
+          hx-post="/ui/account/sessions/revoke-others"
+          hx-target="#account-sessions"
+          hx-swap="outerHTML"
+          onclick="document.getElementById('account-revoke-others-modal').close()"
+        >
+          Revoke others
+        </button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>close</button>
+    </form>
+  </dialog>
+</section>
+{% endblock %}

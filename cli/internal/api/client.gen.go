@@ -1569,6 +1569,14 @@ type BodyUiAgentsToggleUiAgentsNameTogglePost struct {
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
+// BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost defines model for Body_ui_broadcast_overrides_create_ui_broadcast_overrides_post.
+type BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost struct {
+	Detail      string  `json:"detail"`
+	OpIdPattern string  `json:"op_id_pattern"`
+	ScopeField  *string `json:"scope_field,omitempty"`
+	ScopeValue  *string `json:"scope_value,omitempty"`
+}
+
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 	Aliases   *string `json:"aliases"`
@@ -6851,6 +6859,11 @@ type UiBroadcastFeedFragmentUiBroadcastFeedGetParams struct {
 	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
 }
 
+// UiBroadcastOverridesUiBroadcastOverridesGetParams defines parameters for UiBroadcastOverridesUiBroadcastOverridesGet.
+type UiBroadcastOverridesUiBroadcastOverridesGetParams struct {
+	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+}
+
 // UiBroadcastStreamUiBroadcastStreamGetParams defines parameters for UiBroadcastStreamUiBroadcastStreamGet.
 type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
@@ -7181,6 +7194,9 @@ type ApprovalApproveUiApprovalsRequestIdApprovePostFormdataRequestBody = BodyApp
 
 // ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody defines body for ApprovalRejectUiApprovalsRequestIdRejectPost for application/x-www-form-urlencoded ContentType.
 type ApprovalRejectUiApprovalsRequestIdRejectPostFormdataRequestBody = BodyApprovalRejectUiApprovalsRequestIdRejectPost
+
+// UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody defines body for UiBroadcastOverridesCreateUiBroadcastOverridesPost for application/x-www-form-urlencoded ContentType.
+type UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody = BodyUiBroadcastOverridesCreateUiBroadcastOverridesPost
 
 // UiConnectorsListUiConnectorsGetJSONRequestBody defines body for UiConnectorsListUiConnectorsGet for application/json ContentType.
 type UiConnectorsListUiConnectorsGetJSONRequestBody = UISessionContext
@@ -8694,6 +8710,15 @@ type ClientInterface interface {
 	// UiDashboardUiGet request
 	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAccountUiAccountGet request
+	UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost request
+	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost request
+	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAgentsListUiAgentsGetWithBody request with any body
 	UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8887,6 +8912,17 @@ type ClientInterface interface {
 
 	// UiBroadcastHistoryUiBroadcastHistoryGet request
 	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastOverridesUiBroadcastOverridesGet request
+	UiBroadcastOverridesUiBroadcastOverridesGet(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBody request with any body
+	UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiBroadcastOverridesCreateUiBroadcastOverridesPostWithFormdataBody(ctx context.Context, body UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete request
+	UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11286,6 +11322,42 @@ func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEdit
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountUiAccountGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(c.Server, sessionId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAgentsListUiAgentsGetRequestWithBody(c.Server, contentType, body)
 	if err != nil {
@@ -12164,6 +12236,54 @@ func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, 
 
 func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastOverridesUiBroadcastOverridesGet(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastOverridesUiBroadcastOverridesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastOverridesCreateUiBroadcastOverridesPostWithFormdataBody(ctx context.Context, body UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteRequest(c.Server, overrideId)
 	if err != nil {
 		return nil, err
 	}
@@ -22330,6 +22450,94 @@ func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiAccountUiAccountGetRequest generates requests for UiAccountUiAccountGet
+func NewUiAccountUiAccountGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest generates requests for UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost
+func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/sessions/revoke-others")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest generates requests for UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost
+func NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(server string, sessionId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/sessions/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAgentsListUiAgentsGetRequest calls the generic UiAgentsListUiAgentsGet builder with application/json body
 func NewUiAgentsListUiAgentsGetRequest(server string, body UiAgentsListUiAgentsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -24952,6 +25160,129 @@ func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Req
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastOverridesUiBroadcastOverridesGetRequest generates requests for UiBroadcastOverridesUiBroadcastOverridesGet
+func NewUiBroadcastOverridesUiBroadcastOverridesGetRequest(server string, params *UiBroadcastOverridesUiBroadcastOverridesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithFormdataBody calls the generic UiBroadcastOverridesCreateUiBroadcastOverridesPost builder with application/x-www-form-urlencoded body
+func NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithFormdataBody(server string, body UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithBody generates requests for UiBroadcastOverridesCreateUiBroadcastOverridesPost with any type of body
+func NewUiBroadcastOverridesCreateUiBroadcastOverridesPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteRequest generates requests for UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete
+func NewUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteRequest(server string, overrideId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "override_id", runtime.ParamLocationPath, overrideId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/overrides/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -30571,6 +30902,15 @@ type ClientWithResponsesInterface interface {
 	// UiDashboardUiGetWithResponse request
 	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
 
+	// UiAccountUiAccountGetWithResponse request
+	UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error)
+
+	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request
+	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error)
+
+	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request
+	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error)
+
 	// UiAgentsListUiAgentsGetWithBodyWithResponse request with any body
 	UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error)
 
@@ -30764,6 +31104,17 @@ type ClientWithResponsesInterface interface {
 
 	// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request
 	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
+
+	// UiBroadcastOverridesUiBroadcastOverridesGetWithResponse request
+	UiBroadcastOverridesUiBroadcastOverridesGetWithResponse(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error)
+
+	// UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBodyWithResponse request with any body
+	UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse, error)
+
+	UiBroadcastOverridesCreateUiBroadcastOverridesPostWithFormdataBodyWithResponse(ctx context.Context, body UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse, error)
+
+	// UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteWithResponse request
+	UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
@@ -34016,6 +34367,70 @@ func (r UiDashboardUiGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiAccountUiAccountGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountUiAccountGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountUiAccountGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAgentsListUiAgentsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -35019,6 +35434,72 @@ func (r UiBroadcastHistoryUiBroadcastHistoryGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiBroadcastHistoryUiBroadcastHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastOverridesUiBroadcastOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastOverridesUiBroadcastOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastOverridesUiBroadcastOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38770,6 +39251,33 @@ func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, 
 	return ParseUiDashboardUiGetResponse(rsp)
 }
 
+// UiAccountUiAccountGetWithResponse request returning *UiAccountUiAccountGetResponse
+func (c *ClientWithResponses) UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error) {
+	rsp, err := c.UiAccountUiAccountGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountUiAccountGetResponse(rsp)
+}
+
+// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request returning *UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse
+func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+	rsp, err := c.UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp)
+}
+
+// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request returning *UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse
+func (c *ClientWithResponses) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
+	rsp, err := c.UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx, sessionId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp)
+}
+
 // UiAgentsListUiAgentsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsListUiAgentsGetResponse
 func (c *ClientWithResponses) UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error) {
 	rsp, err := c.UiAgentsListUiAgentsGetWithBody(ctx, contentType, body, reqEditors...)
@@ -39406,6 +39914,41 @@ func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithRespons
 		return nil, err
 	}
 	return ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp)
+}
+
+// UiBroadcastOverridesUiBroadcastOverridesGetWithResponse request returning *UiBroadcastOverridesUiBroadcastOverridesGetResponse
+func (c *ClientWithResponses) UiBroadcastOverridesUiBroadcastOverridesGetWithResponse(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error) {
+	rsp, err := c.UiBroadcastOverridesUiBroadcastOverridesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastOverridesUiBroadcastOverridesGetResponse(rsp)
+}
+
+// UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBodyWithResponse request with arbitrary body returning *UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse
+func (c *ClientWithResponses) UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse, error) {
+	rsp, err := c.UiBroadcastOverridesCreateUiBroadcastOverridesPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastOverridesCreateUiBroadcastOverridesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiBroadcastOverridesCreateUiBroadcastOverridesPostWithFormdataBodyWithResponse(ctx context.Context, body UiBroadcastOverridesCreateUiBroadcastOverridesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse, error) {
+	rsp, err := c.UiBroadcastOverridesCreateUiBroadcastOverridesPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastOverridesCreateUiBroadcastOverridesPostResponse(rsp)
+}
+
+// UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteWithResponse request returning *UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse
+func (c *ClientWithResponses) UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse, error) {
+	rsp, err := c.UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete(ctx, overrideId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse(rsp)
 }
 
 // UiBroadcastStreamUiBroadcastStreamGetWithResponse request returning *UiBroadcastStreamUiBroadcastStreamGetResponse
@@ -44833,6 +45376,64 @@ func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetRespons
 	return response, nil
 }
 
+// ParseUiAccountUiAccountGetResponse parses an HTTP response from a UiAccountUiAccountGetWithResponse call
+func ParseUiAccountUiAccountGetResponse(rsp *http.Response) (*UiAccountUiAccountGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountUiAccountGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse parses an HTTP response from a UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse call
+func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *http.Response) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse parses an HTTP response from a UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse call
+func ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp *http.Response) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUiAgentsListUiAgentsGetResponse parses an HTTP response from a UiAgentsListUiAgentsGetWithResponse call
 func ParseUiAgentsListUiAgentsGetResponse(rsp *http.Response) (*UiAgentsListUiAgentsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -45991,6 +46592,84 @@ func ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp *http.Response) (*
 	response := &UiBroadcastHistoryUiBroadcastHistoryGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastOverridesUiBroadcastOverridesGetResponse parses an HTTP response from a UiBroadcastOverridesUiBroadcastOverridesGetWithResponse call
+func ParseUiBroadcastOverridesUiBroadcastOverridesGetResponse(rsp *http.Response) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastOverridesUiBroadcastOverridesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastOverridesCreateUiBroadcastOverridesPostResponse parses an HTTP response from a UiBroadcastOverridesCreateUiBroadcastOverridesPostWithResponse call
+func ParseUiBroadcastOverridesCreateUiBroadcastOverridesPostResponse(rsp *http.Response) (*UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastOverridesCreateUiBroadcastOverridesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse parses an HTTP response from a UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteWithResponse call
+func ParseUiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse(rsp *http.Response) (*UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

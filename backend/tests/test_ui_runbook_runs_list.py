@@ -560,6 +560,33 @@ def test_runs_invalid_state_returns_422() -> None:
     assert response.status_code == 422
 
 
+def test_runs_empty_state_filter_is_200_unfiltered() -> None:
+    """An empty ``?status=`` (the "All" option) returns the unfiltered runs at 200.
+
+    The run-state ``<select>``'s "All" option carries ``value=""``; picking it
+    (or changing the sibling assignee filter, which ``hx-include``s the empty
+    ``status=``) submits an empty value. Without the empty-string coercion that
+    fails the ``_RunStateFilter`` literal and 422s, so HTMX never swaps. The
+    unfiltered run must come back at 200.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+    run = _seed_run(
+        tenant_id=_TENANT_A,
+        slug="drain-node",
+        version=version,
+        assigned_to=_OPERATOR_SUB,
+        state="in_progress",
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/runs", params={"status": ""})
+
+    assert response.status_code == 200, response.text
+    assert str(run) in response.text
+
+
 def test_runs_operator_forged_assignee_filter_ignored() -> None:
     """An OPERATOR passing ``?assignee=<other>`` still sees only their own runs.
 

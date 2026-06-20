@@ -585,6 +585,47 @@ def test_drawer_credential_read_renders_lock_and_placeholder() -> None:
     assert "secret/prod/db" not in body
 
 
+def test_drawer_renders_suppress_cross_link_for_sensitive_op() -> None:
+    """A sensitive op's drawer carries the "suppress this op" cross-link (#1891).
+
+    The cross-link is gated on the sensitive op_class SET
+    (credential_read / credential_mint / audit_query), not the badge
+    colour. It hx-gets the Overrides tab fragment with this op_id
+    pre-filled into the create form's op_id_pattern, and dispatches the
+    tab switch. ``audit_query`` is ``badge-info`` (not warning), so it is
+    the load-bearing case proving the gate keys on the set.
+    """
+    audit_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        payload={"op_id": "audit.query", "params": {"filter": "x"}},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/broadcast/event/{audit_id}")
+    body = response.text
+    assert "Suppress this op" in body
+    # Pre-fills the op_id into the overrides create form via the fragment.
+    assert "/ui/broadcast/overrides?op_id=audit.query" in body
+    assert 'hx-target="#broadcast-overrides"' in body
+    assert "broadcast-show-overrides" in body
+
+
+def test_drawer_omits_suppress_cross_link_for_non_sensitive_op() -> None:
+    """A non-sensitive op's drawer has no "suppress this op" cross-link (#1891)."""
+    audit_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        payload={"op_id": "vsphere.vm.list", "params": {"datacenter": "dc-1"}},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/broadcast/event/{audit_id}")
+    body = response.text
+    assert "Suppress this op" not in body
+    assert "/ui/broadcast/overrides?op_id=" not in body
+
+
 def test_drawer_honours_effective_aggregate_verdict_for_audit_query() -> None:
     """An audit_query op (aggregate effective) withholds the payload."""
     audit_id = _seed_audit_row(

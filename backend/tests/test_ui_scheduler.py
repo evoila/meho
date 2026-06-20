@@ -436,6 +436,42 @@ def test_list_invalid_kind_filter_is_422() -> None:
     assert response.status_code == 422, response.text
 
 
+def test_list_invalid_status_filter_is_422() -> None:
+    """An out-of-enum ``status`` query value is rejected at the boundary."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _ = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    try:
+        response = client.get("/ui/scheduler?status=bogus")
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+
+
+def test_list_empty_kind_and_status_filters_are_200_unfiltered() -> None:
+    """Empty ``?kind=&status=`` (both "All" options) return the unfiltered list at 200.
+
+    Both filter ``<select>``s carry an "All" ``<option value="">``; selecting
+    either submits an empty value for that param, and ``hx-include`` resubmits
+    the sibling's empty value too. Without the empty-string coercion those empty
+    values fail the ``KindFilterValue`` / ``StatusFilterValue`` enum validation
+    and 422, so HTMX never swaps. The unfiltered row must come back at 200.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    tid = _seed_trigger(tenant_id=_TENANT_A)
+    client, mock, _ = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    try:
+        response = client.get("/ui/scheduler?status=&kind=")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert str(tid) in response.text
+
+
 def test_list_is_tenant_isolated() -> None:
     """A trigger in tenant B never appears in tenant A's list."""
     _seed_tenant(_TENANT_A, "tenant-a")

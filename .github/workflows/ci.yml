@@ -411,10 +411,16 @@ jobs:
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
-    #   * PUSH-TO-MAIN ONLY (`github.event_name == 'push'`) — PRs stay
-    #     fast/no-cov; SonarCloud decoration updates "one merge late" (the
+    #   * PUSH-TO-MAIN ONLY by default (`github.event_name == 'push'`) — PRs
+    #     stay fast/no-cov; SonarCloud decoration updates "one merge late" (the
     #     pre-#771 behaviour, the accepted trade in #1987). Not run on PRs
-    #     (no per-PR suite double-run) and not in the merge queue.
+    #     (no per-PR suite double-run) and not in the merge queue. The ONE
+    #     exception is an opt-in `ci-coverage-validate` PR label: a PR carrying
+    #     that label also runs this job, so a change to the coverage path
+    #     itself can be proven green + artifact-producing on the real
+    #     `meho-runners-ci-heavy` pod (where the OOM reproduces) BEFORE it
+    #     merges — without paying the double-suite cost on every other PR.
+    #     Remove the label once validated; routine PRs never carry it.
     #   * NON-REQUIRED + whole-job continue-on-error (#1987 AC5) — it is NOT
     #     in branch protection's required contexts, AND continue-on-error
     #     means a coverage OOM/timeout reports the JOB as success, so it
@@ -445,7 +451,15 @@ jobs:
     # If the suite grows enough to push -n 1 over the limit, the durable fix is
     # a larger-memory runner pool (infra, out of band) — this job is
     # non-blocking so an OOM merely skips one coverage upload until then.
-    if: github.event_name == 'push'
+    # Runs on push to main, OR on a PR explicitly opted in via the
+    # `ci-coverage-validate` label (the on-runner validation escape hatch
+    # described above). The fork-PR guard still applies on the PR path so
+    # fork code never executes on the self-hosted pool.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
     # ~36-min serial wall + headroom. This job is push-only and non-blocking,
     # so a long wall is acceptable (it never gates a PR). The cap is a hang

@@ -1,0 +1,36 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit session-replay FORBIDDEN fragment (Initiative #1841 G10.15, Task #1946).
+
+  Returned with HTTP 403 by ``GET /ui/audit/sessions/{session_id}/replay``
+  when the session's operator is not a ``tenant_admin`` (a ``read_only`` /
+  ``operator`` role, or a failed/soft role lift). Replaying an arbitrary
+  session reconstructs another principal's full session trace -- a privileged
+  forensic act -- so this is the one audit surface that is admin-only on read,
+  matching the REST replay route's ``tenant_admin`` gate and the MCP
+  ``meho.audit.replay`` posture.
+
+  Context variables:
+    session_id -- str: the session id that was requested (echoed back)
+-#}
+<section
+  id="audit-replay"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Session replay forbidden"
+>
+  <div class="card-body items-center space-y-2 py-10 text-center">
+    <h2 class="card-title text-base">Session replay is a tenant-admin forensic action</h2>
+    <p class="text-sm opacity-70">
+      Replaying agent session
+      <code class="font-mono break-all">{{ session_id }}</code>
+      reconstructs another principal's full session trace, so it requires the
+      <span class="font-mono">tenant_admin</span> role. Your session does not
+      hold it.
+    </p>
+    <a class="btn btn-sm btn-ghost" href="/ui/audit" aria-label="Back to audit query">
+      Back to audit query
+    </a>
+  </div>
+</section>

@@ -1,0 +1,86 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit session-replay tree page (Initiative #1841 G10.15, Task #1946).
+
+  The TENANT_ADMIN-gated forensic surface that reconstructs one agent
+  session's chronological parent/child lineage as a tree. Reached from the
+  T1/T2 "replay" pivot (enabled only for an admin lift). Three render paths,
+  one route:
+
+    * over-cap -- the session exceeds the backend ``_REPLAY_ROW_CAP``; the
+      count-first guard refuses the tree and ``_replay_over_cap.html`` offers
+      the T1 flat-query pivot instead (mirrors the REST 413).
+    * tree -- the ``root`` forest renders via ``_replay_tree.html``; each
+      node opens the T2 detail drawer on click (so the aggregate-only 🔒
+      gate applies per-node).
+    * empty -- an unknown / foreign / empty session renders the empty state
+      (``root=[]``), NEVER a 404 (the non-leakage posture).
+
+  CSRF: the page mints + sets the ``meho_csrf`` cookie (chassis
+  double-submit convention) so the node "details" ``hx-get``s pass the
+  double-submit check, even though every route here is GET.
+
+  Context (built by ``audit/routes.py::_build_replay_context`` + the handler):
+    session_id      -- str: the replayed session id
+    row_count       -- int: anchor-row count
+    over_cap        -- bool: whether the count exceeded the cap
+    replay_row_cap  -- int: the backend cap (single-sourced)
+    root            -- list[dict]: the projected node forest (empty when none)
+    flat_query_href -- str: the T1 flat-query pivot for this session
+    csrf_token      -- str: the minted double-submit token
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Session replay &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Session replay</h1>
+      <p class="text-sm opacity-70">
+        Chronological parent/child lineage of agent session
+        <code class="font-mono break-all">{{ session_id }}</code> &mdash; a
+        <span class="font-mono">tenant_admin</span> forensic view of one
+        session's full trace.
+      </p>
+    </div>
+    <a
+      class="btn btn-sm btn-ghost gap-1"
+      href="{{ flat_query_href }}"
+      aria-label="Open the flat audit query filtered to this session"
+    >
+      {{ icon("search", class="size-3.5") }} View as flat query
+    </a>
+  </header>
+
+  <div class="grid gap-5 lg:grid-cols-[1fr_22rem]">
+    <div id="audit-replay-results">
+      {% if over_cap %}
+        {% include "audit/_replay_over_cap.html" %}
+      {% elif root %}
+        {% include "audit/_replay_tree.html" %}
+      {% else %}
+        <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+          <div class="card-body items-center py-10 text-center">
+            <p class="text-base opacity-60">No rows recorded for this session</p>
+            <p class="text-sm opacity-40">
+              The session id matches no audit rows in this tenant &mdash; it may
+              have aged out of retention, or never existed (the boundary is
+              opaque).
+            </p>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
+    {#- Drawer slot. Empty until a tree node's "details" is clicked, then the
+        T2 ``/ui/audit/show/{id}`` fragment swaps in here. -#}
+    <div id="audit-drawer" aria-hidden="true"></div>
+  </div>
+</section>
+{% endblock %}

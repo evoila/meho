@@ -15169,7 +15169,7 @@
           "ui-audit"
         ],
         "summary": "Ui Audit Results",
-        "description": "``GET /ui/audit/results`` -- the filter-submit + pager fragment.\n\n``partial=rows`` (the \"Load more\" append fetch) renders ONLY the\npage's rows plus an out-of-band pager re-render; any other value\nrenders the full ``audit/_results.html`` console block. A foreign\n``partial`` value is rejected (422) rather than silently coerced.",
+        "description": "``GET /ui/audit/results`` -- the filter-submit + pager fragment.\n\n``partial=rows`` (the \"Load more\" append fetch) renders ONLY the\npage's rows plus an out-of-band pager re-render; any other value\nrenders the full ``audit/_results.html`` console block. A foreign\n``partial`` value is rejected (422) rather than silently coerced.\n\n``?agent_session_id=<id>`` is the T3 replay over-cap pivot's flat\nfilter: it has no form field but threads to ``query_audit`` so the\nfragment (and the \"Load more\" continuation) stays scoped to that one\nsession rather than the unfiltered tenant-wide list.",
         "operationId": "ui_audit_results_ui_audit_results_get",
         "parameters": [
           {
@@ -15271,6 +15271,17 @@
             }
           },
           {
+            "name": "agent_session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Agent Session Id"
+            }
+          },
+          {
             "name": "partial",
             "in": "query",
             "required": false,
@@ -15320,6 +15331,56 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/audit/sessions/{session_id}/replay": {
+      "get": {
+        "tags": [
+          "ui-audit"
+        ],
+        "summary": "Ui Audit Session Replay",
+        "description": "``GET /ui/audit/sessions/{session_id}/replay`` -- the session replay tree.\n\n**TENANT_ADMIN-gated.** Replaying an *arbitrary* session reconstructs\nanother principal's full session trace -- a privileged forensic act,\nmatching the REST replay route's ``_require_tenant_admin`` gate\n(``api/v1/audit.py``) and the MCP ``meho.audit.replay`` posture. The role\nis lifted via the fail-soft :func:`_resolve_role`; a ``read_only`` /\n``operator`` -- or any failed lift -- renders the 403 forbidden fragment\n(\"session replay is a tenant-admin forensic action\"), never the tree.\n\nFor an admin the tree is built in-process via\n:func:`_build_replay_context` (the SAME count-first 413 guard +\n:func:`~meho_backplane.audit_query.replay_session` the REST route runs).\nAn over-cap session renders the over-cap notice + the T1 flat-query pivot\ninstead of a tree; an unknown / foreign / empty session renders the empty\nstate (``root=[]``), never a 404. Sets + echoes the CSRF cookie per the\nchassis double-submit convention.",
+        "operationId": "ui_audit_session_replay_ui_audit_sessions__session_id__replay_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session replay is a tenant-admin forensic action; a read_only / operator session (or a failed role lift) gets the 403 forbidden fragment, not the tree.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -15383,7 +15444,7 @@
           "ui-audit"
         ],
         "summary": "Ui Audit Page",
-        "description": "``GET /ui/audit`` -- the full page: filter form + first result page.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the form sets\n``hx-push-url`` on the fragment route, mirroring broadcast /\noperations). Sets + echoes the CSRF cookie so the form's ``hx-get``\npasses the double-submit check, even though every route here is GET.\n\n``?audit_id=<id>`` is the drawer deep-link: pasting an audit id into\na ticket opens the page with that row's detail drawer already\nrendered in the drawer slot. A missing / cross-tenant id resolves to\n``None`` and simply renders the page with no open drawer (the page\nitself is not a 404 -- only the drawer fragment is).",
+        "description": "``GET /ui/audit`` -- the full page: filter form + first result page.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the form sets\n``hx-push-url`` on the fragment route, mirroring broadcast /\noperations). Sets + echoes the CSRF cookie so the form's ``hx-get``\npasses the double-submit check, even though every route here is GET.\n\n``?audit_id=<id>`` is the drawer deep-link: pasting an audit id into\na ticket opens the page with that row's detail drawer already\nrendered in the drawer slot. A missing / cross-tenant id resolves to\n``None`` and simply renders the page with no open drawer (the page\nitself is not a 404 -- only the drawer fragment is).\n\n``?agent_session_id=<id>`` is the T3 replay over-cap pivot's flat\nfilter (and the always-rendered \"View as flat query\" header link): it\nhas no visible form field but threads to ``query_audit`` so the page\nlands on that one session's rows -- the over-cap fallback's whole point\n-- rather than the unfiltered tenant-wide list.",
         "operationId": "ui_audit_page_ui_audit_get",
         "parameters": [
           {
@@ -15483,6 +15544,17 @@
               "format": "uuid",
               "nullable": true,
               "title": "Audit Id"
+            }
+          },
+          {
+            "name": "agent_session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Agent Session Id"
             }
           }
         ],

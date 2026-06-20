@@ -156,6 +156,15 @@
         aria-label="Filter by change ticket" autocomplete="off"
       />
     </label>
+
+    {#- The T3 replay over-cap pivot's flat filter. It has no visible field,
+        but it rides the form as a hidden input so the "Load more" pager's
+        ``hx-include="#audit-filter-form"`` re-applies the session pre-filter
+        on every continuation. Emitted only when a session was pivoted to so
+        an unfiltered page never carries an empty ``agent_session_id``. -#}
+    {% if agent_session_id_filter %}
+      <input type="hidden" name="agent_session_id" value="{{ agent_session_id_filter }}" />
+    {% endif %}
   </form>
 
   {#- Results region + the row-detail drawer slot. The results list swaps

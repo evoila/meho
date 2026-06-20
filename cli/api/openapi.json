@@ -8637,6 +8637,311 @@
         }
       }
     },
+    "/ui/topology/edges/bulk": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Bulk Panel",
+        "description": "``GET /ui/topology/edges/bulk`` \u2014 render the bulk-import panel.",
+        "operationId": "bulk_panel_ui_topology_edges_bulk_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Bulk Import",
+        "description": "``POST /ui/topology/edges/bulk`` \u2014 preview (dry-run) or apply rows.",
+        "operationId": "bulk_import_ui_topology_edges_bulk_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_bulk_import_ui_topology_edges_bulk_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/refresh/{target_name}": {
+      "post": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Refresh",
+        "description": "``POST /ui/topology/refresh/{target_name}`` \u2014 rediscover a target.",
+        "operationId": "refresh_ui_topology_refresh__target_name__post",
+        "parameters": [
+          {
+            "name": "target_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/timeline": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Timeline",
+        "description": "``GET /ui/topology/timeline`` \u2014 the tenant-wide change feed.",
+        "operationId": "timeline_ui_topology_timeline_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "nullable": true,
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/diff": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Diff",
+        "description": "``GET /ui/topology/diff?ts1=&ts2=`` \u2014 the point-in-time diff.",
+        "operationId": "diff_ui_topology_diff_get",
+        "parameters": [
+          {
+            "name": "ts1",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "exclusive lower bound on valid_from",
+              "title": "Ts1"
+            },
+            "description": "exclusive lower bound on valid_from"
+          },
+          {
+            "name": "ts2",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "inclusive upper bound on valid_from",
+              "title": "Ts2"
+            },
+            "description": "inclusive upper bound on valid_from"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/history/{name}": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "History",
+        "description": "``GET /ui/topology/history/{name}`` \u2014 per-resource history.",
+        "operationId": "history_ui_topology_history__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/topology/node/{node_id}": {
       "get": {
         "tags": [
@@ -15410,6 +15715,365 @@
         }
       }
     },
+    "/ui/keycloak/users": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak User List",
+        "description": "Render the realm's user list (read; OPERATOR-tier).\n\nDispatches ``keycloak.user.list`` (``safety_level=\"safe\"``); an\noptional ``username`` filter maps to Keycloak's ``?username=``.\nCredential material is redacted from every row by the connector;\nthis render projects named fields only and never dumps the raw\nenvelope. The create / reset / assign affordances are soft-hidden\nfrom a plain operator (``is_tenant_admin`` from the soft-failing\nrole probe); the write POSTs are hard-gated server-side.",
+        "operationId": "keycloak_user_list_ui_keycloak_users_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "username",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "default": "",
+              "title": "Username"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak/users/create": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak User Create Modal",
+        "description": "Render the create-user confirm modal (tenant_admin only).\n\nCollects a ``UserRepresentation`` JSON body + a Vault KV path for\nthe password (NO plaintext password field). Mints + re-sets the\n``meho_csrf`` cookie so the confirm button's own ``hx-headers`` echo\nlines up after the HTMX swap rotated it.",
+        "operationId": "keycloak_user_create_modal_ui_keycloak_users_create_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak User Create",
+        "description": "Dispatch ``keycloak.user.create``; render the write result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) and tenant_admin-gated. The\npassword is supplied as a Vault KV path only -- it never lands in\nform params, request logs, or the audit row. The op is\n``requires_approval=True``, so a clean dispatch returns\n``status=\"awaiting_approval\"`` with the approval-request deep-link.",
+        "operationId": "keycloak_user_create_ui_keycloak_users_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_keycloak_user_create_ui_keycloak_users_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak/users/{user_uuid}/reset-password": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak User Reset Password Modal",
+        "description": "Render the reset-password confirm modal (tenant_admin only).\n\nKeyed on the user's internal UUID. Collects only a Vault KV path\n(NO plaintext password field). Mints + re-sets the ``meho_csrf``\ncookie for the confirm button's own ``hx-headers`` echo.",
+        "operationId": "keycloak_user_reset_password_modal_ui_keycloak_users__user_uuid__reset_password_get",
+        "parameters": [
+          {
+            "name": "user_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Uuid"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak User Reset Password",
+        "description": "Dispatch ``keycloak.user.reset_password``; render the result inline.\n\nCSRF-gated and tenant_admin-gated. Keyed on the user UUID. The new\npassword is supplied as a Vault KV path only -- never inline. The op\nis ``requires_approval=True`` (``awaiting_approval`` deep-link).",
+        "operationId": "keycloak_user_reset_password_ui_keycloak_users__user_uuid__reset_password_post",
+        "parameters": [
+          {
+            "name": "user_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_keycloak_user_reset_password_ui_keycloak_users__user_uuid__reset_password_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak/users/{user_uuid}/roles/assign": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Role Assign Modal",
+        "description": "Render the role-assign confirm modal (tenant_admin only).\n\nA PRIVILEGE GRANT (``safety_level=\"dangerous\"``). Reads the user's\ncurrent realm/client role mappings (``keycloak.role_mapping.get``)\nfor context, then collects realm role names to grant. The confirm\nbanner names it a privilege grant and surfaces ``dangerous``.",
+        "operationId": "keycloak_role_assign_modal_ui_keycloak_users__user_uuid__roles_assign_get",
+        "parameters": [
+          {
+            "name": "user_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Uuid"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Role Assign",
+        "description": "Dispatch ``keycloak.role_mapping.assign``; render the result inline.\n\nCSRF-gated and tenant_admin-gated. A privilege grant. ``roles`` is a\nlist of realm role names (string list); the dispatched params are\n``{\"roles\": [...], \"id\": <uuid>}``. The op is\n``requires_approval=True`` (``awaiting_approval`` deep-link).",
+        "operationId": "keycloak_role_assign_ui_keycloak_users__user_uuid__roles_assign_post",
+        "parameters": [
+          {
+            "name": "user_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_keycloak_role_assign_ui_keycloak_users__user_uuid__roles_assign_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/keycloak/clients/{client_uuid}": {
       "get": {
         "tags": [
@@ -15503,6 +16167,224 @@
                 "$ref": "#/components/schemas/UISessionContext",
                 "nullable": true,
                 "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak/client-scopes/create": {
+      "get": {
+        "tags": [
+          "ui-keycloak",
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Client Scope Create Modal",
+        "description": "Render the create-client-scope confirm modal (tenant_admin only).\n\nA non-admin GET 403s here too -- the modal is the write surface's\nentry point, so gating it keeps a soft-hidden affordance from being\nreached by URL. The modal mints + re-sets the CSRF cookie so the\nconfirm POST's ``hx-headers`` echo lines up after the swap.",
+        "operationId": "keycloak_client_scope_create_modal_ui_keycloak_client_scopes_create_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-keycloak",
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Client Scope Create",
+        "description": "Dispatch ``keycloak.client_scope.create`` (awaiting_approval).\n\nCSRF-gated (a ``POST`` under ``/ui/``) and tenant_admin-gated. Builds\n``{\"representation\": <ClientScopeRepresentation>}`` from the named\nfields + the optional advanced JSON block, pins ``connector_id``, and\nrenders the structured envelope inline -- the ``awaiting_approval``\ndeep-link is the success path because the op requires approval.",
+        "operationId": "keycloak_client_scope_create_ui_keycloak_client_scopes_create_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_keycloak_client_scope_create_ui_keycloak_client_scopes_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak/clients/{client_uuid}/protocol-mappers/create": {
+      "get": {
+        "tags": [
+          "ui-keycloak",
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Protocol Mapper Create Modal",
+        "description": "Render the create-protocol-mapper confirm modal (tenant_admin only).\n\nThe target client is keyed off the route's ``{client_uuid}`` (the\nclient's internal UUID), not a free-form field -- so the dispatch\ncannot be re-pointed at another client by a forged form value. A\nnon-admin GET 403s here too.",
+        "operationId": "keycloak_protocol_mapper_create_modal_ui_keycloak_clients__client_uuid__protocol_mappers_create_get",
+        "parameters": [
+          {
+            "name": "client_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "title": "Client Uuid"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-keycloak",
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Protocol Mapper Create",
+        "description": "Dispatch ``keycloak.protocol_mapper.create`` (awaiting_approval).\n\nThe target client is keyed on the route's ``{client_uuid}`` -- the\ndispatch params carry ``{\"representation\": {...}, \"id\": client_uuid}``\nso the client is fixed by the path, not a free-form field. CSRF- and\ntenant_admin-gated; renders the structured envelope inline (the\n``awaiting_approval`` deep-link is the success path).",
+        "operationId": "keycloak_protocol_mapper_create_ui_keycloak_clients__client_uuid__protocol_mappers_create_post",
+        "parameters": [
+          {
+            "name": "client_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "title": "Client Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_keycloak_protocol_mapper_create_ui_keycloak_clients__client_uuid__protocol_mappers_create_post"
               }
             }
           }
@@ -17966,6 +18848,29 @@
         "type": "object",
         "title": "Body_approval_reject_ui_approvals__request_id__reject_post"
       },
+      "Body_bulk_import_ui_topology_edges_bulk_post": {
+        "properties": {
+          "rows_text": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Rows Text"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "Body_bulk_import_ui_topology_edges_bulk_post"
+      },
       "Body_corpus_search_ui_corpus_search_post": {
         "properties": {
           "collection": {
@@ -18075,6 +18980,185 @@
           "file"
         ],
         "title": "Body_kb_upload_single_ui_kb_upload_post"
+      },
+      "Body_keycloak_client_scope_create_ui_keycloak_client_scopes_create_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Name"
+          },
+          "protocol": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Protocol",
+            "default": "openid-connect"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Description",
+            "default": ""
+          },
+          "representation": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Representation",
+            "default": ""
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "Body_keycloak_client_scope_create_ui_keycloak_client_scopes_create_post"
+      },
+      "Body_keycloak_protocol_mapper_create_ui_keycloak_clients__client_uuid__protocol_mappers_create_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Name"
+          },
+          "protocol": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Protocol",
+            "default": "openid-connect"
+          },
+          "protocol_mapper": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Protocol Mapper"
+          },
+          "representation": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Representation",
+            "default": ""
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "protocol_mapper"
+        ],
+        "title": "Body_keycloak_protocol_mapper_create_ui_keycloak_clients__client_uuid__protocol_mappers_create_post"
+      },
+      "Body_keycloak_role_assign_ui_keycloak_users__user_uuid__roles_assign_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          }
+        },
+        "type": "object",
+        "title": "Body_keycloak_role_assign_ui_keycloak_users__user_uuid__roles_assign_post"
+      },
+      "Body_keycloak_user_create_ui_keycloak_users_create_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "representation": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Representation",
+            "default": ""
+          },
+          "password_secret_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Ref",
+            "default": ""
+          },
+          "password_secret_mount": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Mount",
+            "default": ""
+          },
+          "password_secret_key": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Key",
+            "default": ""
+          },
+          "temporary": {
+            "type": "boolean",
+            "title": "Temporary",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "Body_keycloak_user_create_ui_keycloak_users_create_post"
+      },
+      "Body_keycloak_user_reset_password_ui_keycloak_users__user_uuid__reset_password_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "password_secret_ref": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Ref",
+            "default": ""
+          },
+          "password_secret_mount": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Mount",
+            "default": ""
+          },
+          "password_secret_key": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Password Secret Key",
+            "default": ""
+          },
+          "temporary": {
+            "type": "boolean",
+            "title": "Temporary",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "Body_keycloak_user_reset_password_ui_keycloak_users__user_uuid__reset_password_post"
       },
       "Body_operations_call_ui_operations_call_post": {
         "properties": {

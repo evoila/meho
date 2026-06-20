@@ -1,0 +1,38 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Empty / 404 history panel for an unknown resource name (Initiative #1941
+  Task #1955). A missing node is an expected operator typo, not a server
+  fault -- this panel states "no node matched" with a return path, rather
+  than a dead 500. Mirrors the REST 404 ``node_not_found`` surface.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; History &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="history-not-found">
+  <header>
+    <h1 class="text-2xl font-semibold">
+      History
+      <span class="font-mono text-lg align-middle">{{ node_name }}</span>
+    </h1>
+  </header>
+
+  <div role="alert" class="alert alert-info text-sm" data-error-kind="node_not_found">
+    <div>
+      <p>
+        No node matched <span class="font-mono">{{ node_name }}</span>{% if node_kind %}
+        of kind <span class="font-mono">{{ node_kind }}</span>{% endif %} in this tenant.
+        Check the name on the
+        <a class="link" href="/ui/topology">inventory</a> and try again.
+      </p>
+    </div>
+  </div>
+
+  <a class="btn btn-sm btn-ghost" href="/ui/topology" aria-label="Back to topology inventory">
+    &larr; Inventory
+  </a>
+</section>
+{% endblock %}

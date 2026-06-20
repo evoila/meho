@@ -20,5 +20,6 @@ operations dispatcher too).
 from __future__ import annotations
 
 from meho_backplane.ui.routes.keycloak.routes import build_keycloak_router
+from meho_backplane.ui.routes.keycloak.write import build_keycloak_write_router
 
-__all__ = ["build_keycloak_router"]
+__all__ = ["build_keycloak_router", "build_keycloak_write_router"]

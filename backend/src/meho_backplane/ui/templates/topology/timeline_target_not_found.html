@@ -1,0 +1,46 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Recoverable near-miss banner for an unresolved timeline ``target`` filter
+  (Initiative #1941 Task #1955). The optional ``target`` query filter did not
+  resolve to a row in the tenant; this panel lists the resolver's near-miss
+  suggestions so the operator corrects the name, rather than dead-ending on
+  the raw 404 envelope.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; Timeline &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="timeline-target-not-found">
+  <header>
+    <h1 class="text-2xl font-semibold">Topology timeline</h1>
+  </header>
+
+  <div role="alert" class="alert alert-warning text-sm" data-error-kind="no_target">
+    <div>
+      <p>
+        No target matched <span class="font-mono">{{ target_filter }}</span> in this tenant.
+      </p>
+      {% if near_misses %}
+        <p class="mt-1 opacity-80">Did you mean:</p>
+        <div class="mt-1 flex flex-wrap gap-2" data-test="timeline-near-misses">
+          {% for name in near_misses %}
+            <a
+              class="btn btn-xs btn-outline"
+              href="/ui/topology/timeline?target={{ name | urlencode }}"
+            >
+              {{ name }}
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <a class="btn btn-sm btn-ghost" href="/ui/topology/timeline" aria-label="Clear the target filter">
+    Show the full feed
+  </a>
+</section>
+{% endblock %}

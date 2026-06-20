@@ -1,0 +1,152 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak write-result fragment (Initiative #1943, Tasks #1960 + #1961).
+
+  The shared swap target for ALL keycloak console writes:
+    * user-management writes (#1960): create / reset-password / role-assign
+    * authoring writes (#1961): client-scope create / protocol-mapper create
+
+  Swapped into a create/action modal's result region by the confirm button
+  (``hx-post`` to the relevant write route). Renders the dispatched op's
+  structured ``call_operation`` envelope inline -- the console's write outcome
+  surface. The render NEVER dumps the raw envelope blob.
+
+  Every keycloak write op is ``requires_approval=True``, so the EXPECTED clean
+  outcome is ``awaiting_approval``: the policy gate parked the op and created a
+  durable ApprovalRequest. This MUST be surfaced with
+  ``extras.approval_request_id`` and a DEEP-LINK into ``/ui/approvals`` --
+  otherwise the operator thinks the write silently no-op'd (#1778).
+
+  Render branches:
+    * ``error_message`` set (no ``envelope``) -> inline form error (HTTP 400):
+      a malformed representation/advanced JSON or a missing/bad required
+      field. The op was never dispatched; the operator stays in the modal.
+    * ``status == "awaiting_approval"`` -> the requires-approval handoff:
+      request id + deep-link into ``/ui/approvals``.
+    * ``status == "ok"`` -> a non-approval success path, e.g. an idempotent
+      409-already-exists folded to ``ok`` by the connector. Quiet
+      confirmation; projects any named ``result`` fields when present.
+    * ``status in ("error", "denied")`` -> the structured fault + the human
+      error string.
+
+  Context:
+    envelope      -- dict | None: the call_operation envelope, or None when a
+                     form error pre-empted the dispatch
+    error_message -- str | None: the inline form-error message (400 branch)
+-#}
+{% from "_icons.html" import icon %}
+
+{% if error_message %}
+  <div role="alert" class="alert alert-error" data-write-status="form_error">
+    <div>
+      <h4 class="text-sm font-semibold">Cannot submit</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">{{ error_message }}</p>
+    </div>
+  </div>
+{% elif envelope.status == "awaiting_approval" %}
+  {#- The op requires approval: the policy gate parked it and created a
+      durable ApprovalRequest. NEVER render this as a silent success -- the
+      operator must see a reviewer has to approve, with a deep-link into the
+      approvals surface (#1778). -#}
+  {%- set extras = envelope.get("extras") or {} -%}
+  {%- set approval_id = extras.get("approval_request_id") -%}
+  <div role="alert" class="alert alert-info items-start" data-write-status="awaiting_approval">
+    {{ icon("clock", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Awaiting approval</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">
+        This operation requires approval before it executes. A request has
+        been parked for a reviewer &mdash; it has <span class="font-semibold">not</span>
+        run yet.
+      </p>
+      {% if approval_id %}
+        <p class="mt-1 text-xs opacity-70">
+          Request id <code data-approval-request-id>{{ approval_id }}</code>
+        </p>
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals/{{ approval_id }}"
+          hx-get="/ui/approvals/{{ approval_id }}"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Review in approvals
+        </a>
+      {% else %}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals"
+          hx-get="/ui/approvals"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Open approvals
+        </a>
+      {% endif %}
+    </div>
+  </div>
+{% elif envelope.status == "ok" %}
+  {#- A non-approval success path -- e.g. an idempotent 409-already-exists
+      folded to ``ok`` by the connector. Render the projected named fields
+      from ``result`` when present (never the raw envelope blob); degrade to a
+      quiet confirmation otherwise. -#}
+  {%- set result = envelope.get("result") or {} -%}
+  <div role="status" class="alert alert-success items-start" data-write-status="ok">
+    {{ icon("check", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Done</h4>
+      {% if result.get("name") or result.get("mapper_name") or result.get("conflict") %}
+        <dl class="mt-1 space-y-1 text-xs">
+          {% if result.get("name") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Name</dt>
+              <dd class="font-mono" data-write-name>{{ result.get("name") }}</dd>
+            </div>
+          {% endif %}
+          {% if result.get("mapper_name") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Mapper</dt>
+              <dd class="font-mono" data-write-mapper-name>{{ result.get("mapper_name") }}</dd>
+            </div>
+          {% endif %}
+          {% if result.get("conflict") %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Status</dt>
+              <dd data-write-conflict>already existed (idempotent)</dd>
+            </div>
+          {% endif %}
+        </dl>
+      {% else %}
+        <p class="text-xs">The operation completed.</p>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  {#- status in ("error", "denied") -- the dispatcher's structured fault,
+      surfaced inline (HTTP 200, not 4xx). -#}
+  {%- set extras = envelope.get("extras") or {} -%}
+  <div
+    role="alert"
+    class="alert {{ 'alert-warning' if envelope.status == 'denied' else 'alert-error' }} items-start"
+    data-write-status="{{ envelope.status }}"
+  >
+    {{ icon("ban", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">
+        {% if envelope.status == "denied" %}Operation denied{% else %}Operation failed{% endif %}
+        {% if extras.get("error_code") %}
+          <code class="ml-1 text-xs" data-write-error-code>{{ extras.get("error_code") }}</code>
+        {% endif %}
+      </h4>
+      {% if envelope.get("error") %}
+        <p class="text-xs [overflow-wrap:anywhere]">{{ envelope.get("error") }}</p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}

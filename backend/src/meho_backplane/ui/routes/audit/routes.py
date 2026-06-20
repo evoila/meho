@@ -249,6 +249,7 @@ def _filter_form_context(
     since: str,
     until: str,
     work_ref: str,
+    agent_session_id: uuid.UUID | None,
 ) -> dict[str, object]:
     """Echo the operator's filter selection back into the form context.
 
@@ -256,6 +257,11 @@ def _filter_form_context(
     swapped-in fragment's form keeps the operator's values and the "Load
     more" continuation re-applies them. The op_class / result_status option
     lists ride along so the ``<select>``s render their closed vocabularies.
+
+    ``agent_session_id`` is the T3 replay over-cap pivot's flat filter: it has
+    no visible form field, but it is echoed (as a string, or ``""`` when
+    unset) so the "Load more" continuation and the ``hx-push-url`` preserve
+    the session pre-filter the over-cap fallback landed the operator on.
     """
     return {
         "op_class_options": OP_CLASS_FILTER_OPTIONS,
@@ -268,6 +274,7 @@ def _filter_form_context(
         "since_filter": since,
         "until_filter": until,
         "work_ref_filter": work_ref,
+        "agent_session_id_filter": str(agent_session_id) if agent_session_id is not None else "",
     }
 
 
@@ -282,6 +289,7 @@ def _build_filters(
     until: str,
     work_ref: str,
     cursor: str | None,
+    agent_session_id: uuid.UUID | None = None,
 ) -> AuditQueryFilters:
     """Construct the substrate filter object from the echoed form values.
 
@@ -291,6 +299,13 @@ def _build_filters(
     failure raises :class:`DurationParseError`, surfaced inline by the
     caller. ``tenant_id`` is **not** set here -- it is a mandatory keyword
     argument to :func:`query_audit`, injected from the session.
+
+    ``agent_session_id`` is the T3 replay over-cap pivot's flat filter: it has
+    no form field, but when present it is threaded straight to
+    :attr:`AuditQueryFilters.agent_session_id` so ``query_audit`` applies the
+    ``audit_log.agent_session_id = :agent_session_id`` predicate -- making
+    ``/ui/audit?agent_session_id=<id>`` a usable session-scoped flat view
+    (``query.py:201-202``) rather than the unfiltered tenant-wide page.
     """
     now = datetime.now(UTC)
     since_dt = parse_duration(since, now=now) if since else None
@@ -304,6 +319,7 @@ def _build_filters(
         since=since_dt,
         until=until_dt,
         work_ref=work_ref or None,
+        agent_session_id=agent_session_id,
         limit=_PAGE_SIZE,
         cursor=cursor,
     )
@@ -576,6 +592,7 @@ async def _build_results_context(
     until: str,
     work_ref: str,
     cursor: str | None,
+    agent_session_id: uuid.UUID | None = None,
 ) -> dict[str, object]:
     """Assemble the context shared by the full page + the results fragment.
 
@@ -583,6 +600,11 @@ async def _build_results_context(
     duration / cursor / filter error states. A tampered cursor resets to
     page 1 (re-run with no cursor) rather than erroring; a bad duration
     surfaces an inline field error and suppresses the rows.
+
+    ``agent_session_id`` is the T3 replay over-cap pivot's flat filter:
+    threaded into every :func:`_build_filters` call (including the
+    cursor-reset re-run) and echoed via :func:`_filter_form_context` so the
+    session pre-filter survives the cursor-reset and "Load more" paths.
     """
     is_admin = await _is_tenant_admin(session)
     context: dict[str, object] = {
@@ -595,6 +617,7 @@ async def _build_results_context(
             since=since,
             until=until,
             work_ref=work_ref,
+            agent_session_id=agent_session_id,
         ),
         "rows": [],
         "next_cursor": None,
@@ -615,6 +638,7 @@ async def _build_results_context(
             until=until,
             work_ref=work_ref,
             cursor=cursor,
+            agent_session_id=agent_session_id,
         )
     except DurationParseError as exc:
         # Inline field error on since/until -- never a 500 on operator input.
@@ -637,6 +661,7 @@ async def _build_results_context(
             until=until,
             work_ref=work_ref,
             cursor=None,
+            agent_session_id=agent_session_id,
         )
         result = await _run_query(filters, tenant_id=session.tenant_id)
     except UnsupportedFilterError as exc:
@@ -662,6 +687,7 @@ async def _results_handler(
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
     cursor: str | None = Query(default=None),
+    agent_session_id: uuid.UUID | None = Query(default=None),
     partial: str = Query(default=""),
     session: UISessionContext = _require_session,
 ) -> HTMLResponse:
@@ -671,6 +697,11 @@ async def _results_handler(
     page's rows plus an out-of-band pager re-render; any other value
     renders the full ``audit/_results.html`` console block. A foreign
     ``partial`` value is rejected (422) rather than silently coerced.
+
+    ``?agent_session_id=<id>`` is the T3 replay over-cap pivot's flat
+    filter: it has no form field but threads to ``query_audit`` so the
+    fragment (and the "Load more" continuation) stays scoped to that one
+    session rather than the unfiltered tenant-wide list.
     """
     if partial not in _RESULTS_PARTIALS:
         raise HTTPException(
@@ -688,6 +719,7 @@ async def _results_handler(
         until=until,
         work_ref=work_ref,
         cursor=cursor,
+        agent_session_id=agent_session_id,
     )
     template = (
         "audit/_results_rows_oob.html"
@@ -708,6 +740,7 @@ async def _page_handler(
     until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
     work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
     audit_id: uuid.UUID | None = Query(default=None),
+    agent_session_id: uuid.UUID | None = Query(default=None),
     session: UISessionContext = _require_session,
     db_session: AsyncSession = _get_raw_session_dep,
 ) -> HTMLResponse:
@@ -724,6 +757,12 @@ async def _page_handler(
     rendered in the drawer slot. A missing / cross-tenant id resolves to
     ``None`` and simply renders the page with no open drawer (the page
     itself is not a 404 -- only the drawer fragment is).
+
+    ``?agent_session_id=<id>`` is the T3 replay over-cap pivot's flat
+    filter (and the always-rendered "View as flat query" header link): it
+    has no visible form field but threads to ``query_audit`` so the page
+    lands on that one session's rows -- the over-cap fallback's whole point
+    -- rather than the unfiltered tenant-wide list.
     """
     context = await _build_results_context(
         session,
@@ -736,6 +775,7 @@ async def _page_handler(
         until=until,
         work_ref=work_ref,
         cursor=None,
+        agent_session_id=agent_session_id,
     )
     csrf_token = mint_csrf_token(str(session.session_id))
     context["page_title"] = "Audit"

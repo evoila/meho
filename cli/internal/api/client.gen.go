@@ -6733,29 +6733,31 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
 type UiAuditPageUiAuditGetParams struct {
-	Target       *string             `form:"target,omitempty" json:"target,omitempty"`
-	Principal    *string             `form:"principal,omitempty" json:"principal,omitempty"`
-	OpId         *string             `form:"op_id,omitempty" json:"op_id,omitempty"`
-	OpClass      *string             `form:"op_class,omitempty" json:"op_class,omitempty"`
-	ResultStatus *string             `form:"result_status,omitempty" json:"result_status,omitempty"`
-	Since        *string             `form:"since,omitempty" json:"since,omitempty"`
-	Until        *string             `form:"until,omitempty" json:"until,omitempty"`
-	WorkRef      *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	AuditId      *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
+	Target         *string             `form:"target,omitempty" json:"target,omitempty"`
+	Principal      *string             `form:"principal,omitempty" json:"principal,omitempty"`
+	OpId           *string             `form:"op_id,omitempty" json:"op_id,omitempty"`
+	OpClass        *string             `form:"op_class,omitempty" json:"op_class,omitempty"`
+	ResultStatus   *string             `form:"result_status,omitempty" json:"result_status,omitempty"`
+	Since          *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until          *string             `form:"until,omitempty" json:"until,omitempty"`
+	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	AuditId        *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
+	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
 }
 
 // UiAuditResultsUiAuditResultsGetParams defines parameters for UiAuditResultsUiAuditResultsGet.
 type UiAuditResultsUiAuditResultsGetParams struct {
-	Target       *string `form:"target,omitempty" json:"target,omitempty"`
-	Principal    *string `form:"principal,omitempty" json:"principal,omitempty"`
-	OpId         *string `form:"op_id,omitempty" json:"op_id,omitempty"`
-	OpClass      *string `form:"op_class,omitempty" json:"op_class,omitempty"`
-	ResultStatus *string `form:"result_status,omitempty" json:"result_status,omitempty"`
-	Since        *string `form:"since,omitempty" json:"since,omitempty"`
-	Until        *string `form:"until,omitempty" json:"until,omitempty"`
-	WorkRef      *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Cursor       *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Partial      *string `form:"partial,omitempty" json:"partial,omitempty"`
+	Target         *string             `form:"target,omitempty" json:"target,omitempty"`
+	Principal      *string             `form:"principal,omitempty" json:"principal,omitempty"`
+	OpId           *string             `form:"op_id,omitempty" json:"op_id,omitempty"`
+	OpClass        *string             `form:"op_class,omitempty" json:"op_class,omitempty"`
+	ResultStatus   *string             `form:"result_status,omitempty" json:"result_status,omitempty"`
+	Since          *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until          *string             `form:"until,omitempty" json:"until,omitempty"`
+	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Cursor         *string             `form:"cursor,omitempty" json:"cursor,omitempty"`
+	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
 }
 
 // UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
@@ -24107,6 +24109,22 @@ func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGe
 
 		}
 
+		if params.AgentSessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_session_id", runtime.ParamLocationQuery, *params.AgentSessionId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -24298,6 +24316,22 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AgentSessionId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_session_id", runtime.ParamLocationQuery, *params.AgentSessionId); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

@@ -535,6 +535,120 @@ def test_replay_credential_node_drawer_renders_lock_placeholder() -> None:
 
 
 # ===========================================================================
+# AC1(c) wire-up: the over-cap flat-query pivot actually pre-filters by session
+# ===========================================================================
+#
+# The over-cap fallback (and the always-rendered "View as flat query" header
+# link) deep-link to ``/ui/audit?agent_session_id=<id>``. That pivot is only
+# useful if T1's page + results handlers honour the ``agent_session_id`` query
+# param -- an undeclared FastAPI query param is silently dropped, which would
+# land the operator on the UNFILTERED tenant-wide page. These tests prove the
+# param is declared and threaded to ``query_audit`` so the pivot returns ONLY
+# the pivoted session's rows. A plain (non-admin) session is sufficient: the
+# page/results handlers do not gate on the admin lift, and the
+# ``agent_session_id`` predicate is orthogonal to the replay route's RBAC.
+
+
+def test_audit_page_pivot_pre_filters_by_agent_session_id() -> None:
+    """GET /ui/audit?agent_session_id=<sid> returns ONLY that session's rows.
+
+    Seeds two distinct sessions in the same tenant; the page pivot for
+    session A must surface A's row and exclude B's -- proving the param is
+    declared on ``_page_handler`` and threaded to ``query_audit`` rather than
+    being dropped onto the unfiltered tenant-wide page.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_a = uuid.uuid4()
+    session_b = uuid.uuid4()
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=0,
+        op_id="session.a.only.op",
+        agent_session_id=session_a,
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="session.b.only.op",
+        agent_session_id=session_b,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit?agent_session_id={session_a}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Only session A's row is in the result list; session B's is filtered out.
+    assert "session.a.only.op" in body
+    assert "session.b.only.op" not in body
+    # The hidden filter input echoes the pivoted session so "Load more"
+    # (hx-include the form) re-applies the session pre-filter on each page.
+    assert f'name="agent_session_id" value="{session_a}"' in body
+
+
+def test_audit_results_fragment_pivot_pre_filters_by_agent_session_id() -> None:
+    """GET /ui/audit/results?agent_session_id=<sid> filters the fragment too.
+
+    The "Load more" pager and the form-submit swap both hit the results
+    fragment route; the session pre-filter must hold there as well or the
+    second page would leak the unfiltered tenant-wide list.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_a = uuid.uuid4()
+    session_b = uuid.uuid4()
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=0,
+        op_id="frag.a.only.op",
+        agent_session_id=session_a,
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A,
+        second=1,
+        op_id="frag.b.only.op",
+        agent_session_id=session_b,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/results?agent_session_id={session_a}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "frag.a.only.op" in body
+    assert "frag.b.only.op" not in body
+
+
+def test_audit_page_without_session_filter_is_unfiltered() -> None:
+    """Omitting ``agent_session_id`` keeps the page tenant-wide (no regression).
+
+    The new optional param must default to ``None`` (no filter) so the
+    existing unfiltered T1 browse is unchanged -- both sessions' rows show.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_a = uuid.uuid4()
+    session_b = uuid.uuid4()
+    _seed_audit_row(tenant_id=_TENANT_A, second=0, op_id="plain.a.op", agent_session_id=session_a)
+    _seed_audit_row(tenant_id=_TENANT_A, second=1, op_id="plain.b.op", agent_session_id=session_b)
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/audit")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # No pivot -> both sessions' rows are present (the unfiltered browse).
+    assert "plain.a.op" in body
+    assert "plain.b.op" in body
+    # And no stray hidden session filter is emitted on the unfiltered page.
+    assert 'name="agent_session_id"' not in body
+
+
+# ===========================================================================
 # Route distinctness (AC5): the sessions prefix never collides with T2
 # ===========================================================================
 

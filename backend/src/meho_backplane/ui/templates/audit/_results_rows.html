@@ -56,9 +56,20 @@
       </p>
     </div>
 
-    {#- One-click pivots. who-touched / by-work-ref re-bind the filter on the
-        page route; replay deep-links to the T3 session replay surface. -#}
+    {#- One-click pivots. "details" opens the T2 row drawer (hx-get into
+        ``#audit-drawer``); who-touched / by-work-ref re-bind the filter on
+        the page route; replay deep-links to the T3 session replay surface. -#}
     <div class="flex shrink-0 items-center gap-1">
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs gap-1"
+        hx-get="/ui/audit/show/{{ row.id }}"
+        hx-target="#audit-drawer"
+        hx-swap="outerHTML"
+        aria-label="Open detail drawer for audit row {{ row.id }}"
+      >
+        {{ icon("scroll-text", class="size-3.5") }} details
+      </button>
       {% if row.target_name %}
         <a
           class="btn btn-ghost btn-xs gap-1"

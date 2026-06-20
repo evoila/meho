@@ -158,11 +158,31 @@
     </label>
   </form>
 
-  {#- Results region: rows + forward-cursor pager (or an empty / error
-      state). Seeded server-side for a shared filtered URL / hard refresh;
-      the form swaps it thereafter. -#}
-  <div id="audit-results">
-    {% include "audit/_results.html" %}
+  {#- Results region + the row-detail drawer slot. The results list swaps
+      into ``#audit-results``; a row's "details" affordance ``hx-get``s
+      ``/ui/audit/show/{id}`` into ``#audit-drawer`` (T2). On a ``?audit_id=``
+      deep-link the drawer is pre-rendered server-side so a pasted ticket
+      link opens the row immediately. -#}
+  <div class="grid gap-5 lg:grid-cols-[1fr_22rem]">
+    <div id="audit-results">
+      {% include "audit/_results.html" %}
+    </div>
+
+    {#- Drawer slot. Empty until a row is clicked (or a deep-link pre-renders
+        it). The placeholder keeps the grid column from collapsing. -#}
+    {% if drawer %}
+      {% with row=drawer.row, op_id=drawer.op_id, op_class=drawer.op_class,
+              badge_class=drawer.badge_class, aggregate_only=drawer.aggregate_only,
+              request_payload=drawer.request_payload,
+              gated_op_classes=drawer.gated_op_classes,
+              agent_session_id=drawer.agent_session_id,
+              parent_audit_id=drawer.parent_audit_id,
+              replay_enabled=drawer.replay_enabled %}
+        {% include "audit/_drawer.html" %}
+      {% endwith %}
+    {% else %}
+      <div id="audit-drawer" aria-hidden="true"></div>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

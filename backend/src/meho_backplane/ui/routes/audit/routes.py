@@ -90,6 +90,7 @@ from typing import Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.audit_query import (
     AuditQueryFilters,
@@ -102,11 +103,20 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.broadcast import classify_op
+from meho_backplane.db.engine import get_raw_session, get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.broadcast.aggregate_gate import (
+    AGGREGATE_ONLY_OP_CLASSES,
+    INTERNAL_PAYLOAD_KEYS,
+    fetch_audit_row,
+    is_aggregate_only,
+    resolve_op_id,
+)
 from meho_backplane.ui.routes.broadcast.feed import (
     OP_CLASS_BADGE_CLASSES,
     OP_CLASS_FILTER_OPTIONS,
@@ -149,10 +159,22 @@ _MAX_DURATION_LENGTH: Final[int] = 32
 _RESULTS_PARTIAL_ROWS: Final[str] = "rows"
 _RESULTS_PARTIALS: Final[frozenset[str]] = frozenset({"", _RESULTS_PARTIAL_ROWS})
 
+#: The ``since`` window for the my-recent quick view: the calling
+#: operator's last-24h rows. Matches the REST ``/api/v1/audit/my-recent``
+#: default (``audit.py:380``); my-recent is a glance ("what did I just
+#: do"), not a forensic browse, so the window is fixed rather than a form
+#: field.
+_MY_RECENT_SINCE: Final[str] = "24h"
+
 #: Module-level :class:`fastapi.Depends` closure for the operator-session
 #: gate -- the ruff B008 idiom (no call in a default-argument position) the
 #: broadcast / approvals / runbooks routes established.
 _require_session = Depends(require_ui_session)
+
+#: Module-level :class:`fastapi.Depends` for the raw-session drawer query
+#: (same B008 guard) -- the drawer resolves one row directly, not through
+#: the cursor-paged substrate.
+_get_raw_session_dep = Depends(get_raw_session)
 
 
 async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
@@ -337,6 +359,106 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
     ]
 
 
+def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]:
+    """Assemble the row-detail drawer context for one ``audit_log`` row.
+
+    Classifies the op via the same :func:`classify_op` chain the broadcast
+    drawer uses, applies the shared aggregate-only gate
+    (:func:`is_aggregate_only`) so a ``credential_read`` / ``credential_mint``
+    / ``audit_query`` row -- or any row whose ``broadcast_detail_effective``
+    is ``"aggregate"`` -- renders the 🔒 placeholder and **no** payload, and
+    strips the audit-only classification + G6.3 forensic keys from the
+    rendered request payload otherwise. The replay deep-link is enabled only
+    when the session lifted to ``tenant_admin`` (``is_admin``) and the row
+    carries an ``agent_session_id``; the parent-row deep-link re-opens the
+    drawer on ``parent_audit_id``.
+    """
+    op_id = resolve_op_id(row)
+    op_class = classify_op(op_id)
+    aggregate_only = is_aggregate_only(row, op_class)
+    # Only the full-detail path projects the request payload; the
+    # aggregate-only branch never renders it at all (decision #3).
+    request_payload = (
+        {}
+        if aggregate_only
+        else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
+    )
+    agent_session_id = str(row.agent_session_id) if row.agent_session_id is not None else None
+    parent_audit_id = str(row.parent_audit_id) if row.parent_audit_id is not None else None
+    return {
+        "row": row,
+        "op_id": op_id,
+        "op_class": op_class,
+        "badge_class": _badge_class(op_class),
+        "aggregate_only": aggregate_only,
+        "request_payload": request_payload,
+        # The single-source gated op-class set (from the shared
+        # broadcast aggregate_gate) names the withheld classes in the 🔒
+        # placeholder copy, so the drawer text stays honest about which
+        # ops are aggregate-only without a second hard-coded list.
+        "gated_op_classes": sorted(AGGREGATE_ONLY_OP_CLASSES),
+        "agent_session_id": agent_session_id,
+        "parent_audit_id": parent_audit_id,
+        # The replay surface is TENANT_ADMIN-gated (#1844); the pivot is an
+        # enabled deep-link only for an admin lift on a session-bearing row.
+        "replay_enabled": is_admin and agent_session_id is not None,
+    }
+
+
+async def _resolve_deep_link_drawer(
+    db_session: AsyncSession,
+    *,
+    session: UISessionContext,
+    audit_id: uuid.UUID | None,
+) -> dict[str, object] | None:
+    """Resolve the ``?audit_id=`` page deep-link to a drawer context.
+
+    Returns the drawer context to pre-render on initial page load, or
+    ``None`` when no ``audit_id`` was supplied or it does not resolve in the
+    operator's tenant. A missing / cross-tenant id degrades to "no open
+    drawer" rather than 404-ing the whole page -- only the dedicated drawer
+    fragment route (:func:`_drawer_handler`) returns the 404 not-found
+    fragment. Tenant scoping is enforced by :func:`fetch_audit_row`.
+    """
+    if audit_id is None:
+        return None
+    row = await fetch_audit_row(db_session, tenant_id=session.tenant_id, audit_id=audit_id)
+    if row is None:
+        return None
+    is_admin = await _is_tenant_admin(session)
+    return _build_drawer_context(row, is_admin=is_admin)
+
+
+async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
+    """Assemble the my-recent quick-view context (operator-self-scoped).
+
+    Binds ``principal=session.operator_sub`` so the query returns only the
+    calling operator's own rows -- a second operator's activity is never
+    surfaced through this route (mirrors the REST ``/api/v1/audit/my-recent``
+    ``principal=operator.sub`` binding, ``audit.py:380``). Reuses the T1 row
+    projection so each row renders through the shared row partial and opens
+    the same detail drawer. A bad cursor / duration is impossible here (the
+    window is the fixed ``_MY_RECENT_SINCE`` shorthand, no operator input).
+    """
+    is_admin = await _is_tenant_admin(session)
+    filters = _build_filters(
+        target="",
+        principal=session.operator_sub,
+        op_id="",
+        op_class="",
+        result_status="",
+        since=_MY_RECENT_SINCE,
+        until="",
+        work_ref="",
+        cursor=None,
+    )
+    result = await _run_query(filters, tenant_id=session.tenant_id)
+    return {
+        "rows": _project_rows(result, is_admin=is_admin),
+        "operator_sub": session.operator_sub,
+    }
+
+
 async def _build_results_context(
     session: UISessionContext,
     *,
@@ -424,6 +546,160 @@ async def _build_results_context(
     return context
 
 
+async def _results_handler(
+    request: Request,
+    target: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    principal: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    op_id: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    op_class: str = Query(default="", max_length=64),
+    result_status: str = Query(default="", max_length=16),
+    since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
+    until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
+    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    cursor: str | None = Query(default=None),
+    partial: str = Query(default=""),
+    session: UISessionContext = _require_session,
+) -> HTMLResponse:
+    """``GET /ui/audit/results`` -- the filter-submit + pager fragment.
+
+    ``partial=rows`` (the "Load more" append fetch) renders ONLY the
+    page's rows plus an out-of-band pager re-render; any other value
+    renders the full ``audit/_results.html`` console block. A foreign
+    ``partial`` value is rejected (422) rather than silently coerced.
+    """
+    if partial not in _RESULTS_PARTIALS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown audit results partial '{partial}'.",
+        )
+    context = await _build_results_context(
+        session,
+        target=target,
+        principal=principal,
+        op_id=op_id,
+        op_class=op_class,
+        result_status=result_status,
+        since=since,
+        until=until,
+        work_ref=work_ref,
+        cursor=cursor,
+    )
+    template = (
+        "audit/_results_rows_oob.html"
+        if partial == _RESULTS_PARTIAL_ROWS
+        else "audit/_results.html"
+    )
+    return get_templates().TemplateResponse(request, template, context)
+
+
+async def _page_handler(
+    request: Request,
+    target: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    principal: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    op_id: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    op_class: str = Query(default="", max_length=64),
+    result_status: str = Query(default="", max_length=16),
+    since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
+    until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
+    work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
+    audit_id: uuid.UUID | None = Query(default=None),
+    session: UISessionContext = _require_session,
+    db_session: AsyncSession = _get_raw_session_dep,
+) -> HTMLResponse:
+    """``GET /ui/audit`` -- the full page: filter form + first result page.
+
+    Filters are accepted on the full-page route too so a copy-pasted
+    filtered URL reproduces the operator's view (the form sets
+    ``hx-push-url`` on the fragment route, mirroring broadcast /
+    operations). Sets + echoes the CSRF cookie so the form's ``hx-get``
+    passes the double-submit check, even though every route here is GET.
+
+    ``?audit_id=<id>`` is the drawer deep-link: pasting an audit id into
+    a ticket opens the page with that row's detail drawer already
+    rendered in the drawer slot. A missing / cross-tenant id resolves to
+    ``None`` and simply renders the page with no open drawer (the page
+    itself is not a 404 -- only the drawer fragment is).
+    """
+    context = await _build_results_context(
+        session,
+        target=target,
+        principal=principal,
+        op_id=op_id,
+        op_class=op_class,
+        result_status=result_status,
+        since=since,
+        until=until,
+        work_ref=work_ref,
+        cursor=None,
+    )
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context["page_title"] = "Audit"
+    context["active_surface"] = "audit"
+    context["csrf_token"] = csrf_token
+    context["drawer"] = await _resolve_deep_link_drawer(
+        db_session, session=session, audit_id=audit_id
+    )
+    response = get_templates().TemplateResponse(request, "audit/index.html", context)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        path="/ui",
+    )
+    return response
+
+
+async def _my_recent_handler(
+    request: Request,
+    session: UISessionContext = _require_session,
+) -> HTMLResponse:
+    """``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.
+
+    Returns the calling operator's last-24h rows
+    (``principal=session.operator_sub``) rendered through the same row
+    partial as the T1 result list, so each row opens the T2 detail
+    drawer. ``OPERATOR``-self-scoped: a second operator's activity is
+    never reachable here. HTMX-only fragment (no full-page chrome).
+    """
+    context = await _build_my_recent_context(session)
+    return get_templates().TemplateResponse(request, "audit/_my_recent.html", context)
+
+
+async def _drawer_handler(
+    request: Request,
+    audit_id: uuid.UUID,
+    session: UISessionContext = _require_session,
+    db_session: AsyncSession = _get_raw_session_dep,
+) -> HTMLResponse:
+    """``GET /ui/audit/show/{audit_id}`` -- the row detail drawer fragment.
+
+    Resolves the row in-process scoped to ``session.tenant_id`` (the
+    shared :func:`fetch_audit_row`); a missing / cross-tenant id renders
+    the not-found fragment at **404** (never 403, never 200), matching
+    the REST ``show`` non-leakage posture (``audit.py:399-404``) and the
+    broadcast drawer. The aggregate-only gate withholds the payload for
+    sensitive ops; the replay deep-link is enabled only for a
+    ``tenant_admin`` lift.
+    """
+    row = await fetch_audit_row(
+        db_session,
+        tenant_id=session.tenant_id,
+        audit_id=audit_id,
+    )
+    if row is None:
+        return get_templates().TemplateResponse(
+            request,
+            "audit/_drawer_not_found.html",
+            {"audit_id": str(audit_id)},
+            status_code=404,
+        )
+    is_admin = await _is_tenant_admin(session)
+    context = _build_drawer_context(row, is_admin=is_admin)
+    return get_templates().TemplateResponse(request, "audit/_drawer.html", context)
+
+
 def build_audit_router() -> APIRouter:
     """Construct the ``/ui/audit*`` :class:`APIRouter`.
 
@@ -431,117 +707,52 @@ def build_audit_router() -> APIRouter:
     construct parallel routers without shared route state -- the convention
     every surface router (broadcast / approvals / runbooks) follows.
     Registered ahead of the stubs aggregate in
-    :func:`meho_backplane.ui.routes.build_router`; the literal
-    ``/ui/audit/results`` route is registered **before** the ``/ui/audit``
-    page route, and before any ``{param}`` route a future task adds (T2's
-    row drawer, T3's ``/ui/audit/sessions/{session_id}/replay``), so the
-    first-match-wins lookup never binds the literal ``results`` segment as a
-    slug.
+    :func:`meho_backplane.ui.routes.build_router`.
+
+    Route ordering is the first-match-wins contract. The **literal**
+    segments are registered before the ``{audit_id}`` parametrised drawer
+    so a literal path never binds as a slug:
+
+    1. ``GET /ui/audit/results`` -- the T1 filter-submit + pager fragment.
+    2. ``GET /ui/audit/my-recent`` -- the my-recent quick view (literal,
+       registered **before** ``show/{audit_id}`` so ``my-recent`` is never
+       read as an ``audit_id``).
+    3. ``GET /ui/audit/show/{audit_id}`` -- the T2 row detail drawer.
+    4. ``GET /ui/audit`` -- the full page.
+
+    A future T3 ``/ui/audit/sessions/{session_id}/replay`` slots in among the
+    literal-prefixed routes the same way.
     """
     router = APIRouter(tags=["ui-audit"])
-
-    async def _results_handler(
-        request: Request,
-        target: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        principal: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        op_id: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        op_class: str = Query(default="", max_length=64),
-        result_status: str = Query(default="", max_length=16),
-        since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-        until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-        work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        cursor: str | None = Query(default=None),
-        partial: str = Query(default=""),
-        session: UISessionContext = _require_session,
-    ) -> HTMLResponse:
-        """``GET /ui/audit/results`` -- the filter-submit + pager fragment.
-
-        ``partial=rows`` (the "Load more" append fetch) renders ONLY the
-        page's rows plus an out-of-band pager re-render; any other value
-        renders the full ``audit/_results.html`` console block. A foreign
-        ``partial`` value is rejected (422) rather than silently coerced.
-        """
-        if partial not in _RESULTS_PARTIALS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"Unknown audit results partial '{partial}'.",
-            )
-        context = await _build_results_context(
-            session,
-            target=target,
-            principal=principal,
-            op_id=op_id,
-            op_class=op_class,
-            result_status=result_status,
-            since=since,
-            until=until,
-            work_ref=work_ref,
-            cursor=cursor,
-        )
-        template = (
-            "audit/_results_rows_oob.html"
-            if partial == _RESULTS_PARTIAL_ROWS
-            else "audit/_results.html"
-        )
-        return get_templates().TemplateResponse(request, template, context)
-
-    async def _page_handler(
-        request: Request,
-        target: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        principal: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        op_id: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        op_class: str = Query(default="", max_length=64),
-        result_status: str = Query(default="", max_length=16),
-        since: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-        until: str = Query(default="", max_length=_MAX_DURATION_LENGTH),
-        work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
-        session: UISessionContext = _require_session,
-    ) -> HTMLResponse:
-        """``GET /ui/audit`` -- the full page: filter form + first result page.
-
-        Filters are accepted on the full-page route too so a copy-pasted
-        filtered URL reproduces the operator's view (the form sets
-        ``hx-push-url`` on the fragment route, mirroring broadcast /
-        operations). Sets + echoes the CSRF cookie so the form's ``hx-get``
-        passes the double-submit check, even though every route here is GET.
-        """
-        context = await _build_results_context(
-            session,
-            target=target,
-            principal=principal,
-            op_id=op_id,
-            op_class=op_class,
-            result_status=result_status,
-            since=since,
-            until=until,
-            work_ref=work_ref,
-            cursor=None,
-        )
-        csrf_token = mint_csrf_token(str(session.session_id))
-        context["page_title"] = "Audit"
-        context["active_surface"] = "audit"
-        context["csrf_token"] = csrf_token
-        response = get_templates().TemplateResponse(request, "audit/index.html", context)
-        response.set_cookie(
-            key=CSRF_COOKIE_NAME,
-            value=csrf_token,
-            httponly=False,
-            secure=True,
-            samesite="strict",
-            path="/ui",
-        )
-        return response
-
-    # The literal ``/ui/audit/results`` route is registered BEFORE the
-    # ``/ui/audit`` page route (and ahead of any future ``{param}`` route) so
-    # first-match-wins routing never binds ``results`` as a slug -- the
-    # ordering discipline the approvals / operations routers document.
     router.add_api_route(
         "/ui/audit/results",
         _results_handler,
         methods=["GET"],
         name="ui_audit_results",
         response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/audit/my-recent",
+        _my_recent_handler,
+        methods=["GET"],
+        name="ui_audit_my_recent",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/audit/show/{audit_id}",
+        _drawer_handler,
+        methods=["GET"],
+        name="ui_audit_drawer",
+        response_class=HTMLResponse,
+        responses={
+            404: {
+                "description": (
+                    "Audit id does not exist in this tenant (or exists only "
+                    "for another tenant). Returns the not-found drawer fragment."
+                ),
+                "content": {"text/html": {}},
+            },
+        },
     )
     router.add_api_route(
         "/ui/audit",

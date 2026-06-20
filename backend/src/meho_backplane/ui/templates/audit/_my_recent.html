@@ -1,0 +1,44 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit my-recent quick-view fragment (Initiative #1841 G10.15, Task #1945).
+
+  Returned by ``GET /ui/audit/my-recent`` -- the "what did I just do"
+  shortcut. Renders the calling operator's last-24h rows
+  (``principal=session.operator_sub``, OPERATOR-self-scoped) through the
+  SAME row partial (``audit/_results_rows.html``) as the T1 result list, so
+  each row carries the identical badge / pivots and opens the same T2 detail
+  drawer (``GET /ui/audit/show/{audit_id}``).
+
+  Unlike the forensic results list, this is a glance, not a browse: it is a
+  fixed 24h window with no filter form and no forward-cursor pager. An
+  HTMX-only fragment (no ``base.html`` chrome) meant to swap into a
+  quick-view slot beside the query surface.
+
+  Context variables:
+    rows         -- list[dict]: projected rows (see ``_results.html``)
+    operator_sub -- str: the calling operator's sub (self-scope label)
+-#}
+<div id="audit-my-recent" class="space-y-3">
+  <header class="flex items-center justify-between gap-2">
+    <h2 class="text-sm font-semibold uppercase opacity-60">My recent activity</h2>
+    <span class="text-xs opacity-50">last 24h &middot; <span class="font-mono break-all">{{ operator_sub }}</span></span>
+  </header>
+  {% if rows %}
+    <ul
+      id="audit-my-recent-rows"
+      class="divide-base-content/8 divide-y rounded-box border border-base-300 bg-base-100"
+      role="list"
+      aria-label="My recent audit rows"
+    >
+      {% include "audit/_results_rows.html" %}
+    </ul>
+  {% else %}
+    <div class="card bg-base-100 border-base-300 border border-dashed shadow-sm">
+      <div class="card-body items-center py-8 text-center">
+        <p class="text-sm opacity-60">No activity in the last 24 hours</p>
+      </div>
+    </div>
+  {% endif %}
+</div>

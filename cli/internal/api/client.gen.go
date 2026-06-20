@@ -1227,6 +1227,13 @@ type BodyApprovalRejectUiApprovalsRequestIdRejectPost struct {
 	Reason *string `json:"reason,omitempty"`
 }
 
+// BodyBulkImportUiTopologyEdgesBulkPost defines model for Body_bulk_import_ui_topology_edges_bulk_post.
+type BodyBulkImportUiTopologyEdgesBulkPost struct {
+	DryRun   *bool   `json:"dry_run,omitempty"`
+	RowsText *string `json:"rows_text"`
+	Upload   *string `json:"upload"`
+}
+
 // BodyCorpusSearchUiCorpusSearchPost defines model for Body_corpus_search_ui_corpus_search_post.
 type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
@@ -7553,6 +7560,9 @@ type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISe
 // AnnotateUiTopologyEdgesPostFormdataRequestBody defines body for AnnotateUiTopologyEdgesPost for application/x-www-form-urlencoded ContentType.
 type AnnotateUiTopologyEdgesPostFormdataRequestBody = BodyAnnotateUiTopologyEdgesPost
 
+// BulkImportUiTopologyEdgesBulkPostMultipartRequestBody defines body for BulkImportUiTopologyEdgesBulkPost for multipart/form-data ContentType.
+type BulkImportUiTopologyEdgesBulkPostMultipartRequestBody = BodyBulkImportUiTopologyEdgesBulkPost
+
 // UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody defines body for UiTopologyNodeDetailUiTopologyNodeNodeIdGet for application/json ContentType.
 type UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody = UISessionContext
 
@@ -9554,6 +9564,12 @@ type ClientInterface interface {
 	// AnnotateModalUiTopologyEdgesAnnotateGet request
 	AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// BulkPanelUiTopologyEdgesBulkGet request
+	BulkPanelUiTopologyEdgesBulkGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// BulkImportUiTopologyEdgesBulkPostWithBody request with any body
+	BulkImportUiTopologyEdgesBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UnannotateUiTopologyEdgesEdgeIdDelete request
 	UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9561,6 +9577,9 @@ type ClientInterface interface {
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RefreshUiTopologyRefreshTargetNamePost request
+	RefreshUiTopologyRefreshTargetNamePost(ctx context.Context, targetName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VaultIndexUiVaultGet request
 	VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14882,6 +14901,30 @@ func (c *Client) AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, re
 	return c.Client.Do(req)
 }
 
+func (c *Client) BulkPanelUiTopologyEdgesBulkGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBulkPanelUiTopologyEdgesBulkGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BulkImportUiTopologyEdgesBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBulkImportUiTopologyEdgesBulkPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(c.Server, edgeId)
 	if err != nil {
@@ -14908,6 +14951,18 @@ func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context
 
 func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RefreshUiTopologyRefreshTargetNamePost(ctx context.Context, targetName string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRefreshUiTopologyRefreshTargetNamePostRequest(c.Server, targetName)
 	if err != nil {
 		return nil, err
 	}
@@ -31395,6 +31450,62 @@ func NewAnnotateModalUiTopologyEdgesAnnotateGetRequest(server string) (*http.Req
 	return req, nil
 }
 
+// NewBulkPanelUiTopologyEdgesBulkGetRequest generates requests for BulkPanelUiTopologyEdgesBulkGet
+func NewBulkPanelUiTopologyEdgesBulkGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/bulk")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewBulkImportUiTopologyEdgesBulkPostRequestWithBody generates requests for BulkImportUiTopologyEdgesBulkPost with any type of body
+func NewBulkImportUiTopologyEdgesBulkPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/bulk")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest generates requests for UnannotateUiTopologyEdgesEdgeIdDelete
 func NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(server string, edgeId openapi_types.UUID) (*http.Request, error) {
 	var err error
@@ -31472,6 +31583,40 @@ func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(server string
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRefreshUiTopologyRefreshTargetNamePostRequest generates requests for RefreshUiTopologyRefreshTargetNamePost
+func NewRefreshUiTopologyRefreshTargetNamePostRequest(server string, targetName string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "target_name", runtime.ParamLocationPath, targetName)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/refresh/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -32986,6 +33131,12 @@ type ClientWithResponsesInterface interface {
 	// AnnotateModalUiTopologyEdgesAnnotateGetWithResponse request
 	AnnotateModalUiTopologyEdgesAnnotateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error)
 
+	// BulkPanelUiTopologyEdgesBulkGetWithResponse request
+	BulkPanelUiTopologyEdgesBulkGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*BulkPanelUiTopologyEdgesBulkGetResponse, error)
+
+	// BulkImportUiTopologyEdgesBulkPostWithBodyWithResponse request with any body
+	BulkImportUiTopologyEdgesBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BulkImportUiTopologyEdgesBulkPostResponse, error)
+
 	// UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request
 	UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error)
 
@@ -32993,6 +33144,9 @@ type ClientWithResponsesInterface interface {
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
 
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+
+	// RefreshUiTopologyRefreshTargetNamePostWithResponse request
+	RefreshUiTopologyRefreshTargetNamePostWithResponse(ctx context.Context, targetName string, reqEditors ...RequestEditorFn) (*RefreshUiTopologyRefreshTargetNamePostResponse, error)
 
 	// VaultIndexUiVaultGetWithResponse request
 	VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error)
@@ -39466,6 +39620,49 @@ func (r AnnotateModalUiTopologyEdgesAnnotateGetResponse) StatusCode() int {
 	return 0
 }
 
+type BulkPanelUiTopologyEdgesBulkGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r BulkPanelUiTopologyEdgesBulkGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r BulkPanelUiTopologyEdgesBulkGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type BulkImportUiTopologyEdgesBulkPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r BulkImportUiTopologyEdgesBulkPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r BulkImportUiTopologyEdgesBulkPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UnannotateUiTopologyEdgesEdgeIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -39504,6 +39701,28 @@ func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RefreshUiTopologyRefreshTargetNamePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RefreshUiTopologyRefreshTargetNamePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RefreshUiTopologyRefreshTargetNamePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43441,6 +43660,24 @@ func (c *ClientWithResponses) AnnotateModalUiTopologyEdgesAnnotateGetWithRespons
 	return ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp)
 }
 
+// BulkPanelUiTopologyEdgesBulkGetWithResponse request returning *BulkPanelUiTopologyEdgesBulkGetResponse
+func (c *ClientWithResponses) BulkPanelUiTopologyEdgesBulkGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*BulkPanelUiTopologyEdgesBulkGetResponse, error) {
+	rsp, err := c.BulkPanelUiTopologyEdgesBulkGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBulkPanelUiTopologyEdgesBulkGetResponse(rsp)
+}
+
+// BulkImportUiTopologyEdgesBulkPostWithBodyWithResponse request with arbitrary body returning *BulkImportUiTopologyEdgesBulkPostResponse
+func (c *ClientWithResponses) BulkImportUiTopologyEdgesBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BulkImportUiTopologyEdgesBulkPostResponse, error) {
+	rsp, err := c.BulkImportUiTopologyEdgesBulkPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBulkImportUiTopologyEdgesBulkPostResponse(rsp)
+}
+
 // UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request returning *UnannotateUiTopologyEdgesEdgeIdDeleteResponse
 func (c *ClientWithResponses) UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
 	rsp, err := c.UnannotateUiTopologyEdgesEdgeIdDelete(ctx, edgeId, reqEditors...)
@@ -43465,6 +43702,15 @@ func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithRes
 		return nil, err
 	}
 	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
+}
+
+// RefreshUiTopologyRefreshTargetNamePostWithResponse request returning *RefreshUiTopologyRefreshTargetNamePostResponse
+func (c *ClientWithResponses) RefreshUiTopologyRefreshTargetNamePostWithResponse(ctx context.Context, targetName string, reqEditors ...RequestEditorFn) (*RefreshUiTopologyRefreshTargetNamePostResponse, error) {
+	rsp, err := c.RefreshUiTopologyRefreshTargetNamePost(ctx, targetName, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRefreshUiTopologyRefreshTargetNamePostResponse(rsp)
 }
 
 // VaultIndexUiVaultGetWithResponse request returning *VaultIndexUiVaultGetResponse
@@ -51585,6 +51831,48 @@ func ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp *http.Response) (*
 	return response, nil
 }
 
+// ParseBulkPanelUiTopologyEdgesBulkGetResponse parses an HTTP response from a BulkPanelUiTopologyEdgesBulkGetWithResponse call
+func ParseBulkPanelUiTopologyEdgesBulkGetResponse(rsp *http.Response) (*BulkPanelUiTopologyEdgesBulkGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &BulkPanelUiTopologyEdgesBulkGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseBulkImportUiTopologyEdgesBulkPostResponse parses an HTTP response from a BulkImportUiTopologyEdgesBulkPostWithResponse call
+func ParseBulkImportUiTopologyEdgesBulkPostResponse(rsp *http.Response) (*BulkImportUiTopologyEdgesBulkPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &BulkImportUiTopologyEdgesBulkPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse parses an HTTP response from a UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse call
 func ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse(rsp *http.Response) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -51620,6 +51908,32 @@ func ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp *http.Response
 	}
 
 	response := &UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRefreshUiTopologyRefreshTargetNamePostResponse parses an HTTP response from a RefreshUiTopologyRefreshTargetNamePostWithResponse call
+func ParseRefreshUiTopologyRefreshTargetNamePostResponse(rsp *http.Response) (*RefreshUiTopologyRefreshTargetNamePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RefreshUiTopologyRefreshTargetNamePostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

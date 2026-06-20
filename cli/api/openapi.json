@@ -8637,6 +8637,110 @@
         }
       }
     },
+    "/ui/topology/edges/bulk": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Bulk Panel",
+        "description": "``GET /ui/topology/edges/bulk`` \u2014 render the bulk-import panel.",
+        "operationId": "bulk_panel_ui_topology_edges_bulk_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Bulk Import",
+        "description": "``POST /ui/topology/edges/bulk`` \u2014 preview (dry-run) or apply rows.",
+        "operationId": "bulk_import_ui_topology_edges_bulk_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_bulk_import_ui_topology_edges_bulk_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/refresh/{target_name}": {
+      "post": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Refresh",
+        "description": "``POST /ui/topology/refresh/{target_name}`` \u2014 rediscover a target.",
+        "operationId": "refresh_ui_topology_refresh__target_name__post",
+        "parameters": [
+          {
+            "name": "target_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/topology/node/{node_id}": {
       "get": {
         "tags": [
@@ -18051,6 +18155,29 @@
         },
         "type": "object",
         "title": "Body_approval_reject_ui_approvals__request_id__reject_post"
+      },
+      "Body_bulk_import_ui_topology_edges_bulk_post": {
+        "properties": {
+          "rows_text": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Rows Text"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "Body_bulk_import_ui_topology_edges_bulk_post"
       },
       "Body_corpus_search_ui_corpus_search_post": {
         "properties": {

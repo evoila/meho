@@ -56,6 +56,24 @@
       <div class="text-sm opacity-70">
         <span x-text="'Selected: ' + selected.size" aria-live="polite"></span>
       </div>
+      {#- Bulk-import affordance -- soft-hidden for non-admins (Task #1954).
+          The server-side ``tenant_admin`` gate on ``/ui/topology/edges/bulk``
+          is the authority; this button is a UX hint. ``hx-get`` opens the
+          bulk panel into the ``#topology-bulk-modal`` slot below the header;
+          the panel mints its own CSRF token, so the GET needs none. -#}
+      {% if is_tenant_admin %}
+        <button
+          type="button"
+          class="btn btn-sm btn-outline"
+          data-test="bulk-import-open"
+          aria-label="Bulk-import curated edges"
+          hx-get="{{ bulk_import_href }}"
+          hx-target="#topology-bulk-modal"
+          hx-swap="outerHTML"
+        >
+          Bulk import
+        </button>
+      {% endif %}
       {# ---------- View toggle (table | graph) ----------
          The graph link carries the active filters + the cross-link
          selection so a table -> graph toggle preserves operator
@@ -82,6 +100,15 @@
       </div>
     </div>
   </header>
+
+  {#- Bulk-import panel mount slot (Task #1954). Empty until the "Bulk
+      import" button ``hx-get``s the panel fragment into it; the fragment's
+      outer element shares this id so the swap is stable. Soft-hidden for
+      non-admins (the button that targets it only renders for tenant_admin).
+  -#}
+  {% if is_tenant_admin %}
+    <div id="topology-bulk-modal" data-test="bulk-modal-slot"></div>
+  {% endif %}
 
   {# ---------- Filter bar ---------- #}
   <form

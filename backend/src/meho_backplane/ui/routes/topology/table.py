@@ -91,6 +91,7 @@ from meho_backplane.db.models import _GRAPH_NODE_KINDS
 from meho_backplane.topology.query import list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.topology.graph import OverlayDirection, render_graph
 from meho_backplane.ui.routes.topology.queries import (
     DEFAULT_OVERLAY_DEPTH,
@@ -224,6 +225,17 @@ async def _render_table(
         direction=direction.value,
         limit=limit,
     )
+    is_fragment = _is_htmx_request(request)
+    # The page header carries the tenant_admin-only "Bulk import" button
+    # (Task #1954). Resolve the role probe only for the full-page render —
+    # the table-body fragment swap (sort / filter) does not re-render the
+    # header chrome, so the JWT round-trip would be wasted there. Fail-soft:
+    # a JWKS hiccup projects to "no privileges" (the button hides) rather
+    # than 5xx-ing the table; the server-side ``tenant_admin`` gate on the
+    # bulk routes is the authority, not this hint.
+    is_tenant_admin = False
+    if not is_fragment:
+        is_tenant_admin = (await resolve_role_probe(request, session_ctx)).is_tenant_admin
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = {
         "page_title": "Topology",
@@ -234,6 +246,8 @@ async def _render_table(
         "kind_filter": kind or "",
         "name_filter": name_contains or "",
         "csrf_token": csrf_token,
+        "is_tenant_admin": is_tenant_admin,
+        "bulk_import_href": "/ui/topology/edges/bulk",
         "next_direction_for": _next_direction_factory(sort, direction),
         "node_kind_options": _node_kind_options(),
         # ``selected_id`` is the cross-link payload from the graph
@@ -242,9 +256,7 @@ async def _render_table(
         # env does not raise on a missing-key read in the template.
         "selected_id": str(selected_id) if selected_id is not None else "",
     }
-    template_name = (
-        "topology/_table_rows.html" if _is_htmx_request(request) else "topology/table.html"
-    )
+    template_name = "topology/_table_rows.html" if is_fragment else "topology/table.html"
     response = get_templates().TemplateResponse(request, template_name, context)
     # Mirror the dashboard's CSRF posture so a future state-changing
     # action button on the table (bulk-delete, bulk-annotate, ...) has

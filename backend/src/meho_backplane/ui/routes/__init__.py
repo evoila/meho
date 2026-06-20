@@ -91,6 +91,7 @@ from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
+from meho_backplane.ui.routes.audit import build_audit_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
 from meho_backplane.ui.routes.conventions import build_conventions_router
@@ -109,6 +110,7 @@ __all__ = [
     "build_agent_grants_router",
     "build_agents_router",
     "build_approvals_router",
+    "build_audit_router",
     "build_broadcast_router",
     "build_connectors_router",
     "build_conventions_router",
@@ -205,5 +207,16 @@ def build_router() -> APIRouter:
     # segment can never bind as a descriptor id; registered before the
     # stubs aggregate so its concrete paths win the first-match-wins lookup.
     router.include_router(build_operations_router())
+    # Audit-query forensic console (G10.15-T1 #1944): ``/ui/audit`` (filter
+    # form + first result page) + ``/ui/audit/results`` (filter-submit +
+    # forward-cursor "Load more" fragment). Reads dispatch the
+    # ``audit_query.query_audit`` substrate in-process, tenant-scoped from the
+    # session. Inside the router the literal ``/ui/audit/results`` is
+    # registered before the ``/ui/audit`` page route (and ahead of any future
+    # ``{param}`` route T2/T3 add) so the literal ``results`` segment is never
+    # bound as a slug; registered before the stubs aggregate so its concrete
+    # paths win the first-match-wins lookup against the placeholder
+    # ``/ui/{slug}``.
+    router.include_router(build_audit_router())
     router.include_router(build_stubs_router())
     return router

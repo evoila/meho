@@ -1,0 +1,54 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit-query forward-cursor PAGER partial (Initiative #1841 G10.15, Task
+  #1944).
+
+  The "Load more" affordance for one page. Extracted from ``_results.html``
+  so the same markup is rendered two ways:
+
+    * Included inline by ``_results.html`` for the first page (the in-page
+      pager beneath the rows list).
+    * Re-rendered on its own as an out-of-band swap (``hx-swap-oob``) in the
+      ``partial=rows`` "Load more" response, so each append REPLACES the old
+      pager with one whose "Load more" URL carries the ADVANCED ``next_cursor``
+      (or collapses to "No more rows" on the last page). Without the OOB
+      re-render the button would re-request the same cursor forever.
+
+  Forward-only: there is NO back button. The substrate cursor is forward-only
+  (``AuditQueryResult.next_cursor``); paging back is re-running the filter
+  from page 1. The "Load more" button ``hx-include``s the filter form so the
+  next page re-applies the active filters alongside the new cursor.
+
+  ``oob`` (bool) selects the mode: when true the wrapper carries
+  ``hx-swap-oob="outerHTML"`` so HTMX replaces the existing pager by id rather
+  than appending; the rows themselves still swap into the list via the
+  request's own ``beforeend`` target.
+
+  Context variables (subset of the results context):
+    next_cursor -- str | None: forward continuation token for the next fetch
+    has_more    -- bool: whether a further page exists
+    oob         -- bool: render as an hx-swap-oob replacement (default false)
+-#}
+<div
+  id="audit-results-pager"
+  class="flex items-center justify-end gap-2"
+  {% if oob | default(false) %}hx-swap-oob="outerHTML"{% endif %}
+>
+  {% if has_more and next_cursor %}
+    <button
+      type="button"
+      class="btn btn-sm btn-ghost"
+      hx-get="/ui/audit/results?cursor={{ next_cursor | urlencode }}&partial=rows"
+      hx-target="#audit-results-rows"
+      hx-swap="beforeend"
+      hx-include="#audit-filter-form"
+      aria-label="Load more audit rows"
+    >
+      Load more
+    </button>
+  {% else %}
+    <span class="text-xs opacity-40">No more rows</span>
+  {% endif %}
+</div>

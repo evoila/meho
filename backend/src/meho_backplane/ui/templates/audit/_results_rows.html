@@ -1,0 +1,101 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit-query ROWS partial (Initiative #1841 G10.15, Task #1944).
+
+  Just the ``<li>`` rows for one page -- no surrounding ``<ul>`` or pager.
+  Included by ``_results.html`` for the first page, and returned on its own
+  by the forward-cursor "Load more" pager (``hx-swap="beforeend"`` appends
+  these onto ``#audit-results-rows``, so paging never drops rows already
+  shown).
+
+  Each row colour-codes its op_class via the broadcast badge palette
+  (``badge_class``, imported from ``ui.routes.broadcast.feed`` -- no duplicate
+  colour map) and renders three one-click pivots:
+
+    * who-touched -- a ``target``-bound query (``/ui/audit?target=<name>``),
+      rendered only when the row carries a target.
+    * by-work-ref -- a ``work_ref``-bound query
+      (``/ui/audit?work_ref=<ref>``), rendered only when the row carries one.
+    * replay -- deep-links to the T3 ``/ui/audit/sessions/{id}/replay`` surface
+      when the row carries an ``agent_session_id``. The replay route is
+      ``TENANT_ADMIN``-gated (#1844), so the pivot is an enabled link only
+      when ``replay_enabled`` (admin + session present); a plain operator sees
+      it disabled with a tooltip.
+
+  Context variables:
+    rows -- list[dict]: projected rows (see ``_results.html``)
+-#}
+{% from "_icons.html" import icon %}
+{% for row in rows %}
+  <li class="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+    <div class="min-w-0 space-y-1">
+      <div class="flex items-center gap-2">
+        <span
+          class="badge badge-sm {{ row.badge_class }}"
+          aria-label="Op class {{ row.op_class }}"
+        >{{ row.op_class }}</span>
+        <p class="truncate font-mono text-sm">{{ row.op_id }}</p>
+        <span class="badge badge-ghost badge-sm" aria-label="Result {{ row.result_status }}">
+          {{ row.result_status }}
+        </span>
+      </div>
+      <p class="truncate text-xs text-base-content/55">
+        <span>{{ row.principal_name or row.principal_sub }}</span>
+        {% if row.target_name %}
+          <span aria-hidden="true">&middot;</span>
+          <span class="font-mono">{{ row.target_name }}</span>
+        {% endif %}
+        <span aria-hidden="true">&middot;</span>
+        <time datetime="{{ row.ts }}">{{ row.ts }}</time>
+        {% if row.work_ref %}
+          <span aria-hidden="true">&middot;</span>
+          <span class="font-mono">{{ row.work_ref }}</span>
+        {% endif %}
+      </p>
+    </div>
+
+    {#- One-click pivots. who-touched / by-work-ref re-bind the filter on the
+        page route; replay deep-links to the T3 session replay surface. -#}
+    <div class="flex shrink-0 items-center gap-1">
+      {% if row.target_name %}
+        <a
+          class="btn btn-ghost btn-xs gap-1"
+          href="/ui/audit?target={{ row.target_name | urlencode }}"
+          aria-label="Who touched {{ row.target_name }}"
+        >
+          {{ icon("search", class="size-3.5") }} who-touched
+        </a>
+      {% endif %}
+      {% if row.work_ref %}
+        <a
+          class="btn btn-ghost btn-xs gap-1"
+          href="/ui/audit?work_ref={{ row.work_ref | urlencode }}"
+          aria-label="Rows for change ticket {{ row.work_ref }}"
+        >
+          {{ icon("share-2", class="size-3.5") }} by-work-ref
+        </a>
+      {% endif %}
+      {% if row.agent_session_id %}
+        {% if row.replay_enabled %}
+          <a
+            class="btn btn-ghost btn-xs gap-1"
+            href="/ui/audit/sessions/{{ row.agent_session_id }}/replay"
+            aria-label="Replay agent session {{ row.agent_session_id }}"
+          >
+            {{ icon("waypoints", class="size-3.5") }} replay
+          </a>
+        {% else %}
+          <span
+            class="btn btn-ghost btn-xs btn-disabled gap-1"
+            aria-disabled="true"
+            title="Session replay requires the tenant_admin role"
+          >
+            {{ icon("waypoints", class="size-3.5") }} replay
+          </span>
+        {% endif %}
+      {% endif %}
+    </div>
+  </li>
+{% endfor %}

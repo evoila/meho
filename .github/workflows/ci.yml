@@ -41,17 +41,25 @@
 #
 # The workflow name is `CI` so it satisfies the `workflow_run:
 # workflows: ["CI"]` dependency in quality-gate.yml (SonarCloud's
-# Clean-as-You-Code gate). The Python job uploads `coverage.xml` as a
-# `python-coverage` artifact so the downstream SonarCloud scan can
-# ingest it — quality-gate.yml's `actions/download-artifact` step
-# references that exact name.
+# Clean-as-You-Code gate). The dedicated `python-coverage` job (push to
+# main only) uploads `coverage.xml` as a `python-coverage` artifact so
+# the downstream SonarCloud scan can ingest it — quality-gate.yml's
+# `actions/download-artifact` step references that exact name. The
+# required unit lane (`python-lint-test`) is intentionally NO-cov: see
+# that job and #1982 — running the unit suite under coverage OOM-kills
+# the memory-limited heavy runner, so coverage was split into its own
+# push-only, non-required, continue-on-error job (#1987).
 #
 # Fail-loud posture (per Goal #11 + devops_best_practices "no
 # continue-on-error on linters or tests"): every step that asserts a
-# contract is allowed to fail the job. The only continue-on-error in
-# this file is on the coverage artifact upload — losing the artifact
-# does not invalidate the test result, and SonarCloud already guards
-# its own download with continue-on-error.
+# contract is allowed to fail the job. The continue-on-error in this
+# file is confined to coverage: the whole `python-coverage` job is
+# job-level continue-on-error (a coverage OOM degrades to "no
+# coverage for this push" and never fails the CI run conclusion —
+# which would otherwise also suppress quality-gate.yml's
+# workflow_run), and the artifact-upload step inside it is
+# step-level continue-on-error. SonarCloud already guards its own
+# download with continue-on-error.
 #
 # All third-party actions pinned to immutable SHAs with the
 # human-readable tag in a trailing comment (devops_best_practices:
@@ -393,14 +401,184 @@ jobs:
             echo "::error title=Unit perf budget exceeded::unit pytest ${dur}s > budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s: MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py (#793/#827). Amortize the cost; do not just bump the budget."
             exit 1
           fi
+        # NOTE: this required lane no longer uploads a coverage artifact —
+        # #1982 dropped `--cov` here (OOM) and the dead `hashFiles(coverage.xml)`-
+        # guarded upload step was removed in #1987. The SonarCloud coverage
+        # artifact is now produced by the dedicated `python-coverage` job below.
+
+  python-coverage:
+    name: Python coverage (SonarCloud)
+    # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
+    # had to drop from the required unit lane to stop the OOM kill. This job
+    # is deliberately:
+    #   * PUSH-TO-MAIN ONLY by default (`github.event_name == 'push'`) — PRs
+    #     stay fast/no-cov; SonarCloud decoration updates "one merge late" (the
+    #     pre-#771 behaviour, the accepted trade in #1987). Not run on PRs
+    #     (no per-PR suite double-run) and not in the merge queue. The ONE
+    #     exception is an opt-in `ci-coverage-validate` PR label: a PR carrying
+    #     that label also runs this job, so a change to the coverage path
+    #     itself can be proven green + artifact-producing on the real
+    #     `meho-runners-ci-heavy` pod (where the OOM reproduces) BEFORE it
+    #     merges — without paying the double-suite cost on every other PR.
+    #     Remove the label once validated; routine PRs never carry it.
+    #   * NON-REQUIRED + whole-job continue-on-error (#1987 AC5) — it is NOT
+    #     in branch protection's required contexts, AND continue-on-error
+    #     means a coverage OOM/timeout reports the JOB as success, so it
+    #     never fails the overall CI run conclusion. That matters twice: a
+    #     red coverage job must not block merge (it can't — push runs after
+    #     merge — but defence in depth), and it must not flip the CI run's
+    #     `conclusion` to `failure`, which would suppress quality-gate.yml's
+    #     `workflow_run` (it only runs on `conclusion == 'success'`).
+    #
+    # WHY OFFLINE COMBINE + LOW PARALLELISM (the memory story, measured for
+    # #1987; methodology = #1982's: systemd-run --user --scope, cgroup
+    # memory.peak, full unit suite, 8306 passed):
+    #   | config                   | peak       | wall   |
+    #   | no-cov -n 3 (#1982)      | 7.86 GiB   | 13:34  |
+    #   | offline-cov -n 3        | 14.03 GiB  | 15:19  |
+    #   | offline-cov -n 2        | 13.17 GiB  | 20:42  |
+    #   | offline-cov -n 1        | 12.48 GiB  | 35:32  |
+    # The coverage tax (~4.6 GiB even fully serial) is INTRINSIC — the
+    # in-memory line-coverage map over the whole meho_backplane package
+    # across 8306 tests — and barely shrinks with xdist worker count, so the
+    # session-end combine is NOT the peak (offline combine alone did not
+    # avoid the OOM at -n 3). The lever that actually fits the pod is dropping
+    # base suite memory via low parallelism: -n 1 peaks at 12.48 GiB, ~1.2 GiB
+    # under the <13.67 GiB pod limit that #1982's --cov run (13.67 GiB) tripped.
+    # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
+    # AFTER pytest exits, pytest invoked with `-p no:cov` so pytest-cov's
+    # in-process combine never runs) keeps the combine memory-cheap regardless.
+    # If the suite grows enough to push -n 1 over the limit, the durable fix is
+    # a larger-memory runner pool (infra, out of band) — this job is
+    # non-blocking so an OOM merely skips one coverage upload until then.
+    # Runs on push to main, OR on a PR explicitly opted in via the
+    # `ci-coverage-validate` label (the on-runner validation escape hatch
+    # described above). The fork-PR guard still applies on the PR path so
+    # fork code never executes on the self-hosted pool.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
+    runs-on: meho-runners-ci-heavy
+    # ~36-min serial wall + headroom. This job is push-only and non-blocking,
+    # so a long wall is acceptable (it never gates a PR). The cap is a hang
+    # backstop, not a perf budget.
+    timeout-minutes: 50
+    continue-on-error: true
+    env:
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Docker Hub login (for testcontainers pulls)
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Cache fastembed model (drift-guard + slow-lane)
+        # Same shared model cache the required lane uses — the unit suite this
+        # job re-runs instantiates the embedding model, so it must be warm here
+        # too. Keyed identically so the two jobs share one cache entry.
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - name: Embedding-model drift guard (evoila/meho#574)
+        env:
+          MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run python -m meho_backplane.retrieval.warm
+
+      - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
+        # Same model the unit lane provisions — the Tier-2 redaction tests in
+        # the unit sweep need it, and this job re-runs that sweep.
+        run: |
+          uv run python -m spacy download en_core_web_sm
+          MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
+            uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
+
+      - name: Pytest (unit) with offline coverage data
+        env:
+          MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
+          # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
+          # calls coverage.process_startup() when COVERAGE_PROCESS_START points
+          # at a config, so every worker writes its OWN parallel data file
+          # (.coverage.<host>.<pid>.<rand>). pytest itself runs with -p no:cov
+          # below, so pytest-cov's memory-spiking in-process session-end combine
+          # never runs — the combine is deferred to a standalone step after
+          # this one, by which point all workers are dead and their memory freed.
+          COVERAGE_PROCESS_START: .coveragerc.ci
+          # sysmon (PEP 669) is the faster tracer; line counts match the C
+          # tracer exactly (SonarCloud parity), and it does not raise the peak
+          # vs the C tracer in measurement.
+          COVERAGE_CORE: sysmon
+        # Same unit sweep as the required lane (--ignore=tests/integration), but
+        # -n 1 (serial) to keep the coverage-inflated peak under the pod limit
+        # (see the memory table in this job's header). --dist loadscope keeps a
+        # module's tests on one worker so session-scoped fixtures instantiate
+        # once. No --maxfail: a coverage run wants the whole suite measured even
+        # if one test is flaky; redness here is non-blocking anyway.
+        run: |
+          uv run pytest -n 1 --dist loadscope -p no:cov \
+            --ignore=tests/integration tests/
+
+      - name: Combine coverage + write XML (offline, workers exited)
+        # Runs AFTER the pytest step above fully returned — every xdist worker
+        # process is gone, so `coverage combine` merges the per-worker parallel
+        # data files standalone (cheap), not co-resident with live workers.
+        # Uses .coveragerc.ci (relative_files=true) so paths are repo-relative
+        # for SonarCloud cross-job mapping (#1987 AC6).
+        #
+        # `if: always()` so a non-zero pytest exit (a single flaky test in a
+        # 8.3k-test sweep) still combines + uploads whatever coverage the run
+        # DID produce, rather than GitHub skipping this step and silently
+        # dropping all coverage for the push. Partial coverage beats none here
+        # — this whole job is non-blocking, and SonarCloud merging slightly
+        # incomplete new-code coverage is far better than a "no data" gap on
+        # every push that happens to hit a flake. The `[ -f .coverage* ]` guard
+        # keeps the step from erroring with "No data to combine" when pytest
+        # crashed before any worker wrote a data file (genuine no-coverage case
+        # → the upload step's hashFiles guard then skips cleanly).
+        if: always()
+        run: |
+          if ! ls .coverage.* >/dev/null 2>&1; then
+            echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
+            exit 0
+          fi
+          uv run coverage combine --rcfile=.coveragerc.ci
+          uv run coverage xml --rcfile=.coveragerc.ci -o coverage.xml
+          # Sanity: the file must exist and carry the empty <source></source>
+          # that quality-gate.yml's sed rewrites to <source>backend</source>.
+          test -f coverage.xml
+          grep -q '<source></source>' coverage.xml \
+            || echo "::warning::coverage.xml has no empty <source> — SonarCloud path mapping may not resolve"
 
       - name: Upload Python coverage artifact
-        # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).
-        # Lossy artifact: a missing upload (network, runner eviction)
-        # degrades the SonarCloud signal to "no coverage for this run"
-        # but never invalidates the test outcome. continue-on-error is
-        # appropriate ONLY for this step — every preceding linter /
-        # type check / test is fail-loud.
+        # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud) under this
+        # exact name. Lossy: a missing upload degrades the SonarCloud signal to
+        # "no coverage for this push" but never invalidates anything.
+        # continue-on-error here is belt-and-suspenders on top of the whole-job
+        # continue-on-error.
         if: always() && hashFiles('backend/coverage.xml') != ''
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

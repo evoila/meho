@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Coverage config for the CI "Python coverage (SonarCloud)" job ONLY
+# (.github/workflows/ci.yml). It is deliberately separate from
+# backend/pyproject.toml's [tool.coverage.run] so the offline-combine
+# coverage path does not change how a developer's local `coverage` /
+# pytest-cov invocation behaves.
+#
+# WHY OFFLINE COMBINE (the OOM fix, #1987 / post-#1982): running the
+# unit suite with pytest-cov under xdist peaks the pytest tree at
+# ~13.67 GiB because pytest-cov combines every worker's coverage data
+# *in-process*, inside the still-alive controller, at session end —
+# all workers' data + the merge co-resident (+5.8 GiB over the 7.86 GiB
+# no-cov baseline), OOM-killing the memory-limited heavy runner. This
+# config instead has each xdist worker write its OWN parallel data file
+# (parallel=true + the COVERAGE_PROCESS_START subprocess hook), and the
+# CI job runs `coverage combine` + `coverage xml` as separate steps
+# AFTER pytest exits — by then every worker process is dead and its
+# memory freed, so the combine runs standalone, well under the pod
+# limit. pytest is invoked WITHOUT --cov (-p no:cov), so pytest-cov's
+# session-end in-process combine never runs.
+#
+# relative_files duplicates pyproject.toml's value on purpose: this is
+# the config the combine/xml steps load, and SonarCloud path mapping
+# across the two jobs (CI producer -> quality-gate.yml consumer)
+# depends on it (#1987 AC6). source pins measurement to the package so
+# the report shape matches the previous pytest-cov output that
+# SonarCloud already ingests.
+[run]
+parallel = true
+relative_files = true
+source = meho_backplane

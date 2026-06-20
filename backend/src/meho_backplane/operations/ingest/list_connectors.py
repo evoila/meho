@@ -96,6 +96,7 @@ from meho_backplane.operations.ingest.catalog import (
     ConnectorSpecCatalog,
     load_catalog,
 )
+from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
 
 __all__ = ["list_ingested_connectors", "next_step_for_registered_connector"]
 
@@ -532,6 +533,12 @@ async def _emit_db_backed_rows(
         ):
             continue
         op_counts = op_counts_by_connector.get(key, {})
+        enabled_op_count = op_counts.get("enabled", 0)
+        kind, dispatchable = resolve_authoring_kind(
+            product=product,
+            version=version,
+            enabled_operation_count=enabled_op_count,
+        )
         items.append(
             ConnectorListItem(
                 connector_id=connector_id,
@@ -544,8 +551,10 @@ async def _emit_db_backed_rows(
                 enabled_group_count=row["enabled"],
                 disabled_group_count=row["disabled"],
                 operation_count=op_counts.get("total", 0),
-                enabled_operation_count=op_counts.get("enabled", 0),
+                enabled_operation_count=enabled_op_count,
                 state="ingested",
+                kind=kind,
+                dispatchable=dispatchable,
             ),
         )
     return items
@@ -679,6 +688,20 @@ def _maybe_build_class_only_item(
         # == parsed product) and the SDDC case (registry product
         # "sddc-manager" vs parsed "sddc").
         return None
+    # The authoring-mode ``kind`` still reflects what class backs the
+    # registration (e.g. a registered hand-coded class reads "typed"),
+    # but ``dispatchable`` is forced ``False`` regardless: a
+    # ``state="registered"`` row has no descriptor rows, so the
+    # dispatcher cannot resolve a call against it yet (#773) — the
+    # operator must ingest / register ops first. Resolver-replay
+    # against the registered class's ``(product, version)`` is what
+    # gives the kind; the gate has not been cleared (zero enabled ops),
+    # so a profiled registration reads "profiled-but-unreviewed".
+    kind, _resolved_dispatchable = resolve_authoring_kind(
+        product=parsed_product,
+        version=parsed_version,
+        enabled_operation_count=0,
+    )
     return ConnectorListItem(
         connector_id=connector_id,
         product=parsed_product,
@@ -692,6 +715,8 @@ def _maybe_build_class_only_item(
         operation_count=0,
         enabled_operation_count=0,
         state="registered",
+        kind=kind,
+        dispatchable=False,
         next_step=_next_step_for_registered(
             # Lookup against the registry triple (the catalog's native
             # key) rather than the parsed one — for SDDC the registry

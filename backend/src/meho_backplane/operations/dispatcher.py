@@ -212,7 +212,7 @@ from meho_backplane.connectors import (
     ResultHandle,
     resolve_connector_or_label,
 )
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
@@ -837,11 +837,16 @@ async def _run_branch_with_error_handling(
         # import light; in production the package is already loaded by
         # the REST routes, so this is a dict lookup.
         from meho_backplane.operations.ingest.connector_registration import (
-            GenericRestConnector,
             sibling_handrolled_impl_id,
         )
 
-        is_auto_shim = isinstance(connector_instance, GenericRestConnector)
+        # G0.28-T1 (#1967): only a *bare* auto-shim (GenericRestConnector,
+        # shim_kind == "bare") is the "unreplaced auto-shim" dead end. A
+        # profiled connector (shim_kind == "profiled") that raises
+        # NotImplementedError is a dispatchable connector whose profile
+        # wiring is incomplete, not a dead shim — it gets the generic
+        # unsupported_feature cause.
+        is_auto_shim = connector_instance is not None and shim_kind(connector_instance) == "bare"
         cause: Literal["unsupported_feature", "unreplaced_auto_shim"] = (
             "unreplaced_auto_shim" if is_auto_shim else "unsupported_feature"
         )

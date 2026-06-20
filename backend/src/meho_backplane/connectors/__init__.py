@@ -8,7 +8,8 @@ and the resolver so downstream consumers can import from this package
 root.
 """
 
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ShimKind, shim_kind
+from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.registry import (
     all_connectors,
     all_connectors_v2,
@@ -51,8 +52,10 @@ __all__ = [
     "NodeKind",
     "OperationResult",
     "ProbeResult",
+    "ProfiledRestConnector",
     "ResolutionLabel",
     "ResultHandle",
+    "ShimKind",
     "TopologyHints",
     "all_connectors",
     "all_connectors_v2",
@@ -62,4 +65,5 @@ __all__ = [
     "register_connector_v2",
     "resolve_connector",
     "resolve_connector_or_label",
+    "shim_kind",
 ]

@@ -413,6 +413,54 @@ Two operator-facing surfaces flag an unreplaced shim:
   of its subclass landing), and resolver misses/ties fail soft to
   "no warning" rather than blocking the write.
 
+### `ProfiledRestConnector` + the tri-state `shim_kind` predicate (G0.28-T1 #1967)
+
+`ProfiledRestConnector` (`connectors/profiled.py`) is the **sibling** of
+`GenericRestConnector` — an `HttpConnector` subclass, **not** a
+`GenericRestConnector` subclass — that a reviewed declarative
+`ExecutionProfile` plugs into to make an ingested REST connector
+dispatchable (Initiative #1965; the profile schema/machinery land in
+T3–T7). T1 ships the class + the classification only; its `auth_headers`
+/ `fingerprint` / `probe` / `execute` raise `NotImplementedError` until
+the profile machinery is wired.
+
+The gate that makes this possible is the **tri-state dispatchability
+classifier** that replaces the binary `issubclass(GenericRestConnector)`
+predicate. Each connector class advertises a `_shim_kind`
+(`connectors/base.py`), read everywhere via the `shim_kind()` helper —
+never `issubclass`:
+
+| `shim_kind` | Class | Dispatchable? | Resolver tier |
+|---|---|---|---|
+| `"none"` | hand-coded (default) | yes | highest — a bespoke class always wins |
+| `"profiled"` | `ProfiledRestConnector` | yes (once profiled) | middle — beats a bare shim, loses to a hand-coded class |
+| `"bare"` | `GenericRestConnector` auto-shim | no (`auth_headers` raises) | lowest — demoted whenever any dispatchable candidate exists |
+
+`"profiled"` is its own tier (not folded into `"none"`) because a
+profiled connector carries a bounded `supported_version_range` derived
+from the ingested spec that can be *narrower* than a hand-coded class's
+broad range. Were it classified identically to a hand-coded class, the
+resolver's most-specific-version-match step would let a profiled
+connector out-specific — and so shadow — a bespoke connector for the same
+`(product, version)`, reinstating the #1750/#1798 product-shadowing
+footgun. The resolver's tier-demotion rung
+(`_demote_lower_dispatch_tiers`, `connectors/resolver.py`) runs *before*
+the specificity step and keeps `none > profiled > bare`, so a hand-coded
+class always wins regardless of version-range span or `priority`.
+
+The six former binary-predicate sites all read `shim_kind` now:
+`resolver._demote_lower_dispatch_tiers` (tri-state ladder),
+`dispatcher` (`is_auto_shim` = `shim_kind == "bare"` so only a bare shim
+yields `cause='unreplaced_auto_shim'`; a profiled connector that raises
+gets the generic `unsupported_feature`), `handrolled_class_for_impl_id`
+and `sibling_handrolled_impl_id` (defer to / name any *dispatchable*
+class, `shim_kind != "bare"`), `resolved_auto_shim_class` (warns only on
+a `"bare"` resolve), and `delete_connector._auto_shim_keys_for_triple`
+(auto-deregisters only `"bare"` shims; a profiled connector's
+registration lifecycle is owned by the profile-stamping path, T5 #1971).
+The `register_connector_v2` product↔impl_id round-trip hard-fail is
+class-agnostic, so it still rejects a divergent profiled registration.
+
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
 G0.9-T9 (#741) pre-flight that the operator's `version` label is

@@ -71,11 +71,11 @@ import structlog
 from sqlalchemy import CursorResult, case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2, deregister_connector_v2
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest._internals import ConnectorScope
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
-from meho_backplane.operations.ingest.connector_registration import GenericRestConnector
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
 from meho_backplane.operations.ingest.parser import parse_connector_id
 
@@ -161,9 +161,12 @@ def _auto_shim_keys_for_triple(
     *(product, version, impl_id)* — the same lossless-round-trip rule
     ``list_connectors._resolve_class_only_natural_key`` applies, which
     is what makes the VCF long↔short product split match — and
-    (c) hold a :class:`GenericRestConnector` subclass. Hand-coded
-    classes are intentionally excluded; see the module docstring's
-    registry policy.
+    (c) are a **bare** auto-shim (``shim_kind == "bare"``; G0.28-T1
+    #1967). Hand-coded (``"none"``) classes are intentionally excluded —
+    they are never auto-deregistered by a connector delete — and so are
+    profiled (``"profiled"``) classes: a profiled connector's registration
+    lifecycle is owned by the profile-stamping path (G0.28-T5 #1971), not
+    this auto-shim sweep. See the module docstring's registry policy.
     """
     keys: list[tuple[str, str, str]] = []
     for (reg_product, reg_version, reg_impl_id), cls in sorted(all_connectors_v2().items()):
@@ -172,7 +175,7 @@ def _auto_shim_keys_for_triple(
         connector_id = build_connector_id(reg_product, reg_version, reg_impl_id)
         if parse_connector_id(connector_id) != (product, version, impl_id):
             continue
-        if not issubclass(cls, GenericRestConnector):
+        if shim_kind(cls) != "bare":
             continue
         keys.append((reg_product, reg_version, reg_impl_id))
     return tuple(keys)

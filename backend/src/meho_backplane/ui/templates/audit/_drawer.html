@@ -147,7 +147,10 @@
       {% if aggregate_only %}
         <p class="flex items-center gap-1 text-sm text-warning">
           <span aria-hidden="true">&#x1F512;</span>
-          <span>(aggregate-only — sensitive op; request payload not shown)</span>
+          <span>
+            (aggregate-only — request payload not shown for
+            {{ gated_op_classes | join(" / ") }} ops)
+          </span>
         </p>
       {% elif request_payload %}
         <pre class="mt-1 max-h-72 overflow-auto rounded bg-base-200 p-2 text-xs">{{ request_payload | tojson(indent=2) }}</pre>

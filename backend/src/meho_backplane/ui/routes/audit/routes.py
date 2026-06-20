@@ -111,6 +111,7 @@ from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_sessi
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
+    AGGREGATE_ONLY_OP_CLASSES,
     INTERNAL_PAYLOAD_KEYS,
     fetch_audit_row,
     is_aggregate_only,
@@ -391,6 +392,11 @@ def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]
         "badge_class": _badge_class(op_class),
         "aggregate_only": aggregate_only,
         "request_payload": request_payload,
+        # The single-source gated op-class set (from the shared
+        # broadcast aggregate_gate) names the withheld classes in the 🔒
+        # placeholder copy, so the drawer text stays honest about which
+        # ops are aggregate-only without a second hard-coded list.
+        "gated_op_classes": sorted(AGGREGATE_ONLY_OP_CLASSES),
         "agent_session_id": agent_session_id,
         "parent_audit_id": parent_audit_id,
         # The replay surface is TENANT_ADMIN-gated (#1844); the pivot is an

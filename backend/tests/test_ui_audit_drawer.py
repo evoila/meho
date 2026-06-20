@@ -331,6 +331,11 @@ def test_drawer_gates_sensitive_op_classes(op_id: str, op_class: str) -> None:
     body = response.text
     # The 🔒 aggregate-only placeholder renders.
     assert "aggregate-only" in body
+    # The placeholder names the gated classes off the single-source set
+    # (AGGREGATE_ONLY_OP_CLASSES, imported from the shared gate -- no second
+    # copy), so the copy stays honest about what is withheld.
+    assert "credential_read" in body
+    assert "audit_query" in body
     # The sensitive request payload is never rendered.
     assert "secret_path" not in body
     assert "should-never-render" not in body

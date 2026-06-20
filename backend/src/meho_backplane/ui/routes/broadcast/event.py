@@ -149,6 +149,14 @@ def build_event_router() -> APIRouter:
         op_id = resolve_op_id(row)
         op_class = classify_op(op_id)
         aggregate_only = is_aggregate_only(row, op_class)
+        # The "suppress this op" cross-link is gated on the sensitive
+        # op-class *set* (decision #3), not the badge colour: of the
+        # three, ``credential_read`` / ``credential_mint`` are
+        # ``badge-warning`` while ``audit_query`` is ``badge-info``, so
+        # gating on the colour would miss audit_query. The link offers a
+        # tenant_admin a shortcut into the Overrides tab with this op_id
+        # pre-filled; the create still goes through the gated POST.
+        is_sensitive = op_class in AGGREGATE_ONLY_OP_CLASSES
         # Strip the audit-only classification + G6.3 forensic keys so
         # the drawer's "request payload" section shows only the request
         # params. Only computed for the full-detail path -- the
@@ -163,6 +171,7 @@ def build_event_router() -> APIRouter:
             "op_id": op_id,
             "op_class": op_class,
             "aggregate_only": aggregate_only,
+            "is_sensitive": is_sensitive,
             "request_payload": request_payload,
             # The ephemeral broadcast id, for display only -- not a PG
             # column. Empty string when the row was opened from a path

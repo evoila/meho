@@ -1,0 +1,166 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault status partial (Initiative #1942 G10.18, Task #1958 T3).
+
+  Swapped into ``#vault-status-region`` by the index's auto-load + the
+  "Refresh" button (``hx-get /ui/vault/status`` with ``HX-Request``), or
+  rendered standalone inside ``status.html`` on a full-page navigation.
+  Renders three independent cards from three ``vault.sys.*`` read
+  envelopes -- seal state, cluster health, and the enabled secret mounts.
+  All three return cluster/mount metadata; NONE return secret values.
+
+  Each card renders its own envelope, so an unreachable / sealed Vault
+  degrades one card (via the shared ``vault_envelope_error`` macro)
+  without blanking the others. The mounts card additionally handles the
+  set-shaped JSONFlux spill (``handle is not None``) -- the mount map can
+  be large -- rendering the handle metadata, NOT a huge blob.
+
+  Context:
+    * ``error`` (str|None) -- ``"no_vault_connector"`` when no ingested
+      vault connector is visible (the three envelopes are then None).
+    * ``seal`` / ``health`` / ``mounts`` (dict|None) -- the op envelopes.
+-#}
+{% from "_icons.html" import icon %}
+{% from "vault/_envelope_error.html" import vault_envelope_error %}
+
+{% if error == "no_vault_connector" %}
+  {{ vault_envelope_error("no_vault_connector", none) }}
+{% else %}
+<div class="grid gap-4 lg:grid-cols-3" data-vault-status>
+
+  {#- ---- Seal status card (vault.sys.seal_status) ---------------------- -#}
+  <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="seal">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+      {{ icon("shield-check", class="size-4 opacity-70") }}
+      Seal status
+    </h3>
+    {% if not seal or seal.status != "ok" %}
+      {{ vault_envelope_error(none, seal) }}
+    {% else %}
+      {%- set s = seal.get("result") or {} -%}
+      {%- set sealed = s.get("sealed") -%}
+      <div class="flex items-center gap-2" data-vault-seal="{{ 'sealed' if sealed else 'unsealed' }}">
+        {% if sealed %}
+          <span class="badge badge-warning gap-1">
+            {{ icon("lock", class="size-3.5") }} Sealed
+          </span>
+        {% else %}
+          <span class="badge badge-success gap-1">
+            {{ icon("check", class="size-3.5") }} Unsealed
+          </span>
+        {% endif %}
+        {% if s.get("initialized") is not none %}
+          <span class="badge badge-ghost gap-1" data-vault-initialized="{{ 'true' if s.get('initialized') else 'false' }}">
+            {% if s.get("initialized") %}Initialized{% else %}Uninitialized{% endif %}
+          </span>
+        {% endif %}
+      </div>
+      <dl class="mt-3 space-y-1 text-xs">
+        {% if s.get("type") %}
+          <div class="flex gap-2"><dt class="opacity-60">Seal type</dt><dd class="font-mono" data-vault-seal-type>{{ s.get("type") }}</dd></div>
+        {% endif %}
+        {% if s.get("t") is not none and s.get("n") is not none %}
+          <div class="flex gap-2"><dt class="opacity-60">Threshold</dt><dd class="font-mono" data-vault-seal-threshold>{{ s.get("t") }} of {{ s.get("n") }}</dd></div>
+        {% endif %}
+        {% if s.get("progress") is not none %}
+          <div class="flex gap-2"><dt class="opacity-60">Unseal progress</dt><dd class="font-mono" data-vault-seal-progress>{{ s.get("progress") }}</dd></div>
+        {% endif %}
+        {% if s.get("version") %}
+          <div class="flex gap-2"><dt class="opacity-60">Version</dt><dd class="font-mono" data-vault-seal-version>{{ s.get("version") }}</dd></div>
+        {% endif %}
+      </dl>
+    {% endif %}
+  </div>
+
+  {#- ---- Health card (vault.sys.health) -------------------------------- -#}
+  <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="health">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+      {{ icon("activity", class="size-4 opacity-70") }}
+      Health
+    </h3>
+    {% if not health or health.status != "ok" %}
+      {{ vault_envelope_error(none, health) }}
+    {% else %}
+      {%- set h = health.get("result") or {} -%}
+      <div class="flex items-center gap-2" data-vault-health="{{ 'ok' if h.get('ok') else 'unhealthy' }}">
+        {% if h.get("ok") %}
+          <span class="badge badge-success gap-1">{{ icon("check", class="size-3.5") }} Serving</span>
+        {% else %}
+          <span class="badge badge-error gap-1">{{ icon("x", class="size-3.5") }} Not serving</span>
+        {% endif %}
+      </div>
+      <dl class="mt-3 space-y-1 text-xs">
+        {% if h.get("detail") %}
+          <div class="flex gap-2"><dt class="opacity-60">Detail</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-detail>{{ h.get("detail") }}</dd></div>
+        {% endif %}
+        {% if h.get("sealed") is not none %}
+          <div class="flex gap-2"><dt class="opacity-60">Sealed</dt><dd class="font-mono" data-vault-health-sealed>{{ "yes" if h.get("sealed") else "no" }}</dd></div>
+        {% endif %}
+        {% if h.get("version") %}
+          <div class="flex gap-2"><dt class="opacity-60">Version</dt><dd class="font-mono" data-vault-health-version>{{ h.get("version") }}</dd></div>
+        {% endif %}
+        {% if h.get("cluster_name") %}
+          <div class="flex gap-2"><dt class="opacity-60">Cluster</dt><dd class="font-mono [overflow-wrap:anywhere]" data-vault-health-cluster>{{ h.get("cluster_name") }}</dd></div>
+        {% endif %}
+      </dl>
+    {% endif %}
+  </div>
+
+  {#- ---- Mounts card (vault.sys.mounts.list) --------------------------- -#}
+  <div class="rounded-box border border-base-300 bg-base-100 p-4" data-vault-status-card="mounts">
+    <h3 class="mb-3 flex items-center gap-2 text-sm font-semibold opacity-80">
+      {{ icon("package", class="size-4 opacity-70") }}
+      Secret mounts
+    </h3>
+    {% if not mounts or mounts.status != "ok" %}
+      {{ vault_envelope_error(none, mounts) }}
+    {% else %}
+      {%- set m_handle = mounts.get("handle") -%}
+      {% if m_handle %}
+        {#- Set-shaped spill: the mount map crossed the JSONFlux threshold
+            and was reduced to a sample + handle. Render the handle
+            metadata, NOT the full map. -#}
+        <div role="status" class="alert alert-info items-start" data-vault-mounts="handle">
+          {{ icon("package", class="size-5 shrink-0") }}
+          <div class="min-w-0">
+            <h4 class="text-sm font-semibold">Large mount set stored out-of-band</h4>
+            <p class="text-xs">The mount list spilled to the read-back store; the summary is below.</p>
+            <dl class="mt-2 space-y-1 text-xs">
+              <div class="flex gap-2"><dt class="opacity-60">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ m_handle.handle_id }}</dd></div>
+              {% if m_handle.total_rows is not none %}
+                <div class="flex gap-2"><dt class="opacity-60">Mounts</dt><dd data-handle-total-rows>{{ m_handle.total_rows }}</dd></div>
+              {% endif %}
+              {% if m_handle.ttl_seconds is not none %}
+                <div class="flex gap-2"><dt class="opacity-60">TTL</dt><dd data-handle-ttl>{{ m_handle.ttl_seconds }}s</dd></div>
+              {% endif %}
+            </dl>
+          </div>
+        </div>
+      {% else %}
+        {%- set mount_map = (mounts.get("result") or {}).get("mounts") or {} -%}
+        {% if mount_map %}
+          <ul class="divide-y divide-base-300 rounded-box border border-base-300" role="list" data-vault-mounts="inline">
+            {% for mount_path, descriptor in mount_map | dictsort %}
+              <li class="flex items-center gap-2 px-3 py-2" data-vault-mount="{{ mount_path }}">
+                {{ icon("table", class="size-3.5 shrink-0 opacity-50") }}
+                <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ mount_path }}</span>
+                {%- set m_type = descriptor.get("type") if descriptor is mapping else none -%}
+                {% if m_type %}
+                  <span class="badge badge-ghost badge-sm font-mono" data-vault-mount-type>{{ m_type }}</span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="rounded-box border border-base-300 px-3 py-6 text-center text-sm opacity-60" data-vault-mounts="empty">
+            No secret mounts reported.
+          </div>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  </div>
+
+</div>
+{% endif %}

@@ -107,7 +107,7 @@ from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
-from meho_backplane.ui.routes.vault import build_vault_router
+from meho_backplane.ui.routes.vault import build_vault_router, build_vault_status_router
 
 __all__ = [
     "build_account_router",
@@ -132,6 +132,7 @@ __all__ = [
     "build_stubs_router",
     "build_topology_router",
     "build_vault_router",
+    "build_vault_status_router",
 ]
 
 
@@ -260,5 +261,14 @@ def build_router() -> APIRouter:
     # stubs aggregate so its concrete paths win the first-match-wins lookup
     # against the placeholder ``/ui/{slug}``.
     router.include_router(build_vault_router())
+    # Vault status view (G10.18-T3 #1958): ``/ui/vault/status`` seal/health/
+    # mounts panel + ``/ui/vault/auth`` auth-methods glance, both read-only
+    # GETs. The literal ``status`` / ``auth`` segments are distinct from the
+    # T1 ``list`` / ``read`` / ``versions`` literals and the bare
+    # ``/ui/vault`` index; there is no ``{param}`` route on the vault
+    # surface, so the first-match-wins lookup is unambiguous. Registered
+    # immediately after the KV-browser router and before the stubs
+    # aggregate, alongside its sibling vault routes.
+    router.include_router(build_vault_status_router())
     router.include_router(build_stubs_router())
     return router

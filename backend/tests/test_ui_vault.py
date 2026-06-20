@@ -56,6 +56,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import VaultConnector
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
+from meho_backplane.connectors.vault.ops_sys import register_vault_sys_typed_operations
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Tenant
 from meho_backplane.operations import reset_dispatcher_caches
@@ -230,6 +231,25 @@ def _register_vault(stub_embedding_service: AsyncMock) -> None:
 
     async def _do() -> None:
         await register_vault_typed_operations(embedding_service=stub_embedding_service)
+
+    asyncio.run(_do())
+
+
+def _register_vault_sys(stub_embedding_service: AsyncMock) -> None:
+    """Register the vault v2 connector + upsert the ``vault.sys.*`` op rows.
+
+    The status surface (T3 #1958) dispatches ``vault.sys.seal_status`` /
+    ``vault.sys.health`` / ``vault.sys.mounts.list`` / ``vault.sys.auth.list``;
+    those handlers live behind the SEPARATE ``register_vault_sys_typed_operations``
+    registrar (the KV registrar :func:`_register_vault` calls does not upsert
+    them). This helper registers the connector class + the sys op rows so the
+    in-process dispatch reaches the real ``vault_sys_*`` handlers (which hit
+    the shared in-process Vault fake's ``sys`` backend).
+    """
+    register_connector_v2(product="vault", version="1.x", impl_id="vault", cls=VaultConnector)
+
+    async def _do() -> None:
+        await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
 
     asyncio.run(_do())
 
@@ -737,3 +757,342 @@ def test_vault_ui_routes_require_session() -> None:
     response = client.get("/ui/vault")
     assert response.status_code in (302, 303, 307), response.status_code
     assert "/ui/auth/login" in response.headers.get("location", "")
+
+
+# ===========================================================================
+# T3 (#1958): read-only status view -- seal / health / mounts + auth glance
+# ===========================================================================
+
+#: A canonical healthy-unsealed seal-status payload. ``vault.sys.seal_status``
+#: returns this object verbatim as the envelope ``result``.
+_SEAL_STATUS_OK = {
+    "type": "shamir",
+    "initialized": True,
+    "sealed": False,
+    "t": 3,
+    "n": 5,
+    "progress": 0,
+    "version": "1.15.6",
+    "cluster_name": "vault-cluster-status",
+}
+
+#: A health payload shaped so ``_classify_health_response`` returns
+#: ``ok=True, detail="sealed=False"`` and the handler echoes the descriptive
+#: fields (version / cluster_name / sealed) from the HTTP-200 dict body.
+_HEALTH_OK = {
+    "initialized": True,
+    "sealed": False,
+    "standby": False,
+    "version": "1.15.6",
+    "cluster_name": "vault-cluster-status",
+}
+
+#: A mounts payload in the full Vault envelope shape the hvac fake returns;
+#: ``vault.sys.mounts.list`` unwraps ``data`` into ``{"mounts": <data>}``.
+_MOUNTS_OK = {
+    "data": {
+        "secret/": {"type": "kv", "description": "key/value store", "accessor": "kv_abc"},
+        "cubbyhole/": {"type": "cubbyhole", "description": "per-token private", "accessor": "cb_x"},
+    }
+}
+
+#: An auth-methods payload in the full Vault envelope shape; the handler
+#: unwraps ``data`` into ``{"auth_methods": <data>}``.
+_AUTH_METHODS_OK = {
+    "data": {
+        "token/": {"type": "token", "description": "token based credentials", "accessor": "auth_t"},
+        "userpass/": {"type": "userpass", "description": "user/pass", "accessor": "auth_up"},
+    }
+}
+
+
+def test_vault_ui_status_renders_seal_health_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """``GET /ui/vault/status`` renders the seal status, health, and mounts table.
+
+    Drives the three ``vault.sys.*`` reads through the shared in-process Vault
+    fake and asserts each card rendered from its envelope: the seal verdict
+    (unsealed), the health verdict (serving) + version, and the mount rows.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+    install_fake_client(
+        monkeypatch,
+        seal_status_payload=_SEAL_STATUS_OK,
+        health_payload=_HEALTH_OK,
+        mounts_payload=_MOUNTS_OK,
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/status", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Seal card: the unsealed verdict + the seal metadata.
+    assert 'data-vault-status-card="seal"' in body
+    assert 'data-vault-seal="unsealed"' in body
+    assert "3 of 5" in body  # threshold t of n
+    # Health card: the serving verdict + the version.
+    assert 'data-vault-status-card="health"' in body
+    assert 'data-vault-health="ok"' in body
+    assert "1.15.6" in body
+    # Mounts card: the mount table with both mount paths + their types.
+    assert 'data-vault-status-card="mounts"' in body
+    assert 'data-vault-mounts="inline"' in body
+    assert 'data-vault-mount="secret/"' in body
+    assert 'data-vault-mount="cubbyhole/"' in body
+    assert "kv" in body
+
+
+def test_vault_ui_status_full_page_renders_chrome_and_panel(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A non-HTMX ``GET /ui/vault/status`` renders the full page + the status panel.
+
+    Content negotiation: without ``HX-Request`` the route renders the full
+    page (sidebar chrome + the auto-loading auth region) with the seal/health/
+    mounts panel server-rendered inline (populated on first paint, not blank).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+    install_fake_client(
+        monkeypatch,
+        seal_status_payload=_SEAL_STATUS_OK,
+        health_payload=_HEALTH_OK,
+        mounts_payload=_MOUNTS_OK,
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/status")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Full-page chrome (the navbar contract the base layout pins) is present.
+    assert "navbar" in body
+    # The status panel is server-rendered inline on first paint.
+    assert 'data-vault-status-card="seal"' in body
+    assert 'data-vault-seal="unsealed"' in body
+    # The auth region auto-loads its partial via an HTMX load trigger.
+    assert 'hx-get="/ui/vault/auth"' in body
+    assert 'hx-trigger="load"' in body
+
+
+def test_vault_ui_auth_renders_method_names_no_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """``GET /ui/vault/auth`` renders auth-method NAMES + types; no credential text.
+
+    The glance is over ``vault.sys.auth.list`` -- a method-metadata map. It
+    must surface the mount paths + types and never a credential/value field.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+    install_fake_client(monkeypatch, auth_methods_payload=_AUTH_METHODS_OK)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/auth", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-vault-auth="inline"' in body
+    # The auth-method mount paths (NAMES) + their types render.
+    assert 'data-vault-auth-method="token/"' in body
+    assert 'data-vault-auth-method="userpass/"' in body
+    assert "userpass" in body
+    # Names-only: the glance must not surface any credential/secret field.
+    # ``accessor`` ids are not credentials, but no token/password text leaks.
+    assert "client_token" not in body
+    assert "password" not in body
+    assert "secret_id" not in body
+
+
+def test_vault_ui_auth_handle_renders_metadata_not_blob(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """A set-shaped ``vault.sys.auth.list`` (handle present) renders metadata, not the blob.
+
+    Patches the status module's ``call_operation`` to return an envelope
+    carrying a ``handle`` -- the JSONFlux set-shape spill. The glance must
+    render the handle metadata (``handle_id``) and NOT inline the full map.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+    handle_id = uuid.uuid4()
+    sentinel_blob = "DO-NOT-INLINE-2000-METHODS"
+    handle_envelope = {
+        "status": "ok",
+        "op_id": "vault.sys.auth.list",
+        "result": {"row_count": 2000, "sample": [{"value": "token/"}]},
+        "error": None,
+        "duration_ms": 9.0,
+        "handle": {
+            "handle_id": str(handle_id),
+            "summary_md": "2000 auth methods matched",
+            "schema_": {"type": "object"},
+            "total_rows": 2000,
+            "sample_rows": [{"value": sentinel_blob}],
+            "ttl_seconds": 3600,
+            "fetch_more": None,
+        },
+        "extras": {},
+    }
+
+    async def _fake_call(operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        return handle_envelope
+
+    monkeypatch.setattr(
+        "meho_backplane.ui.routes.vault.status.call_operation",
+        _fake_call,
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/auth", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-vault-auth="handle"' in body
+    assert str(handle_id) in body
+    assert "2000" in body
+    assert sentinel_blob not in body
+    assert 'data-vault-auth="inline"' not in body
+
+
+def test_vault_ui_status_dispatches_connector_id_not_product_slug(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """The status dispatch carries ``connector_id="vault-1.x"``; the bare slug is never sent.
+
+    Captures every ``call_operation`` argument the status route makes and
+    asserts the dispatchable ``<impl_id>-<version>`` id is used for all three
+    sys reads, and that the bare product slug ``vault`` is never dispatched
+    (it would 404 through ``parse_connector_id``).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+
+    captured: list[dict[str, Any]] = []
+
+    async def _capturing_call(operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.append(dict(arguments))
+        return {
+            "status": "ok",
+            "op_id": arguments["op_id"],
+            "result": {},
+            "error": None,
+            "duration_ms": 1.0,
+            "handle": None,
+            "extras": {},
+        }
+
+    monkeypatch.setattr(
+        "meho_backplane.ui.routes.vault.status.call_operation",
+        _capturing_call,
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/status", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    # All three sys reads dispatched.
+    op_ids = sorted(arg["op_id"] for arg in captured)
+    assert op_ids == ["vault.sys.health", "vault.sys.mounts.list", "vault.sys.seal_status"]
+    # Every dispatch carries the dispatchable id, never the bare slug.
+    assert {arg["connector_id"] for arg in captured} == {"vault-1.x"}
+    assert all(arg["connector_id"] != "vault" for arg in captured)
+
+
+def test_vault_ui_status_route_ordering_status_not_param(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """``/ui/vault/status`` resolves to the status handler, not a ``{param}`` route.
+
+    There is no ``{param}`` route on the vault surface today, but the literal
+    ``status`` segment must resolve to the status handler (a 200 render with
+    the status panel), not a 404/422 from a hypothetical slug route -- the
+    ordering discipline the router pins for when a ``{param}`` route lands.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault_sys(_stub_embedding_service)
+    install_fake_client(
+        monkeypatch,
+        seal_status_payload=_SEAL_STATUS_OK,
+        health_payload=_HEALTH_OK,
+        mounts_payload=_MOUNTS_OK,
+    )
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/status", headers={"HX-Request": "true"})
+    # The status panel rendered (not a 404/422 from a slug route).
+    assert response.status_code == 200, response.text
+    assert "data-vault-status" in response.text
+
+
+def test_vault_ui_status_no_connector_renders_hint(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """With no ingested vault connector, ``/ui/vault/status`` renders a hint, not a dead panel."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # No descriptor seeded + no connector registered -> the picker resolves None.
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault/status", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    assert 'data-vault-error="no_vault_connector"' in response.text
+
+
+def test_vault_ui_status_routes_require_session() -> None:
+    """The status routes are session-gated: an unauthenticated GET is redirected."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client = TestClient(_build_app(), follow_redirects=False)
+    for path in ("/ui/vault/status", "/ui/vault/auth"):
+        response = client.get(path)
+        assert response.status_code in (302, 303, 307), (path, response.status_code)
+        assert "/ui/auth/login" in response.headers.get("location", "")
+
+
+def test_vault_ui_index_links_to_status_view(
+    _stub_embedding_service: AsyncMock,
+) -> None:
+    """The KV-browser index links to the status view (shared ``vault`` nav entry).
+
+    The status surface is reached from the existing ``/ui/vault`` console via
+    a header link, NOT a second top-level sidebar entry.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_vault_descriptor()
+    _register_vault(_stub_embedding_service)
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/vault")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'href="/ui/vault/status"' in body
+    assert "data-vault-status-link" in body
+    # The vault sidebar entry exists once; the status link is NOT a second
+    # top-level nav surface (no ``/ui/vault/status`` href in the sidebar nav,
+    # which would duplicate the surface). The header link is the only one.
+    assert body.count('href="/ui/vault/status"') == 1

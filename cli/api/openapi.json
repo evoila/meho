@@ -16266,6 +16266,50 @@
         }
       }
     },
+    "/ui/vault/status": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Status",
+        "description": "Render the seal / health / mounts status panel.\n\nContent-negotiated on ``HX-Request``: a normal navigation renders\nthe full page; an HTMX fetch renders only the status partial.\nRead-only; the three ``vault.sys.*`` ops return cluster/mount\nmetadata, never secret values.",
+        "operationId": "vault_status_ui_vault_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/auth": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Auth",
+        "description": "Render the auth-methods glance partial (``vault.sys.auth.list``).\n\nRead-only. Renders the enabled auth-method mount-paths + types --\nmethod NAMES and config metadata only, never credentials. A\nset-shaped spill (``handle is not None``) renders the handle\nmetadata, not a huge blob.",
+        "operationId": "vault_auth_ui_vault_auth_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

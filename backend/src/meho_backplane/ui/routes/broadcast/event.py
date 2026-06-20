@@ -83,97 +83,21 @@ import uuid
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.db.models import AuditLog
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.routes.broadcast.aggregate_gate import (
+    AGGREGATE_ONLY_OP_CLASSES,
+    INTERNAL_PAYLOAD_KEYS,
+    fetch_audit_row,
+    is_aggregate_only,
+    resolve_op_id,
+)
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["AGGREGATE_ONLY_OP_CLASSES", "build_event_router"]
-
-#: Op classes whose detail is withheld from the broadcast surface per
-#: decision #3 -- the same classes :func:`redact_payload` strips at
-#: publish time. The drawer never renders the audit row's raw payload
-#: for these; it shows the 🔒 aggregate-only placeholder instead. Kept
-#: in sync with the redaction contract in
-#: :mod:`meho_backplane.broadcast.events`.
-AGGREGATE_ONLY_OP_CLASSES: frozenset[str] = frozenset(
-    {"credential_read", "credential_mint", "audit_query"}
-)
-
-#: Audit-only payload keys the drawer hides from the rendered request
-#: payload. ``op_id`` / ``op_class`` are the route-bound classification
-#: hints surfaced as first-class drawer fields, not request params;
-#: ``broadcast_detail_origin`` / ``broadcast_detail_effective`` are the
-#: G6.3 resolver's internal forensic metadata (``tenant_rule:<uuid>``
-#: origins are deliberately never shown to broadcast subscribers). The
-#: drawer renders the *request* payload, so these are stripped before
-#: the ``| tojson`` dump.
-_INTERNAL_PAYLOAD_KEYS: frozenset[str] = frozenset(
-    {"op_id", "op_class", "broadcast_detail_origin", "broadcast_detail_effective"}
-)
-
-
-async def _fetch_audit_row(
-    db_session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    audit_id: uuid.UUID,
-) -> AuditLog | None:
-    """Resolve ``(tenant_id, audit_id)`` to an ``audit_log`` row.
-
-    Returns ``None`` when no row matches. A cross-tenant id surfaces
-    identically -- the tenant boundary is opaque, mirroring the
-    topology drawer's ``_fetch_node`` contract.
-    """
-    stmt = select(AuditLog).where(
-        AuditLog.tenant_id == tenant_id,
-        AuditLog.id == audit_id,
-    )
-    result = await db_session.execute(stmt)
-    return result.scalar_one_or_none()
-
-
-def _resolve_op_id(row: AuditLog) -> str:
-    """Recover the op id for the row's sensitivity classification.
-
-    The audit middleware stamps the canonical op id into
-    ``payload["op_id"]`` for connector-style routes. When absent
-    (chassis HTTP routes, non-op requests) we fall back to the
-    publisher's own heuristic ``http.{method.lower()}:{path}`` -- the
-    exact string
-    :func:`meho_backplane.audit._resolve_op_id_and_class_override`
-    builds -- so :func:`classify_op` here yields the same class the
-    broadcast publisher computed. The ``:`` separator deliberately
-    avoids a route ending in ``.list`` being misread as a ``read`` verb
-    suffix (the publisher relies on the same guard).
-    """
-    op_id = row.payload.get("op_id")
-    if isinstance(op_id, str) and op_id:
-        return op_id
-    return f"http.{row.method.lower()}:{row.path}"
-
-
-def _is_aggregate_only(row: AuditLog, op_class: str) -> bool:
-    """Decide whether the drawer withholds the payload (decision #3).
-
-    Honours the G6.3 resolver's recorded verdict
-    (``payload["broadcast_detail_effective"]``) when present so the
-    drawer matches the detail the feed actually showed -- including a
-    per-tenant override that flipped a sensitive op to full detail.
-    Falls back to op-class membership in
-    :data:`AGGREGATE_ONLY_OP_CLASSES` for rows predating G6.3 (or rows
-    written when ``tenant_id`` was unresolved, which carry no effective
-    key).
-    """
-    effective = row.payload.get("broadcast_detail_effective")
-    if isinstance(effective, str) and effective:
-        return effective == "aggregate"
-    return op_class in AGGREGATE_ONLY_OP_CLASSES
-
 
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 guard.
 _require_ui_session_dep = Depends(require_ui_session)
@@ -209,7 +133,7 @@ def build_event_router() -> APIRouter:
         classes). A missing / cross-tenant id renders the not-found
         fragment with HTTP 404.
         """
-        row = await _fetch_audit_row(
+        row = await fetch_audit_row(
             db_session,
             tenant_id=session_ctx.tenant_id,
             audit_id=audit_id,
@@ -222,9 +146,9 @@ def build_event_router() -> APIRouter:
                 status_code=404,
             )
 
-        op_id = _resolve_op_id(row)
+        op_id = resolve_op_id(row)
         op_class = classify_op(op_id)
-        aggregate_only = _is_aggregate_only(row, op_class)
+        aggregate_only = is_aggregate_only(row, op_class)
         # Strip the audit-only classification + G6.3 forensic keys so
         # the drawer's "request payload" section shows only the request
         # params. Only computed for the full-detail path -- the
@@ -232,7 +156,7 @@ def build_event_router() -> APIRouter:
         request_payload = (
             {}
             if aggregate_only
-            else {k: v for k, v in row.payload.items() if k not in _INTERNAL_PAYLOAD_KEYS}
+            else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
         )
         context = {
             "row": row,

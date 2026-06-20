@@ -15305,13 +15305,85 @@
         }
       }
     },
+    "/ui/audit/my-recent": {
+      "get": {
+        "tags": [
+          "ui-audit"
+        ],
+        "summary": "Ui Audit My Recent",
+        "description": "``GET /ui/audit/my-recent`` -- the my-recent quick-view fragment.\n\nReturns the calling operator's last-24h rows\n(``principal=session.operator_sub``) rendered through the same row\npartial as the T1 result list, so each row opens the T2 detail\ndrawer. ``OPERATOR``-self-scoped: a second operator's activity is\nnever reachable here. HTMX-only fragment (no full-page chrome).",
+        "operationId": "ui_audit_my_recent_ui_audit_my_recent_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/audit/show/{audit_id}": {
+      "get": {
+        "tags": [
+          "ui-audit"
+        ],
+        "summary": "Ui Audit Drawer",
+        "description": "``GET /ui/audit/show/{audit_id}`` -- the row detail drawer fragment.\n\nResolves the row in-process scoped to ``session.tenant_id`` (the\nshared :func:`fetch_audit_row`); a missing / cross-tenant id renders\nthe not-found fragment at **404** (never 403, never 200), matching\nthe REST ``show`` non-leakage posture (``audit.py:399-404``) and the\nbroadcast drawer. The aggregate-only gate withholds the payload for\nsensitive ops; the replay deep-link is enabled only for a\n``tenant_admin`` lift.",
+        "operationId": "ui_audit_drawer_ui_audit_show__audit_id__get",
+        "parameters": [
+          {
+            "name": "audit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Audit Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Audit id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/audit": {
       "get": {
         "tags": [
           "ui-audit"
         ],
         "summary": "Ui Audit Page",
-        "description": "``GET /ui/audit`` -- the full page: filter form + first result page.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the form sets\n``hx-push-url`` on the fragment route, mirroring broadcast /\noperations). Sets + echoes the CSRF cookie so the form's ``hx-get``\npasses the double-submit check, even though every route here is GET.",
+        "description": "``GET /ui/audit`` -- the full page: filter form + first result page.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the form sets\n``hx-push-url`` on the fragment route, mirroring broadcast /\noperations). Sets + echoes the CSRF cookie so the form's ``hx-get``\npasses the double-submit check, even though every route here is GET.\n\n``?audit_id=<id>`` is the drawer deep-link: pasting an audit id into\na ticket opens the page with that row's detail drawer already\nrendered in the drawer slot. A missing / cross-tenant id resolves to\n``None`` and simply renders the page with no open drawer (the page\nitself is not a 404 -- only the drawer fragment is).",
         "operationId": "ui_audit_page_ui_audit_get",
         "parameters": [
           {
@@ -15400,6 +15472,17 @@
               "maxLength": 256,
               "default": "",
               "title": "Work Ref"
+            }
+          },
+          {
+            "name": "audit_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Audit Id"
             }
           }
         ],

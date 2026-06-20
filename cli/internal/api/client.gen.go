@@ -6733,14 +6733,15 @@ type ApprovalsHistoryUiApprovalsListGetParams struct {
 
 // UiAuditPageUiAuditGetParams defines parameters for UiAuditPageUiAuditGet.
 type UiAuditPageUiAuditGetParams struct {
-	Target       *string `form:"target,omitempty" json:"target,omitempty"`
-	Principal    *string `form:"principal,omitempty" json:"principal,omitempty"`
-	OpId         *string `form:"op_id,omitempty" json:"op_id,omitempty"`
-	OpClass      *string `form:"op_class,omitempty" json:"op_class,omitempty"`
-	ResultStatus *string `form:"result_status,omitempty" json:"result_status,omitempty"`
-	Since        *string `form:"since,omitempty" json:"since,omitempty"`
-	Until        *string `form:"until,omitempty" json:"until,omitempty"`
-	WorkRef      *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Target       *string             `form:"target,omitempty" json:"target,omitempty"`
+	Principal    *string             `form:"principal,omitempty" json:"principal,omitempty"`
+	OpId         *string             `form:"op_id,omitempty" json:"op_id,omitempty"`
+	OpClass      *string             `form:"op_class,omitempty" json:"op_class,omitempty"`
+	ResultStatus *string             `form:"result_status,omitempty" json:"result_status,omitempty"`
+	Since        *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until        *string             `form:"until,omitempty" json:"until,omitempty"`
+	WorkRef      *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	AuditId      *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
 }
 
 // UiAuditResultsUiAuditResultsGetParams defines parameters for UiAuditResultsUiAuditResultsGet.
@@ -8799,8 +8800,14 @@ type ClientInterface interface {
 	// UiAuditPageUiAuditGet request
 	UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAuditMyRecentUiAuditMyRecentGet request
+	UiAuditMyRecentUiAuditMyRecentGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAuditResultsUiAuditResultsGet request
 	UiAuditResultsUiAuditResultsGet(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuditDrawerUiAuditShowAuditIdGet request
+	UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
 	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11977,8 +11984,32 @@ func (c *Client) UiAuditPageUiAuditGet(ctx context.Context, params *UiAuditPageU
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiAuditMyRecentUiAuditMyRecentGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuditMyRecentUiAuditMyRecentGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiAuditResultsUiAuditResultsGet(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditResultsUiAuditResultsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuditDrawerUiAuditShowAuditIdGetRequest(c.Server, auditId)
 	if err != nil {
 		return nil, err
 	}
@@ -24045,7 +24076,50 @@ func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGe
 
 		}
 
+		if params.AuditId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "audit_id", runtime.ParamLocationQuery, *params.AuditId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuditMyRecentUiAuditMyRecentGetRequest generates requests for UiAuditMyRecentUiAuditMyRecentGet
+func NewUiAuditMyRecentUiAuditMyRecentGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/audit/my-recent")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -24239,6 +24313,40 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuditDrawerUiAuditShowAuditIdGetRequest generates requests for UiAuditDrawerUiAuditShowAuditIdGet
+func NewUiAuditDrawerUiAuditShowAuditIdGetRequest(server string, auditId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "audit_id", runtime.ParamLocationPath, auditId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/audit/show/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -30488,8 +30596,14 @@ type ClientWithResponsesInterface interface {
 	// UiAuditPageUiAuditGetWithResponse request
 	UiAuditPageUiAuditGetWithResponse(ctx context.Context, params *UiAuditPageUiAuditGetParams, reqEditors ...RequestEditorFn) (*UiAuditPageUiAuditGetResponse, error)
 
+	// UiAuditMyRecentUiAuditMyRecentGetWithResponse request
+	UiAuditMyRecentUiAuditMyRecentGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuditMyRecentUiAuditMyRecentGetResponse, error)
+
 	// UiAuditResultsUiAuditResultsGetWithResponse request
 	UiAuditResultsUiAuditResultsGetWithResponse(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*UiAuditResultsUiAuditResultsGetResponse, error)
+
+	// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request
+	UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error)
 
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
 	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
@@ -34533,6 +34647,27 @@ func (r UiAuditPageUiAuditGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiAuditMyRecentUiAuditMyRecentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuditMyRecentUiAuditMyRecentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuditMyRecentUiAuditMyRecentGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiAuditResultsUiAuditResultsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -34549,6 +34684,28 @@ func (r UiAuditResultsUiAuditResultsGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuditResultsUiAuditResultsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuditDrawerUiAuditShowAuditIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuditDrawerUiAuditShowAuditIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38991,6 +39148,15 @@ func (c *ClientWithResponses) UiAuditPageUiAuditGetWithResponse(ctx context.Cont
 	return ParseUiAuditPageUiAuditGetResponse(rsp)
 }
 
+// UiAuditMyRecentUiAuditMyRecentGetWithResponse request returning *UiAuditMyRecentUiAuditMyRecentGetResponse
+func (c *ClientWithResponses) UiAuditMyRecentUiAuditMyRecentGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuditMyRecentUiAuditMyRecentGetResponse, error) {
+	rsp, err := c.UiAuditMyRecentUiAuditMyRecentGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuditMyRecentUiAuditMyRecentGetResponse(rsp)
+}
+
 // UiAuditResultsUiAuditResultsGetWithResponse request returning *UiAuditResultsUiAuditResultsGetResponse
 func (c *ClientWithResponses) UiAuditResultsUiAuditResultsGetWithResponse(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*UiAuditResultsUiAuditResultsGetResponse, error) {
 	rsp, err := c.UiAuditResultsUiAuditResultsGet(ctx, params, reqEditors...)
@@ -38998,6 +39164,15 @@ func (c *ClientWithResponses) UiAuditResultsUiAuditResultsGetWithResponse(ctx co
 		return nil, err
 	}
 	return ParseUiAuditResultsUiAuditResultsGetResponse(rsp)
+}
+
+// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request returning *UiAuditDrawerUiAuditShowAuditIdGetResponse
+func (c *ClientWithResponses) UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error) {
+	rsp, err := c.UiAuditDrawerUiAuditShowAuditIdGet(ctx, auditId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp)
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
@@ -45395,6 +45570,22 @@ func ParseUiAuditPageUiAuditGetResponse(rsp *http.Response) (*UiAuditPageUiAudit
 	return response, nil
 }
 
+// ParseUiAuditMyRecentUiAuditMyRecentGetResponse parses an HTTP response from a UiAuditMyRecentUiAuditMyRecentGetWithResponse call
+func ParseUiAuditMyRecentUiAuditMyRecentGetResponse(rsp *http.Response) (*UiAuditMyRecentUiAuditMyRecentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuditMyRecentUiAuditMyRecentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
 // ParseUiAuditResultsUiAuditResultsGetResponse parses an HTTP response from a UiAuditResultsUiAuditResultsGetWithResponse call
 func ParseUiAuditResultsUiAuditResultsGetResponse(rsp *http.Response) (*UiAuditResultsUiAuditResultsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -45404,6 +45595,32 @@ func ParseUiAuditResultsUiAuditResultsGetResponse(rsp *http.Response) (*UiAuditR
 	}
 
 	response := &UiAuditResultsUiAuditResultsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuditDrawerUiAuditShowAuditIdGetResponse parses an HTTP response from a UiAuditDrawerUiAuditShowAuditIdGetWithResponse call
+func ParseUiAuditDrawerUiAuditShowAuditIdGetResponse(rsp *http.Response) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuditDrawerUiAuditShowAuditIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

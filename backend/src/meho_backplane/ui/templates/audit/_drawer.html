@@ -1,0 +1,159 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit row detail drawer fragment (Initiative #1841 G10.15, Task #1945).
+
+  Rendered by ``GET /ui/audit/show/{audit_id}`` and swapped into the
+  ``#audit-drawer`` slot on the T1 query page via HTMX (outerHTML) on a
+  row click, or rendered directly on a deep-link (paste an ``audit_id``
+  into a ticket and open the drawer). Mirrors the broadcast event drawer
+  (``broadcast/_event_drawer.html``) but binds the audit-row columns and
+  adds the lineage deep-links (replay / parent row).
+
+  Dismiss model (Alpine click-outside), sections, and the aggregate-only
+  payload gate match the broadcast drawer verbatim:
+
+    1. Header -- op_id + op_class badge + close.
+    2. Operation -- principal, method/path, status, timing.
+    3. Identifiers -- request_id, audit_id, work_ref.
+    4. Lineage -- replay-session deep-link (TENANT_ADMIN-gated, disabled
+       with a tooltip for a plain operator) + parent-row deep-link.
+    5. Payload -- the full request payload JSON when the op is not
+       aggregate-only; the 🔒 placeholder otherwise (a sensitive op never
+       leaks its payload on click -- decision #3).
+
+  Context variables:
+    row            -- AuditLog: the resolved audit row
+    op_id          -- str: the classified op id
+    op_class       -- str: the sensitivity class
+    badge_class    -- str: the DaisyUI badge variant for op_class
+    aggregate_only -- bool: whether the payload is withheld (🔒)
+    request_payload-- dict: the stripped request payload (empty when gated)
+    agent_session_id -- str | None: replay deep-link target
+    parent_audit_id  -- str | None: parent-row deep-link target
+    replay_enabled -- bool: admin + session present -> enabled replay link
+-#}
+<aside
+  id="audit-drawer"
+  class="card bg-base-100 border-base-300 border shadow-sm self-start"
+  aria-label="Audit row detail drawer"
+  x-data="{ open: true }"
+  x-show="open"
+  x-on:click.outside="open = false"
+  x-on:keydown.escape.window="open = false"
+>
+  <div class="card-body space-y-3">
+    <header class="flex items-start justify-between gap-2">
+      <div>
+        <h2 class="card-title text-base">
+          <span class="badge badge-sm {{ badge_class }}">{{ op_class }}</span>
+          <span class="font-mono text-sm break-all">{{ op_id }}</span>
+        </h2>
+        <p class="text-xs opacity-70">Audit row detail</p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        aria-label="Close audit row detail drawer"
+        x-on:click="open = false"
+      >
+        Close
+      </button>
+    </header>
+
+    {# ---------- Operation ---------- #}
+    <section aria-label="Operation">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Operation</h3>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="opacity-60">principal</dt>
+        <dd class="font-mono break-all">{{ row.operator_sub }}</dd>
+        <dt class="opacity-60">method</dt>
+        <dd>
+          <span class="badge badge-outline badge-xs">{{ row.method }}</span>
+          <span class="font-mono text-xs break-all">{{ row.path }}</span>
+        </dd>
+        <dt class="opacity-60">status</dt>
+        <dd>{{ row.status_code }}</dd>
+        <dt class="opacity-60">occurred_at</dt>
+        <dd>{{ row.occurred_at.isoformat() }}</dd>
+        {% if row.duration_ms is not none %}
+          <dt class="opacity-60">duration_ms</dt>
+          <dd>{{ row.duration_ms }}</dd>
+        {% endif %}
+      </dl>
+    </section>
+
+    {# ---------- Identifiers ---------- #}
+    <section aria-label="Identifiers">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Identifiers</h3>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="opacity-60">audit_id</dt>
+        <dd class="font-mono break-all">{{ row.id }}</dd>
+        <dt class="opacity-60">request_id</dt>
+        <dd class="font-mono break-all">
+          {% if row.request_id %}{{ row.request_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
+        </dd>
+        <dt class="opacity-60">work_ref</dt>
+        <dd class="font-mono break-all">
+          {% if row.work_ref %}{{ row.work_ref }}{% else %}<span class="opacity-50">—</span>{% endif %}
+        </dd>
+      </dl>
+    </section>
+
+    {# ---------- Lineage (replay / parent deep-links) ---------- #}
+    {% if agent_session_id or parent_audit_id %}
+      <section aria-label="Lineage">
+        <h3 class="text-sm font-semibold uppercase opacity-60">Lineage</h3>
+        <div class="flex flex-wrap items-center gap-1">
+          {% if agent_session_id %}
+            {% if replay_enabled %}
+              <a
+                class="btn btn-ghost btn-xs gap-1"
+                href="/ui/audit/sessions/{{ agent_session_id }}/replay"
+                aria-label="Replay agent session {{ agent_session_id }}"
+              >
+                replay session
+              </a>
+            {% else %}
+              <span
+                class="btn btn-ghost btn-xs btn-disabled gap-1"
+                aria-disabled="true"
+                title="Session replay requires the tenant_admin role"
+              >
+                replay session
+              </span>
+            {% endif %}
+          {% endif %}
+          {% if parent_audit_id %}
+            <a
+              class="btn btn-ghost btn-xs gap-1"
+              hx-get="/ui/audit/show/{{ parent_audit_id }}"
+              hx-target="#audit-drawer"
+              hx-swap="outerHTML"
+              href="/ui/audit/show/{{ parent_audit_id }}"
+              aria-label="Open parent audit row {{ parent_audit_id }}"
+            >
+              parent row
+            </a>
+          {% endif %}
+        </div>
+      </section>
+    {% endif %}
+
+    {# ---------- Payload (decision #3 aggregate-only gate) ---------- #}
+    <section aria-label="Payload">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Payload</h3>
+      {% if aggregate_only %}
+        <p class="flex items-center gap-1 text-sm text-warning">
+          <span aria-hidden="true">&#x1F512;</span>
+          <span>(aggregate-only — sensitive op; request payload not shown)</span>
+        </p>
+      {% elif request_payload %}
+        <pre class="mt-1 max-h-72 overflow-auto rounded bg-base-200 p-2 text-xs">{{ request_payload | tojson(indent=2) }}</pre>
+      {% else %}
+        <p class="text-sm opacity-60">No request payload recorded.</p>
+      {% endif %}
+    </section>
+  </div>
+</aside>

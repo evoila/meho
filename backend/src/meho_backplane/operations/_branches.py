@@ -240,6 +240,78 @@ async def resolve_ingested_request(
     )
 
 
+def _profile_pagination(connector: Connector) -> Any:
+    """Return the connector's profiled ``cursor_token`` pagination, or ``None``.
+
+    Reads ``connector.profile.pagination`` (present only on a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` that
+    carries a stamped :class:`~meho_backplane.connectors.profile.ExecutionProfile`)
+    via ``getattr`` so the ingested-dispatch branch stays tolerant of a
+    plain :class:`HttpConnector` with no profile. Returns the
+    :class:`~meho_backplane.connectors.profile.PaginationSpec` only when its
+    strategy is ``cursor_token`` (the one strategy that drives a loop);
+    ``strategy='none'`` and a profile-less connector both yield ``None`` so
+    the caller falls through to the single-request path.
+    """
+    profile = getattr(connector, "profile", None)
+    if profile is None:
+        return None
+    pagination = getattr(profile, "pagination", None)
+    if pagination is None or pagination.strategy != "cursor_token":
+        return None
+    return pagination
+
+
+async def _dispatch_ingested_cursor_token(
+    *,
+    request_json: Any,
+    target: Any,
+    request: IngestedRequest,
+    operator: Operator,
+    pagination: Any,
+) -> dict[str, Any]:
+    """Follow a ``cursor_token`` pagination loop, concatenating each page's rows.
+
+    Each iteration GETs the same path with the next cursor merged into the
+    query under ``pagination.cursor.req_param``, unwraps the rows from the
+    literal top-level ``pagination.items_key``, and reads the next cursor
+    from the literal top-level ``pagination.cursor.resp_field``. The loop
+    stops when that field is falsy (absent / empty). Returns the assembled
+    set under the same ``items_key`` plus a ``total`` count — the unwrapped,
+    cursor-free shape the reducer / agent consumes, mirroring the hand-coded
+    gcloud paginators (``{rows, total}``).
+
+    A page whose ``items_key`` is missing or not a list is treated as a
+    zero-row page (a vendor that signals "no more" with an empty body),
+    keeping the loop robust against a trailing empty page.
+    """
+    items_key = pagination.items_key
+    cursor = pagination.cursor
+    rows: list[Any] = []
+    page_token: str | None = None
+    while True:
+        query = dict(request.query or {})
+        if page_token:
+            query[cursor.req_param] = page_token
+        payload = await request_json(
+            target,
+            request.method,
+            request.path,
+            operator=operator,
+            params=query or None,
+            json=request.body,
+            extra_headers=request.headers,
+        )
+        page_rows = payload.get(items_key) if isinstance(payload, dict) else None
+        if isinstance(page_rows, list):
+            rows.extend(page_rows)
+        next_token = payload.get(cursor.resp_field) if isinstance(payload, dict) else None
+        if not next_token:
+            break
+        page_token = str(next_token)
+    return {items_key: rows, "total": len(rows)}
+
+
 async def dispatch_ingested(
     *,
     connector: Connector,
@@ -293,6 +365,19 @@ async def dispatch_ingested(
             raise RuntimeError(
                 f"connector {type(connector).__name__} has no _request_json "
                 f"(ingested dispatch requires HttpConnector)"
+            )
+        # A profiled connector whose declarative pagination strategy is
+        # ``cursor_token`` drives a follow-the-cursor loop here, assembling
+        # the full set the way the hand-coded gcloud paginators do; every
+        # other connector (and ``strategy='none'``) makes a single request.
+        pagination = _profile_pagination(connector)
+        if pagination is not None:
+            return await _dispatch_ingested_cursor_token(
+                request_json=request_json,
+                target=target,
+                request=request,
+                operator=operator,
+                pagination=pagination,
             )
         return await request_json(
             target,

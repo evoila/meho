@@ -56,11 +56,15 @@ wiring is incomplete.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import ShimKind
+from meho_backplane.connectors.profile import ExecutionProfile, split_version
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -75,6 +79,13 @@ _PROFILE_PENDING = (
     "machinery (T4 #1970), and profile-driven fingerprint/probe (T6 "
     "#1972) are not wired yet. Attach a vetted profile rather than "
     "hand-coding this method."
+)
+
+_NO_PROFILE = (
+    "ProfiledRestConnector has no ExecutionProfile attached; the profile "
+    "is stamped onto the synthesised connector class at review time "
+    "(record_profile_stamp, #1971). A profiled class with no profile is a "
+    "registration fault."
 )
 
 
@@ -105,8 +116,24 @@ class ProfiledRestConnector(HttpConnector):
     # priority rung against a hand-coded class.
     priority: int = 0
 
+    #: The reviewed declarative profile, stamped onto the synthesised
+    #: subclass at review time (``record_profile_stamp``, #1971). The base
+    #: class carries ``None`` — it is concrete (instantiable) so it can
+    #: stand in for the dispatchable tier in resolver / dispatcher
+    #: classification tests, but a *registered* profiled class always
+    #: carries a concrete :class:`ExecutionProfile`. T6 (#1972) reads
+    #: ``fingerprint`` / ``probe`` / ``pagination`` off it; T4 (#1970) will
+    #: read ``auth`` off the same attribute.
+    profile: ExecutionProfile | None = None
+
+    def _require_profile(self) -> ExecutionProfile:
+        """Return the attached profile, or raise a registration-fault error."""
+        if self.profile is None:
+            raise NotImplementedError(_NO_PROFILE)
+        return self.profile
+
     async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
-        """Raise until the profile's named auth scheme is wired (T3/T4)."""
+        """Raise until the profile's named auth scheme is wired (T4 #1970)."""
         raise NotImplementedError(_PROFILE_PENDING)
 
     async def fingerprint(
@@ -114,13 +141,115 @@ class ProfiledRestConnector(HttpConnector):
         target: Any,
         operator: Operator | None = None,
     ) -> FingerprintResult:
-        """Raise until the profile-driven fingerprint is wired (T6)."""
-        del operator  # unused until the profile machinery lands
-        raise NotImplementedError(_PROFILE_PENDING)
+        """Fingerprint the upstream from the profile's declarative recipe.
+
+        Reads :attr:`ExecutionProfile.fingerprint`: GETs its ``path``,
+        reads the version string from the literal top-level ``version_key``,
+        and renders it into ``(version, build)`` via the named
+        :func:`~meho_backplane.connectors.profile.split_version` splitter
+        (harbor's ``-`` split, vRLI's 5-part dot split). On transport or
+        status failure, returns a non-reachable result whose
+        ``extras["error"]`` carries the exception class + message — the same
+        shape the hand-coded harbor / SDDC / NSX connectors established.
+
+        ``operator`` is threaded through to the auth-bearing GET when the
+        recipe is ``authenticated``; an unauthenticated fingerprint endpoint
+        (vRLI's ``/api/v2/version``) does not need it. When the recipe is
+        authenticated and no operator is supplied, the call falls through to
+        :meth:`auth_headers` (which raises until T4 wires it) — the same
+        operator-context requirement the hand-coded connectors carry.
+        """
+        spec = self._require_profile().fingerprint
+        probed_at = datetime.now(UTC)
+        product = self.product
+        try:
+            if spec.authenticated:
+                if operator is None:
+                    raise RuntimeError(
+                        f"fingerprint recipe for {product!r} is authenticated but "
+                        "no operator was supplied"
+                    )
+                payload = await self._get_json(target, spec.path, operator=operator)
+            else:
+                payload = await self._get_unauthenticated_json(target, spec.path)
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            return FingerprintResult(
+                vendor=product,
+                product=product,
+                reachable=False,
+                probed_at=probed_at,
+                probe_method=f"GET {spec.path}",
+                extras={"error": f"{type(exc).__name__}: {exc}"},
+            )
+        raw_version = payload.get(spec.version_key)
+        version_str, build_str = split_version(
+            spec.version_splitter,
+            raw_version if isinstance(raw_version, str) else None,
+        )
+        return FingerprintResult(
+            vendor=product,
+            product=product,
+            version=version_str,
+            build=build_str,
+            reachable=True,
+            probed_at=probed_at,
+            probe_method=f"GET {spec.path}",
+        )
 
     async def probe(self, target: Any) -> ProbeResult:
-        """Raise until the profile-driven probe is wired (T6)."""
-        raise NotImplementedError(_PROFILE_PENDING)
+        """Probe reachability from the profile's declarative recipe.
+
+        When :attr:`ExecutionProfile.probe` is the ``'delegate'`` sentinel,
+        the probe runs the fingerprint round-trip and reports ``ok`` =
+        ``reachable`` (the SDDC Manager / NSX precedent). When it is a
+        :class:`~meho_backplane.connectors.profile.ProbeSpec`, GETs its
+        ``path`` and compares the literal top-level ``ok_field`` value
+        against ``ok_value`` (harbor's ``GET /api/v2.0/health`` with
+        ``status == 'healthy'``).
+
+        A dedicated health probe is run unauthenticated — it is a
+        reachability check, not a credentialled read; this matches harbor's
+        health endpoint, which needs no auth. On transport / status failure
+        the probe returns ``ok=False`` with the exception in ``reason``.
+        """
+        profile = self._require_profile()
+        probed_at = datetime.now(UTC)
+        if profile.probe == "delegate":
+            fp = await self.fingerprint(target)
+            reason = None if fp.reachable else str(fp.extras.get("error") or "unreachable")
+            return ProbeResult(ok=fp.reachable, reason=reason, probed_at=probed_at)
+        spec = profile.probe
+        try:
+            payload = await self._get_unauthenticated_json(target, spec.path)
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            return ProbeResult(
+                ok=False,
+                reason=f"{type(exc).__name__}: {exc}",
+                probed_at=probed_at,
+            )
+        actual = payload.get(spec.ok_field)
+        if actual == spec.ok_value:
+            return ProbeResult(ok=True, probed_at=probed_at)
+        return ProbeResult(
+            ok=False,
+            reason=f"{spec.ok_field}={actual!r} (expected {spec.ok_value!r})",
+            probed_at=probed_at,
+        )
+
+    async def _get_unauthenticated_json(self, target: Any, path: str) -> dict[str, Any]:
+        """GET *path* with no auth headers, returning parsed JSON.
+
+        The fingerprint/probe recipes may target an unauthenticated version
+        / health endpoint (vRLI's ``/api/v2/version``, harbor's
+        ``/api/v2.0/health``). The base :meth:`HttpConnector._get_json`
+        always calls :meth:`auth_headers` (which raises on a profiled
+        connector until T4 wires it), so this seam issues the request
+        through the pooled, TLS-trust-aware client without an auth header.
+        """
+        client = await self._http_client(target)
+        resp = await client.request("GET", path)
+        resp.raise_for_status()
+        return resp.json()  # type: ignore[no-any-return]
 
     async def execute(
         self,

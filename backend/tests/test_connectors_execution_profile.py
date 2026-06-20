@@ -27,17 +27,33 @@ from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
     ExecutionProfileError,
+    FingerprintSpec,
+    PaginationSpec,
     ReservedAuthSchemeError,
     UnknownAuthSchemeError,
     validate_execution_profile,
 )
+
+_FINGERPRINT = FingerprintSpec(
+    path="/api/v2.0/systeminfo",
+    version_key="harbor_version",
+    version_splitter="dash",
+)
+_PAGINATION = PaginationSpec(strategy="none", items_key="value")
 
 
 def _profile(**auth_overrides: object) -> ExecutionProfile:
     """Build a valid ExecutionProfile with a basic auth block by default."""
     auth = {"scheme": "basic", "secret_fields": ("username", "password")}
     auth.update(auth_overrides)
-    return ExecutionProfile(product="harbor", version="2.x", auth=AuthSpec(**auth))
+    return ExecutionProfile(
+        product="harbor",
+        version="2.x",
+        auth=AuthSpec(**auth),
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -89,6 +105,9 @@ def test_profile_forbids_extra_fields() -> None:
             product="harbor",
             version="2.x",
             auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             token_location="header",  # type: ignore[call-arg]
         )
 
@@ -188,6 +207,9 @@ def test_validate_passes_for_named_schemes(scheme: str) -> None:
         product="p",
         version="1",
         auth=AuthSpec(scheme=scheme, secret_fields=("token",), **extra),  # type: ignore[arg-type]
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
     )
     # No raise.
     validate_execution_profile(profile)

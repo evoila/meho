@@ -41,6 +41,7 @@ of them.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
@@ -50,6 +51,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import AgentRunStatus
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.agents.runs.operator import resolve_run_reader
 from meho_backplane.ui.routes.agents.runs.views import project_run_to_view
 from meho_backplane.ui.templating import get_templates
@@ -142,7 +144,7 @@ def build_runs_list_router() -> APIRouter:
 
     async def _handler(
         request: Request,
-        status: AgentRunStatus | None = Query(default=None),
+        status: Annotated[AgentRunStatus | None, EMPTY_STR_TO_NONE, Query()] = None,
         work_ref: str | None = Query(default=None, max_length=256),
         session_ctx: UISessionContext = _require_session_dep,
         operator: Operator = _run_reader_dep,

@@ -119,14 +119,17 @@ from meho_backplane.db.models import AuditLog, WebSession
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "ActiveSessionRow",
     "DecryptedSession",
     "EncryptionKeyMissingError",
     "RefreshReplayError",
     "SessionStoreError",
     "create_session",
+    "list_active_sessions",
     "load_session",
     "load_session_for_update",
     "reset_fernet_cache_for_testing",
+    "revoke_other_sessions",
     "revoke_session",
     "rotate_refresh",
 ]
@@ -219,6 +222,32 @@ class DecryptedSession:
     access_token: str
     refresh_token: str
     last_seen_at: datetime
+
+
+@dataclass(frozen=True)
+class ActiveSessionRow:
+    """Token-free view of one active ``web_session`` row for the account page.
+
+    Drives the operator-console Account surface's active-session list
+    (G10.11-T1 #1892). Deliberately omits the ``access_token`` /
+    ``refresh_token`` ciphertext columns: the listing renders session
+    metadata only, so the Fernet-encrypted token blobs never leave the
+    storage seam for a read that has no reason to decrypt them. Carrying
+    only the timestamps + identity keeps the list query a cheap metadata
+    projection rather than a per-row decrypt.
+
+    All four ``datetime`` fields are returned UTC-aware (coerced through
+    :func:`_coerce_utc`) so the route + template can compare them against
+    ``datetime.now(UTC)`` without a dialect-portability surprise on the
+    SQLite dev/test path.
+    """
+
+    id: uuid.UUID
+    operator_sub: str
+    tenant_id: uuid.UUID
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +570,104 @@ async def revoke_session(
         return
     row.revoked_at = datetime.now(UTC)
     await session.flush()
+
+
+async def list_active_sessions(
+    session: AsyncSession,
+    *,
+    operator_sub: str,
+    tenant_id: uuid.UUID,
+) -> list[ActiveSessionRow]:
+    """Return one operator's active sessions for the Account surface.
+
+    Backs the operator-console Account page's active-session list
+    (G10.11-T1 #1892). Filters to the **calling operator's own** rows:
+    ``operator_sub`` AND ``tenant_id`` both match, ``revoked_at IS NULL``,
+    and ``expires_at > now()`` -- the same liveness predicate
+    :func:`load_session` applies, so the list shows exactly the sessions
+    that would still authenticate. Ordered ``last_seen_at DESC`` so the
+    most-recently-active device sorts first.
+
+    The ``(operator_sub, tenant_id)`` pair is supplied by the caller from
+    the **validated** :class:`UISessionContext`, never from a client form
+    field -- the listing must never be steerable to another operator's
+    sessions. The ``operator_sub`` filter rides
+    ``web_session_operator_sub_idx`` (the index the model was given
+    specifically for this surface).
+
+    Returns :class:`ActiveSessionRow` projections (timestamps + identity
+    only) -- the Fernet-encrypted token columns are never read.
+
+    The expiry filter applies ``datetime.now(UTC)`` Python-side after the
+    fetch rather than in SQL so the ``timestamptz``-vs-naive coercion
+    (:func:`_coerce_utc`) stays in one place and the comparison is
+    dialect-portable across PostgreSQL and the SQLite dev/test path
+    (which returns naive UTC datetimes from a ``timestamptz`` column).
+    """
+    now = datetime.now(UTC)
+    result = await session.execute(
+        select(WebSession)
+        .where(
+            WebSession.operator_sub == operator_sub,
+            WebSession.tenant_id == tenant_id,
+            WebSession.revoked_at.is_(None),
+        )
+        .order_by(WebSession.last_seen_at.desc())
+    )
+    rows: list[ActiveSessionRow] = []
+    for row in result.scalars():
+        if _coerce_utc(row.expires_at) <= now:
+            continue
+        rows.append(
+            ActiveSessionRow(
+                id=row.id,
+                operator_sub=row.operator_sub,
+                tenant_id=row.tenant_id,
+                created_at=_coerce_utc(row.created_at),
+                last_seen_at=_coerce_utc(row.last_seen_at),
+                expires_at=_coerce_utc(row.expires_at),
+            )
+        )
+    return rows
+
+
+async def revoke_other_sessions(
+    session: AsyncSession,
+    *,
+    operator_sub: str,
+    tenant_id: uuid.UUID,
+    keep_session_id: uuid.UUID,
+) -> int:
+    """Soft-delete every active session for this operator except *keep_session_id*.
+
+    Backs the Account page's "revoke all other sessions" action
+    (G10.11-T1 #1892): the operator kills every device but the one they
+    are currently using. Scoped to the caller's own ``operator_sub`` AND
+    ``tenant_id`` (supplied from the validated session context, never a
+    form field) so the action can never touch another operator's rows.
+    The current session (``keep_session_id``) is excluded so the
+    operator is **not** logged out by this action.
+
+    Idempotent and additive: already-revoked rows are skipped
+    (``revoked_at IS NULL`` filter), so re-running revokes nothing new.
+    Returns the count of rows newly revoked -- the caller logs it; the
+    UI re-renders the (now single-row) list regardless.
+    """
+    now = datetime.now(UTC)
+    result = await session.execute(
+        select(WebSession).where(
+            WebSession.operator_sub == operator_sub,
+            WebSession.tenant_id == tenant_id,
+            WebSession.revoked_at.is_(None),
+            WebSession.id != keep_session_id,
+        )
+    )
+    revoked = 0
+    for row in result.scalars():
+        row.revoked_at = now
+        revoked += 1
+    await session.flush()
+    return revoked
 
 
 async def rotate_refresh(

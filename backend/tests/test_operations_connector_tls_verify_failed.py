@@ -213,6 +213,7 @@ class _TlsVerifyFailConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_tls_verify_connect_error()
 
@@ -222,7 +223,10 @@ class _TlsVerifyFailConnector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_tls_verify_connect_error()
 
@@ -265,6 +269,7 @@ class _ConnRefusedConnector(_TlsVerifyFailConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise httpx.ConnectError("[Errno 111] Connection refused")
 
@@ -274,7 +279,10 @@ class _ConnRefusedConnector(_TlsVerifyFailConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise httpx.ConnectError("[Errno 111] Connection refused")
 

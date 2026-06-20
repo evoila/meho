@@ -461,6 +461,42 @@ registration lifecycle is owned by the profile-stamping path, T5 #1971).
 The `register_connector_v2` product↔impl_id round-trip hard-fail is
 class-agnostic, so it still rejects a divergent profiled registration.
 
+### Profile review-gate interlock (G0.28-T5 #1971)
+
+Stamping an `ExecutionProfile` makes a connector **dispatchable** but must
+never **auto-enable** dispatch — that property is security-load-bearing.
+`ReviewService.record_profile_stamp(connector_id, *, tenant_id,
+connector_class)` (`ingest/service.py`) is the stamp seam:
+
+- It registers the `ProfiledRestConnector` (carrying the vetted profile)
+  under the connector's `(product, version, impl_id)` v2 key, making it
+  the resolved class for dispatch.
+- It does **not** touch any op's `is_enabled` or any group's
+  `review_status`. Every ingested op stays `is_enabled=False` /
+  `review_status='staged'` exactly as ingested.
+- It writes one `meho.connector.profile_stamp` (`OP_PROFILE_STAMP`) audit
+  row on the **first** stamp; a re-stamp of an already-registered triple
+  is idempotent (returns `False`, no duplicate row). Passing a non-profiled
+  class (`shim_kind != "profiled"`) raises `TypeError`.
+
+The interlock that blocks dispatch is the same one that blocks a staged
+bare-shim op: `lookup_descriptor` (`operations/_lookup.py`) hard-filters
+`is_enabled = TRUE`, so a staged op is invisible to dispatch regardless of
+whether its connector is a bare shim, a profiled connector, or a
+hand-coded class. Registering a profiled connector changes *what class
+dispatch would resolve to*; it changes *nothing* about which ops are
+callable. An operator clears the gate per-op via `edit_op(..., is_enabled=
+True)` (or connector-wide via `enable_connector`), exactly as for any
+ingested connector.
+
+`edit_op`'s enable-time advisory (`enable_time_auto_shim_warnings`) is
+tri-state to match: a `"bare"` resolve still yields the
+`unreplaced_auto_shim` dead-end advisory; a `"profiled"` resolve yields a
+`profiled_but_unreviewed` advisory (`EditOpWarning.code`) confirming the
+enable — not the stamp — is what cleared the review gate and made the op
+callable. Both advisories decorate a write that already landed; neither
+blocks it.
+
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
 G0.9-T9 (#741) pre-flight that the operator's `version` label is

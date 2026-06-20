@@ -87,7 +87,7 @@ References
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -110,6 +110,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.routes.runbooks.driver import register_driver_routes
 from meho_backplane.ui.routes.runbooks.editor_routes import register_editor_routes
@@ -402,7 +403,7 @@ def build_runbooks_router() -> APIRouter:
     async def runbooks_index(
         request: Request,
         session: UISessionContext = _require_session,
-        status: _StatusFilter | None = Query(default=None),
+        status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
         target_kind: str | None = Query(default=None, max_length=_MAX_TARGET_KIND_LENGTH),
     ) -> HTMLResponse:
         return await _render_index(request, session, status, target_kind)
@@ -411,7 +412,7 @@ def build_runbooks_router() -> APIRouter:
     async def runbooks_list(
         request: Request,
         session: UISessionContext = _require_session,
-        status: _StatusFilter | None = Query(default=None),
+        status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
         target_kind: str | None = Query(default=None, max_length=_MAX_TARGET_KIND_LENGTH),
     ) -> HTMLResponse:
         return await _render_list_fragment(request, session, status, target_kind)

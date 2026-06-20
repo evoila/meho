@@ -1059,6 +1059,7 @@ class _FakeHttpConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -1068,6 +1069,7 @@ class _FakeHttpConnector(HttpConnector):
                 "operator": operator,
                 "params": params,
                 "json": json,
+                "extra_headers": extra_headers,
             }
         )
         return {"ok": True, "method": method, "path": path}
@@ -1312,6 +1314,120 @@ async def test_dispatch_ingested_post_sends_unwrapped_request_body(
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)
     assert result.result["number"] == 7
+    assert len(captured_events) == 1
+
+
+def _gh_update_issue_descriptor(embedding: Any, *, verb: str) -> Any:
+    """Build a gh-rest ``{verb}:/repos/{owner}/{repo}/issues/{number}`` descriptor.
+
+    Carries a header-located param (``X-Trace``) alongside the path params and
+    the requestBody container, so a dispatch can prove both the real verb and
+    the header bucket reach the wire (#1968).
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    return EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        op_id=f"{verb}:/repos/{{owner}}/{{repo}}/issues/{{number}}",
+        source_kind="ingested",
+        method=verb,
+        path="/repos/{owner}/{repo}/issues/{number}",
+        handler_ref=None,
+        summary="Update an issue",
+        description="Update an issue on a repository.",
+        tags=[],
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-meho-param-loc": "path"},
+                "repo": {"type": "string", "x-meho-param-loc": "path"},
+                "number": {"type": "integer", "x-meho-param-loc": "path"},
+                "X-Trace": {"type": "string", "x-meho-param-loc": "header"},
+                "body": {"type": "object", "x-meho-param-loc": "body"},
+            },
+            "required": ["owner", "repo", "number", "body"],
+        },
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="caution",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=embedding,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["PUT", "PATCH", "DELETE"])
+async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
+    verb: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An ingested PUT/PATCH/DELETE reaches the wire with its real verb + header param.
+
+    Regression for #1968: ``dispatch_ingested`` previously routed every
+    non-idempotent verb through a hardcoded-``POST`` ``_post_json`` and dropped
+    the header-located params bucket entirely. Drives the real httpx transport
+    via respx so the assertion is on the actual outbound request.
+    """
+    import respx
+
+    register_connector_v2(
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        cls=_RoundTripHttpConnector,
+    )
+
+    session.add(
+        _gh_update_issue_descriptor(stub_embedding_service.encode_one.return_value, verb=verb)
+    )
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="gh", version="3.0", host="api.github.test", port=443)
+
+    with respx.mock(base_url="https://api.github.test", assert_all_called=True) as mock:
+        route = mock.request(verb, "/repos/octocat/hello/issues/7").respond(
+            200, json={"number": 7, "state": "closed"}
+        )
+        result = await dispatch(
+            operator=operator,
+            connector_id="gh-rest-3.0",
+            op_id=f"{verb}:/repos/{{owner}}/{{repo}}/issues/{{number}}",
+            target=target,
+            params={
+                "owner": "octocat",
+                "repo": "hello",
+                "number": 7,
+                "X-Trace": "trace-123",
+                "body": {"state": "closed"},
+            },
+        )
+
+    assert route.called
+    sent = route.calls.last.request
+    # The real declared verb is on the wire — not a downgraded POST.
+    assert sent.method == verb
+    # The header-located param reached the outgoing request.
+    assert sent.headers["x-trace"] == "trace-123"
+    # The auth header still rides alongside.
+    assert sent.headers["authorization"] == "Bearer test-token"
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["state"] == "closed"
     assert len(captured_events) == 1
 
 

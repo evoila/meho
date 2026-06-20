@@ -76,6 +76,7 @@ __all__ = [
     "ensure_connector_class_registered",
     "handrolled_class_for_impl_id",
     "resolved_auto_shim_class",
+    "resolved_profiled_connector_class",
     "sibling_handrolled_impl_id",
 ]
 
@@ -804,5 +805,51 @@ def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
         )
         return None
     if shim_kind(cls) == "bare":
+        return cls.__name__
+    return None
+
+
+def resolved_profiled_connector_class(*, product: str, version: str) -> str | None:
+    """Return the profiled connector class name dispatch would resolve to, or ``None``.
+
+    G0.28-T5 (#1971). The profiled-tier counterpart of
+    :func:`resolved_auto_shim_class`: replays the production resolver
+    against a synthetic target carrying the op's ``(product, version)``
+    and returns the resolved class's ``__name__`` only when it is a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    (``shim_kind == "profiled"``), ``None`` otherwise.
+
+    Why this exists separately from the bare probe: a profiled connector
+    is **dispatchable**, so enabling an op that resolves to it is not a
+    dead end the way a bare shim is. But stamping the connector's
+    :class:`ExecutionProfile` deliberately does **not** auto-enable
+    dispatch — the ``is_enabled=False`` / ``review_status='staged'``
+    review gate is the load-bearing interlock (#1971). This probe lets
+    the enable-time advisory confirm that the operator's
+    ``is_enabled=True`` write — not the earlier profile stamp — is what
+    cleared the gate, so the "profiled but unreviewed until now" state is
+    surfaced at exactly the moment it changes.
+
+    Fail-soft semantics mirror :func:`resolved_auto_shim_class`: resolver
+    misses and ties return ``None`` — a warning probe must never break the
+    enable write it decorates.
+    """
+    from meho_backplane.connectors.resolver import (
+        AmbiguousConnectorResolution,
+        NoMatchingConnector,
+        resolve_connector,
+    )
+
+    try:
+        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+        _log.debug(
+            "edit_op_profiled_probe_unresolved",
+            product=product,
+            version=version,
+            reason=type(exc).__name__,
+        )
+        return None
+    if shim_kind(cls) == "profiled":
         return cls.__name__
     return None

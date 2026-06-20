@@ -235,7 +235,10 @@ class _Http403Connector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_http_status_error(
             headers=self.response_headers,
@@ -252,6 +255,7 @@ class _Http403Connector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_http_status_error(
             headers=self.response_headers,
@@ -337,7 +341,10 @@ class _OkConnector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return {"number": 7, "state": "open"}
 
@@ -380,7 +387,10 @@ class _NotImplementedConnector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError(
             f"_NotImplementedConnector does not implement write dispatch for target {target.name!r}"

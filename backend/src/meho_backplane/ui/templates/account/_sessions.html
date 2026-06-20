@@ -1,0 +1,138 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Active-sessions list fragment (G10.11-T1 #1892). Rendered both inline
+  on the full account page and standalone as the HTMX swap target after a
+  revoke. The wrapper element id ``account-sessions`` is the stable
+  ``hx-target`` -- both the per-row revoke and the "Revoke others" action
+  swap this whole block (``hx-swap="outerHTML"``) with the freshly-queried
+  list.
+
+  Each row carries a confirm ``<dialog>`` (DaisyUI modal). The current
+  device's row ("This device" badge) gets an explicit self-logout warning
+  in its confirm body and its revoke POST returns an ``HX-Redirect`` to
+  ``/ui/auth/login`` so the operator is signed out immediately.
+
+  The ``hx-headers`` CSRF echo is inherited from the enclosing
+  ``<section>`` on the page; the standalone fragment render rides the
+  ``meho_csrf`` cookie + the header the swapping element already carries,
+  so the double-submit gate passes on the next revoke from the swapped DOM.
+-#}
+{% from "_icons.html" import icon %}
+
+{%- macro relative_time(ts) -%}
+  {#- "X ago" for a past timestamp; one-minute resolution. The title
+      attribute on the caller carries the exact ISO timestamp. -#}
+  {%- set delta = (now_utc - ts).total_seconds() | int -%}
+  {%- if delta < 60 -%}
+    just now
+  {%- elif delta < 3600 -%}
+    {{ (delta // 60) }} min ago
+  {%- elif delta < 86400 -%}
+    {{ (delta // 3600) }} h ago
+  {%- elif delta < 604800 -%}
+    {{ (delta // 86400) }} d ago
+  {%- else -%}
+    {{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro expires_in(ts) -%}
+  {#- "in X" for a future timestamp; one-minute resolution. Used for the
+      identity card's session-expiry line and the per-row expiry. -#}
+  {%- set delta = (ts - now_utc).total_seconds() | int -%}
+  {%- if delta <= 0 -%}
+    expired
+  {%- elif delta < 3600 -%}
+    in {{ (delta // 60) }}m
+  {%- elif delta < 86400 -%}
+    in {{ (delta // 3600) }}h
+  {%- else -%}
+    in {{ (delta // 86400) }}d
+  {%- endif -%}
+{%- endmacro -%}
+
+<div id="account-sessions" class="space-y-2" data-current-session="{{ current_session_id }}">
+  {% if sessions %}
+    {% for s in sessions %}
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 rounded-box border border-base-300 px-3 py-2.5"
+        data-session-row="{{ s.id }}"
+      >
+        <div class="min-w-0 space-y-0.5">
+          <div class="flex items-center gap-2">
+            {{ icon("monitor", class="size-4 opacity-60") }}
+            {% if s.is_current %}
+              <span class="badge badge-primary badge-sm" data-badge="this-device">This device</span>
+            {% endif %}
+            <span class="text-xs opacity-70">
+              last active
+              <span title="{{ s.last_seen_at.isoformat() }}">{{ relative_time(s.last_seen_at) }}</span>
+            </span>
+          </div>
+          <div class="text-xs opacity-55">
+            created
+            <span title="{{ s.created_at.isoformat() }}">{{ s.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+            &middot; expires
+            <span title="{{ s.expires_at.isoformat() }}">{{ expires_in(s.expires_at) }}</span>
+          </div>
+        </div>
+        <div>
+          <button
+            type="button"
+            class="btn btn-xs {% if s.is_current %}btn-warning{% else %}btn-ghost text-error{% endif %}"
+            data-action="open-revoke"
+            aria-label="Revoke session {{ s.id }}{% if s.is_current %} (this device){% endif %}"
+            onclick="document.getElementById('account-revoke-modal-{{ s.id }}').showModal()"
+          >
+            {{ icon("ban", class="size-3.5") }}
+            <span>Revoke</span>
+          </button>
+        </div>
+
+        {# Per-row confirm modal. The current device's body carries the
+           explicit self-logout warning. #}
+        <dialog id="account-revoke-modal-{{ s.id }}" class="modal">
+          <div class="modal-box">
+            <h3 class="text-lg font-semibold">Revoke this session?</h3>
+            {% if s.is_current %}
+              <p class="py-2 text-sm text-warning" data-warning="self-logout">
+                This is the device you're using now — revoking it signs you
+                out immediately.
+              </p>
+            {% else %}
+              <p class="py-2 text-sm opacity-80">
+                The device using this session will be signed out on its next
+                request.
+              </p>
+            {% endif %}
+            <div class="modal-action">
+              <form method="dialog">
+                <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+              </form>
+              <button
+                type="button"
+                class="btn btn-sm btn-error"
+                data-action="confirm-revoke"
+                hx-post="/ui/account/sessions/{{ s.id | urlencode }}/revoke"
+                hx-target="#account-sessions"
+                hx-swap="outerHTML"
+                onclick="document.getElementById('account-revoke-modal-{{ s.id }}').close()"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+          <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+          </form>
+        </dialog>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="px-1 py-2 text-sm opacity-60" data-empty="no-sessions">
+      No active sessions.
+    </p>
+  {% endif %}
+</div>

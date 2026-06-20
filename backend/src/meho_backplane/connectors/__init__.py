@@ -9,6 +9,18 @@ root.
 """
 
 from meho_backplane.connectors.base import Connector, ShimKind, shim_kind
+from meho_backplane.connectors.profile import (
+    NAMED_AUTH_SCHEMES,
+    RESERVED_AUTH_SCHEMES,
+    AuthSchemeName,
+    AuthSpec,
+    ExecutionProfile,
+    ExecutionProfileError,
+    ReservedAuthSchemeError,
+    StaticHeaderValueKind,
+    UnknownAuthSchemeError,
+    validate_execution_profile,
+)
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.registry import (
     all_connectors,
@@ -40,12 +52,18 @@ from meho_backplane.connectors.schemas import (
 )
 
 __all__ = [
+    "NAMED_AUTH_SCHEMES",
+    "RESERVED_AUTH_SCHEMES",
     "AmbiguousConnectorResolution",
     "AuthModel",
+    "AuthSchemeName",
+    "AuthSpec",
     "CandidateHint",
     "Connector",
     "EdgeHint",
     "EdgeKind",
+    "ExecutionProfile",
+    "ExecutionProfileError",
     "FingerprintResult",
     "NoMatchingConnector",
     "NodeHint",
@@ -53,10 +71,13 @@ __all__ = [
     "OperationResult",
     "ProbeResult",
     "ProfiledRestConnector",
+    "ReservedAuthSchemeError",
     "ResolutionLabel",
     "ResultHandle",
     "ShimKind",
+    "StaticHeaderValueKind",
     "TopologyHints",
+    "UnknownAuthSchemeError",
     "all_connectors",
     "all_connectors_v2",
     "get_connector",
@@ -66,4 +87,5 @@ __all__ = [
     "resolve_connector",
     "resolve_connector_or_label",
     "shim_kind",
+    "validate_execution_profile",
 ]

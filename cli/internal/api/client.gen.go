@@ -6985,6 +6985,27 @@ type UiTopologyTableUiTopologyGetParams struct {
 	MaxHops   *int                `form:"max_hops,omitempty" json:"max_hops,omitempty"`
 }
 
+// VaultListUiVaultListGetParams defines parameters for VaultListUiVaultListGet.
+type VaultListUiVaultListGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// VaultReadUiVaultReadGetParams defines parameters for VaultReadUiVaultReadGet.
+type VaultReadUiVaultReadGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
+// VaultVersionsUiVaultVersionsGetParams defines parameters for VaultVersionsUiVaultVersionsGet.
+type VaultVersionsUiVaultVersionsGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
+	Path   *string `form:"path,omitempty" json:"path,omitempty"`
+}
+
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
 type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
 
@@ -9397,6 +9418,18 @@ type ClientInterface interface {
 
 	// UiTopologyNodeDetailUiTopologyNodeNodeIdGet request
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultIndexUiVaultGet request
+	VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultListUiVaultListGet request
+	VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultReadUiVaultReadGet request
+	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultVersionsUiVaultVersionsGet request
+	VaultVersionsUiVaultVersionsGet(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14492,6 +14525,54 @@ func (c *Client) UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTop
 
 func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultIndexUiVaultGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultListUiVaultListGet(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultListUiVaultListGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultReadUiVaultReadGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultVersionsUiVaultVersionsGet(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultVersionsUiVaultVersionsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -30394,6 +30475,276 @@ func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId
 	return req, nil
 }
 
+// NewVaultIndexUiVaultGetRequest generates requests for VaultIndexUiVaultGet
+func NewVaultIndexUiVaultGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultListUiVaultListGetRequest generates requests for VaultListUiVaultListGet
+func NewVaultListUiVaultListGetRequest(server string, params *VaultListUiVaultListGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/list")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultReadUiVaultReadGetRequest generates requests for VaultReadUiVaultReadGet
+func NewVaultReadUiVaultReadGetRequest(server string, params *VaultReadUiVaultReadGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/read")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultVersionsUiVaultVersionsGetRequest generates requests for VaultVersionsUiVaultVersionsGet
+func NewVaultVersionsUiVaultVersionsGetRequest(server string, params *VaultVersionsUiVaultVersionsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/versions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Mount != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "mount", runtime.ParamLocationQuery, *params.Mount); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVersionVersionGetRequest generates requests for VersionVersionGet
 func NewVersionVersionGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -31589,6 +31940,18 @@ type ClientWithResponsesInterface interface {
 
 	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+
+	// VaultIndexUiVaultGetWithResponse request
+	VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error)
+
+	// VaultListUiVaultListGetWithResponse request
+	VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error)
+
+	// VaultReadUiVaultReadGetWithResponse request
+	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
+
+	// VaultVersionsUiVaultVersionsGetWithResponse request
+	VaultVersionsUiVaultVersionsGetWithResponse(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*VaultVersionsUiVaultVersionsGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -37831,6 +38194,93 @@ func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) StatusCode() int {
 	return 0
 }
 
+type VaultIndexUiVaultGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultIndexUiVaultGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultIndexUiVaultGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultListUiVaultListGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultListUiVaultListGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultListUiVaultListGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultReadUiVaultReadGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultReadUiVaultReadGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultReadUiVaultReadGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultVersionsUiVaultVersionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultVersionsUiVaultVersionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultVersionsUiVaultVersionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VersionVersionGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -41527,6 +41977,42 @@ func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithRes
 		return nil, err
 	}
 	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
+}
+
+// VaultIndexUiVaultGetWithResponse request returning *VaultIndexUiVaultGetResponse
+func (c *ClientWithResponses) VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error) {
+	rsp, err := c.VaultIndexUiVaultGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultIndexUiVaultGetResponse(rsp)
+}
+
+// VaultListUiVaultListGetWithResponse request returning *VaultListUiVaultListGetResponse
+func (c *ClientWithResponses) VaultListUiVaultListGetWithResponse(ctx context.Context, params *VaultListUiVaultListGetParams, reqEditors ...RequestEditorFn) (*VaultListUiVaultListGetResponse, error) {
+	rsp, err := c.VaultListUiVaultListGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultListUiVaultListGetResponse(rsp)
+}
+
+// VaultReadUiVaultReadGetWithResponse request returning *VaultReadUiVaultReadGetResponse
+func (c *ClientWithResponses) VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error) {
+	rsp, err := c.VaultReadUiVaultReadGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultReadUiVaultReadGetResponse(rsp)
+}
+
+// VaultVersionsUiVaultVersionsGetWithResponse request returning *VaultVersionsUiVaultVersionsGetResponse
+func (c *ClientWithResponses) VaultVersionsUiVaultVersionsGetWithResponse(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*VaultVersionsUiVaultVersionsGetResponse, error) {
+	rsp, err := c.VaultVersionsUiVaultVersionsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultVersionsUiVaultVersionsGetResponse(rsp)
 }
 
 // VersionVersionGetWithResponse request returning *VersionVersionGetResponse
@@ -49344,6 +49830,100 @@ func ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp *http.Response
 	}
 
 	response := &UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultIndexUiVaultGetResponse parses an HTTP response from a VaultIndexUiVaultGetWithResponse call
+func ParseVaultIndexUiVaultGetResponse(rsp *http.Response) (*VaultIndexUiVaultGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultIndexUiVaultGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseVaultListUiVaultListGetResponse parses an HTTP response from a VaultListUiVaultListGetWithResponse call
+func ParseVaultListUiVaultListGetResponse(rsp *http.Response) (*VaultListUiVaultListGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultListUiVaultListGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultReadUiVaultReadGetResponse parses an HTTP response from a VaultReadUiVaultReadGetWithResponse call
+func ParseVaultReadUiVaultReadGetResponse(rsp *http.Response) (*VaultReadUiVaultReadGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultReadUiVaultReadGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseVaultVersionsUiVaultVersionsGetResponse parses an HTTP response from a VaultVersionsUiVaultVersionsGetWithResponse call
+func ParseVaultVersionsUiVaultVersionsGetResponse(rsp *http.Response) (*VaultVersionsUiVaultVersionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultVersionsUiVaultVersionsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

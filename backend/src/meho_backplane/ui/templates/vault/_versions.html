@@ -1,0 +1,92 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV version-history partial (Initiative #1942 G10.18, Task #1956 T1).
+
+  Swapped into ``#vault-versions-region`` by the "Versions" button / a
+  per-key Versions affordance (``hx-get /ui/vault/versions``). Renders the
+  per-version metadata of a KV-v2 secret: when each version was created,
+  which are soft-deleted, which are destroyed. This is READ-ONLY metadata
+  -- ``vault.kv.versions`` NEVER returns secret values, so this partial
+  carries no secret material.
+
+  Render branches:
+    * a non-ok envelope (or ``error="no_vault_connector"``) -> the shared
+      ``vault_envelope_error`` macro.
+    * ``status="ok"`` -> the version table. ``result`` is
+      ``{"current_version": <int|null>, "versions": {"<n>": {created_time,
+      deletion_time, destroyed}, ...}}``.
+
+  Context: ``error`` (str|None), ``envelope`` (dict|None), ``mount``,
+  ``path``, ``target``.
+-#}
+{% from "_icons.html" import icon %}
+{% from "vault/_envelope_error.html" import vault_envelope_error %}
+
+{% if error or not envelope or envelope.status != "ok" %}
+  {{ vault_envelope_error(error, envelope, mount, path) }}
+{% else %}
+  {%- set result = envelope.get("result") or {} -%}
+  {%- set current = result.get("current_version") -%}
+  {%- set versions = result.get("versions") or {} -%}
+  <div class="space-y-3" data-vault-versions="ok">
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="font-mono text-sm [overflow-wrap:anywhere]">{{ mount }}/{{ path }}</span>
+      {% if current is not none %}
+        <span class="badge badge-ghost badge-sm" data-vault-current-version>current: {{ current }}</span>
+      {% endif %}
+    </div>
+
+    {% if versions %}
+      <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+        <table class="table table-sm" data-vault-versions-table>
+          <thead>
+            <tr>
+              <th>Version</th>
+              <th>Created</th>
+              <th>Deleted</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#- Sort by version number descending (newest first). The keys
+                are version numbers as strings; ``int`` coercion orders
+                them numerically rather than lexically. -#}
+            {% for vnum, meta in versions.items() | sort(attribute="0", reverse=true) %}
+              {%- set deletion_time = meta.get("deletion_time") -%}
+              {%- set destroyed = meta.get("destroyed") -%}
+              {%- set is_deleted = deletion_time and deletion_time | string | length > 0 -%}
+              <tr data-vault-version-row="{{ vnum }}">
+                <td class="font-mono">
+                  {{ vnum }}
+                  {% if current is not none and vnum | string == current | string %}
+                    <span class="badge badge-primary badge-xs ml-1">current</span>
+                  {% endif %}
+                </td>
+                <td class="font-mono text-xs opacity-70">{{ meta.get("created_time") or "—" }}</td>
+                <td class="font-mono text-xs opacity-70">{{ deletion_time if is_deleted else "—" }}</td>
+                <td>
+                  {% if destroyed %}
+                    <span class="badge badge-error badge-xs" data-vault-version-state="destroyed">destroyed</span>
+                  {% elif is_deleted %}
+                    <span class="badge badge-warning badge-xs" data-vault-version-state="deleted">deleted</span>
+                  {% else %}
+                    <span class="badge badge-ghost badge-xs" data-vault-version-state="active">active</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div
+        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60"
+        data-vault-versions="empty"
+      >
+        No version history for <code>{{ mount }}/{{ path }}</code>.
+      </div>
+    {% endif %}
+  </div>
+{% endif %}

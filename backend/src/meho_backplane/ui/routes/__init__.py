@@ -106,6 +106,7 @@ from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
+from meho_backplane.ui.routes.vault import build_vault_router
 
 __all__ = [
     "build_account_router",
@@ -128,9 +129,19 @@ __all__ = [
     "build_scheduler_router",
     "build_stubs_router",
     "build_topology_router",
+    "build_vault_router",
 ]
 
 
+# A flat router-registration aggregator: every console surface contributes
+# exactly one ``router.include_router(...)`` call plus an inline
+# first-match-wins ordering rationale; the length is the count of console
+# surfaces this function wires (now incl. the vault KV browser), not
+# per-function complexity. The single registration ORDER is load-bearing (the
+# docstring documents why literal-before-param + real-before-stubs ordering
+# must hold), so splitting it into phase helpers would fracture that one
+# ordered sequence for no readability gain.
+# code-quality-allow: function-size -- registration aggregator, see above.
 def build_router() -> APIRouter:
     """Aggregate the dashboard + surface routers (broadcast … runbooks).
 
@@ -229,5 +240,12 @@ def build_router() -> APIRouter:
     # ``{slug}`` route, so no shadowing concern against the stubs aggregate,
     # but registered before it for consistency with the other surfaces.
     router.include_router(build_account_router())
+    # Vault / secrets console KV browser (G10.18-T1 #1956): ``/ui/vault`` +
+    # ``/ui/vault/list`` + ``/ui/vault/read`` + ``/ui/vault/versions``. The
+    # literal sub-route segments register before any future ``{param}``
+    # route inside that router (first-match-wins); registered before the
+    # stubs aggregate so its concrete paths win the first-match-wins lookup
+    # against the placeholder ``/ui/{slug}``.
+    router.include_router(build_vault_router())
     router.include_router(build_stubs_router())
     return router

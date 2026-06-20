@@ -40,6 +40,13 @@
         Read-only.
       </p>
     </div>
+    {#- Status view (G10.18-T3 #1958): seal/health/mounts + auth-methods.
+        Shares the ``vault`` sidebar entry rather than adding a second
+        top-level nav surface. -#}
+    <a href="/ui/vault/status" class="btn btn-ghost btn-sm gap-1" data-vault-status-link>
+      {{ icon("shield-check", class="size-4") }}
+      Status
+    </a>
   </header>
 
   {% if not connector_id %}

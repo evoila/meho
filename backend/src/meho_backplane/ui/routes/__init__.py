@@ -109,6 +109,7 @@ from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 from meho_backplane.ui.routes.vault import (
     build_vault_router,
+    build_vault_status_router,
     build_vault_writes_router,
 )
 
@@ -135,6 +136,7 @@ __all__ = [
     "build_stubs_router",
     "build_topology_router",
     "build_vault_router",
+    "build_vault_status_router",
     "build_vault_writes_router",
 ]
 
@@ -274,5 +276,14 @@ def build_router() -> APIRouter:
     # they cannot collide with T1's GET slug routes regardless). Registered
     # before the stubs aggregate so its concrete paths win the lookup.
     router.include_router(build_vault_writes_router())
+    # Vault status view (G10.18-T3 #1958): ``/ui/vault/status`` seal/health/
+    # mounts panel + ``/ui/vault/auth`` auth-methods glance, both read-only
+    # GETs. The literal ``status`` / ``auth`` segments are distinct from the
+    # T1 ``list`` / ``read`` / ``versions`` literals, the T2 ``put`` /
+    # ``delete`` / ``move`` literals, and the bare ``/ui/vault`` index; there
+    # is no ``{param}`` route on the vault surface, so the first-match-wins
+    # lookup is unambiguous. Registered alongside its sibling vault routers
+    # and before the stubs aggregate.
+    router.include_router(build_vault_status_router())
     router.include_router(build_stubs_router())
     return router

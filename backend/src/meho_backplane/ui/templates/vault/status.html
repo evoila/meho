@@ -1,0 +1,112 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault status view (Initiative #1942 G10.18, Task #1958 T3).
+
+  The read-only seal / health / mounts + auth-methods status surface of
+  the secrets console. Reached from the KV browser (``/ui/vault``) via the
+  "Status" link in the header -- it shares the ``vault`` sidebar entry, NOT
+  a second top-level nav surface.
+
+  Rendered on a full-page navigation (no ``HX-Request``). The seal / health
+  / mounts panel is server-rendered inline via the ``_status.html`` partial
+  (so the page is populated on first paint, not blank-then-fetch), and the
+  auth-methods glance auto-loads its partial on ``load`` (a second
+  in-process dispatch, kept separate so the heavier sys reads do not block
+  the page render). The "Refresh" controls re-fetch each region via HTMX.
+
+  connector_id shape: the dispatchable id is ``vault-1.x`` (resolved from
+  the ingested-connector list), NEVER the bare slug ``vault``; an empty
+  ``connector_id`` (no vault connector ingested) renders a hint via the
+  ``_status.html`` partial's ``no_vault_connector`` branch.
+
+  Context: ``error`` (str|None), ``seal`` / ``health`` / ``mounts``
+  (dict|None) -- forwarded straight to the ``_status.html`` include.
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Vault status &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold">
+        {{ icon("shield-check", class="size-5 opacity-70") }}
+        Vault status
+      </h1>
+      <p class="text-sm opacity-70">
+        Seal state, cluster health, the enabled secret mounts, and the
+        enabled auth methods. Read-only diagnostics &mdash; no secret
+        values.
+      </p>
+    </div>
+    <a href="/ui/vault" class="btn btn-ghost btn-sm gap-1" data-vault-status-back>
+      {{ icon("arrow-right", class="size-4 rotate-180") }}
+      KV browser
+    </a>
+  </header>
+
+  {#- ---- Seal / health / mounts panel -------------------------------- -#}
+  <section aria-label="Seal, health, and mounts" class="space-y-2">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-semibold opacity-80">Cluster &amp; mounts</h2>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs gap-1"
+        aria-label="Refresh status"
+        hx-get="/ui/vault/status"
+        hx-target="#vault-status-region"
+        hx-swap="innerHTML"
+        hx-indicator="#vault-status-region"
+        data-vault-status-refresh
+      >
+        {{ icon("arrow-up", class="size-3.5") }}
+        Refresh
+      </button>
+    </div>
+    {#- Server-rendered inline on first paint (the route passes the three
+        envelopes into this template, which forwards them to the partial),
+        then re-fetchable via the Refresh button. -#}
+    <div id="vault-status-region">
+      {% include "vault/_status.html" %}
+    </div>
+  </section>
+
+  {#- ---- Auth-methods glance ------------------------------------------ -#}
+  <section aria-label="Auth methods" class="space-y-2">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-semibold opacity-80">Auth methods</h2>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs gap-1"
+        aria-label="Refresh auth methods"
+        hx-get="/ui/vault/auth"
+        hx-target="#vault-auth-region"
+        hx-swap="innerHTML"
+        hx-indicator="#vault-auth-region"
+        data-vault-auth-refresh
+      >
+        {{ icon("arrow-up", class="size-3.5") }}
+        Refresh
+      </button>
+    </div>
+    {#- Auto-loaded on ``load`` so the (separate) auth dispatch does not
+        block the page's first paint; the empty-state prompt is replaced by
+        the partial as soon as it returns. -#}
+    <div
+      id="vault-auth-region"
+      hx-get="/ui/vault/auth"
+      hx-trigger="load"
+      hx-swap="innerHTML"
+    >
+      <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+        Loading auth methods&hellip;
+      </div>
+    </div>
+  </section>
+</section>
+{% endblock %}

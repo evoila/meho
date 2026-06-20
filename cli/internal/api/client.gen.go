@@ -9765,6 +9765,9 @@ type ClientInterface interface {
 	// VaultIndexUiVaultGet request
 	VaultIndexUiVaultGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// VaultAuthUiVaultAuthGet request
+	VaultAuthUiVaultAuthGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// VaultDeleteUiVaultDeletePostWithBody request with any body
 	VaultDeleteUiVaultDeletePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9794,6 +9797,9 @@ type ClientInterface interface {
 
 	// VaultReadUiVaultReadGet request
 	VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// VaultStatusUiVaultStatusGet request
+	VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VaultVersionsUiVaultVersionsGet request
 	VaultVersionsUiVaultVersionsGet(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15322,6 +15328,18 @@ func (c *Client) VaultIndexUiVaultGet(ctx context.Context, reqEditors ...Request
 	return c.Client.Do(req)
 }
 
+func (c *Client) VaultAuthUiVaultAuthGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultAuthUiVaultAuthGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) VaultDeleteUiVaultDeletePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewVaultDeleteUiVaultDeletePostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
@@ -15444,6 +15462,18 @@ func (c *Client) VaultPutConfirmUiVaultPutConfirmGet(ctx context.Context, params
 
 func (c *Client) VaultReadUiVaultReadGet(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewVaultReadUiVaultReadGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) VaultStatusUiVaultStatusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewVaultStatusUiVaultStatusGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -32537,6 +32567,33 @@ func NewVaultIndexUiVaultGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewVaultAuthUiVaultAuthGetRequest generates requests for VaultAuthUiVaultAuthGet
+func NewVaultAuthUiVaultAuthGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/auth")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVaultDeleteUiVaultDeletePostRequestWithFormdataBody calls the generic VaultDeleteUiVaultDeletePost builder with application/x-www-form-urlencoded body
 func NewVaultDeleteUiVaultDeletePostRequestWithFormdataBody(server string, body VaultDeleteUiVaultDeletePostFormdataRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -32998,6 +33055,33 @@ func NewVaultReadUiVaultReadGetRequest(server string, params *VaultReadUiVaultRe
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewVaultStatusUiVaultStatusGetRequest generates requests for VaultStatusUiVaultStatusGet
+func NewVaultStatusUiVaultStatusGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/vault/status")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -34378,6 +34462,9 @@ type ClientWithResponsesInterface interface {
 	// VaultIndexUiVaultGetWithResponse request
 	VaultIndexUiVaultGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultIndexUiVaultGetResponse, error)
 
+	// VaultAuthUiVaultAuthGetWithResponse request
+	VaultAuthUiVaultAuthGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultAuthUiVaultAuthGetResponse, error)
+
 	// VaultDeleteUiVaultDeletePostWithBodyWithResponse request with any body
 	VaultDeleteUiVaultDeletePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error)
 
@@ -34407,6 +34494,9 @@ type ClientWithResponsesInterface interface {
 
 	// VaultReadUiVaultReadGetWithResponse request
 	VaultReadUiVaultReadGetWithResponse(ctx context.Context, params *VaultReadUiVaultReadGetParams, reqEditors ...RequestEditorFn) (*VaultReadUiVaultReadGetResponse, error)
+
+	// VaultStatusUiVaultStatusGetWithResponse request
+	VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error)
 
 	// VaultVersionsUiVaultVersionsGetWithResponse request
 	VaultVersionsUiVaultVersionsGetWithResponse(ctx context.Context, params *VaultVersionsUiVaultVersionsGetParams, reqEditors ...RequestEditorFn) (*VaultVersionsUiVaultVersionsGetResponse, error)
@@ -41155,6 +41245,27 @@ func (r VaultIndexUiVaultGetResponse) StatusCode() int {
 	return 0
 }
 
+type VaultAuthUiVaultAuthGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultAuthUiVaultAuthGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultAuthUiVaultAuthGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VaultDeleteUiVaultDeletePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -41324,6 +41435,27 @@ func (r VaultReadUiVaultReadGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r VaultReadUiVaultReadGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type VaultStatusUiVaultStatusGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r VaultStatusUiVaultStatusGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r VaultStatusUiVaultStatusGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -45353,6 +45485,15 @@ func (c *ClientWithResponses) VaultIndexUiVaultGetWithResponse(ctx context.Conte
 	return ParseVaultIndexUiVaultGetResponse(rsp)
 }
 
+// VaultAuthUiVaultAuthGetWithResponse request returning *VaultAuthUiVaultAuthGetResponse
+func (c *ClientWithResponses) VaultAuthUiVaultAuthGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultAuthUiVaultAuthGetResponse, error) {
+	rsp, err := c.VaultAuthUiVaultAuthGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultAuthUiVaultAuthGetResponse(rsp)
+}
+
 // VaultDeleteUiVaultDeletePostWithBodyWithResponse request with arbitrary body returning *VaultDeleteUiVaultDeletePostResponse
 func (c *ClientWithResponses) VaultDeleteUiVaultDeletePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*VaultDeleteUiVaultDeletePostResponse, error) {
 	rsp, err := c.VaultDeleteUiVaultDeletePostWithBody(ctx, contentType, body, reqEditors...)
@@ -45447,6 +45588,15 @@ func (c *ClientWithResponses) VaultReadUiVaultReadGetWithResponse(ctx context.Co
 		return nil, err
 	}
 	return ParseVaultReadUiVaultReadGetResponse(rsp)
+}
+
+// VaultStatusUiVaultStatusGetWithResponse request returning *VaultStatusUiVaultStatusGetResponse
+func (c *ClientWithResponses) VaultStatusUiVaultStatusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VaultStatusUiVaultStatusGetResponse, error) {
+	rsp, err := c.VaultStatusUiVaultStatusGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseVaultStatusUiVaultStatusGetResponse(rsp)
 }
 
 // VaultVersionsUiVaultVersionsGetWithResponse request returning *VaultVersionsUiVaultVersionsGetResponse
@@ -53858,6 +54008,22 @@ func ParseVaultIndexUiVaultGetResponse(rsp *http.Response) (*VaultIndexUiVaultGe
 	return response, nil
 }
 
+// ParseVaultAuthUiVaultAuthGetResponse parses an HTTP response from a VaultAuthUiVaultAuthGetWithResponse call
+func ParseVaultAuthUiVaultAuthGetResponse(rsp *http.Response) (*VaultAuthUiVaultAuthGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultAuthUiVaultAuthGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
 // ParseVaultDeleteUiVaultDeletePostResponse parses an HTTP response from a VaultDeleteUiVaultDeletePostWithResponse call
 func ParseVaultDeleteUiVaultDeletePostResponse(rsp *http.Response) (*VaultDeleteUiVaultDeletePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -54051,6 +54217,22 @@ func ParseVaultReadUiVaultReadGetResponse(rsp *http.Response) (*VaultReadUiVault
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseVaultStatusUiVaultStatusGetResponse parses an HTTP response from a VaultStatusUiVaultStatusGetWithResponse call
+func ParseVaultStatusUiVaultStatusGetResponse(rsp *http.Response) (*VaultStatusUiVaultStatusGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &VaultStatusUiVaultStatusGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

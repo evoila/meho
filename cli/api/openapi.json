@@ -15291,6 +15291,127 @@
         }
       }
     },
+    "/ui/keycloak/clients/{client_uuid}": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Client Detail",
+        "description": "Render the client-detail fragment for *client_uuid* (read-only).\n\n``client_uuid`` is the client's **internal UUID** (the ``id`` from a\n``keycloak.client.list`` row, NOT the human ``clientId``). Dispatches\n``keycloak.client.get`` and renders projected, redaction-trusting\nfields only -- the client secret is already scrubbed by the\nconnector; the raw envelope is NEVER dumped into the page.",
+        "operationId": "keycloak_client_detail_ui_keycloak_clients__client_uuid__get",
+        "parameters": [
+          {
+            "name": "client_uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Client Uuid"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/keycloak": {
+      "get": {
+        "tags": [
+          "ui-keycloak"
+        ],
+        "summary": "Keycloak Index",
+        "description": "Render the full-page realm browser.\n\nLists the tenant's keycloak targets in a picker; when a target is\nselected (or there is exactly one), dispatches ``keycloak.realm.get``\n+ ``keycloak.client.list`` + ``keycloak.client_scope.list`` and\nrenders the realm-config card + client list + client-scope list. All\ndispatches pin ``connector_id`` to :data:`KEYCLOAK_CONNECTOR_ID`.",
+        "operationId": "keycloak_index_ui_keycloak_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/audit/results": {
       "get": {
         "tags": [

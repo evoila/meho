@@ -1,0 +1,68 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Bulk-import **applied** fragment (Initiative #1941 Task #1954). Swapped
+  into ``#topology-bulk-result`` after a ``POST /ui/topology/edges/bulk``
+  with ``dry_run=false`` that committed. The POST response also carries
+  ``HX-Trigger: meho:topology-edge-changed`` so an open graph view re-pulls
+  and the newly-written edges show without a hard reload.
+
+  The summary shows the post-commit counts (re-derived from the apply pass's
+  actual insert-vs-merge outcome, so intra-batch duplicates / inter-pass
+  races are counted against the committed DB state, not the dry-run
+  prediction). Each row carries its final action + the §6 recoverability
+  listing.
+-#}
+<div data-test="bulk-applied" data-dry-run="false">
+  <div role="status" class="alert alert-success text-sm">
+    <span>
+      Applied —
+      <span class="font-mono">{{ result.created }}</span> created,
+      <span class="font-mono">{{ result.updated }}</span> updated,
+      <span class="font-mono">{{ result.conflicts }}</span> conflict
+      across {{ result.rows | length }} row(s).
+    </span>
+  </div>
+
+  <div class="mt-2 overflow-x-auto">
+    <table class="table table-zebra table-sm">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>action</th>
+          <th>from</th>
+          <th>kind</th>
+          <th>to</th>
+          <th>edge id</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in result.rows %}
+          <tr data-test="bulk-applied-row" data-row-index="{{ row.index }}" data-action="{{ row.action }}">
+            <td class="font-mono">{{ row.index }}</td>
+            <td>
+              {% if row.action == "create" %}
+                <span class="badge badge-success badge-sm">create</span>
+              {% elif row.action == "update" %}
+                <span class="badge badge-info badge-sm">update</span>
+              {% else %}
+                <span class="badge badge-warning badge-sm">conflict</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="font-mono">{{ row.from_name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ row.from_kind }}</span>
+            </td>
+            <td><span class="badge badge-outline badge-xs">{{ row.kind }}</span></td>
+            <td>
+              <span class="font-mono">{{ row.to_name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ row.to_kind }}</span>
+            </td>
+            <td class="font-mono text-xs opacity-70">{{ row.edge_id }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

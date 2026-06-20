@@ -1,0 +1,317 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast Overrides tab fragment (Initiative #1842, Task #1891). The
+  Overrides tab on ``/ui/broadcast`` ``hx-get``s ``/ui/broadcast/overrides``
+  and swaps this fragment (no ``base.html`` chrome) into the tab pane. The
+  POST create / DELETE re-render this same fragment via ``hx-target`` so
+  the table always reflects the current rule set.
+
+  Tenant-admin gate
+  -----------------
+  The route lifts the operator + gates to tenant_admin. A non-admin
+  operator renders the gated empty state below (``is_tenant_admin`` is
+  false) -- never the table or the create form. The server-side gate on
+  every route is the authority; this template branch just hides the
+  affordance.
+
+  Most-specific-wins banner
+  -------------------------
+  The override resolver (G6.3-T2) is most-specific-wins: a scoped rule
+  (scope_field / scope_value set) beats an op-wide rule for the same
+  pattern. The banner spells this out so the flat table is not misread as
+  flat-priority.
+
+  Delete re-exposure
+  ------------------
+  Each row's delete is a two-step ``<dialog>``-gated confirm whose body
+  spells out the consequence -- deleting a rule re-exposes the suppressed
+  detail for matching ops on the live feed and the Slack mirror.
+
+  CSRF posture
+  ------------
+  The create form + every delete button echo the token THIS render minted
+  via ``hx-headers``; the route sets the matching ``meho_csrf`` cookie on
+  the same response, so the double-submit pair always lines up (#1693).
+-#}
+<div id="broadcast-overrides-pane" class="space-y-4">
+  {% if not is_tenant_admin %}
+    {# ---------- Gated empty state (non-admin operator) ---------- #}
+    <div
+      class="alert alert-warning"
+      role="status"
+      id="broadcast-overrides-gated"
+    >
+      <span>
+        Overrides require tenant_admin. Ask your tenant admin to manage
+        broadcast detail-suppression rules for this tenant.
+      </span>
+    </div>
+  {% else %}
+    {# ---------- Most-specific-wins resolution banner ---------- #}
+    <div class="alert alert-info text-sm" role="note">
+      <span>
+        Rules resolve <strong>most-specific-wins</strong>: a scoped rule
+        (a <code>namespace</code> or <code>target_name</code> scope set)
+        beats an op-wide rule for the same pattern. This table is not a
+        flat priority list.
+      </span>
+    </div>
+
+    {# ---------- Inline create / delete error banner ----------
+       Echoes the backend's 422 (glob-not-regex / scope-pair) or 409
+       (already-exists) as inline copy, or the "already removed" notice
+       from a 404 delete, so a failed mutation never silently no-ops. -#}
+    {% if create_error %}
+      <div
+        class="alert alert-error text-sm"
+        role="alert"
+        aria-live="assertive"
+        id="broadcast-overrides-error"
+      >
+        <span>{{ create_error }}</span>
+      </div>
+    {% endif %}
+
+    {# ---------- Create affordance ---------- #}
+    <div class="flex items-center justify-between gap-3">
+      <h2 class="text-lg font-semibold">Suppression rules</h2>
+      <button
+        type="button"
+        class="btn btn-primary btn-sm"
+        onclick="document.getElementById('broadcast-override-create-modal').showModal()"
+      >
+        New rule
+      </button>
+    </div>
+
+    <dialog id="broadcast-override-create-modal" class="modal">
+      <div class="modal-box max-w-2xl">
+        <h3 class="font-semibold text-lg" id="broadcast-override-create-title">
+          New suppression rule
+        </h3>
+        <form
+          id="broadcast-override-create-form"
+          hx-post="/ui/broadcast/overrides"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-target="#broadcast-overrides-pane"
+          hx-swap="outerHTML"
+          hx-disabled-elt="find button[type=submit]"
+          class="space-y-3 py-2"
+          aria-labelledby="broadcast-override-create-title"
+        >
+          <label class="form-control">
+            <span class="label-text">Op id pattern</span>
+            <input
+              type="text"
+              name="op_id_pattern"
+              maxlength="128"
+              required
+              value="{{ op_id_prefill }}"
+              class="input input-bordered input-sm font-mono"
+              placeholder="vault.kv.* or k8s.configmap.info"
+              aria-describedby="broadcast-override-pattern-hint"
+            />
+            <span id="broadcast-override-pattern-hint" class="text-xs opacity-60 mt-1">
+              Glob only &mdash; <code>*</code> and literals; no regex
+              (<code>[ ] ( ) { } \ + ? | ^ $</code> are rejected).
+            </span>
+          </label>
+
+          <div class="grid gap-3 md:grid-cols-2">
+            <label class="form-control">
+              <span class="label-text">Scope</span>
+              <select
+                name="scope_field"
+                class="select select-bordered select-sm"
+                data-action="scope-select"
+              >
+                <option value="">Op-wide (no scope)</option>
+                {% for option in scope_field_options %}
+                  <option value="{{ option }}">{{ option }}</option>
+                {% endfor %}
+              </select>
+            </label>
+
+            <label
+              class="form-control"
+              data-scope-value-row
+              style="display: none;"
+            >
+              <span class="label-text">Scope value</span>
+              <input
+                type="text"
+                name="scope_value"
+                maxlength="128"
+                class="input input-bordered input-sm"
+                placeholder="e.g. kube-system"
+              />
+            </label>
+          </div>
+
+          <label class="form-control">
+            <span class="label-text">Detail level</span>
+            <select
+              name="detail"
+              class="select select-bordered select-sm"
+              required
+            >
+              {% for option in detail_options %}
+                <option value="{{ option }}">{{ option }}</option>
+              {% endfor %}
+            </select>
+            <span class="text-xs opacity-60 mt-1">
+              <code>aggregate</code> suppresses the op's detail on the feed;
+              <code>full</code> pins it to full detail (re-exposing a
+              normally-sensitive op).
+            </span>
+          </label>
+
+          <div class="modal-action">
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              onclick="document.getElementById('broadcast-override-create-modal').close()"
+            >
+              Cancel
+            </button>
+            <button type="submit" class="btn btn-sm btn-primary">Create rule</button>
+          </div>
+        </form>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button>close</button>
+      </form>
+    </dialog>
+
+    {# ---------- Rules table ---------- #}
+    {% if overrides %}
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm" aria-label="Broadcast suppression rules">
+          <thead>
+            <tr>
+              <th>Op id pattern</th>
+              <th>Scope</th>
+              <th>Detail</th>
+              <th>Created by</th>
+              <th>Created</th>
+              <th class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for rule in overrides %}
+              <tr>
+                <td class="font-mono text-xs">{{ rule.op_id_pattern }}</td>
+                <td class="text-xs">
+                  {% if rule.scope_field %}
+                    <span class="font-mono">{{ rule.scope_field }}={{ rule.scope_value }}</span>
+                  {% else %}
+                    <span class="opacity-60">op-wide</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if rule.detail == "aggregate" %}
+                    <span class="badge badge-sm badge-warning">aggregate</span>
+                  {% else %}
+                    <span class="badge badge-sm badge-ghost">full</span>
+                  {% endif %}
+                </td>
+                <td class="font-mono text-xs break-all">{{ rule.created_by_sub }}</td>
+                <td class="text-xs opacity-70">
+                  <time datetime="{{ rule.created_at.isoformat() }}">
+                    {{ rule.created_at.isoformat() }}
+                  </time>
+                </td>
+                <td class="text-right">
+                  <button
+                    type="button"
+                    class="btn btn-xs btn-ghost text-error"
+                    aria-label="Delete rule {{ rule.op_id_pattern }}"
+                    onclick="document.getElementById('broadcast-override-delete-{{ rule.id }}').showModal()"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {# ---------- Per-row delete-confirm dialogs (re-exposure warning) ---------- #}
+      {% for rule in overrides %}
+        <dialog id="broadcast-override-delete-{{ rule.id }}" class="modal">
+          <div class="modal-box">
+            <h3 class="font-semibold text-lg">Delete this suppression rule?</h3>
+            <p class="text-sm py-2 opacity-80">
+              Deleting this rule re-exposes the suppressed detail for
+              matching ops on the live feed and the Slack mirror. The rule
+              <span class="font-mono">{{ rule.op_id_pattern }}</span>
+              {% if rule.scope_field %}
+                (scope <span class="font-mono">{{ rule.scope_field }}={{ rule.scope_value }}</span>)
+              {% endif %}
+              will no longer apply.
+            </p>
+            <div class="modal-action">
+              <form method="dialog">
+                <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+              </form>
+              <button
+                type="button"
+                class="btn btn-sm btn-error"
+                hx-delete="/ui/broadcast/overrides/{{ rule.id }}"
+                hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+                hx-target="#broadcast-overrides-pane"
+                hx-swap="outerHTML"
+                onclick="document.getElementById('broadcast-override-delete-{{ rule.id }}').close()"
+              >
+                Delete &amp; re-expose
+              </button>
+            </div>
+          </div>
+          <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+          </form>
+        </dialog>
+      {% endfor %}
+    {% else %}
+      <div class="px-3 py-10 text-center text-sm opacity-70" id="broadcast-overrides-empty">
+        No suppression rules for this tenant yet. Create one to pin a
+        normally-full op to aggregate-only detail (or vice versa).
+      </div>
+    {% endif %}
+
+    {# ---------- Scope-value visibility toggle ----------
+       Show the scope_value input only when a scope_field is chosen. The
+       backend's scope-pair validator rejects a half-set pair, so a blank
+       scope_value must accompany the "op-wide" sentinel; the route
+       coalesces both to NULL together. Inline (not a separate <script
+       src>) because the fragment is HTMX-injected and a fresh JS request
+       would race the form render. -#}
+    <script>
+      (function () {
+        var form = document.getElementById('broadcast-override-create-form');
+        if (!form) return;
+        var select = form.querySelector('[data-action="scope-select"]');
+        var row = form.querySelector('[data-scope-value-row]');
+        var input = row ? row.querySelector('input[name="scope_value"]') : null;
+        function toggle() {
+          if (!select || !row) return;
+          var scoped = !!select.value;
+          row.style.display = scoped ? '' : 'none';
+          if (input) {
+            if (scoped) {
+              input.setAttribute('required', 'required');
+            } else {
+              input.removeAttribute('required');
+              input.value = '';
+            }
+          }
+        }
+        select.addEventListener('change', toggle);
+        toggle();
+      }());
+    </script>
+  {% endif %}
+</div>

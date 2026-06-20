@@ -8147,6 +8147,134 @@
         }
       }
     },
+    "/ui/broadcast/overrides": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Overrides",
+        "description": "``GET /ui/broadcast/overrides[?op_id=...]`` -- the tab fragment.\n\nTenant-admin-gated: a non-admin operator renders the gated empty\nstate, never the rules. ``op_id`` pre-fills the create form's\n``op_id_pattern`` for the \"suppress this op\" cross-link. The rules\ncome from the backend ``list_overrides_impl`` with the lifted operator\nso the UI never diverges from the API's RBAC contract.",
+        "operationId": "ui_broadcast_overrides_ui_broadcast_overrides_get",
+        "parameters": [
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Op Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Overrides Create",
+        "description": "``POST /ui/broadcast/overrides`` -- create a rule, re-render the table.\n\ntenant_admin-gated (403 outright for a non-admin -- the form is not\nrendered for them). The form fields are validated into\n:class:`BroadcastOverrideCreate`, so the backend's glob-not-regex and\nscope-pair rules surface as a :class:`ValidationError` echoed inline; a\nduplicate ``(tenant_id, op_id_pattern, scope_field, scope_value)``\nsurfaces the 409 ``broadcast_override_already_exists`` inline. On\nsuccess the refreshed fragment is swapped back in.",
+        "operationId": "ui_broadcast_overrides_create_ui_broadcast_overrides_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_broadcast_overrides_create_ui_broadcast_overrides_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast/overrides/{override_id}": {
+      "delete": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Overrides Delete",
+        "description": "``DELETE /ui/broadcast/overrides/{override_id}`` -- delete, re-render.\n\ntenant_admin-gated. The cross-tenant / unknown-id case surfaces as the\nbackend's 404 ``broadcast_override_not_found`` (never 403 -- existence\nis not leaked across tenants), rendered as a \"rule already removed\"\nnotice; the refreshed table re-renders either way so the operator sees\nthe current state.",
+        "operationId": "ui_broadcast_overrides_delete_ui_broadcast_overrides__override_id__delete",
+        "parameters": [
+          {
+            "name": "override_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Override Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/broadcast/event/{audit_id}": {
       "get": {
         "tags": [
@@ -17688,6 +17816,34 @@
         },
         "type": "object",
         "title": "Body_ui_agents_toggle_ui_agents__name__toggle_post"
+      },
+      "Body_ui_broadcast_overrides_create_ui_broadcast_overrides_post": {
+        "properties": {
+          "op_id_pattern": {
+            "type": "string",
+            "title": "Op Id Pattern"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "scope_field": {
+            "type": "string",
+            "title": "Scope Field",
+            "default": ""
+          },
+          "scope_value": {
+            "type": "string",
+            "title": "Scope Value",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id_pattern",
+          "detail"
+        ],
+        "title": "Body_ui_broadcast_overrides_create_ui_broadcast_overrides_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

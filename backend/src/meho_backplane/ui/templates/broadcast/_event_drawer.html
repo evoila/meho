@@ -108,5 +108,36 @@
         <p class="text-sm opacity-60">No request payload recorded.</p>
       {% endif %}
     </section>
+
+    {# ---------- "Suppress this op" cross-link (Task #1891) ----------
+       Shown only for sensitive ops (op_class in the aggregate-only set:
+       credential_read / credential_mint / audit_query -- gated on the
+       SET, not the badge colour). It switches the broadcast tab strip to
+       the Overrides tab and lazy-loads the overrides fragment with this
+       op_id pre-filled into the create form's op_id_pattern. The create
+       itself still goes through the gated POST -- this is a UX shortcut,
+       not a privilege bypass: a non-admin who follows it lands on the
+       tenant_admin-gated empty state. The ``$dispatch`` flips the
+       enclosing ``x-data="{ tab: 'live' }"`` strip (feed.html) to the
+       overrides pane; the ``hx-get`` swaps the pre-filled fragment in. -#}
+    {% if is_sensitive %}
+      <section aria-label="Suppress this op">
+        <a
+          href="#"
+          class="btn btn-outline btn-xs"
+          hx-get="/ui/broadcast/overrides?op_id={{ op_id | urlencode }}"
+          hx-target="#broadcast-overrides"
+          hx-swap="innerHTML"
+          x-on:click="$dispatch('broadcast-show-overrides')"
+        >
+          <span aria-hidden="true">&#x1F512;</span>
+          Suppress this op&hellip;
+        </a>
+        <p class="mt-1 text-xs opacity-60">
+          Opens the Overrides tab with this op id pre-filled
+          (tenant_admin only).
+        </p>
+      </section>
+    {% endif %}
   </div>
 </aside>

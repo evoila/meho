@@ -377,6 +377,8 @@ investigation. #1305 is the closing fix.
   - SSE API edge: `backend/src/meho_backplane/api/v1/feed.py`.
   - SSE UI bridge: `backend/src/meho_backplane/ui/routes/broadcast/stream.py`.
   - MCP tools: `backend/src/meho_backplane/mcp/tools/broadcast.py`.
+  - Override CRUD (REST): `backend/src/meho_backplane/api/v1/broadcast_overrides.py`.
+  - Override UI tab (BFF, tenant_admin): `backend/src/meho_backplane/ui/routes/broadcast/overrides.py` — the Overrides tab on `/ui/broadcast` (#1891). Lists/creates/deletes `BroadcastOverride` rows through the REST plane's `list_overrides_impl` / `create_override_impl` / `delete_override_impl` in-process (the same impl the admin MCP tools call), gated to `tenant_admin` via `resolve_operator_or_403`; delete is a two-step `<dialog>` confirm that spells out the re-exposure consequence; the create form echoes the 422 glob-not-regex / 409 already-exists as inline errors. The sensitive-op cross-link in the event drawer (`_event_drawer.html`) pre-fills the create form's `op_id_pattern`.
   - History (XRANGE) helper: `backend/src/meho_backplane/broadcast/history.py`.
   - Client / lifespan: `backend/src/meho_backplane/broadcast/client.py`.
 - Valkey commands:

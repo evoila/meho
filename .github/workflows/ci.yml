@@ -117,20 +117,29 @@ jobs:
     # pool scales from 0, so an idle period costs one cold-start on the
     # next run. Provisioned RDC-side in rdc-gitops#55.
     runs-on: meho-runners-ci-heavy
-    # 20-min cap: ~2x the observed ~9.3-min job wall after #771/#799
-    # removed the per-test descriptor re-embedding that had dominated
-    # this job. pytest is ~8m33s with --cov+sysmon (run 26245676016,
-    # the post-#799 push) / ~7m35s without; everything else in the job
-    # (uv sync, ruff, mypy, drift-guard) is <1 min combined. History:
-    # the combined serial sweep once blew the 10→20→40→50-min caps
+    # 30-min cap (raised from 20): the unit suite outgrew the headroom the
+    # 20-min cap assumed. The #1901 resource-starvation hang recurred — the
+    # cumulative alembic migration round-trip cluster (schema reached 0048+,
+    # each reversibility test replays the whole upgrade→downgrade chain) plus
+    # the new /ui-console test wave (operations/corpus/retrieval/conventions/
+    # agents-runs) grew the suite from ~7902 to ~8243 run, and even -n 4
+    # re-saturated the 6-core heavy pod until the GHA agent lost its heartbeat
+    # ("runner lost communication", null Pytest step, no log, ~17-18 min,
+    # `failure`, NOT reproducible locally — same signature as #1901). Fix is
+    # the same lever one more notch: -n 4 → -n 3 (3 free cores for the agent /
+    # coordinator / DinD / OS; see the perf-budget `run:` block). -n 3 trades
+    # wall for stability — measured 858s with --cov+sysmon locally (8243
+    # passed, -n 3), vs 655s no-cov at -n 4 — so the cap rises to 30 min to
+    # keep ample headroom above the slower-but-stable wall (hang-backstop
+    # function preserved; budget_s below is the early-warning gate).
+    # ~8m33s with --cov+sysmon was the pre-growth -n 4 wall (run 26245676016).
+    # History: the combined serial sweep once blew the 10→20→40→50-min caps
     # (runs 25910787068, 25970564527, 25972807988, 25987329377,
     # 25992737115) before the integration split (#570), xdist
     # (#585/#603), and the #799 re-embed fix landed; the 50-min cap was
-    # generous headroom from that era. Retuned down now that real
-    # multi-core wall-clock is observed, exactly as the prior comment
-    # instructed. Job name is intentionally unchanged so the existing
-    # branch-protection required check stays satisfied.
-    timeout-minutes: 20
+    # generous headroom from that era. Job name is intentionally unchanged so
+    # the existing branch-protection required check stays satisfied.
+    timeout-minutes: 30
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
@@ -303,8 +312,9 @@ jobs:
         # `-n auto --dist loadscope` 2007/0/0 — identical, empty
         # failure set; local wall-clock serial 10:18 → xdist 6:14
         # (limited by core count; CI multi-core gets the ~49→~10 min).
-        # Worker count is -n 4 (lowered from -n 6 per #1901 — see the rationale in
-        # the perf-budget `run:` block below). The original -n 6 reasoning, kept
+        # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901, then -n 4 → -n 3
+        # when the #1901 starvation hang recurred as the suite grew — see the
+        # rationale in the perf-budget `run:` block below). The original -n 6 reasoning, kept
         # for context: pinned, matched to the dedicated `meho-runners-ci-heavy`
         # scale set's 6000m guaranteed cores (#761). History: -n auto
         # was inconsistent on the shared 4-core pool (run 26164020459
@@ -363,22 +373,33 @@ jobs:
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
-          # -n 4 (lowered from -n 6, #1901): under full 6-core subscription on the
-          # heavy runner the GHA agent + xdist coordinator were starved and the unit
-          # lane died with "runner lost communication" at ~15min (resource-starvation
-          # hang) once the cumulative UI-console test wave (grants / approvals /
-          # agent-run-console+SSE) grew the suite — main red for every PR, NOT
-          # reproducible locally (full suite ~6:45, 7902 passed). -n 4 leaves 2-core
-          # headroom for the agent / coordinator / DinD / OS. budget_s raised 600 ->
-          # 1020 to match the slower-but-stable wall: fewer workers => longer wall by
-          # DESIGN here, not perf creep; still well under the 20-min timeout-minutes
-          # hang-backstop, so the early-warning function is preserved.
-          budget_s=1020
+          # -n 3 (lowered -n 6 → -n 4, #1901; then -n 4 → -n 3 when that same
+          # starvation hang recurred): under full 6-core subscription on the
+          # heavy runner the GHA agent + xdist coordinator are starved and the unit
+          # lane dies with "runner lost communication" at ~15-18min (resource-
+          # starvation hang) — null Pytest step, no log, `failure`, NOT reproducible
+          # locally. #1901 first hit this when the UI-console test wave (grants /
+          # approvals / agent-run-console+SSE) grew the suite to 7902; -n 4 (2-core
+          # headroom) fixed it then. It recurred at ~8243 run tests: the new /ui wave
+          # (operations / corpus / retrieval / conventions / agents-runs) plus the
+          # alembic migration round-trip cluster (schema 0048+; each reversibility
+          # test replays the whole upgrade→downgrade chain, so every round-trip got
+          # slower AND new ones were added — the dominant wall cost, ~45 of the
+          # slowest 60 tests) re-saturated even -n 4. -n 3 leaves 3-core headroom for
+          # the agent / coordinator / DinD / OS — the lever, one more notch. The
+          # durable fix is sharding the lane or a bigger pool (infra); this is the
+          # in-pattern stopgap. budget_s raised 1020 -> 1500 to match the slower-but-
+          # stable -n 3 wall: fewer workers => longer wall BY DESIGN, not perf creep.
+          # Measured locally: 858s with --cov+sysmon at -n 3 (8243 passed), vs 655s
+          # no-cov at -n 4; 1500 sits above the expected runner wall with creep-
+          # detection headroom and well under the 30-min timeout-minutes backstop.
+          # RETIGHTEN budget_s once a real green runner -n 3 wall is observed.
+          budget_s=1500
           start=$(date +%s)
-          COVERAGE_CORE=sysmon uv run pytest -n 4 --dist loadscope --maxfail=1 --ignore=tests/integration \
+          COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
             --cov=meho_backplane --cov-report=xml tests/
           dur=$(( $(date +%s) - start ))
-          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = Goal #11 10-min; hard cap = job timeout-minutes)"
+          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = stability-driven -n 3 wall, was Goal #11 10-min aspiration; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
             echo "::error title=Unit perf budget exceeded::unit pytest ${dur}s > budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s: MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py (#793/#827). Amortize the cost; do not just bump the budget."
             exit 1

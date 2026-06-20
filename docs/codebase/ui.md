@@ -2874,3 +2874,152 @@ is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
   reuse without rotation, 401 propagation on a dead session), and the route
   ordering (retrieval include before stubs; literal diagnostics before any param
   route) + dashboard tile.
+
+## Vault console — confirm-gated writes (G10.18-T2 #1957)
+
+The mutating verbs over the T1 (#1956) read-only KV browser:
+confirm-gated `vault.kv.put` (CAS-aware), `vault.kv.delete` (soft-delete
+specific versions), and `secret.move` (references-not-values). These are the
+highest-blast-radius actions the Vault console gains — every one is
+`requires_approval=True`, so the gate is unmissable and the result render
+surfaces the approval handoff rather than a silent success. BFF + template
+assembly over the existing dispatcher; no new backend route, op, or
+meta-tool.
+
+### Module placement (separate from T1)
+
+The write routes live in `ui/routes/vault/writes.py`
+(`build_vault_writes_router`), a **separate module** from T1's
+`ui/routes/vault/routes.py` (`build_vault_router`, the read-only GET
+browser), so the read / write surfaces — and the parallel T3 status view
+(#1958) — evolve without serial-merge collisions on one shared file. The
+write module **reuses** T1's `_resolve_operator` / `_vault_connector_id` /
+`_default_path` (imported from `routes.py`) rather than re-deriving them, so
+the load-bearing connector-id-shape invariant lives in one place. Both
+routers are included ahead of the stubs aggregate in
+`ui.routes.build_router` (`build_vault_router()` then
+`build_vault_writes_router()`).
+
+### Routes
+
+* `GET /ui/vault/{put,delete,move}/confirm` — the unmissable
+  destructive-confirm modal fragments, modelled on the operations Run modal
+  (`operations/_run_modal.html`). Each renders a prominent `safety_level` /
+  `requires_approval` banner (`put` = `caution`, `delete` / `move` =
+  `dangerous`; all three `requires_approval`), the op-specific inputs, and a
+  confirm button carrying its **own** `hx-headers` CSRF echo (HTMX does not
+  inherit `hx-headers` to children). The GET mints a fresh CSRF token and
+  re-sets the `meho_csrf` cookie (`set_csrf_cookie`) so the double-submit
+  pair lines up after the HTMX swap rotated it (the #1693 / #1754
+  cookie-desync class). The confirm button carries `hx-disabled-elt` so a
+  high-impact write cannot be double-fired. Templates:
+  `vault/_confirm_{put,delete,move}.html`.
+* `POST /ui/vault/put` — dispatch `vault.kv.put` (`connector_id="vault-1.x"`,
+  target + `{mount, path, data, cas?}`). The `cas` Check-And-Set guard rides
+  in `params` **only when the operator set the field** (mirrors the CLI's
+  `Changed("cas")` rule: a blank field is "flag absent" → write
+  unconditionally, an explicit `cas=0` → write only if absent). The `data`
+  JSON is parsed server-side; malformed input is an inline 400 form error,
+  not a 422.
+* `POST /ui/vault/delete` — dispatch `vault.kv.delete` with the
+  comma-separated `versions` parsed into a non-empty list of positive ints.
+* `POST /ui/vault/move` — dispatch `secret.move` against the **separate**
+  `secret-broker-1.x` connector with the schema's `from` / `to` references
+  (+ optional `reason`). **Value-free**: no value input exists, no value
+  reaches the dispatched params, and the render surfaces only the
+  `{status, value_sha256, length}` confirmation — the no-`--value` invariant
+  the CLI keeps.
+
+### Two connector ids (load-bearing)
+
+`vault.kv.put` / `vault.kv.delete` dispatch `vault-1.x`; `secret.move`
+dispatches `secret-broker-1.x` — a **different** connector. Both
+`<impl_id>-<version>` ids are sourced from `list_ingested_connectors`
+(`state == "ingested"`, filtering `product == "vault"` vs
+`product == "secret"`) so a re-version flows through without a literal edit;
+the bare slugs `vault` / `secret` are never emitted (they 404 through
+`parse_connector_id`). `secret-broker` is a typed-op-only synthetic
+connector (no `register_connector_v2`), so the dispatcher resolves it from
+the registered `secret.move` op alone; the listing reports it ingested off
+its DB-backed `operation_group` / `endpoint_descriptor` rows.
+
+### CSRF (writes are gated; T1 reads are not)
+
+T1's four GET reads are CSRF-free (the middleware only guards
+state-changing methods). The write POSTs are gated by the `ui/csrf.py`
+double-submit middleware, which verifies the `X-CSRF-Token` header (or
+`csrf_token` form field) against the `meho_csrf` cookie HMAC **before** the
+route runs — so a POST without the token is a 403 the route never sees. The
+confirm GET mints + re-sets the cookie so the swapped-in confirm button's
+`hx-headers` echo matches.
+
+### awaiting_approval (the silent-success trap)
+
+`call_operation` always returns a structured `OperationResult` envelope;
+errors land inside it, not as HTTP 4xx. Because every write op is
+`requires_approval=True`, a human OPERATOR running one is routed to the
+approval queue (G11.7-T1 #1401), so the **common** return is
+`status="awaiting_approval"` with `extras["approval_request_id"]`. The
+shared result fragment (`vault/_write_result.html`) surfaces it as a banner
++ a deep-link into `/ui/approvals/{approval_request_id}` (the surface #1778
+shipped, `hx-get` into `#meho-approvals-modal-container`), so the operator
+never thinks the write silently no-op'd. The fragment's other branches:
+the value-free `secret.move` `ok` render (status / value_sha256 / length
+only); the put / delete `ok` render (a plain success, no secret value); the
+`error` / `denied` render via the shared `vault/_envelope_error.html` macro
+(which carries the `VaultTenantScopeError` "outside your tenant scope"
+friendly message — surfaced when an approved write re-dispatches against an
+out-of-scope path — and the generic `extras.error_code`); and the inline
+400 form-error / no-connector-hint branches.
+
+### RBAC (operator tier; the gate is policy, not role)
+
+The write verbs are OPERATOR-tier (like the operations Run surface) — there
+is **no** `tenant_admin` hard-403 on the write POST. Safety is enforced by
+the confirm modal + the dispatcher's `policy_gate` → approval queue, not by
+`TenantRole`; a role gate here would contradict the backend gate and the
+operations console. Tenant scoping derives from `operator.tenant_id` only
+(the session), never a form field. The tenant-scope guard
+(`connectors/vault/tenant_scope.py`, default-on since v0.15.0 #1725) runs
+**inside the connector handler**, so it trips on the executed (post-approval
+re-dispatch) path, not on the initial parked dispatch.
+
+### Redaction (top-sensitivity surface)
+
+No secret value reaches a server log, audit row, telemetry frame, or
+request-preview body. `vault.kv.put`'s `data` object is operator-supplied
+secret material; the BFF logs only op-id / connector-id / status /
+approval-id (`ui_vault_write_dispatch`), never the `params` or the envelope
+`result`. `secret.move` is value-free by the connector's own contract; the
+UI keeps that invariant by never offering a value field (a smuggled `value`
+form field is dropped — the dispatched params carry only `from` / `to` /
+`reason`).
+
+### Entry points + route ordering
+
+The T1 `vault/index.html` gains an additive "Write" action bar (Write /
+Delete / Move buttons that `hx-get` the confirm modals into a stable
+`#vault-write-modal-container`; the shared `app/modal-dialogs.js` controller
+auto-opens the swapped-in `<dialog class="modal">` via `showModal()`). Put /
+Delete carry the browser's current mount/path/target via `hx-include` so the
+confirm modal prefills them; Move takes references (a separate connector), so
+no path inputs. The literal `put` / `delete` / `move` (+ `…/confirm`)
+segments register before any `{param}` route on the shared `/ui/vault`
+router (first-match-wins); they are POST / distinct-literal routes, so they
+cannot collide with T1's GET slug routes regardless, but the ordering
+discipline is pinned.
+
+### Tests
+
+* `backend/tests/test_ui_vault_writes.py` — the confirm modals' safety
+  banners + CSRF re-mint + value-free move form (no value/secret/data input);
+  the `awaiting_approval` render (banner + `/ui/approvals` deep-link) end-to-
+  end through the real policy gate for put + move; the CSRF gate (403 without
+  the token, 200 with it); route ordering (`put/confirm` → confirm handler);
+  the CAS rule (carried only when set, blank ≠ `cas=0`); the `secret.move`
+  value-free contract (dispatches `secret-broker-1.x` with refs only, a
+  smuggled `value` field dropped, render carries only status/value_sha256/
+  length); RBAC (a plain operator runs all three writes, no `tenant_admin`
+  403); the `VaultTenantScopeError` friendly-message render branch; inline
+  400 form errors for malformed `data` / empty `versions` / missing
+  `from`/`to`; and the session gate.

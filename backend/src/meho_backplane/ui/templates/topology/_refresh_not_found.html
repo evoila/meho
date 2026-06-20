@@ -1,0 +1,45 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Topology **refresh target-not-found** fragment (Initiative #1941 Task
+  #1954). Swapped into the refresh-result slot when
+  ``POST /ui/topology/refresh/{target_name}`` could not resolve the target.
+
+  * 404 (``is_ambiguous`` false) — no target matched the name in the
+    caller's tenant. The prefix-ILIKE near-misses are listed so the operator
+    re-submits with an exact name rather than seeing an empty 200. This is
+    the issue's "unknown target_name renders the 404 + near-miss hint, not an
+    empty 200" criterion.
+  * 409 (``is_ambiguous`` true) — defensive: the name collided with more
+    than one target (the unique index normally prevents this). The colliding
+    names are listed so the operator disambiguates.
+-#}
+<div
+  data-test="refresh-not-found"
+  data-target-name="{{ target_name }}"
+  role="alert"
+  class="alert alert-warning flex-col items-start gap-1 text-sm"
+>
+  {% if is_ambiguous %}
+    <p data-test="refresh-ambiguous">
+      <span class="font-mono">{{ target_name }}</span> matched more than one
+      target — re-submit with an exact name.
+    </p>
+  {% else %}
+    <p>
+      No target named <span class="font-mono">{{ target_name }}</span> in this
+      tenant.
+    </p>
+  {% endif %}
+  {% if near_misses %}
+    <div class="text-xs" data-test="refresh-near-misses">
+      <span class="opacity-70">Did you mean:</span>
+      <ul class="mt-1 flex flex-wrap gap-1">
+        {% for miss in near_misses %}
+          <li><span class="badge badge-outline badge-sm font-mono">{{ miss.name }}</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+</div>

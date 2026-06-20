@@ -1,0 +1,153 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak create-protocol-mapper confirm modal (Initiative #1943, Task #1961).
+
+  Swapped into ``#keycloak-drawer-container`` by a client detail's "Add
+  protocol mapper" button (tenant_admin only). Confirming dispatches the
+  ``keycloak.protocol_mapper.create`` op -- a ``caution`` /
+  ``requires_approval=True`` WRITE that wires the ``tenant_id`` /
+  ``tenant_role`` claims the backplane row-scopes on -- so the safety gate is
+  UNMISSABLE and the POST is reachable only by a tenant_admin.
+
+  The target client is keyed off the route's ``{client_uuid}`` (the client's
+  internal UUID), carried on the POST URL, NOT a free-form field -- so the
+  dispatch cannot be re-pointed at another client by a forged form value.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  FORM's own ``hx-headers`` (HTMX does not inherit ``hx-headers`` to
+  children). The modal-render GET minted the token + re-set the ``meho_csrf``
+  cookie. The confirm button disables itself during dispatch.
+
+  Context:
+    connector_id -- str: the pinned dispatchable id (display only)
+    client_uuid  -- str: the target client's internal UUID (the POST path key)
+    target       -- str: the active Keycloak target slug
+    csrf_token   -- str: minted double-submit token for the create POST
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="keycloak-write-modal" class="modal" aria-label="Create protocol mapper">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="font-mono text-lg font-semibold">Add protocol mapper</h3>
+        <p class="mt-0.5 text-sm opacity-70">
+          Add a protocol mapper to client
+          <code class="break-all">{{ client_uuid }}</code>.
+        </p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {#- UNMISSABLE safety gate: a caution / requires-approval WRITE. -#}
+    <div
+      role="alert"
+      class="alert alert-warning mt-4 items-start"
+      data-write-gate="confirm"
+      data-safety-level="caution"
+    >
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">State-changing operation</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          This adds a protocol mapper to the client. It
+          <span class="font-semibold">requires approval</span>: confirming
+          parks a request for a reviewer rather than executing immediately.
+        </p>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="badge badge-warning badge-sm" data-write-safety>safety: caution</span>
+          <span class="badge badge-outline badge-sm" data-write-requires-approval>requires approval</span>
+        </div>
+      </div>
+    </div>
+
+    <form
+      class="mt-4 space-y-3"
+      hx-post="/ui/keycloak/clients/{{ client_uuid }}/protocol-mappers/create"
+      hx-target="#keycloak-mapper-create-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[data-action='create']"
+    >
+      <input type="hidden" name="target" value="{{ target }}" />
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Mapper name</span>
+        <input
+          type="text"
+          name="name"
+          required
+          maxlength="512"
+          class="input input-bordered input-sm w-full font-mono"
+          placeholder="e.g. tenant-id-mapper"
+          aria-label="Protocol mapper name"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Mapper type</span>
+        <input
+          type="text"
+          name="protocol_mapper"
+          required
+          maxlength="512"
+          class="input input-bordered input-sm w-full font-mono"
+          placeholder="e.g. oidc-usermodel-attribute-mapper"
+          aria-label="Protocol mapper type"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Protocol</span>
+        <select
+          name="protocol"
+          class="select select-bordered select-sm w-full font-mono"
+          aria-label="Protocol"
+        >
+          <option value="openid-connect" selected>openid-connect</option>
+          <option value="saml">saml</option>
+        </select>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">
+          Advanced <span class="opacity-50">(optional ProtocolMapperRepresentation JSON: the mapper ``config`` block)</span>
+        </span>
+        <textarea
+          name="representation"
+          rows="4"
+          maxlength="65536"
+          class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+          placeholder='{"config": {"claim.name": "tenant_id", "user.attribute": "tenant_id", "id.token.claim": "true", "access.token.claim": "true"}}'
+          aria-label="Advanced ProtocolMapperRepresentation JSON"
+        ></textarea>
+      </label>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onclick="document.getElementById('keycloak-write-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" data-action="create" class="btn btn-warning btn-sm gap-1">
+          {{ icon("zap", class="size-4") }}
+          Add (request approval)
+        </button>
+      </div>
+    </form>
+
+    <div id="keycloak-mapper-create-result" class="mt-4"></div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

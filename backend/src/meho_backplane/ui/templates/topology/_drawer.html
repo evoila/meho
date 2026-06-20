@@ -101,6 +101,32 @@
             Annotate edge
           </button>
         {% endif %}
+        {#-
+          Refresh-from-target affordance (Task #1954) -- shown for every
+          operator on a ``target``-kind node (refresh is an ``operator``-tier
+          verb, not ``tenant_admin``). The POST is SYNCHRONOUS: the service
+          blocks on the connector probe and returns the inline counts (no
+          async job surface). ``hx-disabled-elt`` disables the button + the
+          spinner shows during dispatch, then the result swaps into the slot
+          below. ``hx-headers`` carries the CSRF token (the drawer set the
+          matching ``meho_csrf`` cookie).
+        -#}
+        {% if node.kind == "target" %}
+          <button
+            type="button"
+            class="btn btn-secondary btn-xs"
+            data-test="refresh-target"
+            aria-label="Refresh this target's topology"
+            hx-post="/ui/topology/refresh/{{ node.name | urlencode }}"
+            hx-target="#topology-refresh-result"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-disabled-elt="this"
+          >
+            Refresh
+            <span class="htmx-indicator loading loading-spinner loading-xs" aria-hidden="true"></span>
+          </button>
+        {% endif %}
         <button
           type="button"
           class="btn btn-ghost btn-xs"
@@ -125,6 +151,13 @@
       created-edge fragment back into the same slot.
     -#}
     <div id="topology-edge-modal" data-test="edge-modal-slot"></div>
+
+    {#- Refresh-result mount slot (Task #1954). Empty until the "Refresh"
+        button POSTs; the synchronous ``RefreshResult`` counts (or the 404
+        near-miss hint) swap in here. -#}
+    {% if node.kind == "target" %}
+      <div id="topology-refresh-result" data-test="refresh-result-slot"></div>
+    {% endif %}
 
     {# ---------- Properties ---------- #}
     <section aria-label="Node properties">
@@ -239,7 +272,16 @@
        Hands off to the T3 graph view; the URL contract is fixed
        here so the link works as soon as T3 (#882) lands.
     #}
-    <footer class="mt-2 flex justify-end">
+    <footer class="mt-2 flex justify-end gap-2">
+      {#- History deep-link (Task #1955) -- the per-resource temporal walk. -#}
+      <a
+        href="{{ history_href }}"
+        class="btn btn-ghost btn-xs"
+        data-test="node-history-link"
+        aria-label="Show history for {{ node.name }}"
+      >
+        History
+      </a>
       <a
         href="{{ dependents_href }}"
         class="btn btn-primary btn-xs"

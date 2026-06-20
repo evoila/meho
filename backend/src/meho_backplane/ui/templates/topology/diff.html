@@ -1,0 +1,134 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the point-in-time topology diff (Initiative #1941 Task
+  #1955). Extends ``base.html``. Shows the net created / updated / removed
+  entries between ``ts1`` (exclusive lower bound) and ``ts2`` (inclusive
+  upper bound) -- both REQUIRED query params.
+
+  Truncation (load-bearing): when the diff overflows the 1000-row
+  ``_DIFF_HARD_CAP`` the service flags ``truncated`` + a ``truncation_hint``.
+  This panel renders the hint as a prominent "narrow the time window" banner
+  ABOVE the list, so the operator is never shown a silently-clipped result as
+  if it were the complete diff.
+
+  The ``ts1`` / ``ts2`` pickers are a plain GET form (a browser nav so the
+  URL captures the window for copy/paste); an Alpine ``x-data`` toggle keeps
+  the optional ``kind`` filter collapsed until wanted.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; Diff &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="diff-panel" x-data="{ showKind: {{ 'true' if kind_filter else 'false' }} }">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Topology diff</h1>
+      <p class="text-sm opacity-70">
+        Net graph changes between two points in time
+        (<span class="font-mono">ts1</span> exclusive &rarr; <span class="font-mono">ts2</span> inclusive).
+      </p>
+    </div>
+    <a class="btn btn-sm join-item" href="/ui/topology" aria-label="Back to topology inventory">
+      &larr; Inventory
+    </a>
+  </header>
+
+  {# ---------- Window pickers ----------
+     ``ts1`` / ``ts2`` are required; the form is a plain GET browser nav. The
+     ``datetime-local`` inputs echo the active window so a re-submit refines
+     it. The optional ``kind`` filter collapses behind an Alpine toggle. -#}
+  <form method="get" action="/ui/topology/diff" class="flex flex-wrap items-end gap-2">
+    <label class="form-control">
+      <span class="label-text text-xs opacity-70">From (ts1, exclusive)</span>
+      <input
+        type="datetime-local"
+        name="ts1"
+        value="{{ ts1 }}"
+        required
+        class="input input-bordered input-sm font-mono"
+        aria-label="Diff window lower bound"
+        data-test="diff-ts1"
+      />
+    </label>
+    <label class="form-control">
+      <span class="label-text text-xs opacity-70">To (ts2, inclusive)</span>
+      <input
+        type="datetime-local"
+        name="ts2"
+        value="{{ ts2 }}"
+        required
+        class="input input-bordered input-sm font-mono"
+        aria-label="Diff window upper bound"
+        data-test="diff-ts2"
+      />
+    </label>
+    <label class="form-control" x-show="showKind" x-cloak>
+      <span class="label-text text-xs opacity-70">Kind filter (optional)</span>
+      <input
+        type="text"
+        name="kind"
+        value="{{ kind_filter }}"
+        placeholder="e.g. vm&hellip;"
+        class="input input-bordered input-sm font-mono"
+        aria-label="Restrict the diff to one node kind"
+        autocomplete="off"
+      />
+    </label>
+    <button type="button" class="btn btn-ghost btn-sm" @click="showKind = !showKind">
+      <span x-text="showKind ? 'Hide kind' : 'Filter kind'"></span>
+    </button>
+    <button type="submit" class="btn btn-primary btn-sm" data-test="diff-submit">
+      Compute diff
+    </button>
+  </form>
+
+  {# ---------- Truncation banner (load-bearing) ----------
+     Surfaced ABOVE the list so a clipped diff is never mistaken for a
+     complete one. ``truncated`` is the assert target; ``truncation_hint``
+     carries the canonical "narrow the time window" remediation verbatim from
+     the substrate. -#}
+  {% if truncated %}
+    <div role="alert" class="alert alert-warning text-sm" data-test="diff-truncated" data-truncated="true">
+      <div>
+        <p class="font-semibold">Diff truncated &mdash; results are incomplete.</p>
+        <p>{{ truncation_hint }}</p>
+      </div>
+    </div>
+  {% endif %}
+
+  {# ---------- Diff entries ---------- #}
+  <section aria-label="Diff entries">
+    <h2 class="text-sm font-semibold uppercase opacity-60">
+      Changes ({{ entries | length }})
+    </h2>
+    {% if entries %}
+      <ul class="space-y-1 text-sm">
+        {% for entry in entries %}
+          <li class="flex flex-wrap items-center gap-2 border-base-300 border-b pb-1" data-test="diff-entry">
+            {% if entry.change_kind == "created" %}
+              <span class="badge badge-success badge-xs">created</span>
+            {% elif entry.change_kind == "removed" %}
+              <span class="badge badge-error badge-xs">removed</span>
+            {% else %}
+              <span class="badge badge-warning badge-xs">{{ entry.change_kind }}</span>
+            {% endif %}
+            <span class="badge badge-ghost badge-xs">{{ entry.source }}</span>
+            <span class="badge badge-outline badge-xs">{{ entry.kind }}</span>
+            {% if entry.name %}
+              <span class="font-mono">{{ entry.name }}</span>
+            {% endif %}
+            <span class="opacity-90">{{ entry.summary }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-sm opacity-60" data-test="diff-empty">
+        No net changes between these two points in time.
+      </p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

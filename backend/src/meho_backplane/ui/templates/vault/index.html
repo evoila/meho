@@ -156,6 +156,60 @@
       </div>
     </form>
 
+    {#- Write actions (Task #1957 T2). Each button opens an unmissable
+        confirm modal (``hx-get`` into ``#vault-write-modal-container``; the
+        shared modal controller ``app/modal-dialogs.js`` auto-opens the
+        swapped-in ``<dialog class="modal">``). Put / Delete carry the
+        browser's current mount/path/target via ``hx-include`` so the confirm
+        modal prefills them; Move takes references (a separate connector), so
+        it carries no path inputs. The GET confirm routes are CSRF-free reads;
+        only the confirm POST inside each modal is CSRF-gated. -#}
+    <section aria-label="Write actions" class="space-y-2" data-vault-writes>
+      <h2 class="text-sm font-semibold opacity-80">Write</h2>
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="btn btn-warning btn-sm gap-1"
+          hx-get="/ui/vault/put/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          data-vault-write-open="put"
+        >
+          {{ icon("key-round", class="size-4") }}
+          Write secret
+        </button>
+        <button
+          type="button"
+          class="btn btn-error btn-sm gap-1"
+          hx-get="/ui/vault/delete/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          data-vault-write-open="delete"
+        >
+          {{ icon("ban", class="size-4") }}
+          Delete versions
+        </button>
+        <button
+          type="button"
+          class="btn btn-error btn-sm gap-1"
+          hx-get="/ui/vault/move/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          data-vault-write-open="move"
+        >
+          {{ icon("arrow-right", class="size-4") }}
+          Move secret
+        </button>
+      </div>
+      <p class="text-xs opacity-60">
+        Every write requires approval: confirming parks a request for a
+        reviewer in <a href="/ui/approvals" class="link">Approvals</a> rather
+        than executing immediately.
+      </p>
+    </section>
+
     {#- Three independent swap regions. Each starts with an empty-state
         prompt; the matching control swaps its partial in. They are
         separate so reading a secret does not wipe the key list. -#}
@@ -187,6 +241,14 @@
         </div>
       </div>
     </section>
+
+    {#- Stable write-modal container (Task #1957 T2) -- never replaced. The
+        put / delete / move confirm fragments swap their own
+        ``<dialog id="vault-write-modal" class="modal">`` into this via
+        ``hx-swap="innerHTML"``; the shared modal controller opens each via
+        ``showModal()`` and dismisses it on close/ESC/backdrop -- the same
+        container pattern the approvals + operations modals use. -#}
+    <div id="vault-write-modal-container"></div>
   {% endif %}
 </section>
 {% endblock %}

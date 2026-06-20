@@ -8806,6 +8806,9 @@ type ClientInterface interface {
 	// UiAuditResultsUiAuditResultsGet request
 	UiAuditResultsUiAuditResultsGet(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet request
+	UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAuditDrawerUiAuditShowAuditIdGet request
 	UiAuditDrawerUiAuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11998,6 +12001,18 @@ func (c *Client) UiAuditMyRecentUiAuditMyRecentGet(ctx context.Context, reqEdito
 
 func (c *Client) UiAuditResultsUiAuditResultsGet(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuditResultsUiAuditResultsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetRequest(c.Server, sessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -24323,6 +24338,40 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 	return req, nil
 }
 
+// NewUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetRequest generates requests for UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet
+func NewUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetRequest(server string, sessionId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/audit/sessions/%s/replay", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAuditDrawerUiAuditShowAuditIdGetRequest generates requests for UiAuditDrawerUiAuditShowAuditIdGet
 func NewUiAuditDrawerUiAuditShowAuditIdGetRequest(server string, auditId openapi_types.UUID) (*http.Request, error) {
 	var err error
@@ -30602,6 +30651,9 @@ type ClientWithResponsesInterface interface {
 	// UiAuditResultsUiAuditResultsGetWithResponse request
 	UiAuditResultsUiAuditResultsGetWithResponse(ctx context.Context, params *UiAuditResultsUiAuditResultsGetParams, reqEditors ...RequestEditorFn) (*UiAuditResultsUiAuditResultsGetResponse, error)
 
+	// UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetWithResponse request
+	UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse, error)
+
 	// UiAuditDrawerUiAuditShowAuditIdGetWithResponse request
 	UiAuditDrawerUiAuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditDrawerUiAuditShowAuditIdGetResponse, error)
 
@@ -34684,6 +34736,28 @@ func (r UiAuditResultsUiAuditResultsGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuditResultsUiAuditResultsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -39164,6 +39238,15 @@ func (c *ClientWithResponses) UiAuditResultsUiAuditResultsGetWithResponse(ctx co
 		return nil, err
 	}
 	return ParseUiAuditResultsUiAuditResultsGetResponse(rsp)
+}
+
+// UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetWithResponse request returning *UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse
+func (c *ClientWithResponses) UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse, error) {
+	rsp, err := c.UiAuditSessionReplayUiAuditSessionsSessionIdReplayGet(ctx, sessionId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse(rsp)
 }
 
 // UiAuditDrawerUiAuditShowAuditIdGetWithResponse request returning *UiAuditDrawerUiAuditShowAuditIdGetResponse
@@ -45595,6 +45678,32 @@ func ParseUiAuditResultsUiAuditResultsGetResponse(rsp *http.Response) (*UiAuditR
 	}
 
 	response := &UiAuditResultsUiAuditResultsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse parses an HTTP response from a UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetWithResponse call
+func ParseUiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse(rsp *http.Response) (*UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuditSessionReplayUiAuditSessionsSessionIdReplayGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

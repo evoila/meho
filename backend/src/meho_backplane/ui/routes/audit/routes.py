@@ -92,14 +92,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1.audit import _REPLAY_ROW_CAP, _count_session_rows
 from meho_backplane.audit_query import (
     AuditQueryFilters,
     AuditQueryResult,
     DurationParseError,
     InvalidCursorError,
+    ReplayNode,
     UnsupportedFilterError,
     parse_duration,
     query_audit,
+    replay_session,
 )
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -359,6 +362,45 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
     ]
 
 
+def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, object]:
+    """Project one :class:`ReplayNode` to the row template shape, recursively.
+
+    Reuses the T1 row projection so each tree node renders through the SAME
+    ``_results_rows.html`` partial (identical badge palette + the "details"
+    affordance that opens the T2 detail drawer on click) -- a replayed
+    ``credential_read`` node therefore shows the 🔒 placeholder through the
+    T2 drawer's aggregate-only gate, per-node, exactly as a flat-query row
+    does. Two structural fields are added on top of the flat shape:
+
+    * ``depth`` -- the node's distance from the session root (``0`` for
+      roots), threaded so the template can indent each level.
+    * ``children`` -- the node's projected direct children, recursively, so
+      the nested chronological tree renders the full lineage.
+
+    ``replay_enabled`` mirrors the flat projection (admin + session-bearing),
+    so a node's own replay pivot stays disabled for a non-admin -- though on
+    this surface the caller is already a ``tenant_admin`` by the route gate.
+    """
+    return {
+        "id": str(node.id),
+        "ts": node.ts.isoformat(),
+        "principal_sub": node.principal_sub,
+        "principal_name": node.principal_name,
+        "target_name": node.target_name,
+        "op_id": node.op_id,
+        "op_class": node.op_class,
+        "badge_class": _badge_class(node.op_class),
+        "result_status": node.result_status,
+        "work_ref": node.work_ref,
+        "agent_session_id": (
+            str(node.agent_session_id) if node.agent_session_id is not None else None
+        ),
+        "replay_enabled": is_admin and node.agent_session_id is not None,
+        "depth": node.depth,
+        "children": [_project_replay_node(child, is_admin=is_admin) for child in node.children],
+    }
+
+
 def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]:
     """Assemble the row-detail drawer context for one ``audit_log`` row.
 
@@ -457,6 +499,69 @@ async def _build_my_recent_context(session: UISessionContext) -> dict[str, objec
         "rows": _project_rows(result, is_admin=is_admin),
         "operator_sub": session.operator_sub,
     }
+
+
+async def _build_replay_context(
+    session: UISessionContext,
+    *,
+    session_id: uuid.UUID,
+) -> dict[str, object]:
+    """Assemble the session-replay tree context (in-process, count-first).
+
+    Shares the SAME count-first 413 guard + tree build the REST replay route
+    runs: :func:`_count_session_rows` runs a cheap tenant-scoped ``count(*)``
+    over the session anchor *before* any tree is built, and only when the
+    count is within :data:`_REPLAY_ROW_CAP` does
+    :func:`meho_backplane.audit_query.replay_session` materialize the forest.
+    Dispatching in-process (never a self-HTTP to the cookie-unauthable
+    Bearer route) means the UI and REST surfaces share one DoS-guard + tree-
+    build code path.
+
+    Over-cap: when the count exceeds the cap the tree is **not** built --
+    ``over_cap`` is set with the ``row_count`` so the template renders the
+    over-cap notice + the pivot to the T1 flat query
+    (``/ui/audit?agent_session_id=<id>``). The cap is single-sourced from the
+    backend ``api/v1/audit.py`` :data:`_REPLAY_ROW_CAP`, not a second literal.
+
+    Non-leakage: an unknown / foreign / empty session yields ``row_count=0``
+    and ``root=[]`` -- the empty state, **never a 404** -- so a foreign
+    session is indistinguishable from an empty one (the same posture the REST
+    route's ``root=[]`` / ``row_count=0`` 200 holds).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        row_count = await _count_session_rows(
+            session_id,
+            tenant_id=session.tenant_id,
+            session=db_session,
+        )
+        context: dict[str, object] = {
+            "session_id": str(session_id),
+            "row_count": row_count,
+            "replay_row_cap": _REPLAY_ROW_CAP,
+            "over_cap": False,
+            "root": [],
+            # The T1 flat-query pivot the over-cap notice (and the page
+            # header) link to: the supported ``agent_session_id`` filter
+            # pre-bound to this session.
+            "flat_query_href": f"/ui/audit?agent_session_id={session_id}",
+        }
+        if row_count > _REPLAY_ROW_CAP:
+            # Count-first short-circuit: refuse to build a runaway tree. The
+            # recursive ``replay_session`` walk is skipped entirely.
+            context["over_cap"] = True
+            return context
+
+        forest = await replay_session(
+            session_id,
+            tenant_id=session.tenant_id,
+            session=db_session,
+        )
+
+    # The caller is already a tenant_admin (route gate), so ``is_admin`` is
+    # True for the per-node replay-pivot enabled state.
+    context["root"] = [_project_replay_node(node, is_admin=True) for node in forest]
+    return context
 
 
 async def _build_results_context(
@@ -700,6 +805,54 @@ async def _drawer_handler(
     return get_templates().TemplateResponse(request, "audit/_drawer.html", context)
 
 
+async def _replay_handler(
+    request: Request,
+    session_id: uuid.UUID,
+    session: UISessionContext = _require_session,
+) -> HTMLResponse:
+    """``GET /ui/audit/sessions/{session_id}/replay`` -- the session replay tree.
+
+    **TENANT_ADMIN-gated.** Replaying an *arbitrary* session reconstructs
+    another principal's full session trace -- a privileged forensic act,
+    matching the REST replay route's ``_require_tenant_admin`` gate
+    (``api/v1/audit.py``) and the MCP ``meho.audit.replay`` posture. The role
+    is lifted via the fail-soft :func:`_resolve_role`; a ``read_only`` /
+    ``operator`` -- or any failed lift -- renders the 403 forbidden fragment
+    ("session replay is a tenant-admin forensic action"), never the tree.
+
+    For an admin the tree is built in-process via
+    :func:`_build_replay_context` (the SAME count-first 413 guard +
+    :func:`~meho_backplane.audit_query.replay_session` the REST route runs).
+    An over-cap session renders the over-cap notice + the T1 flat-query pivot
+    instead of a tree; an unknown / foreign / empty session renders the empty
+    state (``root=[]``), never a 404. Sets + echoes the CSRF cookie per the
+    chassis double-submit convention.
+    """
+    if not await _is_tenant_admin(session):
+        return get_templates().TemplateResponse(
+            request,
+            "audit/_replay_forbidden.html",
+            {"session_id": str(session_id)},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    context = await _build_replay_context(session, session_id=session_id)
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context["page_title"] = "Session replay"
+    context["active_surface"] = "audit"
+    context["csrf_token"] = csrf_token
+    response = get_templates().TemplateResponse(request, "audit/replay.html", context)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        path="/ui",
+    )
+    return response
+
+
 def build_audit_router() -> APIRouter:
     """Construct the ``/ui/audit*`` :class:`APIRouter`.
 
@@ -717,11 +870,14 @@ def build_audit_router() -> APIRouter:
     2. ``GET /ui/audit/my-recent`` -- the my-recent quick view (literal,
        registered **before** ``show/{audit_id}`` so ``my-recent`` is never
        read as an ``audit_id``).
-    3. ``GET /ui/audit/show/{audit_id}`` -- the T2 row detail drawer.
-    4. ``GET /ui/audit`` -- the full page.
-
-    A future T3 ``/ui/audit/sessions/{session_id}/replay`` slots in among the
-    literal-prefixed routes the same way.
+    3. ``GET /ui/audit/sessions/{session_id}/replay`` -- the T3 session
+       replay tree (tenant_admin). The distinct ``/ui/audit/sessions/``
+       prefix + the trailing literal ``/replay`` segment make it
+       unambiguous against the ``show/{audit_id}`` drawer and the
+       ``my-recent`` quick view -- ``{session_id}`` is the second path
+       segment, never the first, so it can never bind as an ``audit_id``.
+    4. ``GET /ui/audit/show/{audit_id}`` -- the T2 row detail drawer.
+    5. ``GET /ui/audit`` -- the full page.
     """
     router = APIRouter(tags=["ui-audit"])
     router.add_api_route(
@@ -737,6 +893,23 @@ def build_audit_router() -> APIRouter:
         methods=["GET"],
         name="ui_audit_my_recent",
         response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/audit/sessions/{session_id}/replay",
+        _replay_handler,
+        methods=["GET"],
+        name="ui_audit_session_replay",
+        response_class=HTMLResponse,
+        responses={
+            403: {
+                "description": (
+                    "Session replay is a tenant-admin forensic action; a "
+                    "read_only / operator session (or a failed role lift) "
+                    "gets the 403 forbidden fragment, not the tree."
+                ),
+                "content": {"text/html": {}},
+            },
+        },
     )
     router.add_api_route(
         "/ui/audit/show/{audit_id}",

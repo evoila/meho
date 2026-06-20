@@ -1,0 +1,94 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit session-replay TREE partial (Initiative #1841 G10.15, Task #1946).
+
+  Renders the ``root`` forest of a replayed agent session as a nested
+  chronological tree. Each node carries every audit field plus ``depth``
+  (distance from the session root, ``0`` for roots) and ``children`` (its
+  direct children, recursively, ordered by ``(occurred_at, id)``), projected
+  by ``audit/routes.py::_project_replay_node``.
+
+  The forest is walked with Jinja's ``{% for ... recursive %}`` loop:
+  ``{{ loop(node.children) }}`` re-enters the same body for each node's
+  children, so the whole lineage renders without a fixed depth limit
+  (``replay_session`` itself depth-bounds the closure).
+
+  Each node reuses the T1/T2 row look -- the broadcast op_class badge palette
+  (``badge_class``) -- and its "details" affordance ``hx-get``s the T2 drawer
+  (``/ui/audit/show/{id}`` into ``#audit-drawer``), so the per-node
+  aggregate-only 🔒 gate applies exactly as it does for a flat-query row: a
+  ``credential_read`` / ``audit_query`` node in the tree never leaks its
+  payload, the T2 drawer withholds it on open.
+
+  Context variables:
+    root -- list[dict]: the projected node forest (each: id / ts /
+            principal_* / target_name / op_id / op_class / badge_class /
+            result_status / work_ref / agent_session_id / depth / children)
+-#}
+{% from "_icons.html" import icon %}
+<ul
+  id="audit-replay-tree"
+  class="space-y-1"
+  role="tree"
+  aria-label="Session replay tree"
+>
+  {% for node in root recursive %}
+    <li role="treeitem">
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 rounded-box border border-base-300 bg-base-100 px-4 py-2"
+        style="margin-left: {{ node.depth * 1.5 }}rem"
+      >
+        <div class="min-w-0 space-y-1">
+          <div class="flex items-center gap-2">
+            {% if node.depth > 0 %}
+              <span class="text-base-content/40" aria-hidden="true">&#8627;</span>
+            {% endif %}
+            <span
+              class="badge badge-sm {{ node.badge_class }}"
+              aria-label="Op class {{ node.op_class }}"
+            >{{ node.op_class }}</span>
+            <p class="truncate font-mono text-sm">{{ node.op_id }}</p>
+            <span class="badge badge-ghost badge-sm" aria-label="Result {{ node.result_status }}">
+              {{ node.result_status }}
+            </span>
+          </div>
+          <p class="truncate text-xs text-base-content/55">
+            <span>{{ node.principal_name or node.principal_sub }}</span>
+            {% if node.target_name %}
+              <span aria-hidden="true">&middot;</span>
+              <span class="font-mono">{{ node.target_name }}</span>
+            {% endif %}
+            <span aria-hidden="true">&middot;</span>
+            <time datetime="{{ node.ts }}">{{ node.ts }}</time>
+            {% if node.work_ref %}
+              <span aria-hidden="true">&middot;</span>
+              <span class="font-mono">{{ node.work_ref }}</span>
+            {% endif %}
+          </p>
+        </div>
+
+        {#- "details" opens the T2 row drawer (hx-get into ``#audit-drawer``)
+            so the per-node aggregate-only gate applies on click. -#}
+        <div class="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs gap-1"
+            hx-get="/ui/audit/show/{{ node.id }}"
+            hx-target="#audit-drawer"
+            hx-swap="outerHTML"
+            aria-label="Open detail drawer for audit row {{ node.id }}"
+          >
+            {{ icon("scroll-text", class="size-3.5") }} details
+          </button>
+        </div>
+      </div>
+      {% if node.children %}
+        <ul class="mt-1 space-y-1" role="group">
+          {{ loop(node.children) }}
+        </ul>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>

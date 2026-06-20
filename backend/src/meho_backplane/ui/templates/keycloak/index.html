@@ -216,9 +216,28 @@
 
     {#- ---- Client-scope list -------------------------------------------- -#}
     <section aria-label="Client scopes" data-keycloak-scopes>
-      <h2 class="mb-2 text-sm font-semibold opacity-80">
-        Client scopes <span class="text-xs opacity-60">({{ client_scopes | length }})</span>
-      </h2>
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold opacity-80">
+          Client scopes <span class="text-xs opacity-60">({{ client_scopes | length }})</span>
+        </h2>
+        {#- Create affordance: tenant_admin only (soft-hide). A plain operator
+            never sees the button; the write POST + the modal-render GET still
+            gate server-side with a 403, so hiding it is a UX hint, not the
+            authority. -#}
+        {% if is_tenant_admin %}
+          <button
+            type="button"
+            class="btn btn-warning btn-xs gap-1"
+            hx-get="/ui/keycloak/client-scopes/create?target={{ active_target | urlencode }}"
+            hx-target="#keycloak-drawer-container"
+            hx-swap="innerHTML"
+            data-action="open-scope-create"
+          >
+            {{ icon("key-round", class="size-3.5") }}
+            New client scope
+          </button>
+        {% endif %}
+      </div>
       {% if client_scopes %}
         <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
           <table class="table table-sm">

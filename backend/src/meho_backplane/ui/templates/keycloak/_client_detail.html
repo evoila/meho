@@ -114,10 +114,76 @@
         </div>
       {% endif %}
 
+      {#- Scope <-> client relation (read-only assembly over keycloak.client.get,
+          no new read op): the client's default + optional client scopes, by
+          name, with a deep-link back to the realm browser's client-scope list.
+          A plain operator sees this relation view -- it is operator-tier. -#}
+      <div data-client-scopes>
+        <div class="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <h4 class="text-xs font-semibold opacity-60">Client scopes</h4>
+          <a
+            href="/ui/keycloak?target={{ target | urlencode }}"
+            class="link link-hover inline-flex items-center gap-1 text-xs"
+            data-scope-list-link
+          >
+            {{ icon("key-round", class="size-3.5") }}
+            All client scopes
+          </a>
+        </div>
+        {% set default_scopes = client.get("defaultClientScopes") or [] %}
+        {% set optional_scopes = client.get("optionalClientScopes") or [] %}
+        {% if default_scopes or optional_scopes %}
+          <div class="space-y-1.5">
+            {% if default_scopes %}
+              <div data-client-default-scopes>
+                <span class="text-xs opacity-50">Default</span>
+                <div class="mt-0.5 flex flex-wrap gap-1">
+                  {% for scope in default_scopes %}
+                    <span class="badge badge-outline badge-xs font-mono">{{ scope }}</span>
+                  {% endfor %}
+                </div>
+              </div>
+            {% endif %}
+            {% if optional_scopes %}
+              <div data-client-optional-scopes>
+                <span class="text-xs opacity-50">Optional</span>
+                <div class="mt-0.5 flex flex-wrap gap-1">
+                  {% for scope in optional_scopes %}
+                    <span class="badge badge-ghost badge-xs font-mono">{{ scope }}</span>
+                  {% endfor %}
+                </div>
+              </div>
+            {% endif %}
+          </div>
+        {% else %}
+          <p class="text-xs opacity-60">No client scopes referenced.</p>
+        {% endif %}
+      </div>
+
       {#- Protocol mappers (names only -- the projected view, not the raw
           mapper config blob). -#}
       <div data-client-protocol-mappers>
-        <h4 class="mb-1 text-xs font-semibold opacity-60">Protocol mappers</h4>
+        <div class="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <h4 class="text-xs font-semibold opacity-60">Protocol mappers</h4>
+          {#- Create affordance: tenant_admin only (soft-hide). The write POST
+              + the modal-render GET gate server-side with a 403; hiding the
+              button is a UX hint, not the authority. The target client is
+              keyed off this detail's ``client_uuid`` -- the modal POSTs to
+              ``/ui/keycloak/clients/{uuid}/protocol-mappers/create``. -#}
+          {% if is_tenant_admin %}
+            <button
+              type="button"
+              class="btn btn-warning btn-xs gap-1"
+              hx-get="/ui/keycloak/clients/{{ client_uuid }}/protocol-mappers/create?target={{ target | urlencode }}"
+              hx-target="#keycloak-drawer-container"
+              hx-swap="innerHTML"
+              data-action="open-mapper-create"
+            >
+              {{ icon("zap", class="size-3.5") }}
+              Add protocol mapper
+            </button>
+          {% endif %}
+        </div>
         {% if client.get("protocolMappers") %}
           <ul class="space-y-1">
             {% for mapper in client.get("protocolMappers") %}

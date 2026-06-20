@@ -77,6 +77,14 @@ const (
 	Yes      ConfirmVerifyResponseAnswer = "yes"
 )
 
+// Defines values for ConnectorReviewPayloadKind.
+const (
+	ConnectorReviewPayloadKindIngestedShim          ConnectorReviewPayloadKind = "ingested-shim"
+	ConnectorReviewPayloadKindProfiled              ConnectorReviewPayloadKind = "profiled"
+	ConnectorReviewPayloadKindProfiledButUnreviewed ConnectorReviewPayloadKind = "profiled-but-unreviewed"
+	ConnectorReviewPayloadKindTyped                 ConnectorReviewPayloadKind = "typed"
+)
+
 // Defines values for ConnectorSpecEntryCatalogIngest.
 const (
 	SpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
@@ -122,8 +130,8 @@ const (
 
 // Defines values for EditOpWarningCode.
 const (
-	ProfiledButUnreviewed EditOpWarningCode = "profiled_but_unreviewed"
-	UnreplacedAutoShim    EditOpWarningCode = "unreplaced_auto_shim"
+	EditOpWarningCodeProfiledButUnreviewed EditOpWarningCode = "profiled_but_unreviewed"
+	EditOpWarningCodeUnreplacedAutoShim    EditOpWarningCode = "unreplaced_auto_shim"
 )
 
 // Defines values for EvalRequestSurface.
@@ -2356,15 +2364,38 @@ type ConnectorReviewOp struct {
 // the CLI / API layers surface them in operator output so the
 // convention is self-documenting. “tenant_id“ is the scope the
 // payload was queried under (“None“ for built-in).
+//
+// “kind“ (G0.28-T6 / #1979) is the authoring-mode discriminator —
+// typed / ingested-shim / profiled / profiled-but-unreviewed —
+// projected from the v2 resolver's
+// :data:`~meho_backplane.connectors.base.ShimKind` tier for this
+// connector's “(product, version)“ crossed with the review-gate
+// state, and “dispatchable“ is its boolean roll-up (“True“ for
+// typed / profiled). They mirror the same-named fields on
+// :class:`~meho_backplane.operations.ingest.api_schemas.ConnectorListItem`
+// so the list and review surfaces agree on how a connector reads.
+// Both default to the bare-shim reading
+// (“kind="ingested-shim"“, “dispatchable=False“) so existing
+// construction call sites keep working; the service always sets them
+// explicitly. The per-scheme auth detail is deliberately **not**
+// surfaced here yet — deferred until #1969 freezes the
+// :class:`~meho_backplane.connectors.schemas.ExecutionProfile` schema
+// (the Goal flags secret-handling sensitivity). See
+// :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId  string                 `json:"connector_id"`
-	Groups       []ConnectorReviewGroup `json:"groups"`
-	ImplId       string                 `json:"impl_id"`
-	Product      string                 `json:"product"`
-	TenantId     *openapi_types.UUID    `json:"tenant_id"`
-	TotalOpCount int                    `json:"total_op_count"`
-	Version      string                 `json:"version"`
+	ConnectorId  string                      `json:"connector_id"`
+	Dispatchable *bool                       `json:"dispatchable,omitempty"`
+	Groups       []ConnectorReviewGroup      `json:"groups"`
+	ImplId       string                      `json:"impl_id"`
+	Kind         *ConnectorReviewPayloadKind `json:"kind,omitempty"`
+	Product      string                      `json:"product"`
+	TenantId     *openapi_types.UUID         `json:"tenant_id"`
+	TotalOpCount int                         `json:"total_op_count"`
+	Version      string                      `json:"version"`
 }
+
+// ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.
+type ConnectorReviewPayloadKind string
 
 // ConnectorSpecEntry One curated “(product, version)“ -> spec-source mapping.
 //

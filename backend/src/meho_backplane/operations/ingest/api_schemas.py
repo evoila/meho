@@ -427,6 +427,51 @@ class IngestResponse(BaseModel):
 ConnectorState = Literal["ingested", "registered"]
 
 
+#: Operator-facing authoring-mode discriminator for a connector row.
+#:
+#: G0.28-T6 (#1979). Orthogonal to :data:`ConnectorState` (the
+#: dispatch-resolution lifecycle): ``state`` answers "do descriptor rows
+#: exist for this connector_id", ``kind`` answers "what kind of connector
+#: backs it and can it actually authenticate + execute". The two are
+#: surfaced side by side rather than collapsed because they move
+#: independently -- a ``state="ingested"`` row can be any of the four
+#: kinds depending on which connector class the resolver lands on.
+#:
+#: Projected from the v2 resolver's
+#: :data:`~meho_backplane.connectors.base.ShimKind` tier for the row's
+#: ``(product, version)`` line (the same resolver replay the enable-time
+#: advisories run, G0.28-T5 #1971) crossed with the review-gate state:
+#:
+#: * ``"typed"`` -- the resolver lands on a hand-coded
+#:   :class:`~meho_backplane.connectors.base.Connector` subclass
+#:   (``shim_kind == "none"``). Fully dispatchable.
+#: * ``"ingested-shim"`` -- the resolver lands on a bare
+#:   :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+#:   auto-shim (``shim_kind == "bare"``), or no connector class resolves
+#:   at all. Non-dispatchable: its ``auth_headers`` / ``execute`` raise
+#:   :class:`NotImplementedError` (``connector_unsupported`` /
+#:   ``cause='unreplaced_auto_shim'``). The dead end #1627 surfaces.
+#: * ``"profiled"`` -- the resolver lands on a
+#:   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+#:   (``shim_kind == "profiled"``) backed by a reviewed
+#:   :class:`~meho_backplane.connectors.schemas.ExecutionProfile`, and the
+#:   review gate has been cleared (at least one op is enabled).
+#:   Dispatchable.
+#: * ``"profiled-but-unreviewed"`` -- the resolver lands on a
+#:   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+#:   but no op has been enabled yet. Stamping the profile made the
+#:   connector dispatchable in principle, but the review gate (#1971) is
+#:   still closed -- nothing dispatches until the operator enables an op.
+#:   The sub-state #1971 previously surfaced only as an enable-time
+#:   warning is now visible on the list / review surfaces.
+ConnectorAuthoringKind = Literal[
+    "typed",
+    "ingested-shim",
+    "profiled",
+    "profiled-but-unreviewed",
+]
+
+
 class NextStep(BaseModel):
     """Self-describing in-product hint pointing at the verb that closes the workflow.
 
@@ -521,6 +566,21 @@ class ConnectorListItem(BaseModel):
     the manual-mode flags. Defaults to ``None`` so existing
     construction call sites (tests, MCP fakes) continue to compile
     without explicit assignment.
+
+    ``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator —
+    typed / ingested-shim / profiled / profiled-but-unreviewed — an
+    **additive** sibling to ``state`` (which is deliberately left
+    unchanged: it is the documented dispatch-resolution state machine
+    with its own consumers). ``dispatchable`` is the boolean roll-up of
+    the same projection: ``True`` for ``typed`` and ``profiled``,
+    ``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.
+    Together they let the operator console / CLI distinguish a working
+    profiled connector from a dead bare shim, which neither ``state``
+    nor the count fields could express. Both default to the bare-shim
+    reading (``kind="ingested-shim"``, ``dispatchable=False``) so
+    existing construction call sites (tests, MCP fakes) keep working;
+    the listing always sets them explicitly. See
+    :data:`ConnectorAuthoringKind`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -538,6 +598,8 @@ class ConnectorListItem(BaseModel):
     enabled_operation_count: int
     state: ConnectorState = "ingested"
     next_step: NextStep | None = None
+    kind: ConnectorAuthoringKind = "ingested-shim"
+    dispatchable: bool = False
 
 
 class ConnectorListResponse(BaseModel):

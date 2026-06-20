@@ -105,6 +105,7 @@ from meho_backplane.operations.ingest._internals import (
     write_audit_row,
 )
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
+from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
 from meho_backplane.operations.ingest.delete_connector import (
     DeleteConnectorResult,
     deregister_staged_auto_shims,
@@ -125,10 +126,30 @@ from meho_backplane.operations.ingest.payload import (
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = ["ReviewService"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _authoring_kind_for_payload(
+    scope: ConnectorScope,
+    rendered_groups: list[ConnectorReviewGroup],
+) -> tuple[ConnectorAuthoringKind, bool]:
+    """Project the review payload's ``(kind, dispatchable)`` for *scope* (#1979).
+
+    The review gate (#1971) is "cleared" once any op is enabled; the
+    enabled-op count is derived from the already-rendered groups so no
+    second DB round-trip is needed. Delegates the resolver replay + tier
+    mapping to :func:`resolve_authoring_kind`.
+    """
+    enabled_op_count = sum(1 for group in rendered_groups for op in group.ops if op.is_enabled)
+    return resolve_authoring_kind(
+        product=scope.product,
+        version=scope.version,
+        enabled_operation_count=enabled_op_count,
+    )
 
 
 class ReviewService:
@@ -402,6 +423,7 @@ class ReviewService:
             )
             for group in groups
         ]
+        kind, dispatchable = _authoring_kind_for_payload(scope, rendered_groups)
         return ConnectorReviewPayload(
             connector_id=connector_id,
             product=scope.product,
@@ -410,6 +432,8 @@ class ReviewService:
             tenant_id=scope.tenant_id,
             groups=rendered_groups,
             total_op_count=sum(group.op_count for group in rendered_groups),
+            kind=kind,
+            dispatchable=dispatchable,
         )
 
     # -- public write API: edits ------------------------------------------

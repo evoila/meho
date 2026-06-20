@@ -8663,6 +8663,15 @@ type ClientInterface interface {
 	// UiDashboardUiGet request
 	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiAccountUiAccountGet request
+	UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost request
+	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost request
+	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiAgentsListUiAgentsGetWithBody request with any body
 	UiAgentsListUiAgentsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11245,6 +11254,42 @@ func (c *Client) ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorF
 
 func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiDashboardUiGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountUiAccountGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountUiAccountGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(c.Server, sessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -22299,6 +22344,94 @@ func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiAccountUiAccountGetRequest generates requests for UiAccountUiAccountGet
+func NewUiAccountUiAccountGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest generates requests for UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost
+func NewUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/sessions/revoke-others")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest generates requests for UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost
+func NewUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostRequest(server string, sessionId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/account/sessions/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiAgentsListUiAgentsGetRequest calls the generic UiAgentsListUiAgentsGet builder with application/json body
 func NewUiAgentsListUiAgentsGetRequest(server string, body UiAgentsListUiAgentsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -30540,6 +30673,15 @@ type ClientWithResponsesInterface interface {
 	// UiDashboardUiGetWithResponse request
 	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
 
+	// UiAccountUiAccountGetWithResponse request
+	UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error)
+
+	// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request
+	UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error)
+
+	// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request
+	UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error)
+
 	// UiAgentsListUiAgentsGetWithBodyWithResponse request with any body
 	UiAgentsListUiAgentsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiAgentsListUiAgentsGetResponse, error)
 
@@ -33979,6 +34121,70 @@ func (r UiDashboardUiGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiDashboardUiGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountUiAccountGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountUiAccountGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountUiAccountGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38737,6 +38943,33 @@ func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, 
 		return nil, err
 	}
 	return ParseUiDashboardUiGetResponse(rsp)
+}
+
+// UiAccountUiAccountGetWithResponse request returning *UiAccountUiAccountGetResponse
+func (c *ClientWithResponses) UiAccountUiAccountGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountUiAccountGetResponse, error) {
+	rsp, err := c.UiAccountUiAccountGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountUiAccountGetResponse(rsp)
+}
+
+// UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse request returning *UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse
+func (c *ClientWithResponses) UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+	rsp, err := c.UiAccountRevokeOthersUiAccountSessionsRevokeOthersPost(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp)
+}
+
+// UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse request returning *UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse
+func (c *ClientWithResponses) UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse(ctx context.Context, sessionId string, reqEditors ...RequestEditorFn) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
+	rsp, err := c.UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePost(ctx, sessionId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp)
 }
 
 // UiAgentsListUiAgentsGetWithBodyWithResponse request with arbitrary body returning *UiAgentsListUiAgentsGetResponse
@@ -44797,6 +45030,64 @@ func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetRespons
 	response := &UiDashboardUiGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountUiAccountGetResponse parses an HTTP response from a UiAccountUiAccountGetWithResponse call
+func ParseUiAccountUiAccountGetResponse(rsp *http.Response) (*UiAccountUiAccountGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountUiAccountGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse parses an HTTP response from a UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostWithResponse call
+func ParseUiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse(rsp *http.Response) (*UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountRevokeOthersUiAccountSessionsRevokeOthersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse parses an HTTP response from a UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostWithResponse call
+func ParseUiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse(rsp *http.Response) (*UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAccountRevokeSessionUiAccountSessionsSessionIdRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

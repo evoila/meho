@@ -226,6 +226,135 @@ async def test_auth_headers_forwarded() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _post_json — verb honoring, form-encoded body, header merge (#1968)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_post_json_honors_actual_verb(verb: str) -> None:
+    """_post_json sends the request with the *actual* non-idempotent verb.
+
+    Regression for #1968: the seam previously hardcoded ``POST``, so an
+    ingested ``PUT``/``PATCH``/``DELETE`` was silently downgraded.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.request(verb, "/api/widget/1").respond(200, json={"ok": True})
+        result = await conn._post_json(
+            target,
+            "/api/widget/1",
+            operator=_make_operator("tok"),
+            verb=verb,
+            json={"field": "v"},
+        )
+
+    assert result == {"ok": True}
+    assert route.called
+    assert route.calls[0].request.method == verb
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_form_encoded_body() -> None:
+    """_post_json with data= sends an application/x-www-form-urlencoded body.
+
+    Covers the OAuth2 token-grant + vRLI/nsx session-login shapes (#1968).
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/oauth/token").respond(200, json={"access_token": "t"})
+        result = await conn._post_json(
+            target,
+            "/oauth/token",
+            operator=_make_operator("tok"),
+            data={"grant_type": "client_credentials", "scope": "read"},
+        )
+
+    assert result == {"access_token": "t"}
+    sent = route.calls[0].request
+    assert sent.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert sent.content == b"grant_type=client_credentials&scope=read"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_extra_headers_merged() -> None:
+    """_post_json merges extra_headers onto auth_headers; per-call value wins."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/api/widget").respond(201, json={"id": 1})
+        await conn._post_json(
+            target,
+            "/api/widget",
+            operator=_make_operator("my-jwt"),
+            json={"name": "w"},
+            extra_headers={"X-Idempotency-Key": "abc", "Authorization": "Bearer override"},
+        )
+
+    sent = route.calls[0].request.headers
+    assert sent["x-idempotency-key"] == "abc"
+    # extra_headers wins on a key clash with auth_headers.
+    assert sent["authorization"] == "Bearer override"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["GET", "HEAD", "OPTIONS", "get"])
+async def test_post_json_rejects_idempotent_verb(verb: str) -> None:
+    """_post_json refuses idempotent verbs — they belong on the retried path."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+    with pytest.raises(ValueError, match="non-idempotent"):
+        await conn._post_json(target, "/api/x", operator=_make_operator("t"), verb=verb)
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_rejects_json_and_data_together() -> None:
+    """_post_json refuses a json= and data= body in the same call."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+    with pytest.raises(ValueError, match="not both"):
+        await conn._post_json(
+            target,
+            "/api/x",
+            operator=_make_operator("t"),
+            json={"a": 1},
+            data={"b": 2},
+        )
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_extra_headers_merged() -> None:
+    """_request_json forwards extra_headers (header-located params on a GET)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/items").respond(200, json={"items": []})
+        await conn._request_json(
+            target,
+            "GET",
+            "/api/items",
+            operator=_make_operator("my-jwt"),
+            extra_headers={"X-Tenant": "acme"},
+        )
+
+    sent = route.calls[0].request.headers
+    assert sent["x-tenant"] == "acme"
+    assert sent["authorization"] == "Bearer my-jwt"
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
 # Retry behaviour — 5xx
 # ---------------------------------------------------------------------------
 

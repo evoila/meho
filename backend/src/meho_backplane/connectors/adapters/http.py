@@ -370,6 +370,7 @@ class HttpConnector(Connector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Retryable JSON request. Only idempotent verbs (GET, HEAD, OPTIONS).
 
@@ -378,7 +379,9 @@ class HttpConnector(Connector):
         side-effecting operation. Non-idempotent callers must use
         ``_post_json`` or call the httpx client directly. ``operator`` is
         forwarded to :meth:`auth_headers` so the connector can resolve
-        credentials under the operator's identity.
+        credentials under the operator's identity. ``extra_headers`` are
+        merged onto the connector-supplied :meth:`auth_headers` (e.g.
+        header-located op params; per-call values win on a key clash).
         """
         method = method.upper()
         if method not in _IDEMPOTENT_METHODS:
@@ -388,6 +391,8 @@ class HttpConnector(Connector):
             )
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
+        if extra_headers:
+            headers = {**headers, **extra_headers}
         resp = await client.request(method, path, params=params, json=json, headers=headers)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
@@ -409,15 +414,46 @@ class HttpConnector(Connector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Non-retried POST returning parsed JSON.
+        """Non-retried request for a non-idempotent verb, returning parsed JSON.
 
-        Retry on non-idempotent verbs is the caller's responsibility.
+        Despite the name, this seam honours the *actual* non-idempotent
+        verb passed in ``verb`` (``POST`` / ``PUT`` / ``PATCH`` /
+        ``DELETE``) rather than hardcoding ``POST`` -- an ingested
+        ``PUT``/``PATCH``/``DELETE`` op must reach the wire with its
+        declared method, not be silently downgraded to a ``POST``. The
+        verb is validated against :data:`_IDEMPOTENT_METHODS` so a caller
+        that accidentally routes an idempotent verb here (which would skip
+        the tenacity retry on :meth:`_request_json`) fails loudly.
+
+        Two body shapes are supported and are mutually exclusive: ``json``
+        serialises a JSON request body (``application/json``); ``data``
+        serialises a form-encoded body (``application/x-www-form-urlencoded``
+        -- the shape OAuth2 token grants and session-login POSTs require).
+
+        ``extra_headers`` are merged onto the connector-supplied
+        :meth:`auth_headers` (header-located op params; the per-call values
+        win on a key clash). Retry on non-idempotent verbs is the caller's
+        responsibility -- this seam deliberately stays outside the
+        :meth:`_request_json` tenacity wrapper.
         """
+        verb = verb.upper()
+        if verb in _IDEMPOTENT_METHODS:
+            raise ValueError(
+                f"_post_json only accepts non-idempotent methods; got {verb!r} "
+                f"(idempotent verbs {sorted(_IDEMPOTENT_METHODS)} must use _request_json)"
+            )
+        if json is not None and data is not None:
+            raise ValueError("_post_json accepts json= or data=, not both")
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
-        resp = await client.request("POST", path, json=json, headers=headers)
+        if extra_headers:
+            headers = {**headers, **extra_headers}
+        resp = await client.request(verb, path, json=json, data=data, headers=headers)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 

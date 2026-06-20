@@ -378,6 +378,7 @@ class VcfAutomationConnector(HttpConnector):
         operator: Operator,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Path-aware idempotent JSON request with per-plane 401 retry-once.
 
@@ -404,7 +405,13 @@ class VcfAutomationConnector(HttpConnector):
                 f"['GET', 'HEAD', 'OPTIONS']; got {method_upper!r}"
             )
         return await self._do_request_with_retry(
-            target, method_upper, path, operator=operator, params=params, json=json
+            target,
+            method_upper,
+            path,
+            operator=operator,
+            params=params,
+            json=json,
+            extra_headers=extra_headers,
         )
 
     async def _post_json(
@@ -413,11 +420,32 @@ class VcfAutomationConnector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: Mapping[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Path-aware non-idempotent JSON POST with per-plane 401 retry-once."""
+        """Path-aware non-idempotent JSON request with per-plane 401 retry-once.
+
+        Honours the *actual* non-idempotent verb (``POST``/``PUT``/``PATCH``/
+        ``DELETE``) and an optional form-encoded ``data=`` body, mirroring the
+        base :meth:`HttpConnector._post_json` contract (#1968) while keeping
+        the per-plane 401 retry-once dance.
+        """
+        verb = verb.upper()
+        if verb in {"GET", "HEAD", "OPTIONS"}:
+            raise ValueError(f"_post_json only accepts non-idempotent methods; got {verb!r}")
+        if json is not None and data is not None:
+            raise ValueError("_post_json accepts json= or data=, not both")
         return await self._do_request_with_retry(
-            target, "POST", path, operator=operator, params=None, json=json
+            target,
+            verb,
+            path,
+            operator=operator,
+            params=None,
+            json=json,
+            data=data,
+            extra_headers=extra_headers,
         )
 
     async def _do_request_with_retry(
@@ -429,12 +457,16 @@ class VcfAutomationConnector(HttpConnector):
         operator: Operator,
         params: Mapping[str, Any] | None,
         json: Mapping[str, Any] | None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Shared per-plane 401 retry-once dance for _request_json + _post_json.
 
         Build headers, fire the request; on 401 invalidate the relevant
         plane's token, refresh headers, retry once. A second 401
-        surfaces as :exc:`RuntimeError`.
+        surfaces as :exc:`RuntimeError`. ``extra_headers`` (header-located
+        op params) merge onto the plane auth headers; ``data`` carries a
+        form-encoded body.
         """
 
         async def _fire(headers: Mapping[str, str]) -> httpx.Response:
@@ -446,15 +478,20 @@ class VcfAutomationConnector(HttpConnector):
                 path,
                 params=params_dict,
                 json=json_dict,
+                data=data,
                 headers=dict(headers),
             )
 
         plane = plane_for_path(path)
         headers = await self.auth_headers(target, operator, path=path)
+        if extra_headers:
+            headers = {**headers, **extra_headers}
         resp = await _fire(headers)
         if resp.status_code == 401:
             await self._invalidate_plane(target, plane)
             headers = await self.auth_headers(target, operator, path=path)
+            if extra_headers:
+                headers = {**headers, **extra_headers}
             resp = await _fire(headers)
             if resp.status_code == 401:
                 raise RuntimeError(

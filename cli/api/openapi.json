@@ -16266,6 +16266,279 @@
         }
       }
     },
+    "/ui/vault/put/confirm": {
+      "get": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Put Confirm",
+        "description": "Render the ``vault.kv.put`` confirm modal (caution / requires approval).\n\nMints + re-sets the ``meho_csrf`` cookie so the confirm button's OWN\n``hx-headers`` echo lines up after the HTMX swap rotated it. Put is\nOPERATOR-tier -- no tenant_admin step; the policy gate escalates the\n``requires_approval`` op to ``awaiting_approval`` on dispatch.",
+        "operationId": "vault_put_confirm_ui_vault_put_confirm_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "mount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "secret",
+              "title": "Mount"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/delete/confirm": {
+      "get": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Delete Confirm",
+        "description": "Render the ``vault.kv.delete`` confirm modal (dangerous / requires approval).\n\nSoft-delete is reversible, but it stops reads from returning the named\nversions -- a destructive-class op, so the banner gets the loud\ntreatment. Mints + re-sets the CSRF cookie like the put confirm.",
+        "operationId": "vault_delete_confirm_ui_vault_delete_confirm_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "mount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "secret",
+              "title": "Mount"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/move/confirm": {
+      "get": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Move Confirm",
+        "description": "Render the ``secret.move`` confirm modal (dangerous / requires approval).\n\nVALUE-FREE: the modal carries ``from`` / ``to`` reference inputs and an\noptional reason, but NO value input -- the no-``--value`` invariant the\nCLI keeps. Resolves the SEPARATE ``secret-broker-1.x`` connector;\nrenders a hint when it is not ingested. Mints + re-sets the CSRF cookie.",
+        "operationId": "vault_move_confirm_ui_vault_move_confirm_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/put": {
+      "post": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Put",
+        "description": "Dispatch ``vault.kv.put`` in-process; render the result inline.\n\nCSRF-gated (a ``POST`` under ``/ui/``) + ``require_ui_session``-gated.\n``data`` is the operator-supplied secret key/value JSON object;\n``cas`` rides in ``params`` ONLY when the operator set it (the CLI\n``Changed(\"cas\")`` rule). The BFF logs no secret material.",
+        "operationId": "vault_put_ui_vault_put_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_vault_put_ui_vault_put_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/delete": {
+      "post": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Delete",
+        "description": "Dispatch ``vault.kv.delete`` in-process; render the result inline.\n\nCSRF-gated + ``require_ui_session``-gated. ``versions`` is the\ncomma-separated list of version numbers to soft-delete.",
+        "operationId": "vault_delete_ui_vault_delete_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_vault_delete_ui_vault_delete_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/move": {
+      "post": {
+        "tags": [
+          "ui-vault-writes"
+        ],
+        "summary": "Vault Move",
+        "description": "Dispatch ``secret.move`` in-process; render the value-free result.\n\nCSRF-gated + ``require_ui_session``-gated. Dispatches the SEPARATE\n``secret-broker-1.x`` connector with ``from`` / ``to`` references (+\noptional reason). VALUE-FREE: no value field is accepted, dispatched,\nlogged, or rendered -- only the ``{status, value_sha256, length}``\nconfirmation surfaces.",
+        "operationId": "vault_move_ui_vault_move_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_vault_move_ui_vault_move_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",
@@ -18971,6 +19244,96 @@
         },
         "type": "object",
         "title": "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
+      },
+      "Body_vault_delete_ui_vault_delete_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "mount": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Mount",
+            "default": "secret"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Path",
+            "default": ""
+          },
+          "versions": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Versions",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_vault_delete_ui_vault_delete_post"
+      },
+      "Body_vault_move_ui_vault_move_post": {
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "From",
+            "default": ""
+          },
+          "to": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "To",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_vault_move_ui_vault_move_post"
+      },
+      "Body_vault_put_ui_vault_put_post": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
+          },
+          "mount": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Mount",
+            "default": "secret"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Path",
+            "default": ""
+          },
+          "data": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Data",
+            "default": ""
+          },
+          "cas": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Cas",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_vault_put_ui_vault_put_post"
       },
       "BroadcastOverrideCreate": {
         "properties": {

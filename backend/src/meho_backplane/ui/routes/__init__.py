@@ -107,7 +107,10 @@ from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
-from meho_backplane.ui.routes.vault import build_vault_router
+from meho_backplane.ui.routes.vault import (
+    build_vault_router,
+    build_vault_writes_router,
+)
 
 __all__ = [
     "build_account_router",
@@ -132,6 +135,7 @@ __all__ = [
     "build_stubs_router",
     "build_topology_router",
     "build_vault_router",
+    "build_vault_writes_router",
 ]
 
 
@@ -260,5 +264,15 @@ def build_router() -> APIRouter:
     # stubs aggregate so its concrete paths win the first-match-wins lookup
     # against the placeholder ``/ui/{slug}``.
     router.include_router(build_vault_router())
+    # Vault / secrets console confirm-gated WRITES (G10.18-T2 #1957):
+    # ``GET /ui/vault/{put,delete,move}/confirm`` (the unmissable confirm
+    # modals) + the CSRF-gated ``POST /ui/vault/{put,delete,move}`` dispatch
+    # routes. A SEPARATE module from the T1 browser so the read / write
+    # surfaces evolve without serial-merge collisions; the literal
+    # ``put``/``delete``/``move`` segments register before any ``{param}``
+    # route (first-match-wins, and these are POST / distinct-literal routes so
+    # they cannot collide with T1's GET slug routes regardless). Registered
+    # before the stubs aggregate so its concrete paths win the lookup.
+    router.include_router(build_vault_writes_router())
     router.include_router(build_stubs_router())
     return router

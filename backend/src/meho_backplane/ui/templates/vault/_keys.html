@@ -1,0 +1,134 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV list partial (Initiative #1942 G10.18, Task #1956 T1).
+
+  Swapped into ``#vault-keys-region`` by the "List keys" button
+  (``hx-get /ui/vault/list``). Renders the child key NAMES at a path.
+  Vault never returns secret values through the list endpoint, so this
+  partial carries no secret material -- only key names.
+
+  Render branches:
+    * a non-ok envelope (or ``error="no_vault_connector"``) -> the shared
+      ``vault_envelope_error`` macro (tenant-scope / denied / error).
+    * ``status="ok"`` with ``handle`` -> the set-shaped spill: render the
+      handle metadata (handle_id / rows / TTL) + a note, NEVER the full
+      list blob (the JSONFlux contract).
+    * ``status="ok"`` inline -> the ``{"keys": [...]}`` list. Folder
+      entries (suffixed ``/``) are non-readable; leaf keys carry Read /
+      Versions affordances that re-target the path and drive the read /
+      versions routes.
+
+  Context: ``error`` (str|None), ``envelope`` (dict|None), ``mount``,
+  ``path``, ``target`` (the inputs, so a per-key affordance can re-issue
+  the read/versions request against ``<path>/<key>``).
+-#}
+{% from "_icons.html" import icon %}
+{% from "vault/_envelope_error.html" import vault_envelope_error %}
+
+{% if error or not envelope or envelope.status != "ok" %}
+  {{ vault_envelope_error(error, envelope, mount, path) }}
+{% else %}
+  {%- set handle = envelope.get("handle") -%}
+  {% if handle %}
+    {#- Set-shaped spill: the key set crossed the JSONFlux threshold and
+        was reduced to a sample + handle. Render the handle metadata, NOT
+        the full list. -#}
+    <div role="status" class="alert alert-info items-start" data-vault-keys="handle">
+      {{ icon("package", class="size-5 shrink-0") }}
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">Large key set stored out-of-band</h4>
+        <p class="text-xs">
+          The key list was large enough to spill to the read-back store;
+          the summary is below. The full list is available out-of-band.
+        </p>
+        <dl class="mt-2 space-y-1 text-xs">
+          <div class="flex gap-2">
+            <dt class="opacity-60">Handle id</dt>
+            <dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd>
+          </div>
+          {% if handle.total_rows is not none %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">Keys</dt>
+              <dd data-handle-total-rows>{{ handle.total_rows }}</dd>
+            </div>
+          {% endif %}
+          {% if handle.ttl_seconds is not none %}
+            <div class="flex gap-2">
+              <dt class="opacity-60">TTL</dt>
+              <dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd>
+            </div>
+          {% endif %}
+        </dl>
+        {% if handle.summary_md %}
+          <pre class="mt-2 max-h-40 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-handle-summary><code>{{ handle.summary_md }}</code></pre>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    {%- set keys = (envelope.get("result") or {}).get("keys") or [] -%}
+    {% if keys %}
+      <ul
+        class="divide-y divide-base-300 rounded-box border border-base-300 bg-base-100"
+        role="list"
+        data-vault-keys="inline"
+      >
+        {% for key in keys %}
+          {%- set is_folder = key.endswith("/") -%}
+          {%- set child_path = (path.rstrip("/") ~ "/" ~ key.rstrip("/")) if path else key.rstrip("/") -%}
+          <li class="flex items-center gap-2 px-3 py-2" data-vault-key="{{ key }}">
+            {% if is_folder %}
+              {{ icon("table", class="size-3.5 shrink-0 opacity-50") }}
+            {% else %}
+              {{ icon("lock", class="size-3.5 shrink-0 opacity-50") }}
+            {% endif %}
+            <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ key }}</span>
+            {% if not is_folder %}
+              {#- Leaf key: offer Read + Versions against ``<path>/<key>``.
+                  The hidden inputs carry the resolved child path + the
+                  shared connector/mount/target so the request resolves the
+                  same secret the operator clicked. -#}
+              <span data-vault-key-controls="{{ child_path }}" class="hidden">
+                <input type="hidden" name="mount" value="{{ mount }}" />
+                <input type="hidden" name="path" value="{{ child_path }}" />
+                <input type="hidden" name="target" value="{{ target }}" />
+              </span>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs gap-1"
+                aria-label="Read this secret"
+                hx-get="/ui/vault/read"
+                hx-target="#vault-secret-region"
+                hx-swap="innerHTML"
+                hx-include="[data-vault-key-controls='{{ child_path }}']"
+              >
+                {{ icon("lock", class="size-3.5") }}
+                Read
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs gap-1"
+                aria-label="View version history"
+                hx-get="/ui/vault/versions"
+                hx-target="#vault-versions-region"
+                hx-swap="innerHTML"
+                hx-include="[data-vault-key-controls='{{ child_path }}']"
+              >
+                {{ icon("clock", class="size-3.5") }}
+                Versions
+              </button>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div
+        class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60"
+        data-vault-keys="empty"
+      >
+        No keys at <code>{{ mount }}/{{ path }}</code>.
+      </div>
+    {% endif %}
+  {% endif %}
+{% endif %}

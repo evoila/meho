@@ -1,0 +1,88 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shared error-branch macro for the Vault KV browser partials
+  (Initiative #1942 G10.18, Task #1956 T1).
+
+  The three read partials (_keys / _secret / _versions) share the same
+  non-ok branches, so they live here once:
+
+    * ``error == "no_vault_connector"`` -> no ingested vault connector is
+      visible (the index already guards this, but a stale HTMX fragment
+      could still hit it).
+    * the dispatcher's structured fault envelope (``status`` of
+      ``"error"`` / ``"denied"``). The ONE special case is the per-tenant
+      guard: a ``VaultTenantScopeError`` comes back as ``status="error"``
+      with ``extras.exception_class == "VaultTenantScopeError"`` and is
+      rendered as a clear "outside your tenant scope" message rather than
+      the raw connector-error envelope.
+
+  Macro contract: ``vault_envelope_error(error, envelope, mount, path)``
+  returns the rendered alert when a non-ok branch applies, or nothing
+  when the envelope is ``status="ok"`` (the caller renders the success
+  body in that case).
+-#}
+{% from "_icons.html" import icon %}
+
+{%- macro vault_envelope_error(error, envelope, mount="", path="") -%}
+  {%- if error == "no_vault_connector" -%}
+    <div role="alert" class="alert alert-warning" data-vault-error="no_vault_connector">
+      <div>
+        <h4 class="text-sm font-semibold">No Vault connector available</h4>
+        <p class="text-xs">
+          No ingested <code>vault</code> connector is visible to your tenant.
+        </p>
+      </div>
+    </div>
+  {%- elif envelope is none -%}
+    {#- Defensive: a render reached the error macro with neither a typed
+        error nor an envelope. Surface a generic fault rather than a blank. -#}
+    <div role="alert" class="alert alert-error" data-vault-error="unknown">
+      <div><p class="text-xs">Could not complete the Vault request.</p></div>
+    </div>
+  {%- else -%}
+    {%- set extras = envelope.get("extras") or {} -%}
+    {%- set exc_class = extras.get("exception_class") -%}
+    {%- if exc_class == "VaultTenantScopeError" -%}
+      {#- The per-tenant guard denied a path outside the operator's
+          namespace. Render the actionable "outside your tenant scope"
+          message, NOT the raw 403/connector-error envelope. The guard's
+          message names only the (non-secret) mount/path the caller
+          supplied -- it never echoes secret material. -#}
+      <div role="alert" class="alert alert-warning items-start" data-vault-error="tenant_scope">
+        {{ icon("shield-check", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">Outside your tenant scope</h4>
+          <p class="text-xs [overflow-wrap:anywhere]">
+            {% if path %}<code>{{ mount }}/{{ path }}</code>{% else %}This path{% endif %}
+            is outside your tenant's secret namespace. Browse within your
+            tenant prefix (<code>secret/tenants/&lt;your-tenant&gt;/</code>).
+          </p>
+        </div>
+      </div>
+    {%- else -%}
+      {#- Any other structured fault: surface ``extras.error_code`` + the
+          human ``error`` string. The vault read/list/versions handlers
+          never put secret material in the ``error`` string. -#}
+      <div
+        role="alert"
+        class="alert {{ 'alert-warning' if envelope.status == 'denied' else 'alert-error' }} items-start"
+        data-vault-error="{{ envelope.status }}"
+      >
+        {{ icon("ban", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">
+            {% if envelope.status == "denied" %}Request denied{% else %}Request failed{% endif %}
+            {% if extras.get("error_code") %}
+              <code class="ml-1 text-xs" data-vault-error-code>{{ extras.get("error_code") }}</code>
+            {% endif %}
+          </h4>
+          {% if envelope.get("error") %}
+            <p class="text-xs [overflow-wrap:anywhere]">{{ envelope.get("error") }}</p>
+          {% endif %}
+        </div>
+      </div>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro -%}

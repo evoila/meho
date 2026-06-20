@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.topology.batch import build_batch_router
 from meho_backplane.ui.routes.topology.detail import build_detail_router
 from meho_backplane.ui.routes.topology.edges import build_edges_router
 from meho_backplane.ui.routes.topology.table import build_table_router
@@ -81,6 +82,14 @@ def build_router() -> APIRouter:
     # discipline explicit and robust against a future bare ``{param}``
     # route landing in this aggregator.)
     router.include_router(build_edges_router())
+    # Batch routes BEFORE the detail router: the literal
+    # ``/ui/topology/edges/bulk`` AND the ``{target_name}`` route
+    # ``/ui/topology/refresh/{target_name}`` must win the first-match-wins
+    # lookup against ``detail.py``'s ``/ui/topology/node/{node_id}`` param
+    # route. ``refresh/{target_name}`` is itself a ``{param}`` route, so
+    # registering it ahead keeps it from being shadowed by (or shadowing)
+    # any bare ``{param}`` route in this aggregator (Task #1954).
+    router.include_router(build_batch_router())
     # Temporal read routes BEFORE the detail router: the literal-prefixed
     # ``/ui/topology/history/{name}`` (plus ``timeline`` / ``diff``) must win
     # the first-match-wins lookup against ``detail.py``'s

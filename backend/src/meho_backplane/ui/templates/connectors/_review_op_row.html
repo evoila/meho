@@ -35,10 +35,12 @@
   governance state but no edit affordances. The PATCH route's
   ``resolve_operator_or_403`` is the security authority regardless.
 
-  ``warnings`` carries ``EditOpResponse.warnings`` (the
-  ``unreplaced_auto_shim`` enable-time advisory) after an edit -- rendered
-  inline on the row so the operator learns the dispatch dead end at enable
-  time. The edit STILL landed (warnings never block the write).
+  ``warnings`` carries ``EditOpResponse.warnings`` (the enable-time
+  connector-tier advisory: ``unreplaced_auto_shim`` for a bare ingest
+  shim, ``profiled_but_unreviewed`` for a profile-backed connector whose
+  review gate this enable just cleared) after an edit -- rendered inline on
+  the row so the operator learns what the enable did at enable time. The
+  edit STILL landed (warnings never block the write).
 
   CSRF: every edit form carries the signed double-submit ``X-CSRF-Token``
   on its OWN ``hx-headers`` (HTMX does not inherit page-level
@@ -207,7 +209,7 @@
         <span class="font-semibold">Heads up:</span>
         {{ warning.message }}
         {% if warning.connector_class %}
-          <span class="opacity-70">(shim: <code>{{ warning.connector_class }}</code>)</span>
+          <span class="opacity-70">(connector: <code>{{ warning.connector_class }}</code>)</span>
         {% endif %}
       </span>
     </div>

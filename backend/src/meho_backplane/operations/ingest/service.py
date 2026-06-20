@@ -73,7 +73,7 @@ operator's-tenant rows when both exist.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 import structlog
@@ -91,6 +91,7 @@ from meho_backplane.operations.ingest._internals import (
     OP_ENABLE_READS,
     ConnectorScope,
     apply_op_overrides,
+    audit_profile_stamp,
     bulk_enable_read_ops,
     cascade_is_enabled,
     enable_time_auto_shim_warnings,
@@ -121,6 +122,9 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewOp,
     ConnectorReviewPayload,
 )
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.base import Connector
 
 __all__ = ["ReviewService"]
 
@@ -552,6 +556,93 @@ class ReviewService:
         if is_enabled is True:
             return enable_time_auto_shim_warnings(connector_id, op_id, scope)
         return []
+
+    # -- public write API: profile stamping -------------------------------
+
+    async def record_profile_stamp(
+        self,
+        connector_id: str,
+        *,
+        tenant_id: UUID | None,
+        connector_class: type[Connector],
+    ) -> bool:
+        """Stamp an :class:`ExecutionProfile` onto an ingested connector.
+
+        G0.28-T5 (#1971). The review-gate interlock seam: stamping makes
+        the connector **dispatchable** (registers *connector_class* — a
+        :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+        carrying the vetted profile — under the connector's ``(product,
+        version, impl_id)`` v2 key) but deliberately does **not** touch
+        any op's ``is_enabled`` / ``review_status``. Every op stays
+        ``is_enabled=False`` / ``review_status='staged'`` exactly as it
+        was ingested; dispatch against an unreviewed op is blocked by the
+        ``is_enabled`` filter in
+        :func:`~meho_backplane.operations._lookup.lookup_descriptor` just
+        as a staged bare-shim op is, until an operator clears the gate
+        per-op via :meth:`edit_op` (or connector-wide via
+        :meth:`enable_connector`). A stamp can therefore never auto-enable
+        dispatch — the security-load-bearing property of #1971.
+
+        Idempotent: a profiled connector already registered for the
+        triple is a no-op (returns ``False``, writes no audit row), so a
+        re-stamp does not double-audit. Returns ``True`` on the first
+        stamp, when the registration landed and an :data:`OP_PROFILE_STAMP`
+        audit row was written.
+
+        Raises :class:`TypeError` when *connector_class* is not a
+        ``ProfiledRestConnector`` — only a profiled class carries an
+        ``ExecutionProfile`` to stamp; a bare shim or hand-coded class is
+        a programming error here, not a review action.
+
+        The registration's audit row commits in the same transaction as
+        the v2-registry write would conceptually pair with; the v2
+        registry itself is a process-global, not a DB row, so the audit
+        row is the durable, attributable record of the dispatchability
+        change.
+        """
+        from meho_backplane.connectors.base import shim_kind
+        from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
+
+        if shim_kind(connector_class) != "profiled":
+            raise TypeError(
+                f"record_profile_stamp requires a ProfiledRestConnector "
+                f"(shim_kind == 'profiled'); got {connector_class.__name__!r} "
+                f"(shim_kind == {shim_kind(connector_class)!r})"
+            )
+
+        scope = self._resolve_scope(connector_id, tenant_id)
+        triple = (scope.product, scope.version, scope.impl_id)
+        if triple in all_connectors_v2():
+            # Already stamped (or a hand-coded/bare class occupies the
+            # key) — registering again would raise; treat as idempotent.
+            return False
+
+        register_connector_v2(
+            product=scope.product,
+            version=scope.version,
+            impl_id=scope.impl_id,
+            cls=connector_class,
+        )
+        sessionmaker = self._sessionmaker()
+        async with sessionmaker() as session:
+            await audit_profile_stamp(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                connector_id=connector_id,
+                scope=scope,
+                connector_class=connector_class.__name__,
+            )
+            await session.commit()
+        _log.info(
+            "connector_profile_stamped",
+            connector_id=connector_id,
+            product=scope.product,
+            version=scope.version,
+            impl_id=scope.impl_id,
+            connector_class=connector_class.__name__,
+        )
+        return True
 
     # -- public write API: state transitions ------------------------------
 

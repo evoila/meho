@@ -120,6 +120,12 @@ const (
 	Safe      EditOpBodySafetyLevel = "safe"
 )
 
+// Defines values for EditOpWarningCode.
+const (
+	ProfiledButUnreviewed EditOpWarningCode = "profiled_but_unreviewed"
+	UnreplacedAutoShim    EditOpWarningCode = "unreplaced_auto_shim"
+)
+
 // Defines values for EvalRequestSurface.
 const (
 	EvalRequestSurfaceAll        EvalRequestSurface = "all"
@@ -3058,34 +3064,50 @@ type EditOpResponse struct {
 // EditOpWarning One advisory attached to an “edit_op“ write (G0.23-T4 #1630).
 //
 // Emitted when the edit is legal and **was applied**, but the
-// operator should know it leads somewhere unpleasant. The only
-// producer today is the enable-time auto-shim probe:
-// “is_enabled=True“ on an op whose resolved connector is the
-// unconfigured ingest auto-shim
-// (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
-// — dispatch is then guaranteed to fail with the
-// “connector_unsupported“ / “cause='unreplaced_auto_shim'“
-// structured error (G0.23-T1 #1627), so this warning surfaces the
-// dead end at enable time instead of one dispatch later.
+// operator should know something about what they just enabled. Two
+// producers, both keyed off the enable-time resolver probe that
+// classifies the connector “is_enabled=True“ would dispatch through
+// (G0.28-T5 #1971 split the original single “unreplaced_auto_shim“
+// code into a tri-state vocabulary mirroring
+// :data:`~meho_backplane.connectors.base.ShimKind`):
+//
+//   - “unreplaced_auto_shim“ — the resolved connector is the
+//     unconfigured bare ingest auto-shim
+//     (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`,
+//     “shim_kind == "bare"“). Dispatch is then guaranteed to fail with
+//     the “connector_unsupported“ / “cause='unreplaced_auto_shim'“
+//     structured error (G0.23-T1 #1627). The remediation is to write the
+//     per-product Connector subclass; re-ingesting will not replace it.
+//   - “profiled_but_unreviewed“ — the resolved connector is a
+//     :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+//     (“shim_kind == "profiled"“). A profiled connector IS
+//     dispatchable, so this is not a dead end — but stamping its
+//     :class:`ExecutionProfile` deliberately did not auto-enable
+//     dispatch (the review gate is the load-bearing interlock, #1971),
+//     and this “is_enabled=True“ write is the operator clearing that
+//     gate. The advisory confirms that the enable — not the stamp — is
+//     what made the op callable, so the operator owns the decision.
 //
 // “code“ reuses the dispatch-time cause vocabulary verbatim
-// (“unreplaced_auto_shim“) so an operator — or an SDK — can
-// correlate the proactive warning with the reactive dispatch error
-// without a translation table. Declared as a one-member “Literal“
-// so the OpenAPI schema names the vocabulary; future advisory codes
-// extend the union (an additive, client-compatible change).
+// (“unreplaced_auto_shim“) for the bare case so an operator — or an
+// SDK — can correlate the proactive warning with the reactive
+// dispatch error without a translation table. The “Literal“ union is
+// extended additively (client-compatible) as new tiers gain advisories.
 //
-// “connector_class“ carries the resolved shim class's name
-// (“AutoShim_<product>_<version>_<impl_id>“) — the same key the
-// dispatch error's “extras“ payload uses. “message“ is the
-// operator-facing prose: what was applied, why dispatch will still
-// fail, and the remediation imperative (register the per-product
-// subclass; re-ingesting will not replace the shim).
+// “connector_class“ carries the resolved connector class's name
+// (“AutoShim_<product>_<version>_<impl_id>“ for a bare shim; the
+// profiled subclass's “__name__“ for the profiled case) — the same
+// key the dispatch error's “extras“ payload uses. “message“ is the
+// operator-facing prose: what was applied and the relevant remediation
+// or confirmation.
 type EditOpWarning struct {
-	Code           string `json:"code"`
-	ConnectorClass string `json:"connector_class"`
-	Message        string `json:"message"`
+	Code           EditOpWarningCode `json:"code"`
+	ConnectorClass string            `json:"connector_class"`
+	Message        string            `json:"message"`
 }
+
+// EditOpWarningCode defines model for EditOpWarning.Code.
+type EditOpWarningCode string
 
 // EditTemplateResponse Response for “meho.runbook.edit_template“.
 //

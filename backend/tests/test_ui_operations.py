@@ -514,6 +514,7 @@ class _RecordingHttpConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append({"verb": method, "path": path, "params": params, "json": json})
         return {"sent": True}
@@ -524,7 +525,10 @@ class _RecordingHttpConnector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         self.calls.append({"verb": "POST", "path": path, "json": json})
         return {"sent": True}

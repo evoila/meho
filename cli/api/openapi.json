@@ -8741,6 +8741,207 @@
         }
       }
     },
+    "/ui/topology/timeline": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Timeline",
+        "description": "``GET /ui/topology/timeline`` \u2014 the tenant-wide change feed.",
+        "operationId": "timeline_ui_topology_timeline_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "nullable": true,
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/diff": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Diff",
+        "description": "``GET /ui/topology/diff?ts1=&ts2=`` \u2014 the point-in-time diff.",
+        "operationId": "diff_ui_topology_diff_get",
+        "parameters": [
+          {
+            "name": "ts1",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "exclusive lower bound on valid_from",
+              "title": "Ts1"
+            },
+            "description": "exclusive lower bound on valid_from"
+          },
+          {
+            "name": "ts2",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "inclusive upper bound on valid_from",
+              "title": "Ts2"
+            },
+            "description": "inclusive upper bound on valid_from"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/history/{name}": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "History",
+        "description": "``GET /ui/topology/history/{name}`` \u2014 per-resource history.",
+        "operationId": "history_ui_topology_history__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/topology/node/{node_id}": {
       "get": {
         "tags": [

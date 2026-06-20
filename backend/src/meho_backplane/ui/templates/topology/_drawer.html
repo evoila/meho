@@ -239,7 +239,16 @@
        Hands off to the T3 graph view; the URL contract is fixed
        here so the link works as soon as T3 (#882) lands.
     #}
-    <footer class="mt-2 flex justify-end">
+    <footer class="mt-2 flex justify-end gap-2">
+      {#- History deep-link (Task #1955) -- the per-resource temporal walk. -#}
+      <a
+        href="{{ history_href }}"
+        class="btn btn-ghost btn-xs"
+        data-test="node-history-link"
+        aria-label="Show history for {{ node.name }}"
+      >
+        History
+      </a>
       <a
         href="{{ dependents_href }}"
         class="btn btn-primary btn-xs"

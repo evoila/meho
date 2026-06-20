@@ -1,0 +1,51 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Recoverable 409 ``ambiguous_node`` banner for the history view (Initiative
+  #1941 Task #1955). A bare ``name`` resolving to more than one kind cannot
+  pick a single anchor; this panel lists the candidate ``kinds`` and links
+  each as a disambiguated re-submission (``?kind=<kind>``) so the operator
+  recovers in one click rather than dead-ending on a raw 409.
+
+  Mirrors the REST 409 surface (``_ambiguous_node_http``) and the
+  annotate-modal's ambiguous-node re-render.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; History &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="history-ambiguous">
+  <header>
+    <h1 class="text-2xl font-semibold">
+      History
+      <span class="font-mono text-lg align-middle">{{ node_name }}</span>
+    </h1>
+  </header>
+
+  <div role="alert" class="alert alert-warning text-sm" data-error-kind="ambiguous_node">
+    <div>
+      <p>
+        The name <span class="font-mono">{{ node_name }}</span> is ambiguous in this
+        tenant &mdash; it exists as more than one kind. Pick a kind to view its history.
+      </p>
+      <div class="mt-2 flex flex-wrap gap-2" data-test="ambiguous-kinds">
+        {% for kind in ambiguous_kinds %}
+          <a
+            class="btn btn-xs btn-outline"
+            href="/ui/topology/history/{{ node_name | urlencode }}?kind={{ kind | urlencode }}"
+            data-test="ambiguous-kind-option"
+          >
+            {{ kind }}
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <a class="btn btn-sm btn-ghost" href="/ui/topology" aria-label="Back to topology inventory">
+    &larr; Inventory
+  </a>
+</section>
+{% endblock %}

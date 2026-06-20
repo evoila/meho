@@ -323,6 +323,14 @@ def _build_drawer_context(
             f"&from={quote(node.name, safe='')}"
             f"&from_kind={quote(node.kind, safe='')}"
         ),
+        # Deep-link to this node's temporal history panel (Task #1955). The
+        # ``kind`` disambiguates the bare name up-front so the history route
+        # never has to fall back to its ambiguous-node banner for a node the
+        # drawer already resolved. ``name`` / ``kind`` are unconstrained Text;
+        # ``quote(safe='')`` percent-encodes the path segment + the query value.
+        "history_href": (
+            f"/ui/topology/history/{quote(node.name, safe='')}?kind={quote(node.kind, safe='')}"
+        ),
     }
 
 

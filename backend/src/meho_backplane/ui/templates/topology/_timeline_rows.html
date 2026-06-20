@@ -1,0 +1,58 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Timeline change-feed rows fragment (Initiative #1941 Task #1955). Rendered
+  both inline by ``timeline.html`` (first page) and standalone on the HTMX
+  "load more" swap (next keyset page).
+
+  Each row is one ``graph_node_history`` / ``graph_edge_history`` change:
+  ``valid_from`` timestamp + a source/change-kind badge pair + the human
+  summary. ``resource_id`` is shown (mono) when present.
+
+  Load-more control: the final ``<li>`` carries the keyset ``cursor`` in its
+  ``hx-get`` (``load_more_href``). It replaces ITSELF (``hx-target="this"``
+  ``hx-swap="outerHTML"``) with the next fragment -- a fresh batch of rows
+  plus the next load-more control -- so the chronology grows in place
+  (https://htmx.org/examples/infinite-scroll/). The control is omitted on the
+  last page (``load_more_href`` empty), which terminates the chain.
+
+  Standalone-render note: this fragment is a bare list of ``<li>`` elements
+  (no wrapping ``<ul>``); on "load more" HTMX swaps the load-more ``<li>``
+  for these, so the new rows land inside the existing ``#topology-timeline-list``.
+-#}
+{% if rows %}
+  {% for row in rows %}
+    <li class="flex flex-wrap items-center gap-2 border-base-300 border-b pb-1" data-test="timeline-row">
+      <time class="text-xs opacity-70 font-mono" datetime="{{ row.valid_from.isoformat() }}">
+        {{ row.valid_from.isoformat() }}
+      </time>
+      <span class="badge badge-outline badge-xs">{{ row.source }}</span>
+      <span class="badge badge-ghost badge-xs">{{ row.change_kind }}</span>
+      <span class="opacity-90">{{ row.summary }}</span>
+      {% if row.resource_id %}
+        <span class="text-xs opacity-50 font-mono">{{ row.resource_id }}</span>
+      {% endif %}
+    </li>
+  {% endfor %}
+{% elif not load_more_href %}
+  <li class="text-sm opacity-60" data-test="timeline-empty">
+    No graph changes recorded for this window.
+  </li>
+{% endif %}
+{% if load_more_href %}
+  <li id="topology-timeline-load-more">
+    <button
+      type="button"
+      class="btn btn-ghost btn-sm w-full"
+      data-test="timeline-load-more"
+      data-next-cursor="{{ next_cursor }}"
+      aria-label="Load more timeline entries"
+      hx-get="{{ load_more_href }}"
+      hx-target="this"
+      hx-swap="outerHTML"
+    >
+      Load more &darr;
+    </button>
+  </li>
+{% endif %}

@@ -1,0 +1,66 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the per-resource history walk (Initiative #1941 Task
+  #1955). Extends ``base.html``. The full chronology arrives in one response
+  (history has no keyset cursor) -- every ``graph_node_history`` row for the
+  anchor resource (plus its edges' rows when ``include_edges`` is set on the
+  service), newest first.
+
+  Each row is one snapshot: ``valid_from`` + a source/change-kind badge pair.
+  The raw ``snapshot`` JSON (the resource's state at that point) collapses
+  behind a <details> for forensic shape without flooding the panel.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; History &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="history-panel">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">
+        History
+        <span class="badge badge-ghost badge-sm align-middle">{{ node_kind or "node" }}</span>
+        <span class="font-mono text-lg align-middle">{{ node_name }}</span>
+      </h1>
+      <p class="text-sm opacity-70">
+        Chronological snapshots of this resource (newest first).
+        <span class="font-mono text-xs opacity-50">anchor: {{ anchor_node_id }}</span>
+      </p>
+    </div>
+    <a class="btn btn-sm join-item" href="/ui/topology" aria-label="Back to topology inventory">
+      &larr; Inventory
+    </a>
+  </header>
+
+  <section aria-label="Resource history">
+    {% if rows %}
+      <ul class="space-y-1 text-sm">
+        {% for row in rows %}
+          <li class="border-base-300 border-b pb-1" data-test="history-row">
+            <div class="flex flex-wrap items-center gap-2">
+              <time class="text-xs opacity-70 font-mono" datetime="{{ row.valid_from.isoformat() }}">
+                {{ row.valid_from.isoformat() }}
+              </time>
+              <span class="badge badge-outline badge-xs">{{ row.source }}</span>
+              <span class="badge badge-ghost badge-xs">{{ row.change_kind }}</span>
+            </div>
+            {% if row.snapshot %}
+              <details class="mt-1">
+                <summary class="cursor-pointer text-xs opacity-70">Snapshot JSON</summary>
+                <pre class="mt-1 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ row.snapshot | tojson(indent=2) }}</pre>
+              </details>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-sm opacity-60" data-test="history-empty">
+        No history recorded for this resource in the retention window.
+      </p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

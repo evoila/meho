@@ -57,6 +57,7 @@ from fastapi import APIRouter
 from meho_backplane.ui.routes.topology.detail import build_detail_router
 from meho_backplane.ui.routes.topology.edges import build_edges_router
 from meho_backplane.ui.routes.topology.table import build_table_router
+from meho_backplane.ui.routes.topology.temporal import build_temporal_router
 
 __all__ = ["build_router"]
 
@@ -80,5 +81,12 @@ def build_router() -> APIRouter:
     # discipline explicit and robust against a future bare ``{param}``
     # route landing in this aggregator.)
     router.include_router(build_edges_router())
+    # Temporal read routes BEFORE the detail router: the literal-prefixed
+    # ``/ui/topology/history/{name}`` (plus ``timeline`` / ``diff``) must win
+    # the first-match-wins lookup against ``detail.py``'s
+    # ``/ui/topology/node/{node_id}`` param route. The ``history`` /
+    # ``timeline`` / ``diff`` literals cannot bind as a ``{node_id}`` UUID, but
+    # registering ahead keeps the ordering discipline explicit (Task #1955).
+    router.include_router(build_temporal_router())
     router.include_router(build_detail_router())
     return router

@@ -87,6 +87,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.account import build_account_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
@@ -107,6 +108,7 @@ from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
 __all__ = [
+    "build_account_router",
     "build_agent_grants_router",
     "build_agents_router",
     "build_approvals_router",
@@ -218,5 +220,14 @@ def build_router() -> APIRouter:
     # paths win the first-match-wins lookup against the placeholder
     # ``/ui/{slug}``.
     router.include_router(build_audit_router())
+    # Account surface (G10.11-T1 #1892): ``/ui/account`` page + the two
+    # session-revoke POSTs. The literal ``/ui/account/sessions/revoke-others``
+    # is registered before the parametrised
+    # ``/ui/account/sessions/{session_id}/revoke`` inside that router so the
+    # literal ``revoke-others`` segment is never bound as a ``session_id``.
+    # Operator-tier (self-service own identity + own sessions only); no
+    # ``{slug}`` route, so no shadowing concern against the stubs aggregate,
+    # but registered before it for consistency with the other surfaces.
+    router.include_router(build_account_router())
     router.include_router(build_stubs_router())
     return router

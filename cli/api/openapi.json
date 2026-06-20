@@ -15582,6 +15582,99 @@
         }
       }
     },
+    "/ui/account": {
+      "get": {
+        "tags": [
+          "ui-account"
+        ],
+        "summary": "Ui Account",
+        "description": "``GET /ui/account``.",
+        "operationId": "ui_account_ui_account_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/sessions/revoke-others": {
+      "post": {
+        "tags": [
+          "ui-account"
+        ],
+        "summary": "Ui Account Revoke Others",
+        "description": "``POST /ui/account/sessions/revoke-others``.",
+        "operationId": "ui_account_revoke_others_ui_account_sessions_revoke_others_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/account/sessions/{session_id}/revoke": {
+      "post": {
+        "tags": [
+          "ui-account"
+        ],
+        "summary": "Ui Account Revoke Session",
+        "description": "``POST /ui/account/sessions/{session_id}/revoke``.",
+        "operationId": "ui_account_revoke_session_ui_account_sessions__session_id__revoke_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session id is malformed, does not exist, or belongs to another operator / tenant. Collapsed to 404 so another operator's session id is never confirmed.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

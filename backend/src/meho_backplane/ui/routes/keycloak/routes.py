@@ -249,6 +249,12 @@ def build_keycloak_router() -> APIRouter:
     follows. Registered ahead of the stubs aggregate in
     :func:`meho_backplane.ui.routes.build_router`.
     """
+    # Imported inside the factory (not at module top) to avoid the import
+    # cycle: ``write`` imports the pinned connector id + the target-list
+    # helper from this module, so a top-level import here would re-enter this
+    # module mid-import.
+    from meho_backplane.ui.routes.keycloak.write import build_keycloak_write_router
+
     router = APIRouter(tags=["ui-keycloak"])
 
     # NOTE: the literal ``/ui/keycloak/clients/{client_uuid}`` route is
@@ -292,6 +298,14 @@ def build_keycloak_router() -> APIRouter:
         dispatches pin ``connector_id`` to :data:`KEYCLOAK_CONNECTOR_ID`.
         """
         return await _render_index(request, session, target, role_probe)
+
+    # The client-scope + protocol-mapper authoring writes (T3, #1961). Kept
+    # in a sibling module so the read scaffold stays focused; the write routes
+    # are tenant_admin-gated + confirm-gated + approval-handoff (see
+    # :mod:`meho_backplane.ui.routes.keycloak.write`). Included here -- not
+    # registered separately in ``build_router`` -- so the whole keycloak
+    # surface ships as one router with consistent route ordering.
+    router.include_router(build_keycloak_write_router())
 
     return router
 

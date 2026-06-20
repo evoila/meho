@@ -79,6 +79,67 @@ operator can read every surface here. The page threads an
 can hide their write affordances from operators — but a non-admin render
 must succeed.
 
+## Authoring writes (T3, #1961)
+
+`ui/routes/keycloak/write.py` adds the two approval-gated authoring writes
+the read scaffold leaves to T3 — built as a sibling router
+(`build_keycloak_write_router`) so the read scaffold stays focused and the
+merge-conflict surface with the concurrent user-management task (T2, #1960)
+stays small. `build_keycloak_router` includes the write router, so the whole
+`/ui/keycloak*` surface ships as one router.
+
+| Method · path | Op dispatched |
+|---|---|
+| `GET/POST /ui/keycloak/client-scopes/create` | `keycloak.client_scope.create` |
+| `GET/POST /ui/keycloak/clients/{client_uuid}/protocol-mappers/create` | `keycloak.protocol_mapper.create` |
+
+Both ops register `safety_level="caution"` / `requires_approval=True`
+(`connectors/keycloak/ops_write.py`). The protocol-mapper op is the one that
+wires the `tenant_id` / `tenant_role` claims the backplane row-scopes on.
+
+Each write is reached only from an explicit, unmissable confirm modal (the
+`GET` render) that names the caution safety level and the requires-approval
+handoff before the operator can `POST`. The flow mirrors the merged
+`/ui/operations` Run modal exactly:
+
+1. The modal-render `GET` mints a fresh CSRF token and re-sets the
+   `meho_csrf` cookie (`mint_csrf_token` / `set_csrf_cookie`) so the
+   double-submit pair lines up after the HTMX swap rotated it.
+2. The confirm form carries the token on its **own** `hx-headers`
+   (HTMX does not inherit `hx-headers` to children). Every `POST` under
+   `/ui/` is CSRF-gated by the `ui/csrf.py` double-submit middleware
+   regardless; a missing/invalid token is a hard `403`.
+3. The `POST` builds the op `params` and dispatches in-process through
+   `call_operation` against the pinned `connector_id`.
+
+**Client keying (load-bearing).** The protocol-mapper target client is keyed
+off the route's `{client_uuid}` path segment (the client's internal UUID),
+**not** a free-form field — the dispatch `params` carry
+`{"representation": {...}, "id": client_uuid}`, so a forged form value cannot
+re-point the write at another client. The client-scope create carries only
+`{"representation": <ClientScopeRepresentation>}`.
+
+**Approval handoff.** Because both ops are `requires_approval=True`, the
+dispatcher's policy gate returns `status="awaiting_approval"` with
+`extras["approval_request_id"]` — the write never executes immediately. The
+result fragment (`keycloak/_write_result.html`) surfaces that id and
+**deep-links `/ui/approvals`** so the operator hands off to a reviewer
+rather than seeing a silent success. Implementing the approval *decide* flow
+is out of scope ([#1778](https://github.com/evoila/meho/issues/1778)); this
+surface only deep-links.
+
+**RBAC (soft-hide + hard-403).** The underlying dispatch is operator-tier
+with a policy gate; `requires_approval` (not RBAC) is what routes both writes
+to `awaiting_approval`. This BFF layer adds a `tenant_admin` gate on top for
+the writes, matching the existing UI write routes (connectors / agents /
+conventions). The create affordances on the read surfaces are soft-hidden
+from a plain operator via `resolve_role_probe` (`is_tenant_admin`); the
+confirm-modal `GET`s **and** the write `POST` handlers gate server-side with
+`_resolve_keycloak_admin_or_403` (a keycloak-local twin of
+`resolve_operator_or_403` with a keycloak-appropriate 403 detail), so a
+forged POST from a non-admin returns `403` even when the affordance was
+hidden. The scope ↔ client relation view stays operator-tier.
+
 ## Tenant isolation
 
 The target list and every dispatch derive `tenant_id` from the validated
@@ -117,8 +178,16 @@ The router is included before the stubs aggregate in
 
 ## Known limitations
 
-- Read-only by design (T1). User management is T2; client-scope/mapper
-  create is T3.
+- Read scaffold (T1) + client-scope/protocol-mapper authoring (T3, #1961);
+  user management is T2 (#1960).
+- The authoring forms collect the common representation fields directly
+  (name / protocol / mapper type) plus an optional advanced JSON block for
+  the rest (attributes, embedded `protocolMappers`, the mapper `config`);
+  the explicit fields win over the JSON so a typo in the advanced block
+  cannot silently drop a named field.
+- No protocol-mapper *read* verb exists — mappers are read via
+  `keycloak.client.get` (they ride the `ClientRepresentation`); the scope ↔
+  client relation view is read-only assembly over T1's reads.
 - Single managed realm per target (the connector resolves the realm from
   the target's `managed_realm`); no realm selector.
 

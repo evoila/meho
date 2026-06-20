@@ -743,6 +743,8 @@ func TestPrintListTableHappyPath(t *testing.T) {
 				EnabledGroupCount: 2,
 				OperationCount:    7,
 				TenantID:          nil,
+				Kind:              "typed",
+				Dispatchable:      true,
 			},
 			{
 				ConnectorID:      "vmware-rest-9.0",
@@ -750,13 +752,22 @@ func TestPrintListTableHappyPath(t *testing.T) {
 				StagedGroupCount: 9,
 				OperationCount:   961,
 				TenantID:         &tenantA,
+				Kind:             "profiled-but-unreviewed",
+				Dispatchable:     false,
 			},
 		},
 	}
 	var buf bytes.Buffer
 	printListTable(&buf, "all", r)
 	out := buf.String()
-	for _, want := range []string{"2 connector(s) with status=all", "vault-1.x", "enabled", "(built-in)", "vmware-rest-9.0", "staged", "tenant-a", "961"} {
+	for _, want := range []string{
+		"2 connector(s) with status=all", "vault-1.x", "enabled", "(built-in)",
+		"vmware-rest-9.0", "staged", "tenant-a", "961",
+		// authoring-mode kind column (#1979): a dispatchable typed
+		// connector renders bare; a non-dispatchable profiled-but-
+		// unreviewed connector gets the trailing "*" dead-end marker.
+		"typed", "profiled-but-unreviewed*",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list render missing %q in:\n%s", want, out)
 		}
@@ -815,7 +826,9 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 		"operation_count": 961,
 		"enabled_operation_count": 14,
 		"state": "ingested",
-		"next_step": null
+		"next_step": null,
+		"kind": "profiled",
+		"dispatchable": true
 	}`)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -840,6 +853,10 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 	}
 	if got.NextStep != nil {
 		t.Errorf("next_step must decode JSON null to nil on an ingested row; got %+v", got.NextStep)
+	}
+	if got.Kind != "profiled" || !got.Dispatchable {
+		t.Errorf("authoring-mode kind/dispatchable: want profiled/true; got %q/%v",
+			got.Kind, got.Dispatchable)
 	}
 }
 
@@ -868,7 +885,9 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			"next_step": {
 				"verb": "meho connector ingest --catalog nsx/4.2",
 				"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"
-			}
+			},
+			"kind": "typed",
+			"dispatchable": false
 		}`)
 		var got listEntry
 		if err := json.Unmarshal(raw, &got); err != nil {
@@ -896,6 +915,8 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			`"verb": "meho connector ingest --catalog nsx/4.2"`,
 			`"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"`,
 			`"enabled_operation_count": 0`,
+			`"kind": "typed"`,
+			`"dispatchable": false`,
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("--json re-marshal missing %s in:\n%s", want, out)
@@ -916,7 +937,9 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			"operation_count": 7,
 			"enabled_operation_count": 7,
 			"state": "ingested",
-			"next_step": null
+			"next_step": null,
+			"kind": "profiled",
+			"dispatchable": true
 		}`)
 		var got listEntry
 		if err := json.Unmarshal(raw, &got); err != nil {
@@ -945,12 +968,16 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 // `meho connector list`).
 func TestPrintReviewTableHappyPath(t *testing.T) {
 	summary := "List vSphere clusters"
+	kind := api.ConnectorReviewPayloadKindTyped
+	dispatchable := true
 	r := &api.ConnectorReviewPayload{
 		ConnectorId:  "vmware-rest-9.0",
 		Product:      "vmware",
 		Version:      "9.0",
 		ImplId:       "vmware-rest",
 		TotalOpCount: 2,
+		Kind:         &kind,
+		Dispatchable: &dispatchable,
 		Groups: []api.ConnectorReviewGroup{
 			{
 				GroupKey:     "cluster",
@@ -968,7 +995,7 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 	var buf bytes.Buffer
 	printReviewTable(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"vmware-rest-9.0", "staged", "[cluster]", "Cluster", "vSphere cluster lifecycle", "GET:/api/vcenter/cluster", "safe", "DELETE:/api/vcenter/cluster", "dangerous"} {
+	for _, want := range []string{"vmware-rest-9.0", "staged", "typed", "[cluster]", "Cluster", "vSphere cluster lifecycle", "GET:/api/vcenter/cluster", "safe", "DELETE:/api/vcenter/cluster", "dangerous"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("review render missing %q in:\n%s", want, out)
 		}

@@ -897,6 +897,11 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert harbor["operation_count"] == 0
     assert harbor["enabled_operation_count"] == 0
     assert harbor["state"] == "registered"
+    # G0.28-T6 (#1979): the authoring-mode kind reflects the registered
+    # class (HarborConnector is hand-coded ⇒ "typed"), but a registered
+    # row has no descriptor rows yet, so it is not dispatchable.
+    assert harbor["kind"] == "typed"
+    assert harbor["dispatchable"] is False
 
     assert "sddc-rest-9.0" in by_id
     sddc = by_id["sddc-rest-9.0"]
@@ -914,6 +919,115 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert sddc["enabled_operation_count"] == 0
     assert sddc["group_count"] == 0
     assert sddc["state"] == "registered"
+    assert sddc["kind"] == "typed"
+    assert sddc["dispatchable"] is False
+
+
+@pytest.fixture
+def _registered_profiled_connector() -> Iterator[None]:
+    """Register a ProfiledRestConnector for an ingested triple under test.
+
+    The autouse ``_isolate_global_registries`` conftest fixture snapshots
+    + restores the registry around the test, so this direct
+    ``register_connector_v2`` call is test-scoped.
+    """
+    from meho_backplane.connectors.profiled import ProfiledRestConnector
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    class _AcmeProfiled(ProfiledRestConnector):
+        product = "acme"
+        version = "1.0"
+        impl_id = "acme-rest"
+        supported_version_range = ">=1.0,<2.0"
+
+    register_connector_v2(product="acme", version="1.0", impl_id="acme-rest", cls=_AcmeProfiled)
+    yield
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_profiled_kind_gated_then_dispatchable(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """A profiled DB-backed connector reads profiled-but-unreviewed until an op is enabled.
+
+    G0.28-T6 (#1979). The list surface distinguishes a working profiled
+    connector from a dead bare shim via the additive ``kind`` /
+    ``dispatchable`` fields. Before any op is enabled the review gate
+    (#1971) is closed: ``kind="profiled-but-unreviewed"`` /
+    ``dispatchable=False``. Enabling an op clears the gate:
+    ``kind="profiled"`` / ``dispatchable=True``.
+    """
+    tenant_a = uuid.uuid4()
+
+    # Gate closed: ops staged + disabled.
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="staged",
+        op_is_enabled=False,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    assert item["state"] == "ingested"
+    assert item["kind"] == "profiled-but-unreviewed"
+    assert item["dispatchable"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_profiled_kind_dispatchable_when_enabled(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """An enabled op clears the review gate ⇒ kind="profiled" / dispatchable=True (#1979)."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="enabled",
+        op_is_enabled=True,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    assert item["kind"] == "profiled"
+    assert item["dispatchable"] is True
+
+
+@pytest.mark.asyncio
+async def test_review_payload_surfaces_authoring_kind(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """``GET /{id}/review`` carries the same authoring-mode kind / dispatchable (#1979)."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="enabled",
+        op_is_enabled=True,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors/acme-rest-1.0/review", headers=_authed(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "profiled"
+    assert body["dispatchable"] is True
 
 
 @pytest.mark.asyncio

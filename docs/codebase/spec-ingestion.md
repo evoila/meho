@@ -497,6 +497,55 @@ enable — not the stamp — is what cleared the review gate and made the op
 callable. Both advisories decorate a write that already landed; neither
 blocks it.
 
+### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
+
+The enable-time advisory above surfaces the connector tier only at the
+moment an op is enabled. The list and review **read** surfaces carry the
+same classification as a standing field so an operator (or the operator
+console / CLI) can tell a working profiled connector from a dead bare
+shim without enabling anything.
+
+`resolve_authoring_kind(*, product, version, enabled_operation_count)`
+(`ingest/connector_registration.py`) replays the production resolver for
+the row's `(product, version)` line — the same tie-break ladder dispatch
+and the enable-time probes run — and projects the resolved class's
+`shim_kind` tier, crossed with the review-gate state, onto a wire
+vocabulary returned as `(kind, dispatchable)`:
+
+| `shim_kind` | gate | `kind` | `dispatchable` |
+|---|---|---|---|
+| `"none"` | n/a | `typed` | `True` |
+| `"bare"` (or resolver miss) | n/a | `ingested-shim` | `False` |
+| `"profiled"` | cleared (`enabled_operation_count > 0`) | `profiled` | `True` |
+| `"profiled"` | closed (zero enabled ops) | `profiled-but-unreviewed` | `False` |
+
+The four values land on two surfaces as **additive** fields — the
+existing dispatch-resolution `state` Literal (`ingested` / `registered`)
+is left unchanged, because `state` answers "do descriptor rows exist"
+while `kind` answers "what backs the connector and can it execute", and
+the two move independently:
+
+- `ConnectorListItem` (`ingest/api_schemas.py`), populated in
+  `list_connectors.py`. DB-backed `state="ingested"` rows derive
+  `kind` / `dispatchable` from the resolver replay; class-side
+  `state="registered"` rows derive `kind` from the registered class but
+  pin `dispatchable=False` (no descriptor rows ⇒ the dispatcher can't
+  resolve a call yet).
+- `ConnectorReviewPayload` (`ingest/payload.py`), populated in
+  `ReviewService._render_payload`; `enabled_operation_count` is computed
+  from the rendered ops.
+
+The list route (`GET /api/v1/connectors`) is untyped (returns a bare
+`dict` for per-row UUID serialisation), so the Go CLI's hand-maintained
+`listEntry` struct (`cli/internal/cmd/connector/list.go`) mirrors the two
+new keys; the review route is typed, so its CLI render reads the
+oapi-codegen'd fields. Both surfaces flag a non-dispatchable connector
+with a trailing `*` marker in the human table.
+
+The per-scheme **auth** detail of the `ExecutionProfile` is deliberately
+**not** surfaced on the review payload yet — deferred until #1969 freezes
+that schema (secret-handling sensitivity).
+
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
 G0.9-T9 (#741) pre-flight that the operator's `version` label is

@@ -22,6 +22,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
+
 __all__ = [
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
@@ -89,6 +91,24 @@ class ConnectorReviewPayload(BaseModel):
     the CLI / API layers surface them in operator output so the
     convention is self-documenting. ``tenant_id`` is the scope the
     payload was queried under (``None`` for built-in).
+
+    ``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator —
+    typed / ingested-shim / profiled / profiled-but-unreviewed —
+    projected from the v2 resolver's
+    :data:`~meho_backplane.connectors.base.ShimKind` tier for this
+    connector's ``(product, version)`` crossed with the review-gate
+    state, and ``dispatchable`` is its boolean roll-up (``True`` for
+    typed / profiled). They mirror the same-named fields on
+    :class:`~meho_backplane.operations.ingest.api_schemas.ConnectorListItem`
+    so the list and review surfaces agree on how a connector reads.
+    Both default to the bare-shim reading
+    (``kind="ingested-shim"``, ``dispatchable=False``) so existing
+    construction call sites keep working; the service always sets them
+    explicitly. The per-scheme auth detail is deliberately **not**
+    surfaced here yet — deferred until #1969 freezes the
+    :class:`~meho_backplane.connectors.schemas.ExecutionProfile` schema
+    (the Goal flags secret-handling sensitivity). See
+    :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -100,3 +120,5 @@ class ConnectorReviewPayload(BaseModel):
     tenant_id: UUID | None
     groups: list[ConnectorReviewGroup]
     total_op_count: int
+    kind: ConnectorAuthoringKind = "ingested-shim"
+    dispatchable: bool = False

@@ -1,0 +1,21 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Removed curated-edge fragment (Initiative #1941 Task #1953). Swapped in
+  (``outerHTML``) over the per-edge row's container after a successful
+  confirm-gated ``DELETE /ui/topology/edges/{edge_id}``. The DELETE response
+  also carries ``HX-Trigger: meho:topology-edge-changed`` so an open graph
+  view re-pulls and the removed edge disappears without a hard reload.
+
+  The fragment renders an empty (visually quiet) acknowledgement rather than
+  vanishing entirely so the operator gets feedback the row was removed.
+-#}
+<li
+  class="text-sm opacity-60"
+  data-test="edge-removed"
+  data-edge-id="{{ edge_id }}"
+>
+  <span class="badge badge-ghost badge-xs">removed</span>
+  Curated edge removed.
+</li>

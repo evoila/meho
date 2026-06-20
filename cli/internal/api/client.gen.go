@@ -1206,6 +1206,17 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
+type BodyAnnotateUiTopologyEdgesPost struct {
+	EvidenceUrl *string `json:"evidence_url,omitempty"`
+	FromKind    *string `json:"from_kind,omitempty"`
+	FromName    string  `json:"from_name"`
+	Kind        string  `json:"kind"`
+	Note        *string `json:"note,omitempty"`
+	ToKind      *string `json:"to_kind,omitempty"`
+	ToName      string  `json:"to_name"`
+}
+
 // BodyApprovalApproveUiApprovalsRequestIdApprovePost defines model for Body_approval_approve_ui_approvals__request_id__approve_post.
 type BodyApprovalApproveUiApprovalsRequestIdApprovePost struct {
 	Reason *string `json:"reason,omitempty"`
@@ -7460,6 +7471,12 @@ type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody = UISess
 // UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody defines body for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost for application/json ContentType.
 type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISessionContext
 
+// AnnotateUiTopologyEdgesPostFormdataRequestBody defines body for AnnotateUiTopologyEdgesPost for application/x-www-form-urlencoded ContentType.
+type AnnotateUiTopologyEdgesPostFormdataRequestBody = BodyAnnotateUiTopologyEdgesPost
+
+// UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody defines body for UiTopologyNodeDetailUiTopologyNodeNodeIdGet for application/json ContentType.
+type UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody = UISessionContext
+
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
 	var body ApproveResponseBodyDispatchResult0
@@ -9421,8 +9438,21 @@ type ClientInterface interface {
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiTopologyNodeDetailUiTopologyNodeNodeIdGet request
-	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AnnotateUiTopologyEdgesPostWithBody request with any body
+	AnnotateUiTopologyEdgesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AnnotateUiTopologyEdgesPostWithFormdataBody(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AnnotateModalUiTopologyEdgesAnnotateGet request
+	AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnannotateUiTopologyEdgesEdgeIdDelete request
+	UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody request with any body
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14564,8 +14594,68 @@ func (c *Client) UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTop
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId)
+func (c *Client) AnnotateUiTopologyEdgesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateUiTopologyEdgesPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateUiTopologyEdgesPostWithFormdataBody(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateModalUiTopologyEdgesAnnotateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateModalUiTopologyEdgesAnnotateGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnannotateUiTopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(c.Server, edgeId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(c.Server, nodeId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -30565,8 +30655,120 @@ func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTab
 	return req, nil
 }
 
-// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest generates requests for UiTopologyNodeDetailUiTopologyNodeNodeIdGet
-func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId openapi_types.UUID) (*http.Request, error) {
+// NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody calls the generic AnnotateUiTopologyEdgesPost builder with application/x-www-form-urlencoded body
+func NewAnnotateUiTopologyEdgesPostRequestWithFormdataBody(server string, body AnnotateUiTopologyEdgesPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewAnnotateUiTopologyEdgesPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewAnnotateUiTopologyEdgesPostRequestWithBody generates requests for AnnotateUiTopologyEdgesPost with any type of body
+func NewAnnotateUiTopologyEdgesPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewAnnotateModalUiTopologyEdgesAnnotateGetRequest generates requests for AnnotateModalUiTopologyEdgesAnnotateGet
+func NewAnnotateModalUiTopologyEdgesAnnotateGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/annotate")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest generates requests for UnannotateUiTopologyEdgesEdgeIdDelete
+func NewUnannotateUiTopologyEdgesEdgeIdDeleteRequest(server string, edgeId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "edge_id", runtime.ParamLocationPath, edgeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/edges/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest calls the generic UiTopologyNodeDetailUiTopologyNodeNodeIdGet builder with application/json body
+func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(server, nodeId, "application/json", bodyReader)
+}
+
+// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody generates requests for UiTopologyNodeDetailUiTopologyNodeNodeIdGet with any type of body
+func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequestWithBody(server string, nodeId openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -30591,10 +30793,12 @@ func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	req, err := http.NewRequest("GET", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -31802,8 +32006,21 @@ type ClientWithResponsesInterface interface {
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
 
-	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request
-	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+	// AnnotateUiTopologyEdgesPostWithBodyWithResponse request with any body
+	AnnotateUiTopologyEdgesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error)
+
+	AnnotateUiTopologyEdgesPostWithFormdataBodyWithResponse(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error)
+
+	// AnnotateModalUiTopologyEdgesAnnotateGetWithResponse request
+	AnnotateModalUiTopologyEdgesAnnotateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error)
+
+	// UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request
+	UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse request with any body
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
+
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -38068,6 +38285,71 @@ func (r UiTopologyTableUiTopologyGetResponse) StatusCode() int {
 	return 0
 }
 
+type AnnotateUiTopologyEdgesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnotateUiTopologyEdgesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnotateUiTopologyEdgesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AnnotateModalUiTopologyEdgesAnnotateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnotateModalUiTopologyEdgesAnnotateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnotateModalUiTopologyEdgesAnnotateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnannotateUiTopologyEdgesEdgeIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UnannotateUiTopologyEdgesEdgeIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnannotateUiTopologyEdgesEdgeIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -41813,9 +42095,52 @@ func (c *ClientWithResponses) UiTopologyTableUiTopologyGetWithResponse(ctx conte
 	return ParseUiTopologyTableUiTopologyGetResponse(rsp)
 }
 
-// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
-func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
-	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx, nodeId, reqEditors...)
+// AnnotateUiTopologyEdgesPostWithBodyWithResponse request with arbitrary body returning *AnnotateUiTopologyEdgesPostResponse
+func (c *ClientWithResponses) AnnotateUiTopologyEdgesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateUiTopologyEdgesPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateUiTopologyEdgesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AnnotateUiTopologyEdgesPostWithFormdataBodyWithResponse(ctx context.Context, body AnnotateUiTopologyEdgesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateUiTopologyEdgesPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateUiTopologyEdgesPostResponse(rsp)
+}
+
+// AnnotateModalUiTopologyEdgesAnnotateGetWithResponse request returning *AnnotateModalUiTopologyEdgesAnnotateGetResponse
+func (c *ClientWithResponses) AnnotateModalUiTopologyEdgesAnnotateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error) {
+	rsp, err := c.AnnotateModalUiTopologyEdgesAnnotateGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp)
+}
+
+// UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse request returning *UnannotateUiTopologyEdgesEdgeIdDeleteResponse
+func (c *ClientWithResponses) UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
+	rsp, err := c.UnannotateUiTopologyEdgesEdgeIdDelete(ctx, edgeId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse(rsp)
+}
+
+// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse request with arbitrary body returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
+func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBodyWithResponse(ctx context.Context, nodeId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithBody(ctx, nodeId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, body UiTopologyNodeDetailUiTopologyNodeNodeIdGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx, nodeId, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -49663,6 +49988,74 @@ func ParseUiTopologyTableUiTopologyGetResponse(rsp *http.Response) (*UiTopologyT
 	}
 
 	response := &UiTopologyTableUiTopologyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAnnotateUiTopologyEdgesPostResponse parses an HTTP response from a AnnotateUiTopologyEdgesPostWithResponse call
+func ParseAnnotateUiTopologyEdgesPostResponse(rsp *http.Response) (*AnnotateUiTopologyEdgesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnotateUiTopologyEdgesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse parses an HTTP response from a AnnotateModalUiTopologyEdgesAnnotateGetWithResponse call
+func ParseAnnotateModalUiTopologyEdgesAnnotateGetResponse(rsp *http.Response) (*AnnotateModalUiTopologyEdgesAnnotateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnotateModalUiTopologyEdgesAnnotateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse parses an HTTP response from a UnannotateUiTopologyEdgesEdgeIdDeleteWithResponse call
+func ParseUnannotateUiTopologyEdgesEdgeIdDeleteResponse(rsp *http.Response) (*UnannotateUiTopologyEdgesEdgeIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnannotateUiTopologyEdgesEdgeIdDeleteResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

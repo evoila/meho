@@ -84,10 +84,52 @@ deferred out of T3's read-only scope. Read dispatch (the T3 target) needs
 only the auth slot filled, which the named-scheme catalog covers for the
 six in-catalog connectors.
 
+## T4 (#1970) — the runtime extractors + hoisted session harness
+
+T3's catalog named four schemes; T4 lands the Python that runs them, so a
+stamped `ProfiledRestConnector` actually dispatches. Each `AuthSchemeName`
+value now resolves to one vetted extractor, with **no behaviour loss**
+against the typed connectors the row was grounded on:
+
+- **`basic` / `static_header`** — *stateless*. `build_static_headers` in
+  `backend/src/meho_backplane/connectors/_shared/profile_auth.py` computes
+  the header from the secret bundle on every call (Basic `base64(user:pass)`;
+  bearer-wrapped or raw pre-issued token per `value_kind`). No token cache,
+  no login round-trip.
+- **`session_login` (vRLI) / `oauth2_mint` (keycloak)** — *session-stateful*.
+  The per-target lock / token cache (keyed `(tenant_id, id)`) / single-flight
+  / TTL-or-expiry refresh / empty-`raw_jwt` fail-closed harness lives **once**
+  in `ProfiledRestConnector` (it was duplicated across `vcf_logs` and
+  `keycloak` before). The scheme-specific login mechanics — login path, body
+  encoding (`json` for vRLI's `{username,password,provider}`, `form` for the
+  OAuth2 client-credentials grant), and the token + TTL extractor — are
+  `SessionSchemeSpec` entries in `SESSION_SCHEME_SPECS`, selected by
+  `profile.auth.scheme`. `session_login` caches until a downstream re-login
+  (idle-expiry, `ttl_seconds=None`); `oauth2_mint` re-mints once the
+  monotonic clock passes the margin-adjusted `expires_in`.
+
+The login POST goes through the pooled `httpx.AsyncClient` directly (not the
+`auth_headers`-stamping `_post_json` seam) — the login *is* what establishes
+auth, so routing it through `auth_headers` would recurse and deadlock on the
+session lock. `auth_headers` rejects `per_user` / impersonation with the
+standard `NotImplementedError` (a profile is a `shared_service_account`
+construct). The default credential loader reads exactly the profile's
+declared `secret_fields` via the shared `load_basic_credentials` helper, so
+`static_header` (`token`) and `oauth2_mint` (`client_id`/`client_secret`)
+resolve the right secret shape through the one fail-closed reader.
+
+NSX stays typed (the `cookie_jar_session` reserved scheme): its
+`JSESSIONID` Set-Cookie jar cannot be modeled by the `dict[str, str]`
+`auth_headers` return contract.
+
 ## References
 
 - `backend/src/meho_backplane/connectors/profile.py` — the schema + catalog.
-- `backend/src/meho_backplane/connectors/profiled.py` — T1 (#1967) dispatchable sibling.
+- `backend/src/meho_backplane/connectors/profiled.py` — T1 (#1967)
+  dispatchable sibling; T4 (#1970) hoisted session harness + scheme-driven
+  `auth_headers`.
+- `backend/src/meho_backplane/connectors/_shared/profile_auth.py` — T4
+  (#1970) named extractors (`build_static_headers`, `SESSION_SCHEME_SPECS`).
 - `docs/architecture/runbooks.md` — the closed-vocabulary / no-DSL line (#1177).
 - Precedents modeled on: `connectors/schemas.AuthModel` (StrEnum),
   `auth/permissions.safety_level` (Literal + ceiling),

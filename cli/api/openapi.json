@@ -16043,6 +16043,229 @@
         }
       }
     },
+    "/ui/vault/list": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault List",
+        "description": "Render the child-key-names list partial (``vault.kv.list``).\n\nRead-only. The result carries key NAMES only -- Vault never\nexposes secret values through the list endpoint. A set-shaped\nspill (``handle is not None``) renders the handle metadata, not a\nhuge blob.",
+        "operationId": "vault_list_ui_vault_list_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "mount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "secret",
+              "title": "Mount"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "default": "",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/read": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Read",
+        "description": "Render the secret read partial (``vault.kv.read``), reveal-gated.\n\nThe secret values reach the browser but are reveal-on-click +\ncopy-without-logging; the BFF never logs the envelope ``result``.",
+        "operationId": "vault_read_ui_vault_read_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "mount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "secret",
+              "title": "Mount"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "default": "",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault/versions": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Versions",
+        "description": "Render the version-history metadata table (``vault.kv.versions``).\n\nRead-only metadata; never returns secret values.",
+        "operationId": "vault_versions_ui_vault_versions_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "mount",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "secret",
+              "title": "Mount"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "default": "",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/vault": {
+      "get": {
+        "tags": [
+          "ui-vault"
+        ],
+        "summary": "Vault Index",
+        "description": "Render the full-page KV browser: pickers + an empty key list.",
+        "operationId": "vault_index_ui_vault_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

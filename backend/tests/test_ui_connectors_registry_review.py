@@ -790,3 +790,77 @@ def test_op_route_uses_path_converter() -> None:
     assert "/ui/connectors/registry/{connector_id}/review/groups/{group_key}" in paths
     # No stray :path on connector_id / group_key anywhere in the review family.
     assert "/ui/connectors/registry/{connector_id:path}/review" not in paths
+
+
+# ---------------------------------------------------------------------------
+# AC (#1980): the drawer badges the connector's authoring kind distinctly
+# ---------------------------------------------------------------------------
+
+
+def test_drawer_renders_kind_badge_for_typed() -> None:
+    """The drawer header carries the authoring-mode kind badge (#1980).
+
+    ``vmware-rest`` is a hand-coded v2 class, so ``get_review_endpoint``
+    surfaces ``kind="typed"`` and the drawer badges it as typed (dispatchable).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get(f"/ui/connectors/registry/{_CONNECTOR_ID}/review")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    assert 'data-connector-kind="typed"' in response.text
+
+
+def test_drawer_badges_profiled_but_staged_distinctly() -> None:
+    """The drawer badges a profiled-but-unreviewed connector distinctly (#1980).
+
+    Renders the ``_review_drawer.html`` template directly with a crafted
+    context (a full-pipeline profiled-connector seed is out of scope for a
+    display-only template branch): the profiled-but-unreviewed sub-state gets
+    a ``badge-warning`` "profiled — staged" badge, NOT the plain profiled one.
+    """
+    from starlette.requests import Request
+
+    from meho_backplane.ui.templating import get_templates
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/ui/connectors/registry/{_CONNECTOR_ID}/review",
+            "headers": [],
+            "query_string": b"",
+            "state": {},
+        }
+    )
+    response = get_templates().TemplateResponse(
+        request,
+        "connectors/_review_drawer.html",
+        {
+            "connector_id": _CONNECTOR_ID,
+            "product": _PRODUCT,
+            "version": _VERSION,
+            "impl_id": _IMPL_ID,
+            "total_op_count": 2,
+            "groups": [],
+            "kind": "profiled-but-unreviewed",
+            "dispatchable": False,
+            "is_tenant_admin": False,
+            "csrf_token": "t",
+        },
+    )
+    body = response.body.decode()
+    assert 'data-connector-kind="profiled-but-unreviewed"' in body
+    assert "badge-warning" in body
+    assert "profiled — staged" in body
+    # The distinct sub-state must NOT read as a plain dispatchable "profiled".
+    assert 'data-connector-kind="profiled"' not in body

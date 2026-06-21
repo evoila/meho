@@ -102,6 +102,7 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
+    LegacyFallback,
     ProfileAuthError,
     SessionSchemeSpec,
     SessionToken,
@@ -131,6 +132,25 @@ _log = structlog.get_logger(__name__)
 #: is the shared operator-context Vault KV-v2 reader. The returned dict's
 #: keys are the names the profile declared in ``auth.secret_fields``.
 ProfileCredentialsLoader = Callable[[Any, Operator], Awaitable[dict[str, str]]]
+
+
+def _mounted_path(fallback: LegacyFallback, login_path: str, descriptor_path: str) -> str:
+    """Prefix *descriptor_path* with the API mount the winning *login_path* implies.
+
+    A descriptor path already carrying either of the fallback's known mount
+    prefixes (``/api/...`` / ``/rest/...`` for vCenter) is returned unchanged
+    so an explicitly-mounted descriptor isn't double-prefixed. Otherwise the
+    spec-relative path is normalised to a leading slash and prefixed with the
+    mount the winning login path selects (modern → ``/api``, legacy →
+    ``/rest``). Mirrors the typed connector's
+    ``meho_backplane.connectors.vmware_rest._mount.mounted_path``.
+    """
+    known_prefixes = (f"{fallback.modern_op_mount}/", f"{fallback.legacy_op_mount}/")
+    if descriptor_path.startswith(known_prefixes):
+        return descriptor_path
+    mount = fallback.op_mount_for_login_path(login_path)
+    normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
+    return f"{mount}{normalised}"
 
 
 class _CachedSessionToken:
@@ -207,6 +227,13 @@ class ProfiledRestConnector(HttpConnector):
         # connector instance. Only the two session-stateful schemes
         # (session_login / oauth2_mint) populate it.
         self._session_tokens: dict[tuple[str, str], _CachedSessionToken] = {}
+        # The login path that actually minted each target's session (#2031).
+        # Only a scheme with a LegacyFallback (session_login_basic) ever
+        # records anything other than its modern path here; the recorded path
+        # drives op-path mount (see :meth:`mount_op_path`) and session
+        # teardown so a legacy-only target (vcsim) routes ops to ``/rest``
+        # instead of defaulting to the modern ``/api`` mount.
+        self._session_login_paths: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
 
     # -- auth -----------------------------------------------------------
@@ -284,6 +311,47 @@ class ProfiledRestConnector(HttpConnector):
         value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
         return {spec.token_header: value}
 
+    # -- op-path mount (modern/legacy endpoint fallback) ----------------
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        """Map a spec-relative ingested-op *path* onto *target*'s live mount.
+
+        Overrides the identity :meth:`HttpConnector.mount_op_path` hook the
+        dispatcher calls for ``source_kind='ingested'`` ops. A profile whose
+        session scheme declares no
+        :class:`~meho_backplane.connectors._shared.profile_auth.LegacyFallback`
+        (vRLI / keycloak / the stateless schemes) needs no remount — the
+        descriptor path is reachable verbatim, so this returns it unchanged.
+
+        For a fallback-bearing scheme (vCenter's ``session_login_basic``,
+        #2031) the vCenter REST surface is mounted at ``/api`` on modern and
+        ``/rest`` on legacy / vcsim. Establishing the session is what records
+        the live login path (the modern→legacy 404 fallback in
+        :meth:`_mint_session_token`); it is idempotent + cached, so the call
+        here costs nothing on the warm path and is what lets the *first* op
+        against a legacy-only target mount at ``/rest`` instead of defaulting
+        to ``/api`` and 404ing. A descriptor path already carrying a known
+        mount prefix is returned unchanged so it isn't double-prefixed.
+        Behaviour parity with the typed
+        :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`.
+        """
+        profile = self.profile
+        # No profile / a stateless scheme has no session endpoint to mount
+        # against — fall through to the identity mount (matching the base
+        # HttpConnector hook). The profile-required error stays on the
+        # dispatch surface (auth_headers), not this advisory remount.
+        if profile is None or profile.auth.scheme in STATELESS_SCHEMES:
+            return path
+        spec = self._session_spec(profile.auth.scheme)
+        fallback = spec.legacy_fallback
+        if fallback is None:
+            return path
+        await self._session_token(target, operator)
+        login_path = self._session_login_paths.get(
+            target_cache_key(target), spec.login_path(profile.auth)
+        )
+        return _mounted_path(fallback, login_path, path)
+
     # -- session-token harness (session_login / oauth2_mint) ------------
 
     async def _session_token(self, target: Any, operator: Operator) -> str:
@@ -336,19 +404,23 @@ class ProfiledRestConnector(HttpConnector):
         secret = await self._load_credentials(target, operator)
         body = spec.build_body(auth, secret)
         path = spec.login_path(auth)
-        payload = await self._post_login(target, spec, auth, path, body, secret)
+        payload, established_path = await self._post_login(target, spec, auth, path, body, secret)
         minted = spec.extract_token(payload)
         if minted is None:
             raise ProfileAuthError(
                 f"{auth.scheme!r} session login for target "
                 f"{getattr(target, 'name', '?')!r} returned no usable token"
             )
+        # Record the login path that won so op-path mount + teardown follow
+        # the live endpoint (modern /api vs legacy /rest for vCenter). #2031
+        self._session_login_paths[target_cache_key(target)] = established_path
         _log.info(
             "profiled_session_established",
             target=getattr(target, "name", None),
             host=getattr(target, "host", None),
             scheme=auth.scheme,
             product=profile.product,
+            login_path=established_path,
         )
         return minted
 
@@ -360,8 +432,8 @@ class ProfiledRestConnector(HttpConnector):
         path: str,
         body: Mapping[str, str],
         secret: Mapping[str, str],
-    ) -> Any:
-        """Run the login round-trip on the pooled client; return the parsed JSON.
+    ) -> tuple[Any, str]:
+        """Run the login round-trip; return ``(parsed JSON, winning path)``.
 
         Goes through the pooled :class:`httpx.AsyncClient` **directly** rather
         than the inherited ``_post_json`` seam, for two load-bearing reasons:
@@ -386,8 +458,43 @@ class ProfiledRestConnector(HttpConnector):
         ``"basic"`` sends HTTP Basic creds (from the profile's first two
         declared secret fields) and an empty body — vCenter's
         ``POST /api/session`` shape; ``"body"`` picks the body slot from the
-        spec's ``encoding`` (``json`` → ``json=``, ``form`` → ``data=``). A
-        non-2xx surfaces as :exc:`httpx.HTTPStatusError`.
+        spec's ``encoding`` (``json`` → ``json=``, ``form`` → ``data=``).
+
+        **Modern→legacy 404 fallback (#2031).** When the spec declares a
+        :class:`~meho_backplane.connectors._shared.profile_auth.LegacyFallback`
+        and the modern *path* responds **HTTP 404 only**, the login is retried
+        once at the legacy path before raising. A 401 / 403 / 5xx on the modern
+        path is an auth / server failure — not "this deployment lacks the
+        modern endpoint" — and is **not** retried on legacy. The returned
+        winning path is recorded by the caller so op-path mount + teardown
+        follow the live endpoint. Behaviour parity with the typed
+        :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`.
+        A non-2xx (after the fallback) surfaces as :exc:`httpx.HTTPStatusError`.
+        """
+        resp = await self._login_attempt(target, spec, auth, path, body, secret)
+        established_path = path
+        if resp.status_code == 404 and spec.legacy_fallback is not None:
+            legacy_path = spec.legacy_fallback.legacy_login_path
+            resp = await self._login_attempt(target, spec, auth, legacy_path, body, secret)
+            established_path = legacy_path
+        resp.raise_for_status()
+        return resp.json(), established_path
+
+    async def _login_attempt(
+        self,
+        target: Any,
+        spec: SessionSchemeSpec,
+        auth: AuthSpec,
+        path: str,
+        body: Mapping[str, str],
+        secret: Mapping[str, str],
+    ) -> httpx.Response:
+        """POST one login attempt at *path*; return the raw response.
+
+        Picks credential carriage from the spec's ``login_credentials`` and,
+        for a body-carried scheme, the body slot from ``encoding``. Returns
+        the response **without** raising on a non-2xx so the caller can
+        inspect the status for the 404 modern→legacy fallback decision.
         """
         client = await self._http_client(target)
         request_headers = dict(spec.request_headers)
@@ -400,13 +507,10 @@ class ProfiledRestConnector(HttpConnector):
                     f"{auth.scheme!r} declares login_credentials='basic' but its "
                     f"build_login_auth produced no credential pair"
                 )
-            resp = await client.post(path, headers=request_headers, auth=basic_auth)
-        elif spec.encoding == "form":
-            resp = await client.post(path, data=dict(body), headers=request_headers)
-        else:
-            resp = await client.post(path, json=dict(body), headers=request_headers)
-        resp.raise_for_status()
-        return resp.json()
+            return await client.post(path, headers=request_headers, auth=basic_auth)
+        if spec.encoding == "form":
+            return await client.post(path, data=dict(body), headers=request_headers)
+        return await client.post(path, json=dict(body), headers=request_headers)
 
     @staticmethod
     def _session_spec(scheme: str) -> SessionSchemeSpec:
@@ -435,7 +539,11 @@ class ProfiledRestConnector(HttpConnector):
         profile-driven dispatch path (the dispatcher owns the wire call).
         """
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
+            cache_key = target_cache_key(target)
+            self._session_tokens.pop(cache_key, None)
+            # Drop the recorded login path too so a re-establish re-discovers
+            # the live endpoint from a clean state (#2031).
+            self._session_login_paths.pop(cache_key, None)
 
     # -- fingerprint / probe (G0.28-T6 #1972) ---------------------------
 
@@ -584,4 +692,5 @@ class ProfiledRestConnector(HttpConnector):
         """
         async with self._session_lock:
             self._session_tokens.clear()
+            self._session_login_paths.clear()
         await super().aclose()

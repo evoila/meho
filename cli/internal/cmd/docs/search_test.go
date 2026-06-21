@@ -314,7 +314,7 @@ func TestRunSearchHappyPath(t *testing.T) {
 				{
 					ChunkId:    "chunk-1",
 					Content:    "NSX configuration maximums for vSphere 9.0 are …",
-					DocumentId: "nsx-config-maximums-9.0",
+					DocumentId: ptrStr("nsx-config-maximums-9.0"),
 					Score:      ptrFloat32(0.95),
 					SourceUrl:  ptrStr("https://docs.example/nsx"),
 				},
@@ -446,7 +446,7 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 				{
 					ChunkId:    "chunk-1",
 					Content:    "body",
-					DocumentId: "doc-1",
+					DocumentId: ptrStr("doc-1"),
 					Score:      ptrFloat32(0.5),
 					SourceUrl:  ptrStr("https://docs.example/x"),
 				},
@@ -481,7 +481,7 @@ func TestRunSearchRendersAbsentScoreAsDash(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.SearchDocsResponse{
 			Chunks: []api.DocsChunk{
-				{ChunkId: "c", Content: "b", DocumentId: "doc-1", Score: nil},
+				{ChunkId: "c", Content: "b", DocumentId: ptrStr("doc-1"), Score: nil},
 			},
 		})
 	})
@@ -668,8 +668,8 @@ func TestRunSearchFanoutRendersProvenanceColumn(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.SearchDocsResponse{
 			Chunks: []api.DocsChunk{
-				{ChunkId: "c1", Content: "vmware hit", DocumentId: "dv1", Collection: ptrStr("vmware")},
-				{ChunkId: "c2", Content: "netapp hit", DocumentId: "dn1", Collection: ptrStr("netapp")},
+				{ChunkId: "c1", Content: "vmware hit", DocumentId: ptrStr("dv1"), Collection: ptrStr("vmware")},
+				{ChunkId: "c2", Content: "netapp hit", DocumentId: ptrStr("dn1"), Collection: ptrStr("netapp")},
 			},
 		})
 	})

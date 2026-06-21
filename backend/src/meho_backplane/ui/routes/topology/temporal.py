@@ -295,8 +295,15 @@ async def _render_diff(
     context: dict[str, object] = {
         "page_title": "Topology · Diff",
         "active_surface": "topology",
-        "ts1": ts1.isoformat(),
-        "ts2": ts2.isoformat(),
+        # Echo the submitted window into the ``datetime-local`` pickers as a
+        # naive ``YYYY-MM-DDTHH:MM`` local-datetime string (no offset). An
+        # ``isoformat()`` of these tz-aware (UTC) bounds carries a ``+00:00``
+        # offset, which is not a valid normalized local date-and-time string,
+        # so the user agent rejects it and the picker renders blank. This is a
+        # format-only strip of the same UTC wall-clock the operator submitted
+        # -- no timezone conversion (a separate concern).
+        "ts1": ts1.strftime("%Y-%m-%dT%H:%M"),
+        "ts2": ts2.strftime("%Y-%m-%dT%H:%M"),
         "kind_filter": kind or "",
         "entries": result.entries,
         "truncated": result.truncated,

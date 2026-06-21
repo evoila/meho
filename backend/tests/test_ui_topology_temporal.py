@@ -33,6 +33,7 @@ mirrors :mod:`backend.tests.test_ui_retrieval`.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -539,6 +540,69 @@ def test_topology_ui_diff_renders_net_entries() -> None:
     assert "created" in body
     # A non-overflowing diff carries no truncation banner.
     assert 'data-test="diff-truncated"' not in body
+
+
+def test_topology_ui_diff_pickers_echo_valid_datetime_local() -> None:
+    """The ``datetime-local`` pickers echo a no-offset ``YYYY-MM-DDTHH:MM`` value.
+
+    Regression for #2014: the submitted window is echoed back into the two
+    ``datetime-local`` inputs so a refine-submit starts from the current
+    bounds. ``isoformat()`` of the tz-aware (UTC) bounds yields a trailing
+    ``+00:00`` offset, which is not a valid normalized local date-and-time
+    string -- the user agent rejects it and the picker renders blank. Assert
+    each picker's ``value`` is a valid ``datetime-local`` string (offset- and
+    seconds-stripped), not the offset-bearing ``isoformat()``.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    node = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1")
+    in_window = datetime(2026, 6, 1, 12, 30, tzinfo=UTC)
+    _seed_history_rows(
+        tenant_id=_TENANT_A,
+        node_id=node,
+        count=1,
+        base_ts=in_window,
+        change_kind="created",
+        node_name="vm-1",
+        node_kind="vm",
+    )
+
+    client, mock = _authenticated_operator_client(tenant_id=_TENANT_A)
+    try:
+        response = client.get(
+            "/ui/topology/diff",
+            params={
+                # Offset-bearing isoformat input -- the same shape the picker
+                # round-trips. The echoed ``value`` must NOT carry the offset.
+                "ts1": "2026-06-01T12:00:00+00:00",
+                "ts2": "2026-06-01T13:00:00+00:00",
+            },
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    # A valid ``datetime-local`` value: YYYY-MM-DDTHH:MM, no offset, no seconds.
+    dt_local = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
+    for data_test, expected in (("diff-ts1", "2026-06-01T12:00"), ("diff-ts2", "2026-06-01T13:00")):
+        match = re.search(
+            rf'<input[^>]*data-test="{data_test}"[^>]*>',
+            body,
+        ) or re.search(
+            rf'<input[^>]*value="(?P<v>[^"]*)"[^>]*data-test="{data_test}"',
+            body,
+        )
+        assert match is not None, f"{data_test} input not found in:\n{body}"
+        value_match = re.search(r'value="(?P<v>[^"]*)"', match.group(0))
+        assert value_match is not None, f"{data_test} has no value= attribute"
+        value = value_match.group("v")
+        assert dt_local.match(value), (
+            f"{data_test} value {value!r} is not a valid datetime-local string "
+            f"(expected no offset / no seconds, e.g. {expected!r})"
+        )
+        assert value == expected, f"{data_test} echoed {value!r}, expected {expected!r}"
+        assert "+00:00" not in value, f"{data_test} value still carries an offset: {value!r}"
 
 
 def test_topology_ui_diff_missing_required_ts_is_422() -> None:

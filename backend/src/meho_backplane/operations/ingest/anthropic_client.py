@@ -44,10 +44,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from meho_backplane.operations.ingest.llm_groups import LlmClient
+from meho_backplane.operations.ingest.llm_groups import LlmClient, LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from anthropic import AsyncAnthropic
 
 __all__ = [
@@ -61,10 +63,13 @@ _log = structlog.get_logger(__name__)
 class AnthropicMessagesLlmClient:
     """:class:`LlmClient` backed by the Anthropic Messages API.
 
-    Structurally satisfies the
+    Structurally satisfies both the grouping
     :class:`~meho_backplane.operations.ingest.llm_groups.LlmClient`
-    Protocol — a single ``generate_json`` method. Retry/backoff and
-    transport timeouts are owned by the injected
+    Protocol (``generate_json`` -> raw text) and the richer
+    :class:`~meho_backplane.operations.ingest.llm_groups.StructuredJsonLlmClient`
+    Protocol the ``ask_docs`` answer legs use (``generate_structured_json``
+    -> text + ``stop_reason``, with optional schema-forced output). Retry/
+    backoff and transport timeouts are owned by the injected
     :class:`anthropic.AsyncAnthropic` client (the SDK retries 429 /
     5xx / connection errors with exponential backoff by default), so
     this adapter holds no retry state of its own.
@@ -88,23 +93,65 @@ class AnthropicMessagesLlmClient:
         max_output_tokens: int,
     ) -> str:
         """Return the model's raw text response (JSON validation is the caller's)."""
+        result = await self.generate_structured_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_output_tokens=max_output_tokens,
+        )
+        return result.text
+
+    async def generate_structured_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        response_format: Mapping[str, object] | None = None,
+    ) -> LlmJsonResult:
+        """Return the model's raw text + ``stop_reason``, optionally schema-forced.
+
+        When ``response_format`` is ``None`` the request is byte-for-byte
+        the same ``messages.create`` call the grouping pass issues (the
+        grouping path is unaffected). When given, it is passed as the
+        Messages-API ``output_config.format`` so the model is constrained
+        to emit JSON matching the schema rather than relying on prompt
+        discipline alone.
+        """
+        from typing import cast
+
         from anthropic.types import MessageParam, TextBlock
+        from anthropic.types.json_output_format_param import JSONOutputFormatParam
+        from anthropic.types.output_config_param import OutputConfigParam
 
         messages: list[MessageParam] = [{"role": "user", "content": user_prompt}]
-        message = await self._client.messages.create(
-            model=self._model,
-            max_tokens=max_output_tokens,
-            system=system_prompt,
-            messages=messages,
-        )
-        # The grouping prompts forbid tool use and ask for bare JSON, so
-        # every content block is a TextBlock; concatenate their text and
-        # let the T3 parsers (parse_proposal_response / parse_assignment_
-        # response) own the JSON-shape validation and the LlmOutputInvalid
-        # error envelope. A response with no text blocks yields "" — the
-        # parser turns that into a clear LlmOutputInvalid rather than a
-        # silent empty grouping.
-        return "".join(block.text for block in message.content if isinstance(block, TextBlock))
+        # When no schema is requested, the ``output_config`` kwarg is
+        # omitted entirely so the request is byte-for-byte the grouping
+        # pass's call (its contract test asserts the exact kwarg set).
+        if response_format is None:
+            message = await self._client.messages.create(
+                model=self._model,
+                max_tokens=max_output_tokens,
+                system=system_prompt,
+                messages=messages,
+            )
+        else:
+            output_config: OutputConfigParam = {
+                "format": cast(JSONOutputFormatParam, dict(response_format)),
+            }
+            message = await self._client.messages.create(
+                model=self._model,
+                max_tokens=max_output_tokens,
+                system=system_prompt,
+                messages=messages,
+                output_config=output_config,
+            )
+        # The grouping + answer prompts forbid tool use and ask for bare
+        # JSON, so every content block is a TextBlock; concatenate their
+        # text and let each caller's parser own JSON-shape validation. A
+        # response with no text blocks yields "" — the parser turns that
+        # into a clear typed error rather than a silent empty result.
+        text = "".join(block.text for block in message.content if isinstance(block, TextBlock))
+        return LlmJsonResult(text=text, stop_reason=message.stop_reason)
 
 
 def build_anthropic_ingest_llm_client() -> LlmClient:

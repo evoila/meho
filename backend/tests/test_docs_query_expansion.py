@@ -217,6 +217,21 @@ async def test_expand_non_json_output_raises_expansion_error() -> None:
         await expand_docs_query("q", _collection(), llm_client=stub)
 
 
+async def test_expand_fenced_json_output_parses() -> None:
+    """A ```json```-fenced object is tolerated and parses (#1999).
+
+    The expand leg shared the synthesis bare-``json.loads`` bug; it must
+    get the same fence tolerance or it regresses the moment the model wraps
+    its ``{"queries": [...]}`` object in a markdown fence.
+    """
+    fenced = "```json\n" + json.dumps({"queries": ["VMware NSX configuration maximums"]}) + "\n```"
+    stub = _StubLlmClient(fenced)
+    variants = await expand_docs_query("NSX maximums", _collection(), llm_client=stub)
+    # Original first, then the fenced rewrite — proving the fence was stripped.
+    assert variants[0] == "NSX maximums"
+    assert "VMware NSX configuration maximums" in variants
+
+
 async def test_expand_shape_violating_output_raises_expansion_error() -> None:
     """JSON missing the required ``queries`` key fails the strict shape."""
     stub = _StubLlmClient(json.dumps({"variants": ["x"]}))

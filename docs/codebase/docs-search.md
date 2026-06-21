@@ -301,6 +301,19 @@ acceptance criterion:
   outside it raises `DocsSynthesisError` (an invented citation is rejected,
   not silently dropped). Returned `citations` follow retrieval ranking and
   de-duplicate.
+- **JSON is machine-forced, not prompt-hoped (#1999).** The synthesis call
+  passes the `_SynthesisOutput` JSON schema as the Messages-API
+  `output_config.format` (GA structured outputs on `claude-sonnet-4-6`) via
+  the richer `StructuredJsonLlmClient.generate_structured_json` seam — the
+  model is constrained to emit schema-valid JSON instead of relying on a
+  "return ONLY JSON" prompt sentence. (Assistant-turn `{` prefill is *not*
+  used — it 400s on the 4.6+ model family.) The parser is also tolerant as
+  defence in depth: the shared `extract_json_object` strips a ```` ```json ````
+  fence and a prose preamble before `json.loads`, so a model that still
+  frames its output does not 502. The **expand** leg
+  (`expansion._parse_expansion_output`) gets the same fence tolerance — it
+  shared the original bare-`json.loads` bug and survived only because its
+  tiny `{"queries": [...]}` object rarely attracted a preamble.
 - **Empty retrieval → no model call.** Zero retrieved chunks short-circuit
   to the deterministic `NO_GROUNDED_ANSWER` constant *without* invoking the
   model — the one answer path produced with no LLM call, precisely so it
@@ -312,14 +325,22 @@ acceptance criterion:
   breaks the JSON / citation contract raises `DocsSynthesisError`. Neither
   is caught in the handler — both surface as `-32603` (the MCP analogue of
   503). The synthesis model is never relaxed into an ungrounded answer.
-- **`DocsSynthesisError` carries a sub-cause (#1918).** The two
+- **`DocsSynthesisError` carries a sub-cause (#1918, #1999).** The
   structurally-distinct synthesis failures the message string previously
   buried are split onto `exc.cause`: `SYNTHESIS_CAUSE_PARSE` (output didn't
   parse into the required `{answer, cited_chunk_ids}` shape — non-JSON or
-  shape-violating) vs. `SYNTHESIS_CAUSE_CITATION_RESOLUTION` (output parsed
-  but a cited id didn't resolve to a retrieved chunk). They point at
-  different fixes (prompt / model vs. retrieval / index drift), so the
-  answer-error envelope surfaces the sub-cause.
+  shape-violating), `SYNTHESIS_CAUSE_TRUNCATED` (the response was cut off at
+  the output-token ceiling — `stop_reason == "max_tokens"`; JSON-shaped but
+  incomplete), vs. `SYNTHESIS_CAUSE_CITATION_RESOLUTION` (output parsed but a
+  cited id didn't resolve to a retrieved chunk). They point at different
+  fixes (prompt / model vs. token ceiling vs. retrieval / index drift), so
+  the answer-error envelope surfaces the sub-cause. The synthesis client now
+  threads the model's `stop_reason` out (via `LlmJsonResult`), and on any
+  parse failure the parser logs `stop_reason` plus a **bounded** head/tail
+  of the raw body (`_RAW_LOG_HEAD_TAIL=200` chars each end) — never the full
+  response, so corpus content cannot leak into logs. The answer leg's
+  output-token ceiling was raised (1024 → 2048) so a normal thorough answer
+  is not cut off at the boundary.
 
 The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
@@ -344,7 +365,8 @@ structured envelope naming *which* leg failed.
   leg-scoped `cause`: `DocsQueryExpansionError` → `expand_failed` /
   `expansion_invalid`; `CorpusUnavailable` → `corpus_unavailable`;
   `DocsSynthesisError` → `synthesis_malformed` with its parse /
-  citation-resolution sub-cause carried through; `LlmClientUnavailable` →
+  truncated / citation-resolution sub-cause carried through;
+  `LlmClientUnavailable` →
   `model_unavailable` / `client_unavailable` (or `expand_failed` when the
   caller pins `llm_unavailable_leg=LEG_EXPAND`). A non-leg exception returns
   `None` so the caller falls through to its generic catch — a genuinely

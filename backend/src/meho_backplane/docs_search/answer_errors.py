@@ -70,6 +70,7 @@ __all__ = [
     "CAUSE_EXPANSION_INVALID",
     "CAUSE_SYNTHESIS_CITATION_RESOLUTION",
     "CAUSE_SYNTHESIS_PARSE",
+    "CAUSE_SYNTHESIS_TRUNCATED",
     "LEG_CORPUS",
     "LEG_EXPAND",
     "LEG_MODEL",
@@ -100,8 +101,10 @@ CAUSE_CORPUS_UNAVAILABLE: Final[str] = "corpus_unavailable"
 #: Mirror the synthesis sub-cause constants so callers branch on one
 #: vocabulary; the values equal
 #: :data:`meho_backplane.docs_search.synthesis.SYNTHESIS_CAUSE_PARSE` /
-#: ``SYNTHESIS_CAUSE_CITATION_RESOLUTION` (asserted in tests).
+#: ``SYNTHESIS_CAUSE_TRUNCATED`` / ``SYNTHESIS_CAUSE_CITATION_RESOLUTION``
+#: (asserted in tests).
 CAUSE_SYNTHESIS_PARSE: Final[str] = "parse"
+CAUSE_SYNTHESIS_TRUNCATED: Final[str] = "truncated"
 CAUSE_SYNTHESIS_CITATION_RESOLUTION: Final[str] = "citation_resolution"
 
 

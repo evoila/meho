@@ -26,6 +26,7 @@ from meho_backplane.docs_search.answer_errors import (
     CAUSE_EXPANSION_INVALID,
     CAUSE_SYNTHESIS_CITATION_RESOLUTION,
     CAUSE_SYNTHESIS_PARSE,
+    CAUSE_SYNTHESIS_TRUNCATED,
     LEG_CORPUS,
     LEG_EXPAND,
     LEG_MODEL,
@@ -37,6 +38,7 @@ from meho_backplane.docs_search.expansion import DocsQueryExpansionError
 from meho_backplane.docs_search.synthesis import (
     SYNTHESIS_CAUSE_CITATION_RESOLUTION,
     SYNTHESIS_CAUSE_PARSE,
+    SYNTHESIS_CAUSE_TRUNCATED,
     DocsSynthesisError,
 )
 from meho_backplane.operations.ingest import LlmClientUnavailable
@@ -105,6 +107,21 @@ def test_synthesis_citation_failure_carries_citation_sub_cause() -> None:
     assert err.cause == CAUSE_SYNTHESIS_CITATION_RESOLUTION
 
 
+def test_synthesis_truncated_failure_carries_truncated_sub_cause() -> None:
+    """A truncated ``DocsSynthesisError`` surfaces ``cause=truncated`` (#1999).
+
+    The envelope distinguishes a 1024-token cutoff from a framing fault so
+    the ``synthesis_malformed`` leg names a token-ceiling problem rather
+    than folding it into the generic ``parse`` sub-cause.
+    """
+    err = classify_answer_error(
+        DocsSynthesisError("response truncated", cause=SYNTHESIS_CAUSE_TRUNCATED)
+    )
+    assert isinstance(err, AskDocsAnswerError)
+    assert err.leg == LEG_SYNTHESIS
+    assert err.cause == CAUSE_SYNTHESIS_TRUNCATED
+
+
 def test_synthesis_sub_cause_constants_agree_across_modules() -> None:
     """The answer-error sub-cause constants equal the synthesis ones.
 
@@ -112,6 +129,7 @@ def test_synthesis_sub_cause_constants_agree_across_modules() -> None:
     in one is caught rather than silently diverging the wire contract.
     """
     assert CAUSE_SYNTHESIS_PARSE == SYNTHESIS_CAUSE_PARSE
+    assert CAUSE_SYNTHESIS_TRUNCATED == SYNTHESIS_CAUSE_TRUNCATED
     assert CAUSE_SYNTHESIS_CITATION_RESOLUTION == SYNTHESIS_CAUSE_CITATION_RESOLUTION
 
 

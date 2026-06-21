@@ -24922,6 +24922,11 @@
             "nullable": true,
             "title": "Tls Ca Pin"
           },
+          "tls_server_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Server Name"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -25073,6 +25078,12 @@
             "nullable": true,
             "title": "Tls Ca Pin"
           },
+          "tls_server_name": {
+            "type": "string",
+            "maxLength": 512,
+            "nullable": true,
+            "title": "Tls Server Name"
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -25167,6 +25178,11 @@
             "type": "string",
             "nullable": true,
             "title": "Tls Ca Pin"
+          },
+          "tls_server_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Server Name"
           },
           "fingerprint": {
             "additionalProperties": true,
@@ -25281,6 +25297,12 @@
             "type": "string",
             "nullable": true,
             "title": "Tls Ca Pin"
+          },
+          "tls_server_name": {
+            "type": "string",
+            "maxLength": 512,
+            "nullable": true,
+            "title": "Tls Server Name"
           },
           "extras": {
             "additionalProperties": true,

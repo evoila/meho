@@ -513,6 +513,13 @@ class VcfLogsConnector(HttpConnector):
             resp = await client.get(
                 _VERSION_PATH,
                 headers={"Accept": "application/json"},
+                # #2002: honour the per-target TLS SNI / cert-verify name
+                # override on this unauthenticated fingerprint round-trip
+                # too, so a vRLI that pins its cert to an FQDN while
+                # demanding ``Host: <IP>`` is reachable with
+                # ``verify_tls=true``. Empty dict (the default) leaves the
+                # SNI / verify name derived from ``base_url`` as before.
+                extensions=self._request_extensions(target),
             )
             resp.raise_for_status()
             payload = resp.json()

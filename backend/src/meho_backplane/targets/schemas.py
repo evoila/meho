@@ -162,6 +162,15 @@ class TargetSummary(BaseModel):
     # ``None`` for legacy hand-constructed instances; production
     # projections pass it through :func:`project_target_to_summary`.
     tls_ca_pin: str | None = None
+    # T (#2002). Per-target TLS SNI / cert-verification hostname,
+    # decoupled from ``host``. Connection-routing like ``verify_tls`` /
+    # ``tls_ca_pin``, so it is listable per the same §5 no-silent-masking
+    # rule -- the list response must not hide a connection-affecting field
+    # the detail endpoint exposes. ``None`` = derive from ``host`` as
+    # today. Defaults to ``None`` for legacy hand-constructed instances;
+    # production projections pass it through
+    # :func:`project_target_to_summary`.
+    tls_server_name: str | None = None
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
     created_at: datetime
@@ -239,6 +248,17 @@ class Target(BaseModel):
     # legacy hand-constructed instances stay valid; production read paths
     # go through :func:`_to_full`.
     tls_ca_pin: str | None = None
+    # T (#2002). Per-target TLS SNI / cert-verification hostname,
+    # decoupled from ``host`` (the TCP connect address + wire ``Host:``
+    # header). ``None`` = derive the SNI / verify name from ``host`` as
+    # today. When set, dispatch keeps ``base_url=https://<host>`` (connect
+    # + ``Host`` = IP) and threads ``extensions={"sni_hostname": <name>}``
+    # so the cert is verified against the override name -- letting an
+    # operator keep ``verify_tls=true`` while sending ``Host: <IP>``.
+    # Orthogonal to ``verify_tls`` / ``tls_ca_pin`` (no mutual exclusion).
+    # Defaults to ``None`` so legacy hand-constructed instances stay
+    # valid; production read paths go through :func:`_to_full`.
+    tls_server_name: str | None = None
     extras: Mapping[str, Any]
     notes: str | None
     fingerprint: Mapping[str, Any] | None
@@ -308,6 +328,15 @@ class TargetCreate(BaseModel):
     # validated at this boundary (see :func:`validate_ca_pin_pem`) so a
     # malformed bundle is a 422 here, not an opaque dispatch failure.
     tls_ca_pin: str | None = None
+    # T (#2002). Per-target TLS SNI / cert-verification hostname,
+    # decoupled from ``host``. Default ``None`` = derive the SNI / verify
+    # name from ``host`` (today's behaviour, byte-identical). An operator
+    # whose appliance pins its cert to an FQDN-CN but only accepts
+    # ``Host: <IP>`` sets this to the cert-CN FQDN so dispatch can keep
+    # ``verify_tls=true`` while routing the IP. ``max_length`` matches
+    # ``host`` (a hostname/FQDN, not a URL). No mutual-exclusion validator
+    # -- it composes cleanly with ``verify_tls`` / ``tls_ca_pin``.
+    tls_server_name: str | None = Field(default=None, max_length=512)
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -407,6 +436,16 @@ class TargetUpdate(BaseModel):
     # ``verify_tls=false`` in the *same* body is rejected (the merged
     # state across the persisted row is enforced in the route handler).
     tls_ca_pin: str | None = None
+    # T (#2002). Patchable per-target TLS SNI / cert-verification
+    # hostname. Standard PATCH-field semantics: ``None`` is the
+    # absent-marker ("client did not send this field"), so a PATCH that
+    # does not mention ``tls_server_name`` leaves the column untouched;
+    # an explicit ``{"tls_server_name": null}`` clears the override (same
+    # as clearing ``secret_ref`` / ``fqdn`` / ``tls_ca_pin``) and returns
+    # the target to deriving the SNI / verify name from ``host``. No
+    # mutual-exclusion validator -- orthogonal to ``verify_tls`` /
+    # ``tls_ca_pin``.
+    tls_server_name: str | None = Field(default=None, max_length=512)
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
@@ -477,6 +516,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
+        tls_server_name=t.tls_server_name,
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
         created_at=t.created_at,

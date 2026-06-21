@@ -5246,6 +5246,7 @@ type Target struct {
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
 	UpdatedAt       time.Time               `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
@@ -5287,12 +5288,13 @@ type TargetCreate struct {
 	PreferredImplId *string                 `json:"preferred_impl_id"`
 
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
-	Product     TargetCreateProduct `json:"product"`
-	SecretRef   *string             `json:"secret_ref"`
-	TlsCaPin    *string             `json:"tls_ca_pin"`
-	VerifyTls   *bool               `json:"verify_tls,omitempty"`
-	Version     *string             `json:"version"`
-	VpnRequired *bool               `json:"vpn_required,omitempty"`
+	Product       TargetCreateProduct `json:"product"`
+	SecretRef     *string             `json:"secret_ref"`
+	TlsCaPin      *string             `json:"tls_ca_pin"`
+	TlsServerName *string             `json:"tls_server_name"`
+	VerifyTls     *bool               `json:"verify_tls,omitempty"`
+	Version       *string             `json:"version"`
+	VpnRequired   *bool               `json:"vpn_required,omitempty"`
 }
 
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
@@ -5345,6 +5347,7 @@ type TargetSummary struct {
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
 	UpdatedAt       time.Time               `json:"updated_at"`
 	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
 	Version         *string                 `json:"version"`
@@ -5399,6 +5402,7 @@ type TargetUpdate struct {
 	Product         *string                 `json:"product"`
 	SecretRef       *string                 `json:"secret_ref"`
 	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
 	VerifyTls       *bool                   `json:"verify_tls"`
 	Version         *string                 `json:"version"`
 	VpnRequired     *bool                   `json:"vpn_required"`

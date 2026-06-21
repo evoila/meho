@@ -59,6 +59,7 @@ from meho_backplane.docs_search.synthesis import NO_GROUNDED_ANSWER
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.operations.ingest import LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -175,10 +176,27 @@ class _StubLlmClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
+        # The expand leg calls this; capture its prompt so a test can assert
+        # the manifest reached the expansion prompt (corpus-awareness).
         self.captured["system_prompt"] = system_prompt
         self.captured["user_prompt"] = user_prompt
         self.captured["max_output_tokens"] = max_output_tokens
         return self._raw
+
+    async def generate_structured_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        response_format: Any | None = None,
+    ) -> LlmJsonResult:
+        # The synthesis leg calls this; capture the structured-output request.
+        self.captured["system_prompt"] = system_prompt
+        self.captured["user_prompt"] = user_prompt
+        self.captured["max_output_tokens"] = max_output_tokens
+        self.captured["response_format"] = response_format
+        return LlmJsonResult(text=self._raw, stop_reason="end_turn")
 
 
 @pytest.fixture(autouse=True)

@@ -63,7 +63,11 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from meho_backplane.operations.ingest import LlmClient, build_anthropic_ingest_llm_client
+from meho_backplane.operations.ingest import (
+    LlmClient,
+    build_anthropic_ingest_llm_client,
+    extract_json_object,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.docs_collections import DocCollection
@@ -181,13 +185,16 @@ def _render_manifest_for_prompt(collection: DocCollection) -> str:
 def _parse_expansion_output(raw: str) -> _ExpansionOutput:
     """Parse + validate the model's raw text into the strict output shape.
 
-    A model that returns non-JSON or a shape-violating object raises
-    :class:`DocsQueryExpansionError` — an unparseable expansion cannot be
-    trusted, so we fail closed rather than retrieve on a malformed variant
-    set.
+    Tolerant of a ```json``` fence or a prose preamble (#1999) before
+    :func:`json.loads` — the expand leg shared synthesis's bare-``json.loads``
+    bug and survived only because its tiny ``{"queries": [...]}`` object
+    rarely attracts a preamble. A model that still returns non-JSON or a
+    shape-violating object raises :class:`DocsQueryExpansionError` — an
+    unparseable expansion cannot be trusted, so we fail closed rather than
+    retrieve on a malformed variant set.
     """
     try:
-        decoded = json.loads(raw)
+        decoded = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as exc:
         raise DocsQueryExpansionError(
             "expansion model returned non-JSON output; cannot derive query variants"

@@ -53,6 +53,7 @@ from meho_backplane.docs_search.answer_errors import (
     LEG_SYNTHESIS,
     AskDocsAnswerError,
 )
+from meho_backplane.operations.ingest import LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 
 #: The corpus-http backend's transport seam — the retrieval side.
@@ -73,6 +74,16 @@ class _StubLlmClient:
         self, *, system_prompt: str, user_prompt: str, max_output_tokens: int
     ) -> str:
         return self._raw
+
+    async def generate_structured_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        response_format: Any | None = None,
+    ) -> LlmJsonResult:
+        return LlmJsonResult(text=self._raw, stop_reason="end_turn")
 
 
 @pytest.fixture(autouse=True)

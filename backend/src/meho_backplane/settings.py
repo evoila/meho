@@ -167,10 +167,17 @@ class Settings(BaseModel):
         scheduler is operator-less — it has no Keycloak JWT to forward to
         Vault's JWT/OIDC auth method — so it reads under its own service
         identity instead. A token bound to a narrow policy that grants
-        read on ``scheduler_agent_vault_path_pattern`` (default
+        read/write on ``scheduler_agent_vault_path_pattern`` (default
         ``secret/data/agents/*/credentials``) is the lowest-friction
         service identity: it reuses the ``hvac.Client(token=…)`` primitive
-        with no AppRole ``secret_id`` bootstrap. Default ``""`` (unset)
+        with no AppRole ``secret_id`` bootstrap. **Write** (``create`` +
+        ``update``) is required because agent-principal registration mints
+        the Keycloak client secret into Vault via
+        :func:`~meho_backplane.scheduler.vault_credentials.write_agent_secret`;
+        a read-only token denies registration with
+        :class:`~meho_backplane.scheduler.vault_credentials.SchedulerVaultBrokerError`.
+        The operator-runbook stanza is in
+        ``docs/cross-repo/vault-provisioning.md``. Default ``""`` (unset)
         leaves Vault-sourced scheduling inoperative; the scheduler then
         falls back to the env-var path
         (:attr:`scheduler_agent_secret_env_pattern`). Never logged; never

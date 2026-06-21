@@ -3185,6 +3185,53 @@ paths:
     assert body["ingestion"]["connector_id"] == "vmwaret9-rest-9.0"
 
 
+def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1964 T1 #1975: a ``spec_resource`` row ingests with a null upstream.
+
+    The row carries no ``upstream`` (the on-ramp serves products whose
+    upstream the backend can't dereference) but names a packaged
+    ``spec_resource``. The route must load the spec bytes from package
+    data into ``SpecSource.content`` and ingest WITHOUT any HTTP fetch —
+    so the dry-run succeeds even though no respx mock is installed for an
+    upstream URL (there is none).
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "shippedt1",
+                "version": "1.0",
+                "impl_id": "shippedt1-rest",
+                # Profile-backed naming, but the route only needs the spec
+                # to ingest; class-presence is a boot-time validator concern.
+                "requires_connector_class": "ProfiledRestConnector_shippedt1",
+                "upstream": None,
+                "spec_resource": "_fixture_minimal.yaml",
+                "profile_resource": "_fixture_minimal.yaml",
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # No upstream mock — the shipped spec must be used inline; any
+        # fetch attempt would raise an unmocked-request error.
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "dry_run": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The _fixture_minimal.yaml spec carries exactly one operation.
+    assert body["ingestion"]["inserted_count"] == 1
+    assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
+
+
 def test_ingest_catalog_entry_unknown_returns_structured_422(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -2534,10 +2534,12 @@ type ConnectorSpecEntry struct {
 	ImplId                     string                           `json:"impl_id"`
 	Notes                      *string                          `json:"notes,omitempty"`
 	Product                    string                           `json:"product"`
+	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
+	SpecResource               *string                          `json:"spec_resource"`
 	Upstream                   *[]string                        `json:"upstream"`
 	Version                    string                           `json:"version"`
 }

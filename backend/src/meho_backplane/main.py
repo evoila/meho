@@ -131,6 +131,7 @@ from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
     validate_catalog_registry_coverage,
+    validate_shipped_artifacts,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
@@ -292,6 +293,9 @@ async def _run_lifespan_shutdown() -> None:
         log.exception("dispose_broadcast_blocking_client_failed")
 
 
+# code-quality-allow: linear boot-step sequence at the 100-line limit;
+# #1975 adds one ordered guard whose extraction would obscure the
+# documented startup order.
 async def _run_lifespan_startup() -> None:
     """Eager init phase of the lifespan: probes, pools, registrars, model.
 
@@ -353,6 +357,9 @@ async def _run_lifespan_startup() -> None:
     # ``version: "3"``) would have crashed the lifespan instead of
     # shipping silently.
     validate_catalog_registry_coverage()
+    # Shipped spec/profile dry-run parse (#1964 T1 #1975): a malformed
+    # packaged spec_resource / profile_resource crashes boot. See the fn.
+    validate_shipped_artifacts()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)

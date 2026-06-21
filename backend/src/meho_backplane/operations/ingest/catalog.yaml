@@ -258,3 +258,36 @@ entries:
       Typed-SSH connector. BIND 9 exposes no REST/OpenAPI surface (named
       driven over SSH with atomic-apply discipline), so spec ingestion is not
       possible. See #743 / bind9-onboarding.md.
+
+  # --- Profile-backed shipped-spec mechanism fixture (#1964 T1 #1975) ---
+
+  - product: _fixture
+    version: "1.0"
+    impl_id: fixture-rest
+    # Profile-backed row: requires_connector_class names the synthesised
+    # ProfiledRestConnector subclass T5 (#1971) materialises from the
+    # profile. It need not pre-exist in the v2 registry, so
+    # validate_catalog_registry_coverage exempts a profile_resource-
+    # carrying row from the class-presence + triple-registration checks.
+    requires_connector_class: ProfiledRestConnector_fixture_1_0
+    # upstream is null AND a shipped spec is present: the spec_resource
+    # on-ramp serves products whose upstream the backend can't
+    # dereference. _reject_unusable_entry exempts spec_resource rows from
+    # the typed-/templated-upstream 422s.
+    upstream: null
+    # Shipped OpenAPI spec + ExecutionProfile, both force-included in the
+    # wheel and dry-run-parsed at boot by validate_shipped_artifacts.
+    spec_resource: _fixture_minimal.yaml
+    profile_resource: _fixture_minimal.yaml
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      MECHANISM FIXTURE, not a shippable connector. Exercises the #1964 T1
+      shipped-spec/profile on-ramp end to end: spec_resource +
+      profile_resource resolve to package data under
+      operations/ingest/specs/ and connectors/profiles/, the
+      catalog-driven ingest route loads the spec bytes into
+      SpecSource.content (bypassing the null upstream), and the boot-time
+      validate_shipped_artifacts dry-run-parses both with the live ingest
+      parser. T2 (#1976) authors the real vmware/sddc profile-backed rows;
+      this row is the self-test that the mechanism is wired correctly.

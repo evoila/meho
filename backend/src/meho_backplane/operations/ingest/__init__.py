@@ -43,8 +43,11 @@ from meho_backplane.operations.ingest.catalog import (
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
     load_catalog,
+    load_profile_resource,
+    load_spec_resource,
     parse_catalog,
     validate_catalog_registry_coverage,
+    validate_shipped_artifacts,
 )
 from meho_backplane.operations.ingest.connector_registration import (
     GenericRestConnector,
@@ -211,6 +214,8 @@ __all__ = [
     "get_job_registry",
     "list_ingested_connectors",
     "load_catalog",
+    "load_profile_resource",
+    "load_spec_resource",
     "parse_catalog",
     "parse_connector_id",
     "parse_openapi",
@@ -220,4 +225,5 @@ __all__ = [
     "run_ingest_job",
     "run_llm_grouping",
     "validate_catalog_registry_coverage",
+    "validate_shipped_artifacts",
 ]

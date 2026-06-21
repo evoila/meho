@@ -104,6 +104,27 @@ packages = ["src/meho_backplane"]
 # meho-backplane`` deployment doesn't need an external ``alembic.ini``
 # bind-mount. ``find_alembic_ini`` (db/migrations.py) walks both
 # layouts in order: env var → package data → cwd → source tree.
+# MEHO-authored OpenAPI specs + ExecutionProfile documents (#1964 T1
+# #1975) ship as package data so a catalog row's ``spec_resource`` /
+# ``profile_resource`` resolves via :func:`importlib.resources.files`
+# in a deployed wheel. They live INSIDE the package tree
+# (``src/meho_backplane/operations/ingest/specs/`` and
+# ``src/meho_backplane/connectors/profiles/``), so the ``packages`` glob
+# above already collects their ``.yaml`` data files — the same way the
+# packaged ``catalog.yaml`` and the ``.j2`` grouping prompts ship. They
+# are listed in ``artifacts`` (below) to make the non-``.py`` data-file
+# inclusion explicit and robust against a future ``only-include``
+# narrowing; they are deliberately NOT in ``force-include`` (that table
+# is for trees OUTSIDE the package, like the ``alembic`` tree at
+# ``backend/alembic`` — re-including an in-package path there triggers a
+# duplicate-archive-entry build failure).
+artifacts = [
+    "src/meho_backplane/operations/ingest/specs/*.yaml",
+    "src/meho_backplane/operations/ingest/specs/*.json",
+    "src/meho_backplane/connectors/profiles/*.yaml",
+    "src/meho_backplane/connectors/profiles/*.json",
+]
+
 [tool.hatch.build.targets.wheel.force-include]
 "alembic.ini" = "meho_backplane/alembic.ini"
 "alembic" = "meho_backplane/alembic"

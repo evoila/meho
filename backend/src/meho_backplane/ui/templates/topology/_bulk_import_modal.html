@@ -1,0 +1,164 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Curated-edge **bulk-import** panel (Initiative #1941 Task #1954). Rendered
+  by ``GET /ui/topology/edges/bulk`` (panel-open) and re-rendered by
+  ``POST /ui/topology/edges/bulk`` on a recoverable error (a parse failure,
+  or the aggregated per-row ``invalid_bulk`` validation list).
+
+  Flow:
+    * Operator pastes an ``edges:`` doc into the textarea OR uploads a file.
+    * **Dry-run preview** ``hx-post``s with ``dry_run=true`` and swaps the
+      per-row create/update/conflict plan into ``#topology-bulk-result``
+      WITHOUT writing anything.
+    * **Apply** ``hx-post``s with ``dry_run=false`` and swaps the applied
+      summary in; the response carries ``HX-Trigger: meho:topology-edge-changed``
+      so an open graph view re-pulls.
+
+  The two submit buttons share the same form; a hidden ``dry_run`` field is
+  flipped by each button via ``hx-vals`` so the server branches on the flag
+  (the REST shape: one route, a ``dry_run`` boolean). ``hx-disabled-elt``
+  disables both buttons during the in-flight request so a double-submit can't
+  fire the apply twice.
+
+  CSRF: the form carries the ``X-CSRF-Token`` header on its OWN ``hx-headers``
+  (HTMX does not inherit ``hx-headers`` to children). The panel mints + sets
+  a fresh ``meho_csrf`` cookie on render so the POST carries a valid
+  double-submit token. ``hx-encoding="multipart/form-data"`` lets the file
+  ride along as a proper multipart part.
+
+  The accepted file shape mirrors ``meho topology bulk-import``: a YAML/JSON
+  doc with a top-level ``edges:`` list of ``{from, kind, to, note?,
+  evidence_url?}`` rows, where ``from`` / ``to`` are a bare name string or a
+  ``{name, kind}`` mapping.
+-#}
+<div
+  id="topology-bulk-modal"
+  class="card bg-base-100 border-base-300 border shadow-md"
+  x-data="{ open: true }"
+  x-show="open"
+  aria-label="Bulk-import curated edges"
+>
+  <div class="card-body space-y-3">
+    <header class="flex items-start justify-between gap-2">
+      <div>
+        <h2 class="card-title text-base">Bulk-import curated edges</h2>
+        <p class="text-xs opacity-70">
+          Paste or upload an <code class="font-mono">edges:</code> document
+          ({{ max_rows }} rows max). Mirrors
+          <code class="font-mono">meho topology bulk-import</code>. Preview
+          the plan before applying — apply is all-or-nothing.
+        </p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        aria-label="Close bulk-import panel"
+        @click="open = false"
+      >
+        Close
+      </button>
+    </header>
+
+    {% if parse_error %}
+      <div role="alert" class="alert alert-error text-sm" data-test="bulk-parse-error">
+        <span>{{ parse_error }}</span>
+      </div>
+    {% endif %}
+
+    {% if row_errors %}
+      <div
+        role="alert"
+        class="alert alert-error flex-col items-start gap-1 text-sm"
+        data-test="bulk-row-errors"
+      >
+        <p class="font-semibold">
+          {{ row_errors | length }} row(s) failed validation — fix every row,
+          then re-submit (the whole batch is rejected until they all pass):
+        </p>
+        <ul class="list-disc space-y-1 pl-5">
+          {% for err in row_errors %}
+            <li data-test="bulk-row-error" data-row-index="{{ err.index }}">
+              <span class="font-mono">row {{ err.index }}</span>
+              <span class="badge badge-outline badge-xs">{{ err.error }}</span>
+              <span>{{ err.message }}</span>
+              {% if err.kinds %}
+                <span class="opacity-70">
+                  (valid: {{ err.kinds | join(', ') }})
+                </span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
+    <form
+      id="topology-bulk-form"
+      hx-post="/ui/topology/edges/bulk"
+      hx-encoding="multipart/form-data"
+      hx-target="#topology-bulk-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3"
+    >
+      {#- The dry_run flag is set per-button via hx-vals; this hidden field
+          is the multipart default for clients without JS. -#}
+      <input type="hidden" name="dry_run" value="false" />
+
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">Paste edges document (YAML or JSON)</span>
+        <textarea
+          name="rows_text"
+          rows="8"
+          class="textarea textarea-bordered textarea-sm font-mono"
+          aria-label="Bulk edges document"
+          placeholder="edges:&#10;  - from: svc-a&#10;    kind: depends-on&#10;    to: { name: db-1, kind: vm }"
+        >{{ submitted_rows | default('') }}</textarea>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text text-xs opacity-70">…or upload a file (takes precedence)</span>
+        <input
+          type="file"
+          name="upload"
+          accept=".yaml,.yml,.json,.txt"
+          class="file-input file-input-bordered file-input-sm"
+          aria-label="Upload edges document"
+        />
+      </label>
+
+      {#- The spinner is shown only while the request is in flight via the
+          htmx-request indicator class (htmx sets it on the requesting
+          element). -#}
+      <span class="htmx-indicator loading loading-spinner loading-sm" aria-hidden="true"></span>
+
+      <footer class="flex justify-end gap-2">
+        <button type="button" class="btn btn-ghost btn-sm" @click="open = false">
+          Cancel
+        </button>
+        <button
+          type="submit"
+          class="btn btn-outline btn-sm"
+          data-test="bulk-dry-run"
+          hx-vals='{"dry_run": "true"}'
+        >
+          Dry-run preview
+        </button>
+        <button
+          type="submit"
+          class="btn btn-primary btn-sm"
+          data-test="bulk-apply"
+          hx-vals='{"dry_run": "false"}'
+        >
+          Apply all
+        </button>
+      </footer>
+    </form>
+
+    {#- Result slot: the preview plan / applied summary swaps in here. -#}
+    <div id="topology-bulk-result" data-test="bulk-result-slot"></div>
+  </div>
+</div>

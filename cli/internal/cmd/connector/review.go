@@ -121,9 +121,19 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 	// the same way `meho connector list` does (see deriveRollupLabel).
 	staged, enabled, disabled := groupStatusCounts(r.Groups)
 	rollup := deriveRollupLabel(staged, enabled, disabled)
-	fmt.Fprintf(w, "%s (%s/%s/%s) — %s — %d group(s), %d op(s)\n",
+	// kind / dispatchable carry server-side defaults, so oapi-codegen
+	// types them as optional pointers even though the server always
+	// sets them; deref defensively (empty kind / not-dispatchable on a
+	// nil, the conservative reading).
+	kind := ""
+	if r.Kind != nil {
+		kind = string(*r.Kind)
+	}
+	dispatchable := r.Dispatchable != nil && *r.Dispatchable
+	fmt.Fprintf(w, "%s (%s/%s/%s) — %s — %s — %d group(s), %d op(s)\n",
 		r.ConnectorId, r.Product, r.Version, r.ImplId,
-		rollup, len(r.Groups), r.TotalOpCount,
+		rollup, kindCell(kind, dispatchable),
+		len(r.Groups), r.TotalOpCount,
 	)
 	if len(r.Groups) == 0 {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")

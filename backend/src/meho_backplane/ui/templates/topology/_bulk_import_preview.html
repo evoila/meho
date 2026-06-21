@@ -1,0 +1,79 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Bulk-import **dry-run preview** fragment (Initiative #1941 Task #1954).
+  Swapped into ``#topology-bulk-result`` after a
+  ``POST /ui/topology/edges/bulk`` with ``dry_run=true``. Renders the per-row
+  ``create`` / ``update`` / ``conflict`` plan the service computed WITHOUT
+  writing anything (the graph is unchanged; no ``HX-Trigger`` fires).
+
+  The operator reads the plan, then clicks "Apply all" in the panel above to
+  commit it. ``conflict`` rows carry the §6 recoverability listing
+  (``superseded`` / ``conflicts`` edge ids) so a "successful" import that
+  rewrites the auto-edge landscape is visible before it lands.
+-#}
+<div data-test="bulk-preview" data-dry-run="true">
+  <div role="status" class="alert alert-info text-sm">
+    <span>
+      Dry-run — nothing was written.
+      <span class="font-mono">{{ result.created }}</span> create,
+      <span class="font-mono">{{ result.updated }}</span> update,
+      <span class="font-mono">{{ result.conflicts }}</span> conflict
+      across {{ result.rows | length }} row(s). Click <em>Apply all</em> to
+      commit.
+    </span>
+  </div>
+
+  <div class="mt-2 overflow-x-auto">
+    <table class="table table-zebra table-sm">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>action</th>
+          <th>from</th>
+          <th>kind</th>
+          <th>to</th>
+          <th>notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in result.rows %}
+          <tr data-test="bulk-preview-row" data-row-index="{{ row.index }}" data-action="{{ row.action }}">
+            <td class="font-mono">{{ row.index }}</td>
+            <td>
+              {% if row.action == "create" %}
+                <span class="badge badge-success badge-sm">create</span>
+              {% elif row.action == "update" %}
+                <span class="badge badge-info badge-sm">update</span>
+              {% else %}
+                <span class="badge badge-warning badge-sm">conflict</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="font-mono">{{ row.from_name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ row.from_kind }}</span>
+            </td>
+            <td><span class="badge badge-outline badge-xs">{{ row.kind }}</span></td>
+            <td>
+              <span class="font-mono">{{ row.to_name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ row.to_kind }}</span>
+            </td>
+            <td class="text-xs opacity-70">
+              {% if row.superseded %}
+                <div data-test="bulk-preview-superseded">
+                  supersedes {{ row.superseded | length }} auto edge(s)
+                </div>
+              {% endif %}
+              {% if row.conflicts %}
+                <div data-test="bulk-preview-conflicts">
+                  conflicts with {{ row.conflicts | length }} edge(s)
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -69,12 +69,16 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.operations.ingest.exceptions import UncoveredVersionLabel
 
+if TYPE_CHECKING:
+    from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
+
 __all__ = [
     "GenericRestConnector",
     "check_version_covered_by_registered_class",
     "derive_supported_version_range",
     "ensure_connector_class_registered",
     "handrolled_class_for_impl_id",
+    "resolve_authoring_kind",
     "resolved_auto_shim_class",
     "resolved_profiled_connector_class",
     "sibling_handrolled_impl_id",
@@ -853,3 +857,72 @@ def resolved_profiled_connector_class(*, product: str, version: str) -> str | No
     if shim_kind(cls) == "profiled":
         return cls.__name__
     return None
+
+
+def resolve_authoring_kind(
+    *,
+    product: str,
+    version: str,
+    enabled_operation_count: int,
+) -> tuple[ConnectorAuthoringKind, bool]:
+    """Project the connector's authoring-mode ``(kind, dispatchable)`` for the wire.
+
+    G0.28-T6 (#1979). The list / review surfaces need a single
+    operator-facing discriminator distinguishing a working profiled
+    connector from a dead bare shim — neither the dispatch-resolution
+    ``state`` nor the count fields carry it. This replays the production
+    resolver
+    (:func:`~meho_backplane.connectors.resolver.resolve_connector`) for
+    the row's ``(product, version)`` line — the same tie-break ladder
+    dispatch and the enable-time advisories (#1971) run — and maps the
+    resolved class's :data:`~meho_backplane.connectors.base.ShimKind`
+    tier onto the wire vocabulary:
+
+    * ``shim_kind == "none"`` (hand-coded class) → ``("typed", True)``.
+    * ``shim_kind == "bare"`` (auto-shim) → ``("ingested-shim", False)``
+      — the ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+      dead end (#1627).
+    * ``shim_kind == "profiled"`` → ``("profiled", True)`` once the
+      review gate has been cleared (``enabled_operation_count > 0``),
+      else ``("profiled-but-unreviewed", False)``. Stamping the profile
+      makes the connector dispatchable in principle, but the
+      ``is_enabled=False`` review gate (#1971) keeps it from dispatching
+      until an operator enables an op; ``profiled-but-unreviewed`` is
+      that not-yet-cleared sub-state surfaced on the read surfaces.
+
+    Resolver misses / ties (:exc:`NoMatchingConnector`,
+    :exc:`AmbiguousConnectorResolution`) read as ``("ingested-shim",
+    False)``: no dispatchable class backs the row, which is operationally
+    the same dead end as a bare shim. Fail-soft — a read-surface
+    projection must never raise.
+
+    *enabled_operation_count* is the connector's enabled-op rollup the
+    listing already aggregates (the ``is_enabled`` dispatchable subset,
+    #1636); it stands in for "has the review gate been cleared" without a
+    second DB round-trip.
+    """
+    from meho_backplane.connectors.resolver import (
+        AmbiguousConnectorResolution,
+        NoMatchingConnector,
+        resolve_connector,
+    )
+
+    try:
+        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+        _log.debug(
+            "authoring_kind_probe_unresolved",
+            product=product,
+            version=version,
+            reason=type(exc).__name__,
+        )
+        return "ingested-shim", False
+
+    tier: ShimKind = shim_kind(cls)
+    if tier == "none":
+        return "typed", True
+    if tier == "profiled":
+        if enabled_operation_count > 0:
+            return "profiled", True
+        return "profiled-but-unreviewed", False
+    return "ingested-shim", False

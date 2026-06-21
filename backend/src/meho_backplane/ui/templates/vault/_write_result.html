@@ -1,0 +1,169 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault write-result fragment (Initiative #1942 G10.18, Task #1957 T2).
+
+  Swapped into ``#vault-write-result-region`` (inside a put / delete / move
+  confirm modal) by the confirm button's ``hx-post``. Renders the dispatched
+  write op's ``OperationResult`` envelope inline. ONE fragment drives all
+  three verbs; ``verb`` selects the value-free ``secret.move`` success branch
+  vs the put / delete success branch.
+
+  Because every write op is requires_approval=True, the COMMON return is
+  ``awaiting_approval`` -- never render that as a silent success; surface the
+  approval handoff + a deep-link to /ui/approvals/{id} (#1778).
+
+  Render branches:
+    * ``error_message`` set (no ``envelope``) -> an inline form error (HTTP
+      400): malformed input (bad data JSON, empty/non-integer versions,
+      missing from/to). The op was never dispatched.
+    * ``error_kind`` set (no ``envelope``) -> a typed no-connector hint
+      (no_vault_connector / no_secret_broker_connector).
+    * ``status == "awaiting_approval"`` -> the policy gate parked the op and
+      created a durable ApprovalRequest. Surface extras.approval_request_id
+      with a DEEP-LINK into /ui/approvals/{id}.
+    * ``status == "ok"`` -> the write executed (uncommon for these governed
+      ops). ``move`` renders ONLY {status, value_sha256, length} (value-free);
+      put / delete render a plain success.
+    * ``status in ("error", "denied")`` -> the structured fault, via the
+      shared ``vault_envelope_error`` macro (which renders the tenant-scope
+      "outside your tenant scope" special case + the generic error_code).
+
+  REDACTION: no secret value is rendered here. ``vault.kv.put``'s success
+  carries no value; ``secret.move``'s response is value-free by contract;
+  errors never echo secret material.
+
+  Context:
+    verb          -- "put" | "delete" | "move"
+    envelope      -- dict | None: the call_operation envelope, or None on a
+                     form/no-connector error
+    error_message -- str | None: the inline form-error message (400 branch)
+    error_kind    -- str | None: a typed no-connector kind (400 branch)
+-#}
+{% from "_icons.html" import icon %}
+{% from "vault/_envelope_error.html" import vault_envelope_error %}
+
+{% if error_kind == "no_vault_connector" %}
+  <div role="alert" class="alert alert-warning" data-vault-write-status="no_vault_connector">
+    <div>
+      <h4 class="text-sm font-semibold">No Vault connector available</h4>
+      <p class="text-xs">No ingested <code>vault</code> connector is visible to your tenant.</p>
+    </div>
+  </div>
+{% elif error_kind == "no_secret_broker_connector" %}
+  <div role="alert" class="alert alert-warning" data-vault-write-status="no_secret_broker_connector">
+    <div>
+      <h4 class="text-sm font-semibold">No secret-broker connector available</h4>
+      <p class="text-xs">No ingested <code>secret-broker</code> connector is visible to your tenant.</p>
+    </div>
+  </div>
+{% elif error_message %}
+  {#- Inline form error (400): malformed input. The op was never dispatched. -#}
+  <div role="alert" class="alert alert-error" data-vault-write-status="form_error">
+    <div>
+      <h4 class="text-sm font-semibold">Cannot {{ verb }}</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">{{ error_message }}</p>
+    </div>
+  </div>
+{% elif envelope.status == "awaiting_approval" %}
+  {#- The op requires approval: the policy gate parked it and created a durable
+      ApprovalRequest. NEVER a silent success -- surface the handoff with a
+      deep-link into the approvals surface (#1778). -#}
+  {%- set extras = envelope.get("extras") or {} -%}
+  {%- set approval_id = extras.get("approval_request_id") -%}
+  <div role="alert" class="alert alert-info items-start" data-vault-write-status="awaiting_approval">
+    {{ icon("clock", class="size-5 shrink-0") }}
+    <div>
+      <h4 class="text-sm font-semibold">Awaiting approval</h4>
+      <p class="text-xs [overflow-wrap:anywhere]">
+        This {{ verb }} requires approval before it executes. A request has been
+        parked for a reviewer &mdash; it has <span class="font-semibold">not</span>
+        run yet.
+      </p>
+      {% if approval_id %}
+        <p class="mt-1 text-xs opacity-70">
+          Request id <code data-approval-request-id>{{ approval_id }}</code>
+        </p>
+        {#- Deep-link into /ui/approvals/{id}: hx-get the detail modal into the
+            shared app-shell approvals container so the reviewer can open it
+            without leaving the page. The plain href is the fallback for a
+            non-HTMX navigation / a new tab. -#}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals/{{ approval_id }}"
+          hx-get="/ui/approvals/{{ approval_id }}"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Review in approvals
+        </a>
+      {% else %}
+        <a
+          class="btn btn-primary btn-sm mt-2 gap-1"
+          href="/ui/approvals"
+          hx-get="/ui/approvals"
+          hx-target="#meho-approvals-modal-container"
+          hx-swap="innerHTML"
+          data-approval-deep-link
+        >
+          {{ icon("external-link", class="size-4") }}
+          Open approvals
+        </a>
+      {% endif %}
+    </div>
+  </div>
+{% elif envelope.status == "ok" %}
+  {%- set result = envelope.get("result") or {} -%}
+  {% if verb == "move" %}
+    {#- VALUE-FREE move confirmation: render ONLY {status, value_sha256,
+        length}, never an inline value. The backend response carries exactly
+        these three keys; the value never reaches this template. -#}
+    <div class="space-y-2" data-vault-write-status="ok" data-vault-move-result>
+      <div class="flex items-center gap-2">
+        <span class="badge badge-success badge-sm">moved</span>
+      </div>
+      <dl class="space-y-1 text-xs">
+        <div class="flex gap-2">
+          <dt class="opacity-60">Status</dt>
+          <dd class="font-mono" data-move-status>{{ result.get("status") }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="opacity-60">Value SHA-256</dt>
+          <dd class="font-mono [overflow-wrap:anywhere]" data-move-value-sha256>{{ result.get("value_sha256") }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="opacity-60">Length</dt>
+          <dd class="font-mono" data-move-length>{{ result.get("length") }}</dd>
+        </div>
+      </dl>
+      <p class="text-xs opacity-60">
+        The value was moved server-side and never returned &mdash; only its
+        SHA-256 + byte length are shown as provenance.
+      </p>
+    </div>
+  {% else %}
+    {#- put / delete executed (uncommon for these governed ops). A plain
+        success; the put response carries no secret value. -#}
+    <div class="space-y-2" data-vault-write-status="ok">
+      <div class="flex items-center gap-2">
+        <span class="badge badge-success badge-sm">executed</span>
+        {% if envelope.get("duration_ms") is not none %}
+          <span class="text-xs opacity-60">{{ "%.0f"|format(envelope.duration_ms) }} ms</span>
+        {% endif %}
+      </div>
+      <p class="text-xs opacity-70">
+        The {{ verb }} completed. {% if verb == "put" %}A new version was written.{% else %}The named versions were soft-deleted.{% endif %}
+      </p>
+    </div>
+  {% endif %}
+{% else %}
+  {#- status in ("error", "denied") -- the dispatcher's structured fault,
+      surfaced inline (HTTP 200, not 4xx) via the shared macro. The macro
+      renders the VaultTenantScopeError "outside your tenant scope" special
+      case (the default-on guard denying a write outside the tenant prefix) +
+      the generic extras.error_code branch. -#}
+  {{ vault_envelope_error(None, envelope) }}
+{% endif %}

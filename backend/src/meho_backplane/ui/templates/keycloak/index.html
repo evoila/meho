@@ -1,0 +1,275 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak console -- read-only realm browser (Initiative #1943, Task #1959).
+
+  The read-only realm-administration scaffold the two write tasks (T2 user
+  management, T3 scope/mapper management) build on. Three surfaces on one
+  page, all dispatched in-process through ``call_operation`` against the
+  PINNED ``connector_id="keycloak-admin-26.x"`` (never the bare ``keycloak``
+  slug):
+
+    * realm-config card        (``keycloak.realm.get``)
+    * client list              (``keycloak.client.list``)
+    * client-scope list        (``keycloak.client_scope.list``)
+
+  Each client row drills into ``/ui/keycloak/clients/{client_uuid}`` (keyed
+  on the internal UUID, NOT the human clientId) via ``hx-get`` into the
+  shared drawer container.
+
+  Secret handling: every field rendered here is a NAMED projection from the
+  read op's already-redacted ``result`` -- the raw ``OperationResult``
+  envelope is NEVER dumped into the page. Client secrets are scrubbed
+  upstream by the connector (the ``REDACTED`` sentinel).
+
+  Context keys: ``connector_id``, ``targets``, ``active_target``, ``realm``,
+  ``clients``, ``client_scopes``, ``error``, ``is_tenant_admin`` (see
+  ``keycloak/routes.py``).
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Keycloak &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5" data-surface="keycloak">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Keycloak</h1>
+      <p class="text-sm opacity-70">
+        Read-only realm browser: realm configuration, clients, and client
+        scopes for the managed realm. Client secrets are redacted.
+      </p>
+    </div>
+  </header>
+
+  {#- Target picker. The connector is fixed (keycloak-admin-26.x); the
+      operator only picks WHICH Keycloak deployment to read. Changing the
+      target re-fetches this whole page with the new ``?target=``. The
+      options are tenant-scoped server-side -- a cross-tenant target never
+      appears here. -#}
+  <form
+    class="grid gap-3 sm:grid-cols-[minmax(0,22rem)_1fr]"
+    hx-get="/ui/keycloak"
+    hx-target="body"
+    hx-push-url="true"
+  >
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Keycloak target</span>
+      <select
+        name="target"
+        class="select select-bordered select-sm w-full font-mono"
+        aria-label="Keycloak target"
+        hx-get="/ui/keycloak"
+        hx-target="body"
+        hx-trigger="change"
+        hx-push-url="true"
+      >
+        <option value="">Select a target…</option>
+        {% for t in targets %}
+          <option
+            value="{{ t.name }}"
+            {% if t.name == active_target %}selected{% endif %}
+          >{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+
+  {% if not targets %}
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+      No Keycloak targets registered for this tenant. Register a
+      <code>keycloak</code> target to browse its realm.
+    </div>
+  {% elif not active_target %}
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+      Select a Keycloak target to browse its realm configuration, clients,
+      and client scopes.
+    </div>
+  {% else %}
+    {% if error %}
+      <div role="alert" class="alert alert-warning" data-keycloak-error>
+        <div>
+          <h3 class="text-sm font-semibold">Could not read the realm</h3>
+          <p class="text-xs">
+            Dispatch against <code>{{ active_target }}</code> failed:
+            <code>{{ error }}</code>
+          </p>
+        </div>
+      </div>
+    {% endif %}
+
+    {#- ---- Realm config card -------------------------------------------- -#}
+    <section aria-label="Realm configuration" data-keycloak-realm>
+      <h2 class="mb-2 text-sm font-semibold opacity-80">Realm configuration</h2>
+      {% if realm %}
+        <div class="rounded-box border border-base-300 bg-base-100 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-lg font-semibold">{{ realm.get("realm") | default("—", true) }}</span>
+            {% if realm.get("enabled") %}
+              <span class="badge badge-success badge-sm">enabled</span>
+            {% else %}
+              <span class="badge badge-ghost badge-sm">disabled</span>
+            {% endif %}
+          </div>
+          {% if realm.get("displayName") %}
+            <p class="mt-1 text-sm opacity-70">{{ realm.get("displayName") }}</p>
+          {% endif %}
+          <dl class="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+            <div>
+              <dt class="text-xs opacity-60">Login with email</dt>
+              <dd>{{ realm.get("loginWithEmailAllowed") | default("—", true) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs opacity-60">Registration</dt>
+              <dd>{{ realm.get("registrationAllowed") | default("—", true) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs opacity-60">Access token lifespan (s)</dt>
+              <dd>{{ realm.get("accessTokenLifespan") | default("—", true) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs opacity-60">SSO session idle (s)</dt>
+              <dd>{{ realm.get("ssoSessionIdleTimeout") | default("—", true) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs opacity-60">SSO session max (s)</dt>
+              <dd>{{ realm.get("ssoSessionMaxLifespan") | default("—", true) }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs opacity-60">Login theme</dt>
+              <dd>{{ realm.get("loginTheme") | default("—", true) }}</dd>
+            </div>
+          </dl>
+        </div>
+      {% else %}
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+          No realm configuration returned.
+        </div>
+      {% endif %}
+    </section>
+
+    {#- ---- Client list -------------------------------------------------- -#}
+    <section aria-label="Clients" data-keycloak-clients>
+      <h2 class="mb-2 text-sm font-semibold opacity-80">
+        Clients <span class="text-xs opacity-60">({{ clients | length }})</span>
+      </h2>
+      {% if clients %}
+        <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Client ID</th>
+                <th>Enabled</th>
+                <th>Public</th>
+                <th>Protocol</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for client in clients %}
+                <tr data-client-row data-client-uuid="{{ client.get('id') | default('', true) }}">
+                  <td class="font-mono">{{ client.get("clientId") | default("—", true) }}</td>
+                  <td>
+                    {% if client.get("enabled") %}
+                      <span class="badge badge-success badge-xs">yes</span>
+                    {% else %}
+                      <span class="badge badge-ghost badge-xs">no</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if client.get("publicClient") %}
+                      <span class="badge badge-ghost badge-xs">public</span>
+                    {% else %}
+                      <span class="badge badge-outline badge-xs">confidential</span>
+                    {% endif %}
+                  </td>
+                  <td class="text-xs opacity-70">{{ client.get("protocol") | default("openid-connect", true) }}</td>
+                  <td class="text-right">
+                    {% if client.get("id") %}
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs"
+                        hx-get="/ui/keycloak/clients/{{ client.get('id') }}?target={{ active_target | urlencode }}"
+                        hx-target="#keycloak-drawer-container"
+                        hx-swap="innerHTML"
+                        data-client-detail-link
+                      >
+                        {{ icon("arrow-right", class="size-3.5") }}
+                        Detail
+                      </button>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+          No clients in this realm.
+        </div>
+      {% endif %}
+    </section>
+
+    {#- ---- Client-scope list -------------------------------------------- -#}
+    <section aria-label="Client scopes" data-keycloak-scopes>
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold opacity-80">
+          Client scopes <span class="text-xs opacity-60">({{ client_scopes | length }})</span>
+        </h2>
+        {#- Create affordance: tenant_admin only (soft-hide). A plain operator
+            never sees the button; the write POST + the modal-render GET still
+            gate server-side with a 403, so hiding it is a UX hint, not the
+            authority. -#}
+        {% if is_tenant_admin %}
+          <button
+            type="button"
+            class="btn btn-warning btn-xs gap-1"
+            hx-get="/ui/keycloak/client-scopes/create?target={{ active_target | urlencode }}"
+            hx-target="#keycloak-drawer-container"
+            hx-swap="innerHTML"
+            data-action="open-scope-create"
+          >
+            {{ icon("key-round", class="size-3.5") }}
+            New client scope
+          </button>
+        {% endif %}
+      </div>
+      {% if client_scopes %}
+        <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Protocol</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for scope in client_scopes %}
+                <tr data-scope-row>
+                  <td class="font-mono">{{ scope.get("name") | default("—", true) }}</td>
+                  <td class="text-xs opacity-70">{{ scope.get("protocol") | default("openid-connect", true) }}</td>
+                  <td class="text-xs opacity-70">{{ scope.get("description") | default("", true) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+          No client scopes in this realm.
+        </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {#- Stable drawer container -- lives OUTSIDE the surfaces above so a
+      client-detail swap never wipes the lists. Each client row's Detail
+      button ``hx-get``s the detail fragment into this container. -#}
+  <div id="keycloak-drawer-container"></div>
+</section>
+{% endblock %}

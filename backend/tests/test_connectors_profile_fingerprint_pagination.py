@@ -213,6 +213,7 @@ def test_profile_carries_new_specs() -> None:
         "fingerprint",
         "probe",
         "pagination",
+        "expiry_statuses",
     }
 
 

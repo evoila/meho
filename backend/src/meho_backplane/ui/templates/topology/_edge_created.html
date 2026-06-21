@@ -1,0 +1,36 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Created curated-edge fragment (Initiative #1941 Task #1953). Swapped into
+  ``#topology-edge-modal`` (replacing the annotate form) after a successful
+  ``POST /ui/topology/edges``. The POST response also carries
+  ``HX-Trigger: meho:topology-edge-changed`` so an open graph view re-pulls
+  and the new edge shows without a hard reload.
+-#}
+<div
+  id="topology-edge-modal"
+  class="card bg-base-100 border-success border shadow-sm"
+  data-test="edge-created"
+  aria-label="Curated edge created"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-center gap-2">
+      <span class="badge badge-success badge-sm">created</span>
+      <h2 class="card-title text-base">Curated edge created</h2>
+    </header>
+    <p class="flex items-center gap-2 text-sm">
+      <span class="font-mono">{{ edge.from_endpoint.name }}</span>
+      <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
+      <span class="opacity-60">&rarr;</span>
+      <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
+      <span class="opacity-60">&rarr;</span>
+      <span class="font-mono">{{ edge.to_endpoint.name }}</span>
+      <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
+      <span class="text-xs opacity-50">({{ edge.source }})</span>
+    </p>
+    <p class="text-xs opacity-60">
+      Edge id <span class="font-mono">{{ edge.id }}</span>.
+    </p>
+  </div>
+</div>

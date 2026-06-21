@@ -1,0 +1,158 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV delete confirm modal (Initiative #1942 G10.18, Task #1957 T2).
+
+  Swapped into ``#vault-write-modal-container`` by the browser's "Delete
+  versions" affordance (``hx-get /ui/vault/delete/confirm``).
+  ``vault.kv.delete`` is safety_level=dangerous + requires_approval=True:
+  it soft-deletes the named KV-v2 versions (reversible via Vault's undelete
+  path, but reads stop returning them). The confirm gate must be UNMISSABLE.
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  confirm button's OWN ``hx-headers``; the confirm GET minted the token +
+  re-set the matching ``meho_csrf`` cookie. The confirm button disables
+  itself during dispatch so a destructive op cannot be double-fired.
+
+  The result swaps into ``#vault-write-result-region`` (``_write_result.html``).
+  Delete is OPERATOR-tier -- no tenant_admin step; the policy gate (NOT RBAC)
+  escalates the requires_approval op to awaiting_approval on dispatch.
+
+  Context:
+    verb / op_id / safety_level (="dangerous") / connector_id / default_mount /
+    default_path / target / csrf_token (as for the put confirm).
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="vault-write-modal" class="modal" aria-label="Delete secret versions">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="vault-delete-title">
+          Delete secret versions
+        </h3>
+        <p class="mt-0.5 text-sm opacity-70">{{ op_id }}</p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {% if not connector_id %}
+      <div role="alert" class="alert alert-warning mt-4" data-vault-write-error="no_vault_connector">
+        <div>
+          <h4 class="text-sm font-semibold">No Vault connector available</h4>
+          <p class="text-xs">
+            No ingested <code>vault</code> connector is visible to your tenant.
+          </p>
+        </div>
+      </div>
+    {% else %}
+      {#- UNMISSABLE dangerous gate. Soft-delete is reversible but reads stop
+          returning the named versions; it routes through the approval gate. -#}
+      <div
+        role="alert"
+        class="alert alert-error mt-4 items-start"
+        data-vault-write-gate="confirm"
+        data-safety-level="{{ safety_level }}"
+      >
+        {{ icon("shield-check", class="size-5 shrink-0") }}
+        <div>
+          <h4 class="text-sm font-semibold">Destructive operation</h4>
+          <p class="text-xs [overflow-wrap:anywhere]">
+            This soft-deletes the named versions: reads stop returning them.
+            It is <span class="font-semibold">reversible</span> via Vault's
+            undelete path (the underlying data is retained until destroyed),
+            and it <span class="font-semibold">requires approval</span>:
+            confirming parks a request for a reviewer rather than executing
+            immediately.
+          </p>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-error badge-sm" data-vault-write-safety>safety: {{ safety_level }}</span>
+            <span class="badge badge-outline badge-sm" data-vault-write-requires-approval>requires approval</span>
+          </div>
+        </div>
+      </div>
+
+      <form
+        class="mt-4 space-y-3"
+        hx-post="/ui/vault/delete"
+        hx-target="#vault-write-result-region"
+        hx-swap="innerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="find button[data-action='vault-delete']"
+        data-vault-write-form="delete"
+      >
+        <input type="hidden" name="target" value="{{ target }}" />
+
+        <div class="grid gap-3 sm:grid-cols-[minmax(0,12rem)_1fr]">
+          <label class="form-control">
+            <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+            <input
+              type="text"
+              name="mount"
+              value="{{ default_mount }}"
+              maxlength="256"
+              class="input input-bordered input-sm w-full font-mono"
+              aria-label="KV mount"
+              autocomplete="off"
+            />
+          </label>
+          <label class="form-control">
+            <span class="label-text mb-1 text-xs opacity-70">Path</span>
+            <input
+              type="text"
+              name="path"
+              value="{{ default_path }}"
+              maxlength="1024"
+              placeholder="tenants/&lt;tenant&gt;/&lt;target&gt;"
+              class="input input-bordered input-sm w-full font-mono"
+              aria-label="KV path"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+
+        <label class="form-control">
+          <span class="label-text mb-1 text-xs opacity-70">
+            Versions <span class="opacity-50">(comma-separated version numbers to soft-delete, e.g. 3,4,5)</span>
+          </span>
+          <input
+            type="text"
+            name="versions"
+            maxlength="1024"
+            class="input input-bordered input-sm w-full font-mono"
+            placeholder="3,4,5"
+            aria-label="Versions to soft-delete"
+            autocomplete="off"
+          />
+        </label>
+
+        <div class="flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            onclick="document.getElementById('vault-write-modal').close()"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            data-action="vault-delete"
+            class="btn btn-error btn-sm gap-1"
+          >
+            {{ icon("ban", class="size-4") }}
+            Delete (request approval)
+          </button>
+        </div>
+      </form>
+
+      <div id="vault-write-result-region" class="mt-4"></div>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

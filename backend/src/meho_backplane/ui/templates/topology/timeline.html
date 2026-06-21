@@ -1,0 +1,76 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the topology tenant-wide change feed (timeline)
+  (Initiative #1941 Task #1955). Extends ``base.html`` so the chrome matches
+  the rest of the console.
+
+  Layout (top-down):
+    * Filter bar -- optional ``target`` name filter, plain GET form (a
+      browser nav so the URL captures the active filter for copy/paste).
+    * Change-feed list -- one row per ``graph_node_history`` /
+      ``graph_edge_history`` change, newest first. The body is the
+      ``_timeline_rows.html`` fragment, also served standalone on the HTMX
+      "load more" swap.
+    * "Load more" control -- an ``hx-get`` carrying the keyset ``cursor``
+      that appends the next page (``hx-swap="beforeend"``) into the same
+      list, the infinite-scroll pattern (https://htmx.org/examples/infinite-scroll/).
+      Omitted when there is no next page.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; Timeline &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Topology timeline</h1>
+      <p class="text-sm opacity-70">
+        Tenant-wide chronological feed of graph changes (newest first).
+      </p>
+    </div>
+    <a class="btn btn-sm join-item" href="/ui/topology" aria-label="Back to topology inventory">
+      &larr; Inventory
+    </a>
+  </header>
+
+  {# ---------- Target filter ----------
+     Plain GET form: a browser navigation so the resulting URL captures the
+     active filter. An unresolved target re-renders this page with a
+     near-miss banner (the ``timeline_target_not_found.html`` panel). -#}
+  <form method="get" action="/ui/topology/timeline" class="flex flex-wrap items-end gap-2" role="search">
+    <label class="form-control">
+      <span class="label-text text-xs opacity-70">Filter by target (optional)</span>
+      <input
+        type="search"
+        name="target"
+        value="{{ target_filter }}"
+        placeholder="target name or alias&hellip;"
+        class="input input-bordered input-sm font-mono"
+        aria-label="Filter the timeline by target name"
+        autocomplete="off"
+      />
+    </label>
+    <button type="submit" class="btn btn-primary btn-sm" data-test="timeline-filter-submit">
+      Apply
+    </button>
+    {% if target_filter %}
+      <a class="btn btn-ghost btn-sm" href="/ui/topology/timeline" aria-label="Clear the target filter">
+        Clear
+      </a>
+    {% endif %}
+  </form>
+
+  {# ---------- Change feed ----------
+     The list container; ``_timeline_rows.html`` renders the rows + the
+     load-more control. On "load more" the fragment appends a fresh batch of
+     <li> rows (beforeend) plus its own replacement load-more control. -#}
+  <section aria-label="Change feed" data-test="timeline-feed">
+    <ul id="topology-timeline-list" class="space-y-1 text-sm">
+      {% include "topology/_timeline_rows.html" %}
+    </ul>
+  </section>
+</section>
+{% endblock %}

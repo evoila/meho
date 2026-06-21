@@ -1,0 +1,156 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak create-client-scope confirm modal (Initiative #1943, Task #1961).
+
+  Swapped into ``#keycloak-drawer-container`` by the realm browser's
+  "New client scope" button (tenant_admin only). Confirming dispatches the
+  ``keycloak.client_scope.create`` op -- a ``caution`` /
+  ``requires_approval=True`` WRITE -- so the safety gate is UNMISSABLE and the
+  POST is reachable only by a tenant_admin (the modal-render GET 403s a plain
+  operator too).
+
+  The confirm POST carries the OWASP signed double-submit CSRF token on the
+  FORM's own ``hx-headers`` (HTMX does not inherit ``hx-headers`` to
+  children -- the element issuing the request must carry it). The modal-render
+  GET minted the token + re-set the matching ``meho_csrf`` cookie. The confirm
+  button disables itself during dispatch (``hx-disabled-elt``) so a
+  high-impact write cannot be double-fired.
+
+  The result swaps into ``#keycloak-scope-create-result`` inside this modal
+  (``keycloak/_write_result.html``); the modal stays open so the operator
+  reads the awaiting_approval deep-link in place.
+
+  Context:
+    connector_id -- str: the pinned dispatchable id (for display only; the
+                    POST handler pins it server-side)
+    target       -- str: the active Keycloak target slug, forwarded on the POST
+    csrf_token   -- str: minted double-submit token for the create POST
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="keycloak-write-modal" class="modal" aria-label="Create client scope">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="font-mono text-lg font-semibold">New client scope</h3>
+        <p class="mt-0.5 text-sm opacity-70">
+          Create a client scope in the managed realm.
+        </p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+          {{ icon("x", class="size-4") }}
+        </button>
+      </form>
+    </div>
+
+    {#- UNMISSABLE safety gate: a caution / requires-approval WRITE. -#}
+    <div
+      role="alert"
+      class="alert alert-warning mt-4 items-start"
+      data-write-gate="confirm"
+      data-safety-level="caution"
+    >
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">State-changing operation</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          This creates a client scope in the realm. It
+          <span class="font-semibold">requires approval</span>: confirming
+          parks a request for a reviewer rather than executing immediately.
+        </p>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="badge badge-warning badge-sm" data-write-safety>safety: caution</span>
+          <span class="badge badge-outline badge-sm" data-write-requires-approval>requires approval</span>
+        </div>
+      </div>
+    </div>
+
+    <form
+      class="mt-4 space-y-3"
+      hx-post="/ui/keycloak/client-scopes/create"
+      hx-target="#keycloak-scope-create-result"
+      hx-swap="innerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+      hx-disabled-elt="find button[data-action='create']"
+    >
+      <input type="hidden" name="target" value="{{ target }}" />
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Scope name</span>
+        <input
+          type="text"
+          name="name"
+          required
+          maxlength="512"
+          class="input input-bordered input-sm w-full font-mono"
+          placeholder="e.g. meho-tenant"
+          aria-label="Client scope name"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Protocol</span>
+        <select
+          name="protocol"
+          class="select select-bordered select-sm w-full font-mono"
+          aria-label="Protocol"
+        >
+          <option value="openid-connect" selected>openid-connect</option>
+          <option value="saml">saml</option>
+        </select>
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Description <span class="opacity-50">(optional)</span></span>
+        <input
+          type="text"
+          name="description"
+          maxlength="512"
+          class="input input-bordered input-sm w-full"
+          placeholder="What this scope is for"
+          aria-label="Description"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">
+          Advanced <span class="opacity-50">(optional ClientScopeRepresentation JSON: attributes, embedded protocolMappers)</span>
+        </span>
+        <textarea
+          name="representation"
+          rows="4"
+          maxlength="65536"
+          class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+          placeholder='{"attributes": {"include.in.token.scope": "true"}}'
+          aria-label="Advanced ClientScopeRepresentation JSON"
+        ></textarea>
+      </label>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          onclick="document.getElementById('keycloak-write-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" data-action="create" class="btn btn-warning btn-sm gap-1">
+          {{ icon("key-round", class="size-4") }}
+          Create (request approval)
+        </button>
+      </div>
+    </form>
+
+    {#- Swap target for the rendered write-result fragment. Empty until the
+        operator confirms; the modal stays open so the awaiting_approval
+        deep-link reads in place. -#}
+    <div id="keycloak-scope-create-result" class="mt-4"></div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

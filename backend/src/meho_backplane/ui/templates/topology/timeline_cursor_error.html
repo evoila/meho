@@ -1,0 +1,31 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  400 banner for a tampered / invalid timeline page cursor (Initiative #1941
+  Task #1955). The opaque keyset ``cursor`` is a forward-only token from a
+  prior response; a hand-crafted or stale one renders this "reload the feed"
+  banner rather than a 500. Mirrors the REST 400 ``invalid_cursor`` surface.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; Timeline &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" data-test="timeline-cursor-error">
+  <header>
+    <h1 class="text-2xl font-semibold">Topology timeline</h1>
+  </header>
+
+  <div role="alert" class="alert alert-error text-sm" data-error-kind="invalid_cursor">
+    <div>
+      <p>The page cursor is invalid; reload the feed to start from the top.</p>
+      <p class="text-xs opacity-70 font-mono">{{ cursor_error }}</p>
+    </div>
+  </div>
+
+  <a class="btn btn-sm btn-primary" href="/ui/topology/timeline" aria-label="Reload the timeline feed">
+    Reload feed
+  </a>
+</section>
+{% endblock %}

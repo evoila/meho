@@ -1,0 +1,71 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault auth-methods glance partial (Initiative #1942 G10.18, Task #1958 T3).
+
+  Swapped into ``#vault-auth-region`` by the status page's auto-load + the
+  "Refresh" button (``hx-get /ui/vault/auth``). Renders the enabled auth
+  methods from a ``vault.sys.auth.list`` envelope -- the auth-mount paths
+  ('token/', 'userpass/', 'approle/', ...) + their method types. Method
+  NAMES and config metadata ONLY -- this endpoint never returns a
+  credential.
+
+  Render branches:
+    * a non-ok envelope (or ``error="no_vault_connector"``) -> the shared
+      ``vault_envelope_error`` macro (tenant-scope / denied / error).
+    * ``status="ok"`` with ``handle`` -> the set-shaped spill: render the
+      handle metadata, NEVER the full map (the JSONFlux contract).
+    * ``status="ok"`` inline -> the auth-method rows (path + type badge).
+
+  Context: ``error`` (str|None), ``envelope`` (dict|None).
+-#}
+{% from "_icons.html" import icon %}
+{% from "vault/_envelope_error.html" import vault_envelope_error %}
+
+{% if error or not envelope or envelope.status != "ok" %}
+  {{ vault_envelope_error(error, envelope) }}
+{% else %}
+  {%- set handle = envelope.get("handle") -%}
+  {% if handle %}
+    {#- Set-shaped spill: the auth-method map crossed the JSONFlux
+        threshold and was reduced to a sample + handle. Render the handle
+        metadata, NOT the full map. -#}
+    <div role="status" class="alert alert-info items-start" data-vault-auth="handle">
+      {{ icon("package", class="size-5 shrink-0") }}
+      <div class="min-w-0">
+        <h4 class="text-sm font-semibold">Large auth-method set stored out-of-band</h4>
+        <p class="text-xs">The auth-method list spilled to the read-back store; the summary is below.</p>
+        <dl class="mt-2 space-y-1 text-xs">
+          <div class="flex gap-2"><dt class="opacity-60">Handle id</dt><dd class="font-mono [overflow-wrap:anywhere]" data-handle-id>{{ handle.handle_id }}</dd></div>
+          {% if handle.total_rows is not none %}
+            <div class="flex gap-2"><dt class="opacity-60">Methods</dt><dd data-handle-total-rows>{{ handle.total_rows }}</dd></div>
+          {% endif %}
+          {% if handle.ttl_seconds is not none %}
+            <div class="flex gap-2"><dt class="opacity-60">TTL</dt><dd data-handle-ttl>{{ handle.ttl_seconds }}s</dd></div>
+          {% endif %}
+        </dl>
+      </div>
+    </div>
+  {% else %}
+    {%- set methods = (envelope.get("result") or {}).get("auth_methods") or {} -%}
+    {% if methods %}
+      <ul class="divide-y divide-base-300 rounded-box border border-base-300 bg-base-100" role="list" data-vault-auth="inline">
+        {% for mount_path, descriptor in methods | dictsort %}
+          <li class="flex items-center gap-2 px-3 py-2" data-vault-auth-method="{{ mount_path }}">
+            {{ icon("key-round", class="size-3.5 shrink-0 opacity-50") }}
+            <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ mount_path }}</span>
+            {%- set a_type = descriptor.get("type") if descriptor is mapping else none -%}
+            {% if a_type %}
+              <span class="badge badge-ghost badge-sm font-mono" data-vault-auth-type>{{ a_type }}</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="rounded-box border border-base-300 bg-base-100 px-3 py-6 text-center text-sm opacity-60" data-vault-auth="empty">
+        No auth methods reported.
+      </div>
+    {% endif %}
+  {% endif %}
+{% endif %}

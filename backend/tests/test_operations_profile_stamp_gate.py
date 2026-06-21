@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
 from meho_backplane.db.engine import get_sessionmaker
@@ -391,6 +393,81 @@ def test_resolved_profiled_connector_class_probe() -> None:
         product="bare", version="3.0", impl_id="bare-rest", base_url=None
     )
     assert resolved_profiled_connector_class(product="bare", version="3.0") is None
+
+
+def test_resolve_authoring_kind_profiled_gated_vs_cleared() -> None:
+    """A profiled line reads ``profiled-but-unreviewed`` until an op is enabled (#1979)."""
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+
+    register_connector_v2(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, cls=_AcmeProfiled)
+
+    # Gate still closed: no enabled ops → not dispatchable.
+    kind, dispatchable = resolve_authoring_kind(
+        product=_PRODUCT, version=_VERSION, enabled_operation_count=0
+    )
+    assert (kind, dispatchable) == ("profiled-but-unreviewed", False)
+
+    # Gate cleared by an operator enable → dispatchable.
+    kind, dispatchable = resolve_authoring_kind(
+        product=_PRODUCT, version=_VERSION, enabled_operation_count=1
+    )
+    assert (kind, dispatchable) == ("profiled", True)
+
+
+def test_resolve_authoring_kind_bare_shim_is_non_dispatchable() -> None:
+    """A bare auto-shim line reads ``ingested-shim`` / not dispatchable regardless of enables."""
+    from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+
+    ensure_connector_class_registered(
+        product="bare", version="3.0", impl_id="bare-rest", base_url=None
+    )
+    # Even a non-zero enabled count cannot make a bare shim dispatchable —
+    # its auth_headers / execute raise NotImplementedError.
+    kind, dispatchable = resolve_authoring_kind(
+        product="bare", version="3.0", enabled_operation_count=5
+    )
+    assert (kind, dispatchable) == ("ingested-shim", False)
+
+
+def test_resolve_authoring_kind_handcoded_is_typed() -> None:
+    """A hand-coded connector line reads ``typed`` / dispatchable."""
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+
+    class _AcmeHandRolled(Connector):
+        product = "handcoded"
+        version = "2.0"
+        impl_id = "handcoded-rest"
+        supported_version_range = ">=2.0,<3.0"
+        priority = 5
+
+        async def fingerprint(self, target: Any) -> Any:
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> Any:
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="handcoded", version="2.0", impl_id="handcoded-rest", cls=_AcmeHandRolled
+    )
+    kind, dispatchable = resolve_authoring_kind(
+        product="handcoded", version="2.0", enabled_operation_count=0
+    )
+    assert (kind, dispatchable) == ("typed", True)
+
+
+def test_resolve_authoring_kind_resolver_miss_reads_as_shim() -> None:
+    """No connector class resolves for the line → the dead-end ``ingested-shim`` reading."""
+    from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+
+    kind, dispatchable = resolve_authoring_kind(
+        product="ghost", version="9.9", enabled_operation_count=3
+    )
+    assert (kind, dispatchable) == ("ingested-shim", False)
 
 
 def test_enable_time_warnings_empty_for_no_connector() -> None:

@@ -17,15 +17,20 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// listEntry mirrors all 13 fields of the backend ConnectorListItem
+// listEntry mirrors all 15 fields of the backend ConnectorListItem
 // Pydantic model (operations/ingest/api_schemas.py): one row per
 // listed connector with parsed coordinates + tenant scope +
 // per-status group counts + the operation rollup — `operation_count`
 // total vs `enabled_operation_count` dispatchable subset (#1636) —
 // plus the dispatchability `state` ("ingested" = DB-backed, resolves
 // through the dispatcher; "registered" = v2-registry entry without
-// descriptor rows yet, #773) and the `next_step` remediation hint
-// shipped on registered rows (#1133). The full per-op detail comes
+// descriptor rows yet, #773), the `next_step` remediation hint
+// shipped on registered rows (#1133), and the authoring-mode `kind`
+// (typed / ingested-shim / profiled / profiled-but-unreviewed) +
+// `dispatchable` boolean (#1979) projected from the resolver's
+// connector-class tier crossed with the review-gate state — the pair
+// that distinguishes a working profiled connector from a dead bare
+// shim, which neither `state` nor the counts could express. The full per-op detail comes
 // from `meho connector review <id>`. Keep the field set complete:
 // the `--json` path re-marshals this struct (not the raw response
 // body), so any ConnectorListItem field missing here silently
@@ -71,6 +76,8 @@ type listEntry struct {
 	EnabledOperationCount int       `json:"enabled_operation_count"`
 	State                 string    `json:"state"`
 	NextStep              *nextStep `json:"next_step"`
+	Kind                  string    `json:"kind"`
+	Dispatchable          bool      `json:"dispatchable"`
 }
 
 // nextStep mirrors the backend NextStep Pydantic model (same module):
@@ -239,22 +246,41 @@ func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
 		return
 	}
 	fmt.Fprintf(w, "%d connector(s) with status=%s\n", len(r.Connectors), status)
-	fmt.Fprintf(w, "%-32s %-10s %-10s %5s %5s\n",
-		"connector_id", "status", "tenant", "grps", "ops",
+	fmt.Fprintf(w, "%-32s %-10s %-23s %-10s %5s %5s\n",
+		"connector_id", "status", "kind", "tenant", "grps", "ops",
 	)
 	for _, c := range r.Connectors {
 		tenant := "(built-in)"
 		if c.TenantID != nil && *c.TenantID != "" {
 			tenant = *c.TenantID
 		}
-		fmt.Fprintf(w, "%-32s %-10s %-10s %5d %5d\n",
+		fmt.Fprintf(w, "%-32s %-10s %-23s %-10s %5d %5d\n",
 			truncate(c.ConnectorID, 32),
 			deriveRollupLabel(c.StagedGroupCount, c.EnabledGroupCount, c.DisabledGroupCount),
+			kindCell(c.Kind, c.Dispatchable),
 			truncate(tenant, 10),
 			c.GroupCount,
 			c.OperationCount,
 		)
 	}
+}
+
+// kindCell renders the authoring-mode `kind` plus a dispatchability
+// marker for the human table (#1979). A trailing "*" flags a
+// non-dispatchable connector — a bare ingested-shim that cannot
+// authenticate / execute, or a profiled connector whose review gate
+// (#1971) has not been cleared — so an operator scanning the list
+// can tell a working connector from a dead end at a glance. The
+// `--json` path carries the raw `kind` / `dispatchable` fields
+// untouched for machine consumers.
+func kindCell(kind string, dispatchable bool) string {
+	if kind == "" {
+		kind = "(unknown)"
+	}
+	if !dispatchable {
+		return kind + "*"
+	}
+	return kind
 }
 
 // deriveRollupLabel computes a connector-wide status rollup from the

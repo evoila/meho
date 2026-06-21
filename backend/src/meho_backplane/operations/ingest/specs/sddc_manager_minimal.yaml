@@ -1,0 +1,337 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal, self-contained OpenAPI 3.0 description of the read-only subset
+# of the VMware Cloud Foundation SDDC Manager API that MEHO ingests for
+# the `sddc/9.0` catalog row (#1964 T2 #1976).
+#
+# WHY THIS FILE EXISTS. The Broadcom Developer Portal that hosts the full
+# SDDC Manager API spec serves an HTML landing page, not raw OpenAPI, so
+# catalog-driven ingest (`meho connector ingest --catalog sddc/9.0`) used
+# to 422 `catalog_entry_upstream_not_spec` and force the operator to fetch
+# the spec off a live appliance and upload it. This MEHO-authored minimal
+# spec ships as package data (`spec_resource`) so the catalog path works
+# without that upload. The full vendor spec stays the `upstream` provenance
+# pointer (see the catalog row's `notes`) for a full-surface re-ingest.
+#
+# SCOPE. Only the read (GET) operations MEHO surfaces today, mirroring the
+# nine curated ops in `connectors/sddc_manager/core_ops.py`. Paths, params
+# and the `elements[]` pagination envelope copy the vendor's verbatim names
+# because the dispatcher must address the real appliance with them; the
+# descriptions are vendor-neutral, MEHO-authored prose.
+#
+# CONSTRAINTS. OpenAPI 3.0 (the parser rejects Swagger 2.0); self-contained
+# with only local `$ref`s (the parser rejects cross-document `$ref`); every
+# operation declares an `operationId` so the ingest path emits a stable
+# op_id. Validated at boot by `validate_shipped_artifacts` with the same
+# `parse_openapi` the live ingest uses.
+openapi: "3.0.3"
+info:
+  title: VMware Cloud Foundation SDDC Manager API (MEHO minimal read subset)
+  version: "9.0.0"
+  description: >-
+    MEHO-authored minimal read-only subset of the SDDC Manager REST API
+    served by a VMware Cloud Foundation appliance under /v1. Covers the
+    inventory and lifecycle read operations MEHO ingests; not a full vendor
+    spec. SPDX-License-Identifier: Apache-2.0.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: /v1
+    description: SDDC Manager appliance API root.
+paths:
+  /v1/releases/system:
+    get:
+      operationId: getSystemRelease
+      summary: Get the SDDC Manager software release
+      description: >-
+        Return the running SDDC Manager software release: version, release
+        date, and the bill-of-materials of bundled component versions.
+      responses:
+        "200":
+          description: The current system release.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Release"
+  /v1/sddc-managers:
+    get:
+      operationId: listSddcManagers
+      summary: List SDDC Manager appliances
+      description: >-
+        List the SDDC Manager appliances known to this instance. Typically a
+        singleton; each element carries id, fqdn and version.
+      responses:
+        "200":
+          description: Paginated SDDC Manager inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SddcManagerPage"
+  /v1/domains:
+    get:
+      operationId: listDomains
+      summary: List workload and management domains
+      description: >-
+        List the management and workload domains managed by this SDDC
+        Manager.
+      responses:
+        "200":
+          description: Paginated domain inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainPage"
+  /v1/domains/{id}:
+    get:
+      operationId: getDomain
+      summary: Get a domain by id
+      description: Return full detail for a single domain by its identifier.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The domain identifier.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Domain"
+  /v1/clusters:
+    get:
+      operationId: listClusters
+      summary: List clusters across all domains
+      description: >-
+        List the vSphere clusters across every domain managed by this SDDC
+        Manager.
+      responses:
+        "200":
+          description: Paginated cluster inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterPage"
+  /v1/hosts:
+    get:
+      operationId: listHosts
+      summary: List ESXi hosts across all domains
+      description: >-
+        List the ESXi hosts in the SDDC Manager inventory across every
+        domain, including unassigned hosts in the free pool.
+      responses:
+        "200":
+          description: Paginated host inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostPage"
+  /v1/network-pools:
+    get:
+      operationId: listNetworkPools
+      summary: List network pools
+      description: List the network pools defined for host commissioning.
+      responses:
+        "200":
+          description: Paginated network-pool inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkPoolPage"
+  /v1/bundles:
+    get:
+      operationId: listBundles
+      summary: List lifecycle-management bundles
+      description: >-
+        List the lifecycle-management (LCM) bundles available to or applied
+        by this SDDC Manager.
+      responses:
+        "200":
+          description: Paginated bundle inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BundlePage"
+  /v1/tasks:
+    get:
+      operationId: listTasks
+      summary: List workflow tasks
+      description: >-
+        List in-flight and recently completed SDDC Manager workflow tasks.
+      responses:
+        "200":
+          description: Paginated task inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskPage"
+components:
+  schemas:
+    PageMetadata:
+      type: object
+      description: Pagination metadata accompanying a paginated collection.
+      properties:
+        pageNumber:
+          type: integer
+        pageSize:
+          type: integer
+        totalElements:
+          type: integer
+        totalPages:
+          type: integer
+    Release:
+      type: object
+      description: An SDDC Manager software release.
+      properties:
+        version:
+          type: string
+        releaseDate:
+          type: string
+        description:
+          type: string
+    SddcManager:
+      type: object
+      description: An SDDC Manager appliance.
+      properties:
+        id:
+          type: string
+        fqdn:
+          type: string
+        version:
+          type: string
+    SddcManagerPage:
+      type: object
+      description: A paginated page of SDDC Manager appliances.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/SddcManager"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    Domain:
+      type: object
+      description: A management or workload domain.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+    DomainPage:
+      type: object
+      description: A paginated page of domains.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Domain"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    Cluster:
+      type: object
+      description: A vSphere cluster managed by SDDC Manager.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        primaryDatastoreType:
+          type: string
+    ClusterPage:
+      type: object
+      description: A paginated page of clusters.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Cluster"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    Host:
+      type: object
+      description: An ESXi host in the SDDC Manager inventory.
+      properties:
+        id:
+          type: string
+        fqdn:
+          type: string
+        status:
+          type: string
+    HostPage:
+      type: object
+      description: A paginated page of ESXi hosts.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Host"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    NetworkPool:
+      type: object
+      description: A network pool used for host commissioning.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    NetworkPoolPage:
+      type: object
+      description: A paginated page of network pools.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkPool"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    Bundle:
+      type: object
+      description: A lifecycle-management bundle.
+      properties:
+        id:
+          type: string
+        version:
+          type: string
+        components:
+          type: array
+          items:
+            type: string
+    BundlePage:
+      type: object
+      description: A paginated page of LCM bundles.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Bundle"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"
+    Task:
+      type: object
+      description: An SDDC Manager workflow task.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+    TaskPage:
+      type: object
+      description: A paginated page of workflow tasks.
+      properties:
+        elements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"
+        pageMetadata:
+          $ref: "#/components/schemas/PageMetadata"

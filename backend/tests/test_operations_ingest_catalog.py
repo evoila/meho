@@ -89,9 +89,13 @@ _EXPECTED_PRODUCT_VERSION = {
 }
 _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
 # Products whose catalog row carries neither an ``upstream`` nor is a
-# hand-coded typed connector: the profile-backed shipped-spec rows
-# (#1975) whose spec ships as package data via ``spec_resource``.
-_SHIPPED_SPEC_PRODUCTS = {"_fixture"}
+# hand-coded typed connector: the profile-backed shipped-spec rows whose
+# spec ships as package data via ``spec_resource``. The ``_fixture/1.0``
+# mechanism row landed with #1975; #1964 T2 (#1976) added the real
+# ``vmware/9.0`` + ``sddc/9.0`` rows whose Broadcom upstream the backend
+# can't dereference, so their MEHO-authored minimal specs + reviewed
+# ExecutionProfiles ship as package data instead of forcing a --spec upload.
+_SHIPPED_SPEC_PRODUCTS = {"_fixture", "vmware", "sddc"}
 
 
 @pytest.fixture(autouse=True)
@@ -457,6 +461,108 @@ def test_resource_packages_are_importable() -> None:
 def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
     """Every shipped spec/profile dry-run-parses cleanly at boot."""
     validate_shipped_artifacts()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# (#1964 T2 #1976) The real vmware/sddc shipped specs + profiles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("product", "spec_resource", "profile_resource", "expected_scheme", "expected_ops"),
+    [
+        ("vmware", "vmware_rest_minimal.yaml", "vmware_rest_minimal.yaml", "session_login", 9),
+        ("sddc", "sddc_manager_minimal.yaml", "sddc_manager_minimal.yaml", "basic", 9),
+    ],
+)
+def test_shipped_vmware_sddc_rows_are_profile_backed(
+    product: str,
+    spec_resource: str,
+    profile_resource: str,
+    expected_scheme: str,
+    expected_ops: int,
+) -> None:
+    """The real vmware/sddc rows ship a spec + profile and retire the upstream.
+
+    #1964 T2 (#1976): each row carries a null ``upstream`` (the Broadcom
+    portal is HTML the backend can't dereference), names the MEHO-authored
+    ``spec_resource`` + ``profile_resource``, and advertises
+    ``catalog_ingest: supported`` because the forced-upload friction is gone.
+    """
+    entry = load_catalog().get(product, "9.0")
+    assert entry is not None
+    assert entry.upstream is None
+    assert entry.spec_resource == spec_resource
+    assert entry.profile_resource == profile_resource
+    assert entry.catalog_ingest == "supported"
+
+
+@pytest.mark.parametrize(
+    ("spec_resource", "expected_ops", "needle_path"),
+    [
+        ("vmware_rest_minimal.yaml", 9, "GET:/api/vcenter/vm"),
+        ("sddc_manager_minimal.yaml", 9, "GET:/v1/sddc-managers"),
+    ],
+)
+def test_shipped_vmware_sddc_specs_parse_with_the_ingest_parser(
+    spec_resource: str,
+    expected_ops: int,
+    needle_path: str,
+) -> None:
+    """Each shipped spec parses under the SAME parser the live ingest uses.
+
+    Asserts the boot-validator contract directly: OpenAPI 3.x, self-contained,
+    local-``$ref`` only, every op carrying a ``METHOD:path`` op_id.
+    """
+    from meho_backplane.operations.ingest.openapi import parse_openapi
+
+    content = load_spec_resource(spec_resource)
+    rows = parse_openapi(
+        f"spec:{spec_resource}",
+        spec_source=f"spec:{spec_resource}",
+        content=content,
+    )
+    assert len(rows) == expected_ops
+    assert all(row.method == "GET" for row in rows)
+    assert needle_path in {row.op_id for row in rows}
+
+
+@pytest.mark.parametrize(
+    ("profile_resource", "expected_scheme"),
+    [
+        ("vmware_rest_minimal.yaml", "session_login"),
+        ("sddc_manager_minimal.yaml", "basic"),
+    ],
+)
+def test_shipped_vmware_sddc_profiles_validate_with_named_scheme(
+    profile_resource: str,
+    expected_scheme: str,
+) -> None:
+    """Each shipped profile validates against the closed named-auth catalog."""
+    import yaml
+
+    from meho_backplane.connectors.profile import (
+        ExecutionProfile,
+        validate_execution_profile,
+    )
+
+    raw = yaml.safe_load(load_profile_resource(profile_resource))
+    profile = ExecutionProfile.model_validate(raw)
+    validate_execution_profile(profile)  # must not raise
+    assert profile.auth.scheme == expected_scheme
+    # The declarative fingerprint version_key must be a literal top-level key
+    # (no dotted paths / array indexing — #1177); model_validate already
+    # enforced it, this is the regression anchor for the shipped artifact.
+    assert "." not in profile.fingerprint.version_key
+
+
+def test_shipped_vmware_sddc_resources_are_addressable() -> None:
+    """The real specs/profiles resolve as package data (wheel force-include)."""
+    from importlib.resources import files
+
+    for name in ("vmware_rest_minimal.yaml", "sddc_manager_minimal.yaml"):
+        assert files(SPEC_RESOURCE_PACKAGE).joinpath(name).is_file()
+        assert files(PROFILE_RESOURCE_PACKAGE).joinpath(name).is_file()
 
 
 def test_validate_shipped_artifacts_crashes_on_missing_spec() -> None:
@@ -945,36 +1051,34 @@ def test_entry_rejects_unknown_catalog_ingest_value() -> None:
 
 
 def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
-    """vmware/9.0, sddc/9.0, nsx/4.2 ship ``catalog_ingest: spec-only``.
+    """nsx/9.0 ships ``catalog_ingest: spec-only``; vmware/sddc no longer do.
 
-    G0.18-T8 (#1361, RDC #789 N8). All three upstreams fundamentally
-    cannot drive ``meho connector ingest --catalog`` server-side:
+    G0.18-T8 (#1361, RDC #789 N8) originally marked all three VCF-family
+    rows ``spec-only`` because none could drive ``meho connector ingest
+    --catalog`` server-side. #1964 T2 (#1976) changed that for two of them:
 
-    * ``vmware/9.0`` + ``sddc/9.0`` — Broadcom Developer Portal
-      ``text/html`` landing pages; the route's existing
-      ``catalog_entry_upstream_not_spec`` 422 fires. (The SDDC row's
-      product realigned from ``sddc-manager`` to the short ``sddc``
-      token in #1814 / Initiative #1810.)
-    * ``nsx/9.0`` — first upstream is fqdn-templated
-      (``<nsx-mgr-fqdn>``); the route's
-      ``catalog_entry_templated_upstream`` 422 fires. (Row renumbered
-      from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
-
-    Marking these rows ``"spec-only"`` is what lets the listing emit
-    an honest ``--spec`` ``next_step`` hint instead of the previous
-    "spec available in catalog; run ingest" line that sent operators
-    into a 422.
+    * ``vmware/9.0`` + ``sddc/9.0`` — now PROFILE-BACKED. Their MEHO-
+      authored minimal specs ship as package data (``spec_resource``),
+      so catalog-driven ingest loads the bytes inline (no fetch, no
+      ``catalog_entry_upstream_not_spec`` 422) and the row advertises
+      ``catalog_ingest: supported``. The forced ``--spec`` upload friction
+      is gone.
+    * ``nsx/9.0`` — STILL ``spec-only``: its first upstream is
+      fqdn-templated (``<nsx-mgr-fqdn>``) and no shipped spec exists yet,
+      so the route's ``catalog_entry_templated_upstream`` 422 fires and
+      the listing emits the honest ``--spec`` ``next_step`` hint. (Row
+      renumbered from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
     """
-    spec_only_pairs = {("vmware", "9.0"), ("sddc", "9.0"), ("nsx", "9.0")}
+    spec_only_pairs = {("nsx", "9.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: spec-only "
-                "because its upstream is HTML-portal or fqdn-templated"
+                "because its upstream is fqdn-templated and no spec ships yet"
             )
         else:
             assert entry.catalog_ingest == "supported", (
-                f"{entry.product}/{entry.version} should default to catalog_ingest: supported"
+                f"{entry.product}/{entry.version} should be catalog_ingest: supported"
             )
 
 

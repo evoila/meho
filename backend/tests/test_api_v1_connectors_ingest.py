@@ -808,6 +808,7 @@ def _registered_class_only_connectors() -> Iterator[None]:
     ``RuntimeError: connector already registered``.
     """
     from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.connectors.registry import (
         all_connectors_v2,
         register_connector_v2,
@@ -830,6 +831,16 @@ def _registered_class_only_connectors() -> Iterator[None]:
             version="9.0",
             impl_id="sddc-rest",
             cls=SddcManagerConnector,
+        )
+    # nsx/9.0 stays catalog_ingest: spec-only (fqdn-templated upstream, no
+    # shipped spec) after #1976 made vmware/sddc profile-backed, so the
+    # spec-only next_step test below pivots onto it.
+    if ("nsx", "9.0", "nsx-rest") not in existing:
+        register_connector_v2(
+            product="nsx",
+            version="9.0",
+            impl_id="nsx-rest",
+            cls=NsxConnector,
         )
     yield
 
@@ -1146,23 +1157,20 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
 ) -> None:
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
-    G0.18-T8 (#1361) / RDC #789 N8. The VCF-family rows
-    (``vmware/9.0``, ``sddc/9.0``, ``nsx/9.0``) ship with
-    ``catalog_ingest: spec-only`` because their upstream URLs are
-    Broadcom Developer Portal HTML landing pages (vmware, sddc) or
-    fqdn-templated appliance URLs (nsx) — neither shape can drive
-    ``meho connector ingest --catalog`` server-side. The previous hint
-    ("spec available in catalog; run ingest") sent operators into a
-    422; the refined hint points at the explicit-quadruple ``--spec``
-    form using the catalog's native triple so the verb still
-    copies-and-runs once the operator has the spec file in hand.
+    G0.18-T8 (#1361) / RDC #789 N8. ``nsx/9.0`` ships with
+    ``catalog_ingest: spec-only`` because its first upstream is an
+    fqdn-templated appliance URL (``<nsx-mgr-fqdn>``) and no MEHO-authored
+    spec ships for it — neither shape can drive ``meho connector ingest
+    --catalog`` server-side. The previous hint ("spec available in catalog;
+    run ingest") sent operators into a 422; the refined hint points at the
+    explicit-quadruple ``--spec`` form using the catalog's native triple so
+    the verb still copies-and-runs once the operator has the spec file in
+    hand.
 
-    Post-#1814 (Initiative #1810) the SDDC connector registers under the
-    short ``"sddc"`` token and the catalog row was realigned to match, so
-    the listing's parser-derived token (``"sddc"``), the catalog's native
-    triple (``("sddc", "9.0", "sddc-rest")``), and the v2 registry all
-    agree — the verb emits ``--product sddc`` and resolves the registered
-    class at ingest time with no spelling drift.
+    #1964 T2 (#1976) moved the two former HTML-portal offenders
+    (``vmware/9.0``, ``sddc/9.0``) off this branch: they are now
+    profile-backed shipped-spec rows (``catalog_ingest: supported``), so
+    NSX is the canonical remaining spec-only example here.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -1172,20 +1180,19 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     assert response.status_code == 200
     by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
 
-    sddc = by_id["sddc-rest-9.0"]
-    assert sddc["state"] == "registered"
-    assert sddc["next_step"] is not None
-    verb = sddc["next_step"]["verb"]
+    nsx = by_id["nsx-rest-9.0"]
+    assert nsx["state"] == "registered"
+    assert nsx["next_step"] is not None
+    verb = nsx["next_step"]["verb"]
     # The refined hint must NOT promise the broken ``--catalog`` path.
     assert "--catalog" not in verb
     # And must direct the operator at ``--spec`` with the catalog's
-    # native (realigned) triple (so the registered class resolves at
-    # ingest time).
-    assert "--product sddc" in verb
+    # native triple (so the registered class resolves at ingest time).
+    assert "--product nsx" in verb
     assert "--version 9.0" in verb
-    assert "--impl sddc-rest" in verb
+    assert "--impl nsx-rest" in verb
     assert "--spec" in verb
-    rationale = sddc["next_step"]["rationale"]
+    rationale = nsx["next_step"]["rationale"]
     # Rationale names the reason so an operator (or LLM agent) knows
     # the catalog row isn't broken, it's just upstream-shape-bound.
     assert "HTML-portal" in rationale or "fqdn-templated" in rationale
@@ -3608,53 +3615,59 @@ def test_ingest_explicit_quadruple_html_upstream_returns_422_without_catalog_fie
     assert detail["content_type"] == "text/html"
 
 
-def test_ingest_packaged_catalog_html_portal_entries_carry_warning_notes() -> None:
-    """G0.15-T2 (#1211) audit: every ``spec_info_version: null`` catalog
-    entry whose ``upstream`` would reach the fetch path carries the
-    "HTML-portal upstream; manual ingest required" warning in ``notes``.
+def test_ingest_packaged_catalog_no_broadcom_portal_fetch_entries_remain() -> None:
+    """G0.15-T2 (#1211) audit, revised by #1964 T2 (#1976).
 
-    Sweep over the packaged catalog confirms ``vmware/9.0`` and
-    ``sddc-manager/9.0`` -- the two confirmed offenders -- both carry
-    the warning mirroring the ``harbor/2.x`` Swagger-2.0 precedent. The
-    other ``spec_info_version: null`` entries are excluded by earlier
-    422 gates -- ``nsx/9.0`` via ``catalog_entry_templated_upstream``
-    (FQDN placeholder), the three typed connectors (``vault/1.x``,
-    ``k8s/1.x``, ``bind9/9.x``) via ``catalog_entry_typed_connector``
-    (``upstream: null``) -- so they never reach the fetch path the
-    HTML-portal guard sits on. Test exists so a future contributor
-    adding a third HTML-portal-style entry without the note tripping
-    catches the omission at PR-review time.
+    The original audit asserted ``vmware/9.0`` + ``sddc/9.0`` reached the
+    HTTP fetch path with a Broadcom Developer Portal HTML upstream and
+    therefore carried the ``catalog_entry_upstream_not_spec`` warning in
+    ``notes``. #1976 made both rows PROFILE-BACKED: they now carry
+    ``upstream: null`` (the MEHO-authored minimal spec ships as package
+    data) so they never reach the fetch-path HTML-portal guard at all.
+
+    The sweep is inverted accordingly: no packaged catalog row still
+    points its ``upstream`` at a directly-fetchable Broadcom Developer
+    Portal page (the only remaining Broadcom reference, ``nsx/9.0``, is
+    fqdn-templated and refused earlier by ``catalog_entry_templated_
+    upstream``). A future contributor re-adding a fetchable Broadcom-portal
+    upstream without a shipped spec trips here. Pairs with
+    ``test_shipped_vmware_sddc_rows_are_profile_backed`` in
+    ``test_operations_ingest_catalog.py`` which asserts the positive shape.
     """
     from meho_backplane.operations.ingest.catalog import load_catalog
 
     catalog = load_catalog()
 
-    # An entry reaches the HTTP fetch path only if every upstream URL
-    # is non-templated; entries with any FQDN-templated URL (NSX) are
-    # refused earlier by ``catalog_entry_templated_upstream`` (422)
-    # before ``_load_spec_bytes`` runs, so they never trigger the
-    # HTML-portal guard.
+    # An entry reaches the HTTP fetch path only if it has an upstream and
+    # every upstream URL is non-templated; entries with any FQDN-templated
+    # URL (NSX) are refused earlier by ``catalog_entry_templated_upstream``
+    # (422) before ``_load_spec_bytes`` runs.
     def _reaches_fetch_path(urls: tuple[str, ...]) -> bool:
         return all(("<" not in url and ">" not in url) for url in urls)
 
-    html_portal_entries = {
+    broadcom_fetch_entries = {
         (e.product, e.version)
         for e in catalog.entries
-        if e.spec_info_version is None
-        and e.upstream is not None
+        if e.upstream is not None
         and _reaches_fetch_path(e.upstream)
         and any(url.startswith("https://developer.broadcom.com/") for url in e.upstream)
     }
-    assert ("vmware", "9.0") in html_portal_entries
-    assert ("sddc", "9.0") in html_portal_entries
-    for product, version in html_portal_entries:
-        entry = catalog.get(product, version)
+    assert broadcom_fetch_entries == set(), (
+        "a packaged catalog row points its upstream at a directly-fetchable "
+        "Broadcom Developer Portal page (which serves text/html, not raw "
+        f"OpenAPI): {broadcom_fetch_entries}. Ship a MEHO-authored minimal "
+        "spec via spec_resource (the #1976 on-ramp) instead of a fetchable "
+        "HTML-portal upstream."
+    )
+
+    # The former offenders are now profile-backed with a null upstream and
+    # the on-ramp note referencing T2 (#1976).
+    for product in ("vmware", "sddc"):
+        entry = catalog.get(product, "9.0")
         assert entry is not None
-        assert "catalog_entry_upstream_not_spec" in entry.notes, (
-            f"{product}/{version} upstream points at the Broadcom Developer "
-            f"Portal but notes don't reference the 422 error code -- mirror "
-            "the harbor/2.x Swagger-2.0 precedent."
-        )
+        assert entry.upstream is None
+        assert entry.spec_resource is not None
+        assert "#1976" in entry.notes
 
 
 def test_ingest_explicit_quadruple_still_works_regression(

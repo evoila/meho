@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# ExecutionProfile for the `sddc/9.0` profile-backed catalog row
+# (#1964 T2 #1976). Pairs with operations/ingest/specs/sddc_manager_minimal.yaml.
+#
+# AUTH. `basic` — the SDDC Manager API authenticates with HTTP Basic
+# (username/password from the per-target secret bundle), matching the
+# vetted classification in docs/codebase/connector-auth-coverage.md and the
+# typed SddcManagerConnector.auth_headers. No DSL: the scheme names a vetted
+# extractor (#1969); the profile carries only the secret-field names.
+#
+# FINGERPRINT. `/v1/releases/system` returns a top-level `version` string,
+# so it satisfies the FingerprintSpec literal-top-level-key constraint
+# (#1177 — no dotted paths / array indexing). The typed connector reads
+# `elements[0].version` off `/v1/sddc-managers`, which is nested and cannot
+# be expressed declaratively; the releases endpoint is the equivalent
+# vendor-authentic version source (the `sddc.about` op). version_splitter
+# `none` — the appliance returns a clean MAJOR.MINOR.PATCH.
+#
+# PROBE. `delegate` — one authenticated fingerprint round-trip covers
+# reachability + auth-challenge, the same posture the typed connector takes.
+#
+# PAGINATION. `none` — the curated read ops are single-shot; `items_key`
+# `elements` names the rows key in the SDDC Manager pagination envelope
+# ({elements: [...], pageMetadata: {...}}).
+#
+# Validated at boot by validate_shipped_artifacts (ExecutionProfile.model_
+# validate + validate_execution_profile).
+product: sddc
+version: "9.0"
+auth:
+  scheme: basic
+  secret_fields:
+    - username
+    - password
+fingerprint:
+  path: /v1/releases/system
+  authenticated: true
+  version_key: version
+  version_splitter: none
+probe: delegate
+pagination:
+  strategy: none
+  items_key: elements

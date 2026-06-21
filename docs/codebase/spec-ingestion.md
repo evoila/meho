@@ -231,7 +231,39 @@ error).
 T1 (#1975) ships the mechanism plus a `_fixture/1.0` profile-backed
 row pointing at `_fixture_minimal.yaml` in each resource package, so
 the boot validator and the catalog-driven ingest path are exercised
-end to end. T2 (#1976) authors the real vmware/sddc specs/profiles.
+end to end.
+
+T2 (#1976) authored the real artifacts:
+
+* `vmware/9.0` → `specs/vmware_rest_minimal.yaml` (9 vCenter inventory
+  read ops under `/api`) + `profiles/vmware_rest_minimal.yaml`
+  (`session_login` auth, `/api/about` fingerprint).
+* `sddc/9.0` → `specs/sddc_manager_minimal.yaml` (9 SDDC Manager
+  inventory + lifecycle read ops under `/v1`) +
+  `profiles/sddc_manager_minimal.yaml` (`basic` auth,
+  `/v1/releases/system` fingerprint).
+
+Both are minimal, self-contained, `$ref`-local OpenAPI 3.0 documents
+carrying the SPDX `Apache-2.0` header — only the read ops MEHO surfaces,
+vendor-neutral descriptions, the vendor's verbatim path/param/field
+names (which the dispatcher must use). The rows flip from
+`catalog_ingest: spec-only` to `supported` and drop their `upstream`
+(now provenance pointers in `notes`), so `meho connector ingest
+--catalog vmware/9.0` / `sddc/9.0` works without a forced `--spec`
+upload. The named auth schemes match `docs/codebase/
+connector-auth-coverage.md`; the typed `VmwareRestConnector` /
+`SddcManagerConnector` still own runtime dispatch. The full vendor
+specs stay the `upstream` provenance pointers for a full-surface
+re-ingest off the appliance.
+
+Known limitation: the `session_login` named extractor (#1970) is
+currently hardcoded to the vRLI login shape (`POST /api/v2/sessions`,
+JSON body, `sessionId` → Bearer), which differs from vCenter's
+`POST /api/session` (Basic, `vmware-api-session-id` header). The
+vmware profile ingests and passes the boot validator, but full profiled
+*dispatch* parity for vCenter needs the session extractor to grow a
+vCenter variant — owned by the profiled-dispatch wiring
+(#1971/#1972), not this data task.
 
 ### T3 (LLM grouping) at a glance
 

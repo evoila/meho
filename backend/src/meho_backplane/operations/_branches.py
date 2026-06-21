@@ -57,10 +57,29 @@ __all__ = [
 # into URL path substitution / query-string / request body.
 _PARAM_LOC_KEY = "x-meho-param-loc"
 
-# Path-template substitution pattern. ``"/api/vcenter/cluster/{cluster}"``
-# matches ``{cluster}``; the substituted value is :func:`urllib.parse.quote`-d
-# at substitution time (RFC 3986 reserved chars only).
-_PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
+# Path-template substitution pattern. Captures an optional leading
+# RFC6570 expression operator and the bare expression body:
+#
+# * ``{cluster}``      -> operator ``""``,  name ``"cluster"``     (simple
+#   expansion, RFC6570 §3.2.2 -- reserved chars in the value are encoded)
+# * ``{+constraints}`` -> operator ``"+"``, name ``"constraints"`` (reserved
+#   expansion, RFC6570 §3.2.3 -- reserved/gen-delim chars pass through literal)
+#
+# The operator is stripped from the captured name so the param lookup
+# keys on the bare variable name the ingest pipeline registers (``path``,
+# not ``+path``) -- without the strip a literal ``{+path}`` spec would
+# ``KeyError`` even though the param is supplied. Only ``+`` (and ``#``)
+# change the encoding safe set; the remaining operator chars are captured
+# so the regex never mis-includes a leading operator in the name, even for
+# operators this substituter does not (yet) special-case.
+_PATH_VAR_RE = re.compile(r"\{([+#./;?&]?)([^{}]+)\}")
+
+# RFC6570 §3.2.3 reserved-expansion safe set: the gen-delims + sub-delims
+# from RFC3986 §2.2 that a ``{+var}`` / ``{#var}`` expression leaves
+# unencoded so they keep their structural meaning in the URL. Genuinely
+# unsafe characters (space, control chars) are still percent-encoded by
+# :func:`urllib.parse.quote` because they are absent from this set.
+_RFC6570_RESERVED_SAFE = ":/?#[]@!$&'()*+,;="
 
 
 def _split_ingested_params(
@@ -130,21 +149,39 @@ def _unwrap_body(body_params: dict[str, Any]) -> Any:
 
 
 def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
-    """Substitute ``{var}`` placeholders in *path_template* from *path_params*.
+    """Substitute ``{var}`` / ``{+var}`` placeholders in *path_template*.
 
-    Missing path vars raise :class:`KeyError` so the dispatcher's
-    caller surfaces them as ``invalid_params`` rather than producing
-    a request with literal ``{var}`` in the URL. RFC 3986 path
-    reserved chars in the substituted value are percent-encoded by
-    :func:`urllib.parse.quote` (safe set: empty, so ``/`` in a value
-    is also encoded -- matches OpenAPI's default path-style).
+    Honours RFC6570 expression operators so an ingested op's path
+    template expands with the encoding the spec author intended:
+
+    * **Simple expansion** ``{var}`` (RFC6570 §3.2.2) -- the value is
+      percent-encoded with an empty safe set, so reserved chars like
+      ``/`` become ``%2F`` (OpenAPI's default ``style: simple`` path
+      parameter behaviour: a value cannot leak a path separator).
+    * **Reserved expansion** ``{+var}`` / ``{#var}`` (RFC6570 §3.2.3) --
+      the value is encoded with the reserved/gen-delim safe set
+      (:data:`_RFC6570_RESERVED_SAFE`), so structural chars (``/``,
+      ``:``, ``,`` ...) pass through literal. This is the form a path
+      that carries a *sub-path* expression uses, e.g. vRLI's
+      ``/api/v2/events/{+constraints}`` where the constraint is itself a
+      slash-delimited segment chain (``text/CONTAINS error/hostname/...``).
+
+    In both forms a genuinely-unsafe character (space, control chars) is
+    still percent-encoded -- only the reserved structural chars differ.
+
+    Missing path vars raise :class:`KeyError` so the dispatcher's caller
+    surfaces them as ``invalid_params`` rather than producing a request
+    with a literal ``{var}`` in the URL. The lookup is keyed on the bare
+    variable name (operator stripped), so ``{+constraints}`` resolves the
+    param named ``constraints``.
     """
 
     def _replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+        operator, name = match.group(1), match.group(2)
         if name not in path_params:
             raise KeyError(f"path template requires {name!r} but it was not supplied")
-        return quote(str(path_params[name]), safe="")
+        safe = _RFC6570_RESERVED_SAFE if operator in ("+", "#") else ""
+        return quote(str(path_params[name]), safe=safe)
 
     return _PATH_VAR_RE.sub(_replace, path_template)
 

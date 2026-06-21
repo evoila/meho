@@ -28,17 +28,33 @@ from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
     ExecutionProfileError,
+    FingerprintSpec,
+    PaginationSpec,
     ReservedAuthSchemeError,
     UnknownAuthSchemeError,
     validate_execution_profile,
 )
+
+_FINGERPRINT = FingerprintSpec(
+    path="/api/v2.0/systeminfo",
+    version_key="harbor_version",
+    version_splitter="dash",
+)
+_PAGINATION = PaginationSpec(strategy="none", items_key="value")
 
 
 def _profile(**auth_overrides: object) -> ExecutionProfile:
     """Build a valid ExecutionProfile with a basic auth block by default."""
     auth = {"scheme": "basic", "secret_fields": ("username", "password")}
     auth.update(auth_overrides)
-    return ExecutionProfile(product="harbor", version="2.x", auth=AuthSpec(**auth))
+    return ExecutionProfile(
+        product="harbor",
+        version="2.x",
+        auth=AuthSpec(**auth),
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -90,6 +106,9 @@ def test_profile_forbids_extra_fields() -> None:
             product="harbor",
             version="2.x",
             auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             token_location="header",  # type: ignore[call-arg]
         )
 
@@ -189,6 +208,9 @@ def test_validate_passes_for_named_schemes(scheme: str) -> None:
         product="p",
         version="1",
         auth=AuthSpec(scheme=scheme, secret_fields=("token",), **extra),  # type: ignore[arg-type]
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
     )
     # No raise.
     validate_execution_profile(profile)
@@ -267,6 +289,9 @@ def test_expiry_statuses_vrli_declares_401_and_440() -> None:
         product="vcf_logs",
         version="2.x",
         auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
         expiry_statuses=frozenset({401, 440}),
     )
     assert profile.expiry_statuses == frozenset({401, 440})
@@ -279,6 +304,9 @@ def test_expiry_statuses_coerces_a_list() -> None:
             "product": "vcf_logs",
             "version": "2.x",
             "auth": {"scheme": "session_login", "secret_fields": ["username", "password"]},
+            "fingerprint": _FINGERPRINT.model_dump(),
+            "probe": "delegate",
+            "pagination": _PAGINATION.model_dump(),
             "expiry_statuses": [401, 440],
         }
     )
@@ -292,6 +320,9 @@ def test_expiry_statuses_rejects_empty_set() -> None:
             product="harbor",
             version="2.x",
             auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             expiry_statuses=frozenset(),
         )
 
@@ -304,6 +335,9 @@ def test_expiry_statuses_rejects_non_expiry_status(bad_status: int) -> None:
             product="harbor",
             version="2.x",
             auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             expiry_statuses=frozenset({401, bad_status}),
         )
 
@@ -315,6 +349,9 @@ def test_expiry_statuses_requires_401_floor() -> None:
             product="vcf_logs",
             version="2.x",
             auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             expiry_statuses=frozenset({440}),
         )
 
@@ -325,6 +362,9 @@ def test_expiry_statuses_serialization_roundtrip() -> None:
         product="vcf_logs",
         version="2.x",
         auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
         expiry_statuses=frozenset({401, 440}),
     )
     restored = ExecutionProfile.model_validate_json(profile.model_dump_json())
@@ -338,5 +378,8 @@ def test_expiry_statuses_extra_forbid_unaffected() -> None:
             product="harbor",
             version="2.x",
             auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            fingerprint=_FINGERPRINT,
+            probe="delegate",
+            pagination=_PAGINATION,
             bogus="x",  # type: ignore[call-arg]
         )

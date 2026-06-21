@@ -35,7 +35,12 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
-from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile
+from meho_backplane.connectors.profile import (
+    AuthSpec,
+    ExecutionProfile,
+    FingerprintSpec,
+    PaginationSpec,
+)
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.schemas import AuthModel
 
@@ -72,7 +77,16 @@ def _profile(scheme: str, **auth_overrides: object) -> ExecutionProfile:
     }[scheme]
     auth_kwargs: dict[str, object] = {"scheme": scheme, **defaults}
     auth_kwargs.update(auth_overrides)
-    return ExecutionProfile(product="acme", version="1.0", auth=AuthSpec(**auth_kwargs))
+    return ExecutionProfile(
+        product="acme",
+        version="1.0",
+        auth=AuthSpec(**auth_kwargs),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
+    )
 
 
 def _connector(

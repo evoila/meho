@@ -51,7 +51,12 @@ import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
-from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile
+from meho_backplane.connectors.profile import (
+    AuthSpec,
+    ExecutionProfile,
+    FingerprintSpec,
+    PaginationSpec,
+)
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
@@ -304,6 +309,11 @@ class _Http440DefaultProfileConnector(_Http440Connector):
         product="vcfops",
         version="9",
         auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
         # expiry_statuses omitted -> default {401}.
     )
 
@@ -322,6 +332,11 @@ class _Http440VrliProfileConnector(_Http440Connector):
         product="vcfops",
         version="9",
         auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
         expiry_statuses=frozenset({401, 440}),
     )
 

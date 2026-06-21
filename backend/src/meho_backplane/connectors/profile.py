@@ -68,13 +68,19 @@ __all__ = [
     "DEFAULT_EXPIRY_STATUSES",
     "NAMED_AUTH_SCHEMES",
     "RESERVED_AUTH_SCHEMES",
+    "VERSION_SPLITTERS",
     "AuthSchemeName",
     "AuthSpec",
+    "CursorTokenPagination",
     "ExecutionProfile",
     "ExecutionProfileError",
+    "FingerprintSpec",
+    "PaginationSpec",
+    "ProbeSpec",
     "ReservedAuthSchemeError",
     "StaticHeaderValueKind",
     "UnknownAuthSchemeError",
+    "VersionSplitter",
     "validate_execution_profile",
 ]
 
@@ -151,6 +157,290 @@ RESERVED_AUTH_SCHEMES: frozenset[str] = frozenset(
 #: ``X-Api-Key`` style header). A closed enum, not a free template — the
 #: substrate places the value, it does not interpolate it.
 StaticHeaderValueKind = Literal["bearer", "raw"]
+
+#: The closed catalog of named version splitters a :class:`FingerprintSpec`
+#: may select to render the upstream version string into
+#: ``(version, build)``. Each value names a vetted Python splitter (see
+#: :func:`split_version`) hoisted from an existing connector's
+#: ``_parse_*_version`` helper — **never** a free format string / regex.
+#: A free regex would re-open the rejected-DSL door (#1177): the operator
+#: would be authoring a parser, not selecting a reviewed one.
+#:
+#: * ``none`` — the raw fingerprint field is the version verbatim; no
+#:   build component (the default for an API whose version endpoint already
+#:   returns a clean ``MAJOR.MINOR.PATCH``).
+#: * ``dash`` — split on the first ``-``: ``"v2.11.0-abc1234"`` →
+#:   ``("v2.11.0", "abc1234")`` (harbor's ``_parse_harbor_version``).
+#: * ``vrli_five_part`` — dot-split a 5-part vRLI version
+#:   ``"9.0.0.0.21761695"`` → ``("9.0.0", "21761695")``: ``parts[0:3]``
+#:   joined as the public version, ``parts[4]`` as the build
+#:   (vcf_logs' ``_parse_vrli_version``).
+#:
+#: Adding a value is a deliberate act backed by a real connector's parse
+#: shape — there is no ``custom`` / ``regex`` escape hatch.
+VersionSplitter = Literal["none", "dash", "vrli_five_part"]
+
+#: Runtime mirror of :data:`VersionSplitter` for shape assertions / docs.
+#: Derived from the ``Literal`` via :func:`typing.get_args` so the two
+#: cannot drift.
+VERSION_SPLITTERS: frozenset[str] = frozenset(get_args(VersionSplitter))
+
+
+def split_version(splitter: VersionSplitter, raw: str | None) -> tuple[str | None, str | None]:
+    """Render *raw* into ``(version, build)`` using the named *splitter*.
+
+    The single dispatch point for the closed :data:`VersionSplitter`
+    catalog — :class:`ProfiledRestConnector.fingerprint` calls this with
+    the splitter named in the profile and the raw value read from the
+    fingerprint endpoint's literal top-level key. A blank / non-string
+    *raw* yields ``(None, None)`` so a malformed appliance response never
+    crashes the fingerprint round-trip (mirrors the hand-coded
+    ``_parse_harbor_version`` / ``_parse_vrli_version`` tolerance).
+
+    The match is exhaustive over the ``Literal``; an unlisted splitter is
+    unreachable (the API boundary + boot guard reject it), but a final
+    ``raise`` keeps the function total for the type checker.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None, None
+    if splitter == "none":
+        return raw, None
+    if splitter == "dash":
+        if "-" in raw:
+            version_str, build_str = raw.split("-", 1)
+            return version_str or None, build_str or None
+        return raw, None
+    if splitter == "vrli_five_part":
+        parts = raw.split(".")
+        version = ".".join(parts[0:3]) if len(parts) >= 3 else raw
+        build = parts[4] if len(parts) > 4 else None
+        return version, build
+    raise ValueError(f"unknown version splitter {splitter!r}")  # pragma: no cover
+
+
+class FingerprintSpec(BaseModel):
+    """Declarative fingerprint recipe for a profiled connector.
+
+    Names the GET endpoint a profiled connector calls to fingerprint the
+    upstream, the literal top-level response key carrying the version
+    string, and a *named* :data:`VersionSplitter` that renders it into
+    ``(version, build)``. Carries **no** path expression / regex /
+    template — ``version_key`` is a single literal top-level key (the same
+    #1177 line as :class:`PaginationSpec`), and the splitter is a closed
+    enum, not a format string. The reviewer enforces "literal top-level
+    key, no dotted paths" exactly as for pagination.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(description="GET path the fingerprint reads (e.g. '/api/v2.0/systeminfo').")
+    authenticated: bool = Field(
+        default=True,
+        description=(
+            "Whether the fingerprint GET requires the profile's auth headers. "
+            "False for unauthenticated version endpoints (vRLI's "
+            "'/api/v2/version')."
+        ),
+    )
+    version_key: str = Field(
+        description=(
+            "A single literal top-level response key carrying the version "
+            "string (e.g. 'harbor_version', 'version'). NOT a dotted path / "
+            "JSONPath / wildcard — the value is read as response[version_key]. "
+            "The 'no dotted paths' constraint is review-enforced."
+        ),
+    )
+    version_splitter: VersionSplitter = Field(
+        default="none",
+        description=(
+            "Named splitter (closed enum) rendering the version value into "
+            "(version, build). 'none' = verbatim; 'dash' = harbor's first-'-' "
+            "split; 'vrli_five_part' = vRLI's 5-part dot split."
+        ),
+    )
+
+    @field_validator("path", "version_key")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("fingerprint path and version_key must be non-blank")
+        return value
+
+    @field_validator("version_key")
+    @classmethod
+    def _version_key_is_literal_top_level(cls, value: str) -> str:
+        """Reject a dotted / wildcard version_key — it must be a literal key.
+
+        The #1177 substrate-minimalism line: response-field selection is a
+        single literal top-level key, never a path expression. A ``.`` / ``[``
+        / ``*`` in the key means the operator is trying to author a JSONPath;
+        refuse it at the schema boundary so the rejected-DSL door stays shut.
+        """
+        if any(ch in value for ch in (".", "[", "]", "*")):
+            raise ValueError(
+                f"version_key must be a literal top-level response key, not a "
+                f"dotted/wildcard path: {value!r} (no JSONPath — #1177)"
+            )
+        return value
+
+
+class ProbeSpec(BaseModel):
+    """Declarative probe recipe, or the ``'delegate'`` sentinel.
+
+    A profile either delegates its probe to the fingerprint round-trip
+    (the SDDC Manager / NSX precedent — :attr:`ProbeSpec` is the string
+    ``'delegate'`` in that case, modelled on :class:`ExecutionProfile`)
+    or names a dedicated health GET: its :attr:`path`, the literal
+    top-level :attr:`ok_field` to read, and the :attr:`ok_value` that
+    field must equal for ``ok=True`` (harbor's ``GET /api/v2.0/health``
+    with ``status == 'healthy'``).
+
+    ``ok_field`` is a single literal top-level key — the same
+    no-dotted-paths line as :attr:`FingerprintSpec.version_key`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(description="GET health path (e.g. '/api/v2.0/health').")
+    ok_field: str = Field(
+        description=(
+            "A single literal top-level response key whose value decides "
+            "reachability (e.g. 'status'). NOT a dotted path — read as "
+            "response[ok_field]. The 'no dotted paths' constraint is "
+            "review-enforced."
+        ),
+    )
+    ok_value: str = Field(
+        description="The value ok_field must equal for ok=True (e.g. 'healthy').",
+    )
+
+    @field_validator("path", "ok_field", "ok_value")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("probe path, ok_field and ok_value must be non-blank")
+        return value
+
+    @field_validator("ok_field")
+    @classmethod
+    def _ok_field_is_literal_top_level(cls, value: str) -> str:
+        """Reject a dotted / wildcard ok_field — literal top-level key only (#1177)."""
+        if any(ch in value for ch in (".", "[", "]", "*")):
+            raise ValueError(
+                f"ok_field must be a literal top-level response key, not a "
+                f"dotted/wildcard path: {value!r} (no JSONPath — #1177)"
+            )
+        return value
+
+
+class CursorTokenPagination(BaseModel):
+    """The cursor-token pagination strategy (e.g. gcloud's ``nextPageToken``).
+
+    The list op sends the cursor under request param :attr:`req_param`
+    (``pageToken``); the response carries the next cursor under the
+    literal top-level key :attr:`resp_field` (``nextPageToken``). The
+    dispatch loop reads ``response[resp_field]``; when it is falsy the
+    loop stops. Both are literal top-level keys — no dotted paths (#1177).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    req_param: str = Field(
+        description="Request query-param name the next cursor is sent under (e.g. 'pageToken')."
+    )
+    resp_field: str = Field(
+        description=(
+            "A single literal top-level response key carrying the next cursor "
+            "(e.g. 'nextPageToken'). NOT a dotted path — read as "
+            "response[resp_field]. The 'no dotted paths' constraint is "
+            "review-enforced."
+        ),
+    )
+
+    @field_validator("req_param", "resp_field")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("req_param and resp_field must be non-blank")
+        return value
+
+    @field_validator("resp_field")
+    @classmethod
+    def _resp_field_is_literal_top_level(cls, value: str) -> str:
+        """Reject a dotted / wildcard resp_field — literal top-level key only (#1177)."""
+        if any(ch in value for ch in (".", "[", "]", "*")):
+            raise ValueError(
+                f"resp_field must be a literal top-level response key, not a "
+                f"dotted/wildcard path: {value!r} (no JSONPath — #1177)"
+            )
+        return value
+
+
+class PaginationSpec(BaseModel):
+    """The named pagination strategy for a profiled connector's list ops.
+
+    A profile selects exactly one strategy via the closed
+    :attr:`strategy` enum and supplies the literal top-level
+    :attr:`items_key` under which each page's rows live (gcloud's
+    ``accounts``). The dispatch loop unwraps ``response[items_key]`` per
+    page and concatenates.
+
+    * ``none`` — single request, no looping. :attr:`cursor` must be
+      ``None``; :attr:`items_key` still names the rows key for a
+      consistent unwrapped shape.
+    * ``cursor_token`` — follow a cursor token until exhausted
+      (:class:`CursorTokenPagination`). :attr:`cursor` is required.
+
+    Link-header / offset pagination are deliberately **not** modelled —
+    they are net-new (file a separate task when a vendor needs them), per
+    #1972's out-of-scope note. ``items_key`` is a single literal
+    top-level key — no dotted paths (#1177).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    strategy: Literal["none", "cursor_token"] = Field(
+        description="Named pagination strategy (closed enum: 'none' | 'cursor_token')."
+    )
+    items_key: str = Field(
+        description=(
+            "A single literal top-level response key under which each page's "
+            "rows live (e.g. 'accounts', 'value'). NOT a dotted path — read as "
+            "response[items_key]. The 'no dotted paths' constraint is "
+            "review-enforced."
+        ),
+    )
+    cursor: CursorTokenPagination | None = Field(
+        default=None,
+        description=(
+            "Cursor config; required for strategy='cursor_token', forbidden for strategy='none'."
+        ),
+    )
+
+    @field_validator("items_key")
+    @classmethod
+    def _items_key_is_literal_top_level(cls, value: str) -> str:
+        """Reject a blank / dotted / wildcard items_key — literal top-level key only (#1177)."""
+        if not value.strip():
+            raise ValueError("items_key must be non-blank")
+        if any(ch in value for ch in (".", "[", "]", "*")):
+            raise ValueError(
+                f"items_key must be a literal top-level response key, not a "
+                f"dotted/wildcard path: {value!r} (no JSONPath — #1177)"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _cursor_matches_strategy(self) -> PaginationSpec:
+        """Bind ``cursor`` to ``strategy='cursor_token'`` exclusively."""
+        if self.strategy == "cursor_token":
+            if self.cursor is None:
+                raise ValueError("strategy='cursor_token' requires a cursor config")
+        elif self.cursor is not None:
+            raise ValueError(
+                f"cursor is only valid for strategy='cursor_token', not {self.strategy!r}"
+            )
+        return self
 
 
 class ExecutionProfileError(RuntimeError):
@@ -313,6 +603,25 @@ class ExecutionProfile(BaseModel):
     )
     auth: AuthSpec = Field(
         description="The named auth scheme + secret-field names for this profile."
+    )
+    fingerprint: FingerprintSpec = Field(
+        description=(
+            "Declarative fingerprint recipe: the GET path + literal version "
+            "key + named version splitter. Drives "
+            "ProfiledRestConnector.fingerprint (#1972)."
+        ),
+    )
+    probe: Literal["delegate"] | ProbeSpec = Field(
+        description=(
+            "'delegate' (probe via the fingerprint round-trip) or a dedicated "
+            "health-GET recipe. Drives ProfiledRestConnector.probe (#1972)."
+        ),
+    )
+    pagination: PaginationSpec = Field(
+        description=(
+            "The named pagination strategy for the connector's list ops. "
+            "Drives the ingested-dispatch pagination loop (#1972)."
+        ),
     )
     expiry_statuses: frozenset[int] = Field(
         default=DEFAULT_EXPIRY_STATUSES,

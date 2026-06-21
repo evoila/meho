@@ -3113,11 +3113,15 @@ type DocCollectionSummary struct {
 // path (the collection is already implied by the request scope) and set
 // to the source collection key on the cross-collection fan-out path so an
 // agent fusing hits from several collections can attribute each chunk.
+//
+// “document_id“ is “str | None“ (#2004): it mirrors the corpus's own
+// optional owning-document id (“None“ when the corpus has no document
+// concept for a chunk) and is only read as a citation-label fallback.
 type DocsChunk struct {
 	ChunkId    string   `json:"chunk_id"`
 	Collection *string  `json:"collection"`
 	Content    string   `json:"content"`
-	DocumentId string   `json:"document_id"`
+	DocumentId *string  `json:"document_id"`
 	Score      *float32 `json:"score"`
 	SourceUrl  *string  `json:"source_url"`
 }

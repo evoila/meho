@@ -527,7 +527,7 @@ meho expects a `2xx` JSON body with a **top-level `chunks`** array, ranked
 |---|---|---|---|
 | `chunks` | `[chunk]` | **yes** (top-level key) | The ordered hit list. **Not** `results` / `hits` / `data`. |
 | `chunk_id` | `str` | **yes** | Per-chunk id. |
-| `document_id` | `str` | **yes** | Owning document id. |
+| `document_id` | `str` | optional (#2004) | Owning document id; read only as a citation-label fallback. A blank `""` or an omitted key normalises to `None` — it is **not** a grounding key, so absence does not fail parse. |
 | `content` | `str` | **yes** | The chunk text. **Not** `text` / `body` / `snippet`. |
 | `source_url` | `str` | optional | Citation URL. **Not** `source_uri` / `url`. |
 | `score` | `float` | optional | Rank score (meho keeps corpus order regardless). |
@@ -538,8 +538,10 @@ meho reads top-level **`chunks`** and per-chunk **`content`** /
 is **not** speaking this contract (and triggers the empty-parse footgun
 below, not a loud failure). Extra fields meho does not name are ignored
 (`extra="ignore"`), so a corpus may add fields freely; **dropping** a
-required field (`chunk_id` / `document_id` / `content`) fails parse and is
-surfaced as `CorpusUnavailable` → 503. Source: `CorpusChunk` /
+required field (`chunk_id` / `content`) fails parse and is surfaced as
+`CorpusUnavailable` → 503. `document_id` is the lone exception (#2004): it
+is a citation-label fallback only, so a blank or omitted value normalises
+to `None` rather than failing parse. Source: `CorpusChunk` /
 `CorpusSearchResponse`, `corpus.py:88-122`.
 
 ### Readiness — request + response

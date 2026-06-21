@@ -20962,6 +20962,20 @@
             "nullable": true,
             "title": "Sha256"
           },
+          "spec_resource": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Spec Resource"
+          },
+          "profile_resource": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Profile Resource"
+          },
           "notes": {
             "type": "string",
             "maxLength": 2048,

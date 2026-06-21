@@ -227,6 +227,7 @@ from meho_backplane.operations.ingest import (
     get_job_registry,
     list_ingested_connectors,
     load_catalog,
+    load_spec_resource,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.api_schemas import (
@@ -752,11 +753,34 @@ def _resolve_catalog_entry_if_set(
                 "product": entry.product,
                 "version": entry.version,
                 "impl_id": entry.impl_id,
-                "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
+                "specs": _catalog_entry_specs(entry),
             },
         ),
         entry.spec_info_versions_compatible,
     )
+
+
+def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
+    """Build the ``SpecSource`` list a catalog row resolves to.
+
+    Two on-ramps (#1964 T1):
+
+    * **Shipped spec** — ``entry.spec_resource`` is set: load the
+      MEHO-authored OpenAPI bytes from package data and carry them
+      inline as :attr:`SpecSource.content` (the ``uri`` is the audit
+      label ``spec:<resource>``). The ingest pipeline uses the content
+      verbatim — no fetch, no SSRF guard — bypassing an ``upstream`` the
+      backend can't dereference (HTML portal / fqdn-templated appliance
+      URL). This is why ``_reject_unusable_entry`` exempts shipped-spec
+      rows from the typed-/templated-upstream 422s below.
+    * **Upstream fetch** — no ``spec_resource``: the historical shape,
+      one ``SpecSource(uri=...)`` per ``upstream`` URL for the backend
+      to fetch under the https guard.
+    """
+    if entry.spec_resource is not None:
+        content = load_spec_resource(entry.spec_resource)
+        return [SpecSource(uri=f"spec:{entry.spec_resource}", content=content)]
+    return [SpecSource(uri=uri) for uri in (entry.upstream or ())]
 
 
 def _parse_catalog_entry(catalog_entry: str) -> tuple[str, str]:
@@ -797,7 +821,15 @@ def _reject_unusable_entry(
     can't dereference it server-side. Both surfaces refuse the catalog-
     driven shape and point the operator at the explicit-quadruple
     fallback documented in ``docs/cross-repo/connector-catalog.md``.
+
+    A row carrying ``spec_resource`` (#1964 T1) is exempt: the spec
+    ships as package data and is loaded inline, so neither a null nor a
+    templated ``upstream`` blocks ingest — the whole point of the
+    shipped-spec on-ramp is to serve products whose upstream the
+    backend can't dereference.
     """
+    if entry.spec_resource is not None:
+        return
     if entry.upstream is None:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,

@@ -85,6 +85,20 @@ CatalogIngestSupport = Literal["supported", "spec-only"]
 _CATALOG_PACKAGE = "meho_backplane.operations.ingest"
 _CATALOG_RESOURCE = "catalog.yaml"
 
+#: Package holding MEHO-authored OpenAPI specs shipped as package data
+#: (one ``.yaml`` / ``.json`` per :attr:`ConnectorSpecEntry.spec_resource`).
+#: Resolved via :func:`importlib.resources.files`; force-included in the
+#: wheel (``backend/pyproject.toml`` ``[tool.hatch.build.targets.wheel.
+#: force-include]``) so it survives into a deployed container, mirroring
+#: the alembic precedent (#1964 T1).
+SPEC_RESOURCE_PACKAGE = "meho_backplane.operations.ingest.specs"
+
+#: Package holding MEHO-authored :class:`~meho_backplane.connectors.profile.ExecutionProfile`
+#: documents shipped as package data (one per
+#: :attr:`ConnectorSpecEntry.profile_resource`). Same wheel force-include
+#: + ``importlib.resources`` resolution as :data:`SPEC_RESOURCE_PACKAGE`.
+PROFILE_RESOURCE_PACKAGE = "meho_backplane.connectors.profiles"
+
 #: A SHA-256 digest is 64 lowercase hex characters.
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -229,6 +243,41 @@ class ConnectorSpecEntry(BaseModel):
     #: a single ``connector_id``.
     spec_info_versions_compatible: tuple[str, ...] | None = None
     sha256: str | None = Field(default=None, max_length=64)
+    #: Resource name of a MEHO-authored OpenAPI spec shipped as package
+    #: data under :data:`SPEC_RESOURCE_PACKAGE`. When set, the catalog-
+    #: driven ingest route loads the bytes via ``importlib.resources``
+    #: and fills :class:`~meho_backplane.operations.ingest.api_schemas.SpecSource.content`
+    #: directly, bypassing the ``upstream`` fetch — the on-ramp for
+    #: products whose ``upstream`` is an HTML developer portal or an
+    #: fqdn-templated appliance URL the backend can't dereference
+    #: (vmware/sddc; #1964). The bytes are dry-run-parsed at startup by
+    #: :func:`validate_shipped_artifacts` with the same
+    #: :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`
+    #: the live ingest uses, so a malformed shipped spec crashes boot
+    #: (and CI's app-boot smoke) rather than 500-ing a ``--catalog``
+    #: ingest. ``None`` keeps the historical fetch-from-``upstream``
+    #: behaviour. T2 (#1976) authors the actual vmware/sddc specs; T1
+    #: (#1975) ships the mechanism + a fixture that exercises the
+    #: boot-time validator.
+    spec_resource: str | None = Field(default=None, min_length=1, max_length=256)
+    #: Resource name of a MEHO-authored
+    #: :class:`~meho_backplane.connectors.profile.ExecutionProfile`
+    #: shipped as package data under :data:`PROFILE_RESOURCE_PACKAGE`. A
+    #: profile-backed row pairs a shipped spec with a reviewed
+    #: declarative auth/pagination profile so an ingested REST connector
+    #: dispatches through
+    #: :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    #: without a hand-coded ``auth_headers`` (Initiative #1965). The
+    #: shipped profile is dry-run-parsed + scheme-validated at startup by
+    #: :func:`validate_shipped_artifacts` (the same
+    #: :func:`~meho_backplane.connectors.profile.validate_execution_profile`
+    #: boot guard). Because the synthesised ``ProfiledRestConnector``
+    #: subclass a profile-backed row covers need not pre-exist in the
+    #: v2 registry, :func:`validate_catalog_registry_coverage` exempts a
+    #: row carrying ``profile_resource`` from the class-presence
+    #: assertion (see that function's docstring). ``None`` keeps the
+    #: typed-/generic-connector contract unchanged.
+    profile_resource: str | None = Field(default=None, min_length=1, max_length=256)
     notes: str = Field(default="", max_length=2048)
     #: Whether the catalog row's ``upstream`` URL(s) can drive
     #: ``meho connector ingest --catalog`` end-to-end. Defaults to
@@ -300,6 +349,31 @@ class ConnectorSpecEntry(BaseModel):
             _compatibility_pattern_to_specifier(pattern)
             normalized.append(pattern)
         return tuple(normalized)
+
+    @field_validator("spec_resource", "profile_resource")
+    @classmethod
+    def _resource_name_is_safe(cls, value: str | None) -> str | None:
+        """Reject blank / path-traversing shipped-resource names.
+
+        Shipped specs / profiles are addressed by a bare resource name
+        joined onto a fixed package root via
+        :func:`importlib.resources.files(...).joinpath`. A name carrying
+        a path separator or ``..`` could escape that root, so the
+        validator pins each value to a single path segment at parse time
+        (the same fail-loud-early posture as the compatibility-pattern
+        validator). ``None`` is the no-resource default.
+        """
+        if value is None:
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("spec_resource / profile_resource must not be blank")
+        if "/" in normalized or "\\" in normalized or ".." in normalized:
+            raise ValueError(
+                f"spec_resource / profile_resource {normalized!r} must be a single "
+                "resource name with no path separators or '..' segments"
+            )
+        return normalized
 
     @field_validator("upstream")
     @classmethod
@@ -437,6 +511,66 @@ def load_catalog() -> ConnectorSpecCatalog:
     return parse_catalog(raw)
 
 
+def load_spec_resource(spec_resource: str) -> str:
+    """Read a shipped OpenAPI spec from package data, returning its text.
+
+    Resolves *spec_resource* (a bare resource name, validated to carry no
+    path separators at catalog parse time) against
+    :data:`SPEC_RESOURCE_PACKAGE` via :func:`importlib.resources.files`,
+    the same wheel-and-source-portable shape :func:`load_catalog` uses.
+    The returned text is handed to
+    :class:`~meho_backplane.operations.ingest.api_schemas.SpecSource.content`
+    so the ingest pipeline uses it verbatim (size-capped, no fetch, no
+    SSRF guard — the bytes are MEHO-authored package data, not a remote
+    URL).
+
+    Raises :class:`CatalogError` (never a bare ``FileNotFoundError``) so
+    callers get one remediation-bearing exception type, naming the
+    missing resource and the package it was looked up under.
+    """
+    try:
+        return (
+            resources.files(SPEC_RESOURCE_PACKAGE)
+            .joinpath(spec_resource)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise CatalogError(
+            f"shipped spec resource {spec_resource!r} not found under "
+            f"{SPEC_RESOURCE_PACKAGE!r}; the catalog row names a spec_resource "
+            "that is not packaged. Add the spec to "
+            "backend/src/meho_backplane/operations/ingest/specs/ (force-included "
+            "in the wheel) or drop spec_resource from the row."
+        ) from exc
+
+
+def load_profile_resource(profile_resource: str) -> str:
+    """Read a shipped ExecutionProfile document from package data.
+
+    Companion to :func:`load_spec_resource`; resolves *profile_resource*
+    against :data:`PROFILE_RESOURCE_PACKAGE`. Returns the raw YAML/JSON
+    text; the caller (the boot-time validator and, later, the profiled
+    subclass registrar) parses it into an
+    :class:`~meho_backplane.connectors.profile.ExecutionProfile`.
+
+    Raises :class:`CatalogError` on a missing resource.
+    """
+    try:
+        return (
+            resources.files(PROFILE_RESOURCE_PACKAGE)
+            .joinpath(profile_resource)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise CatalogError(
+            f"shipped profile resource {profile_resource!r} not found under "
+            f"{PROFILE_RESOURCE_PACKAGE!r}; the catalog row names a "
+            "profile_resource that is not packaged. Add the profile to "
+            "backend/src/meho_backplane/connectors/profiles/ (force-included "
+            "in the wheel) or drop profile_resource from the row."
+        ) from exc
+
+
 def _format_triple(product: str, version: str, impl_id: str) -> str:
     """Render a ``(product, version, impl_id)`` triple for error messages.
 
@@ -516,6 +650,11 @@ def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = No
       class-only check missed (the class was registered, just under a
       different version key).
 
+    **Profile-backed rows are exempt from both axes** (#1975): a row
+    carrying a ``profile_resource`` covers a synthesised
+    ``ProfiledRestConnector`` subclass materialised from the reviewed
+    profile (T5 #1971) that need not pre-exist when this check runs.
+
     Failure raises :class:`CatalogError`. For the triple-mismatch
     branch, the message carries a ``catalog_registry_triple_mismatch:``
     code prefix and names the catalog triple plus the closest
@@ -532,12 +671,14 @@ def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = No
     registry_v2 = all_connectors_v2()
     registered_class_names = {cls.__name__ for cls in registry_v2.values()}
 
-    # Axis 1: class presence (existing #743 criterion (b) check).
+    # Axis 1: class presence (#743 crit. b). Profile-backed rows (#1975)
+    # are exempt — see the docstring.
     missing_classes = sorted(
         {
             e.requires_connector_class
             for e in cat.entries
-            if e.requires_connector_class not in registered_class_names
+            if e.profile_resource is None
+            and e.requires_connector_class not in registered_class_names
         }
     )
     if missing_classes:
@@ -554,6 +695,8 @@ def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = No
     registered_triples = sorted(registry_v2.keys())
     triple_mismatches: list[tuple[ConnectorSpecEntry, tuple[str, str, str] | None]] = []
     for entry in cat.entries:
+        if entry.profile_resource is not None:
+            continue  # #1975 exemption — see the docstring.
         triple = (entry.product, entry.version, entry.impl_id)
         if triple not in registry_v2:
             hint = _closest_registered_triple(
@@ -592,3 +735,71 @@ def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = No
             f"register_connector_v2(...) call in {register_path}. See "
             f"docs/codebase/error-message-shape.md for the envelope convention."
         )
+
+
+def validate_shipped_artifacts(catalog: ConnectorSpecCatalog | None = None) -> None:
+    """Dry-run-parse every shipped spec / profile a catalog row names.
+
+    The fourth #1964-T1 boot guard (after the catalog parse, the
+    registry-coverage cross-check, and the profile-scheme load): walk
+    every catalog row, and for each ``spec_resource`` / ``profile_resource``
+    it carries, read the bytes from package data and run them through the
+    **same** parser the live ingest / dispatch path uses —
+    :func:`~meho_backplane.operations.ingest.openapi.parse_openapi` for a
+    spec, :class:`~meho_backplane.connectors.profile.ExecutionProfile`
+    validation + :func:`~meho_backplane.connectors.profile.validate_execution_profile`
+    for a profile. A malformed shipped artifact raises here and crashes
+    the lifespan (CI's app-boot smoke fails) rather than 500-ing the
+    first ``--catalog`` ingest that touches the row.
+
+    Parsing a spec with the real parser — not a cheaper YAML/JSON
+    well-formedness check — is deliberate: a spec that decodes but has no
+    ``paths`` key, a non-3.0/3.1 version, or an unsupported ``$ref`` is
+    exactly the class of "ships fine, fails at ingest" bug this guard
+    exists to catch.
+
+    Raises :class:`CatalogError` (wrapping the parser's own exception
+    type) naming the row + resource so the operator sees which shipped
+    artifact is malformed. Imports the spec / profile parsers lazily so
+    this module stays import-light for the catalog-parse path.
+    """
+    from meho_backplane.connectors.profile import (
+        ExecutionProfile,
+        validate_execution_profile,
+    )
+    from meho_backplane.operations.ingest.openapi import parse_openapi
+
+    cat = catalog if catalog is not None else load_catalog()
+    for entry in cat.entries:
+        if entry.spec_resource is not None:
+            content = load_spec_resource(entry.spec_resource)
+            try:
+                parse_openapi(
+                    f"spec:{entry.spec_resource}",
+                    spec_source=f"spec:{entry.spec_resource}",
+                    content=content,
+                )
+            except Exception as exc:
+                raise CatalogError(
+                    f"shipped spec resource {entry.spec_resource!r} (catalog row "
+                    f"{_format_triple(entry.product, entry.version, entry.impl_id)}) "
+                    f"failed dry-run parse with the ingest parser: "
+                    f"{type(exc).__name__}: {exc}. Fix the spec under "
+                    "backend/src/meho_backplane/operations/ingest/specs/ or drop "
+                    "spec_resource from the row."
+                ) from exc
+        if entry.profile_resource is not None:
+            raw = load_profile_resource(entry.profile_resource)
+            try:
+                data = yaml.safe_load(raw)
+                profile = ExecutionProfile.model_validate(data)
+                validate_execution_profile(profile)
+            except Exception as exc:
+                raise CatalogError(
+                    f"shipped profile resource {entry.profile_resource!r} (catalog "
+                    f"row {_format_triple(entry.product, entry.version, entry.impl_id)}) "
+                    f"failed dry-run parse / scheme validation: "
+                    f"{type(exc).__name__}: {exc}. Fix the profile under "
+                    "backend/src/meho_backplane/connectors/profiles/ or drop "
+                    "profile_resource from the row."
+                ) from exc

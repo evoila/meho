@@ -162,6 +162,77 @@ single write path into `endpoint_descriptor` for ingested rows; T3
 groups them; T4 gates dispatchability behind operator review; T6
 exposes the whole thing over HTTP with tenant_admin / operator RBAC.
 
+### Shipped-spec / profile on-ramp (#1964 T1 #1975)
+
+A catalog row may carry two optional fields naming MEHO-authored
+package data instead of relying on a fetchable `upstream`:
+
+* `spec_resource` — a `.yaml` / `.json` file under
+  `meho_backplane.operations.ingest.specs` (constant
+  `SPEC_RESOURCE_PACKAGE` in `catalog.py`).
+* `profile_resource` — an `ExecutionProfile` document under
+  `meho_backplane.connectors.profiles` (`PROFILE_RESOURCE_PACKAGE`).
+
+Both resolve via `importlib.resources.files(...).joinpath(name)` — the
+same wheel-and-source-portable shape `load_catalog()` uses for the
+catalog YAML. The field validator pins each value to a single path
+segment (no `/`, `\`, or `..`) so a resource name can't escape its
+package root.
+
+**Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
+can't dereference (HTML developer portal / fqdn-templated appliance
+URL) — the `catalog_entry_upstream_not_spec` /
+`catalog_entry_templated_upstream` 422s above. The on-ramp ships a
+MEHO-authored spec as package data so catalog-driven ingest works
+end to end without an operator hand-fetch.
+
+**Route behaviour** (`_catalog_entry_specs` in `connectors_ingest.py`):
+when a row carries `spec_resource`, the route reads the bytes via
+`load_spec_resource()` and builds a single
+`SpecSource(uri="spec:<resource>", content=<bytes>)`. Because
+`content` is set, the ingest pipeline uses the bytes verbatim
+(size-capped) and skips the fetch + https/SSRF guard entirely — the
+bytes are trusted MEHO package data, not a remote URL. A
+`spec_resource` row is exempt from `_reject_unusable_entry`'s
+typed-/templated-upstream 422s for the same reason (the whole point is
+to serve products whose `upstream` is un-fetchable).
+
+**Validator exemption:** a row carrying `profile_resource` is a
+profile-backed row whose `requires_connector_class` names a synthesised
+`ProfiledRestConnector` subclass materialised from the reviewed profile
+(T5 #1971) — it need not pre-exist in the v2 registry when the
+boot-time `validate_catalog_registry_coverage()` runs. Both the
+class-presence (axis 1) and triple-registration (axis 2) checks skip
+profile-backed rows.
+
+**Boot-time dry-run parse:** `validate_shipped_artifacts()` (the fourth
+boot guard in `main.py`, after the catalog parse, registry-coverage
+check, and per-profile scheme load) walks every row and parses each
+shipped artifact with the **same** parser the live path uses —
+`parse_openapi(...)` for a spec, `ExecutionProfile.model_validate(...)`
++ `validate_execution_profile(...)` for a profile. A malformed shipped
+artifact raises `CatalogError` and crashes the lifespan (CI's app-boot
+smoke fails) rather than 500-ing the first `--catalog` ingest that
+touches the row. Parsing a spec with the real parser — not a cheap
+YAML well-formedness check — is deliberate: a spec that decodes but has
+no `paths`, a wrong OpenAPI version, or an unsupported `$ref` is
+exactly the "ships fine, fails at ingest" bug this guard catches.
+
+**Packaging:** the two resource dirs live inside the package tree
+under `src/meho_backplane/`, so hatch's `packages` glob already
+collects their data files into the wheel (same as the packaged
+`catalog.yaml` and the `.j2` grouping prompts). `backend/pyproject.toml`
+lists them in `[tool.hatch.build.targets.wheel].artifacts` to make the
+non-`.py` inclusion explicit; they are NOT in `force-include` (that
+table is for trees *outside* the package, like `backend/alembic` —
+re-including an in-package path there is a duplicate-archive build
+error).
+
+T1 (#1975) ships the mechanism plus a `_fixture/1.0` profile-backed
+row pointing at `_fixture_minimal.yaml` in each resource package, so
+the boot validator and the catalog-driven ingest path are exercised
+end to end. T2 (#1976) authors the real vmware/sddc specs/profiles.
+
 ### T3 (LLM grouping) at a glance
 
 `run_llm_grouping()` opens its own transaction and runs:

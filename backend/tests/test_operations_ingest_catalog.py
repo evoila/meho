@@ -46,19 +46,27 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest.catalog import (
+    PROFILE_RESOURCE_PACKAGE,
+    SPEC_RESOURCE_PACKAGE,
     CatalogError,
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
     info_version_matches_compatibility,
     load_catalog,
+    load_profile_resource,
+    load_spec_resource,
     parse_catalog,
     validate_catalog_registry_coverage,
+    validate_shipped_artifacts,
 )
 
-# The eight catalog entries currently shipped. The seven v0.3.0
+# The nine catalog entries currently shipped. The seven v0.3.0
 # connectors plus ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API
 # entry that consumes the GitHubRestConnector class shipped by
-# G3.11-T1 #1221). The ``gh`` row's ``version`` field stores the
+# G3.11-T1 #1221) plus the ``_fixture/1.0`` profile-backed shipped-spec
+# mechanism row (#1964 T1 #1975 -- exercises the spec_resource /
+# profile_resource on-ramp + the boot-time dry-run-parse validator).
+# The ``gh`` row's ``version`` field stores the
 # digit-prefix ``"3"`` (G3.11-T8 #1242 reconciled the catalog with
 # the registry's parse-friendly form -- the dispatcher's
 # parse_connector_id pins version to ``^[0-9][A-Za-z0-9._]*$``);
@@ -76,8 +84,14 @@ _EXPECTED_PRODUCT_VERSION = {
     ("vault", "1.x"),
     ("k8s", "1.x"),
     ("bind9", "9.x"),
+    # #1964 T1 #1975: profile-backed shipped-spec mechanism fixture.
+    ("_fixture", "1.0"),
 }
 _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
+# Products whose catalog row carries neither an ``upstream`` nor is a
+# hand-coded typed connector: the profile-backed shipped-spec rows
+# (#1975) whose spec ships as package data via ``spec_resource``.
+_SHIPPED_SPEC_PRODUCTS = {"_fixture"}
 
 
 @pytest.fixture(autouse=True)
@@ -125,9 +139,18 @@ def test_shipped_catalog_parses_cleanly() -> None:
 
 
 def test_shipped_catalog_typed_connectors_have_null_upstream() -> None:
-    """Typed connectors carry ``upstream: null``; generic ones carry URLs."""
+    """Typed connectors carry ``upstream: null``; generic ones carry URLs.
+
+    Profile-backed shipped-spec rows (#1975) are a third shape: null
+    ``upstream`` (the spec ships as package data, not fetched) but a
+    ``spec_resource`` instead of a hand-coded connector, so they're
+    exempt from both branches.
+    """
     for entry in load_catalog().entries:
-        if entry.product in _TYPED_PRODUCTS:
+        if entry.product in _SHIPPED_SPEC_PRODUCTS:
+            assert entry.upstream is None, f"{entry.product} ships its spec (null upstream)"
+            assert entry.spec_resource, f"{entry.product} needs a shipped spec_resource"
+        elif entry.product in _TYPED_PRODUCTS:
             assert entry.upstream is None, f"{entry.product} should be typed (null upstream)"
         else:
             assert entry.upstream, f"{entry.product} is generic and needs upstream URL(s)"
@@ -184,6 +207,13 @@ def test_every_requires_connector_class_is_registered(
     _registered_connectors: set[str],
 ) -> None:
     for entry in load_catalog().entries:
+        if entry.profile_resource is not None:
+            # Profile-backed row (#1975): requires_connector_class names a
+            # synthesised ProfiledRestConnector subclass materialised from
+            # the profile (T5 #1971), which need not pre-exist in the
+            # registry. The validator exempts these rows; the test mirrors
+            # that exemption.
+            continue
         assert entry.requires_connector_class in _registered_connectors
 
 
@@ -210,7 +240,13 @@ def test_catalog_product_field_matches_target_create_enum(
     """
     from meho_backplane.connectors.registry import registered_product_tokens
 
-    catalog_products = {entry.product for entry in load_catalog().entries}
+    # Profile-backed rows (#1975) name a product whose ProfiledRestConnector
+    # subclass is registered when the profile is materialised (T5 #1971),
+    # not at catalog-parse time, so their product need not yet be in the
+    # TargetCreate enum. Exempt them from the catalog-↔-enum alignment.
+    catalog_products = {
+        entry.product for entry in load_catalog().entries if entry.profile_resource is None
+    }
     enum_products = set(registered_product_tokens())
     missing = catalog_products - enum_products
     assert missing == set(), (
@@ -339,6 +375,173 @@ def test_validate_catalog_registry_coverage_raises_on_unknown_class() -> None:
     )
     with pytest.raises(CatalogError, match="unregistered connector class"):
         validate_catalog_registry_coverage(bogus)
+
+
+# ---------------------------------------------------------------------------
+# (d) Shipped-spec / profile mechanism — #1964 T1 #1975
+#
+# A catalog row may carry a packaged spec_resource / profile_resource;
+# the catalog-driven ingest route loads the spec bytes inline (bypassing
+# an un-fetchable upstream), the validator exempts profile-backed rows
+# from the class-presence + triple checks, and every shipped artifact is
+# dry-run-parsed at startup (boot crashes on a malformed one).
+# ---------------------------------------------------------------------------
+
+
+def test_profile_backed_row_exempt_from_class_presence() -> None:
+    """A profile-backed row passes the validator with no registered class.
+
+    The synthesised ProfiledRestConnector subclass (T5 #1971) need not
+    exist when the boot-time validator runs, so a row carrying
+    ``profile_resource`` must NOT trip the unregistered-class assertion
+    even against an empty registry.
+    """
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof_1_0",
+                profile_resource="some_profile.yaml",
+            ),
+        ),
+    )
+    # Must not raise even though the class / triple are unregistered.
+    validate_catalog_registry_coverage(cat)
+
+
+def test_non_profile_row_still_enforces_class_presence() -> None:
+    """The exemption is profile-gated: a plain row still fails on a bogus class."""
+    cat = ConnectorSpecCatalog(
+        entries=(_entry(requires_connector_class="NoSuchConnector999"),),
+    )
+    with pytest.raises(CatalogError, match="unregistered connector class"):
+        validate_catalog_registry_coverage(cat)
+
+
+def test_resource_name_rejects_path_traversal() -> None:
+    """spec_resource / profile_resource must be a single safe segment."""
+    for bad in ("../escape.yaml", "sub/dir.yaml", "a\\b.yaml", "  "):
+        with pytest.raises(ValidationError):
+            _entry(spec_resource=bad)
+        with pytest.raises(ValidationError):
+            _entry(profile_resource=bad)
+
+
+def test_load_spec_resource_reads_shipped_fixture() -> None:
+    """The shipped fixture spec resolves to its package-data text."""
+    text = load_spec_resource("_fixture_minimal.yaml")
+    assert "openapi:" in text
+    assert "/things" in text
+
+
+def test_load_profile_resource_reads_shipped_fixture() -> None:
+    text = load_profile_resource("_fixture_minimal.yaml")
+    assert "scheme: basic" in text
+
+
+def test_load_spec_resource_missing_raises_catalog_error() -> None:
+    with pytest.raises(CatalogError, match="not found under"):
+        load_spec_resource("definitely_not_a_real_spec.yaml")
+
+
+def test_resource_packages_are_importable() -> None:
+    """The force-included resource packages exist and are addressable."""
+    from importlib.resources import files
+
+    assert files(SPEC_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
+    assert files(PROFILE_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
+
+
+def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
+    """Every shipped spec/profile dry-run-parses cleanly at boot."""
+    validate_shipped_artifacts()  # must not raise
+
+
+def test_validate_shipped_artifacts_crashes_on_missing_spec() -> None:
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                spec_resource="missing_spec.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="not found under"):
+        validate_shipped_artifacts(cat)
+
+
+def test_validate_shipped_artifacts_crashes_on_malformed_spec(
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shipped spec that parses as YAML but isn't a valid OpenAPI doc crashes boot.
+
+    Patches ``load_spec_resource`` to return a YAML document with no
+    ``paths`` key — well-formed YAML, invalid OpenAPI — and asserts the
+    boot guard surfaces it via the real ``parse_openapi`` (not a cheap
+    well-formedness check), wrapped in a ``CatalogError``.
+    """
+    import meho_backplane.operations.ingest.catalog as catalog_mod
+
+    monkeypatch.setattr(
+        catalog_mod,
+        "load_spec_resource",
+        lambda _name: "openapi: '3.1.0'\ninfo:\n  title: bad\n  version: '1.0'\n",
+    )
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                spec_resource="_fixture_minimal.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="failed dry-run parse"):
+        validate_shipped_artifacts(cat)
+
+
+def test_validate_shipped_artifacts_crashes_on_malformed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shipped profile naming a reserved/unknown auth scheme crashes boot."""
+    import meho_backplane.operations.ingest.catalog as catalog_mod
+
+    bad_profile = (
+        "product: prof\n"
+        "version: '1.0'\n"
+        "auth:\n"
+        "  scheme: not_a_real_scheme\n"
+        "  secret_fields: [token]\n"
+        "fingerprint:\n"
+        "  path: /v\n"
+        "  version_key: version\n"
+        "probe: delegate\n"
+        "pagination:\n"
+        "  strategy: none\n"
+        "  items_key: items\n"
+    )
+    monkeypatch.setattr(catalog_mod, "load_profile_resource", lambda _name: bad_profile)
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                profile_resource="_fixture_minimal.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="failed dry-run parse"):
+        validate_shipped_artifacts(cat)
 
 
 # ---------------------------------------------------------------------------

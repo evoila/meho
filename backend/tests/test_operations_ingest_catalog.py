@@ -471,7 +471,13 @@ def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
 @pytest.mark.parametrize(
     ("product", "spec_resource", "profile_resource", "expected_scheme", "expected_ops"),
     [
-        ("vmware", "vmware_rest_minimal.yaml", "vmware_rest_minimal.yaml", "session_login", 9),
+        (
+            "vmware",
+            "vmware_rest_minimal.yaml",
+            "vmware_rest_minimal.yaml",
+            "session_login_basic",
+            9,
+        ),
         ("sddc", "sddc_manager_minimal.yaml", "sddc_manager_minimal.yaml", "basic", 9),
     ],
 )
@@ -530,7 +536,7 @@ def test_shipped_vmware_sddc_specs_parse_with_the_ingest_parser(
 @pytest.mark.parametrize(
     ("profile_resource", "expected_scheme"),
     [
-        ("vmware_rest_minimal.yaml", "session_login"),
+        ("vmware_rest_minimal.yaml", "session_login_basic"),
         ("sddc_manager_minimal.yaml", "basic"),
     ],
 )

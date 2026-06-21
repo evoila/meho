@@ -114,7 +114,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import ShimKind
-from meho_backplane.connectors.profile import ExecutionProfile, split_version
+from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile, split_version
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -256,9 +256,12 @@ class ProfiledRestConnector(HttpConnector):
 
         Stateless schemes (``basic`` / ``static_header``) compute the header
         from the freshly resolved secret bundle. Session-stateful schemes
-        (``session_login`` / ``oauth2_mint``) return ``{header_name: "Bearer
-        <token>"}`` for a token obtained through the session harness (cached,
-        single-flight, refresh-on-expiry, fail-closed).
+        return ``{spec.token_header: <placed token>}`` for a token obtained
+        through the session harness (cached, single-flight,
+        refresh-on-expiry, fail-closed): ``session_login`` / ``oauth2_mint``
+        place a ``"Bearer <token>"`` in ``Authorization``;
+        ``session_login_basic`` places the raw token in vCenter's
+        ``vmware-api-session-id`` header.
         """
         profile = self._require_profile(target)
         auth = profile.auth
@@ -276,8 +279,10 @@ class ProfiledRestConnector(HttpConnector):
             secret = await self._load_credentials(target, operator)
             return build_static_headers(auth, secret)
 
+        spec = self._session_spec(auth.scheme)
         token = await self._session_token(target, operator)
-        return {auth.header_name: f"Bearer {token}"}
+        value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
+        return {spec.token_header: value}
 
     # -- session-token harness (session_login / oauth2_mint) ------------
 
@@ -316,12 +321,14 @@ class ProfiledRestConnector(HttpConnector):
         """Run the scheme's login round-trip and return the minted token + TTL.
 
         Reads the secret bundle (operator-context, fail-closed) then POSTs
-        the scheme's login body on the pooled client (see :meth:`_post_login`
-        for why this bypasses the ``auth_headers``-stamping ``_post_json``
-        seam). ``encoding`` picks the body slot: JSON for ``session_login``,
-        form-encoded for ``oauth2_mint``. A non-2xx surfaces as
-        :exc:`httpx.HTTPStatusError`; a 2xx with no usable token surfaces as
-        :exc:`ProfileAuthError` naming the target + scheme.
+        the scheme's login round-trip on the pooled client (see
+        :meth:`_post_login` for why this bypasses the
+        ``auth_headers``-stamping ``_post_json`` seam). ``encoding`` picks
+        the body slot: JSON for ``session_login``, form-encoded for
+        ``oauth2_mint``; ``session_login_basic`` sends no body and carries
+        its credentials as HTTP Basic on the login POST instead. A non-2xx
+        surfaces as :exc:`httpx.HTTPStatusError`; a 2xx with no usable token
+        surfaces as :exc:`ProfileAuthError` naming the target + scheme.
         """
         profile = self._require_profile(target)
         auth = profile.auth
@@ -329,7 +336,7 @@ class ProfiledRestConnector(HttpConnector):
         secret = await self._load_credentials(target, operator)
         body = spec.build_body(auth, secret)
         path = spec.login_path(auth)
-        payload = await self._post_login(target, spec, path, body)
+        payload = await self._post_login(target, spec, auth, path, body, secret)
         minted = spec.extract_token(payload)
         if minted is None:
             raise ProfileAuthError(
@@ -349,10 +356,12 @@ class ProfiledRestConnector(HttpConnector):
         self,
         target: Any,
         spec: SessionSchemeSpec,
+        auth: AuthSpec,
         path: str,
         body: Mapping[str, str],
+        secret: Mapping[str, str],
     ) -> Any:
-        """POST the login body on the pooled client and return the parsed JSON.
+        """Run the login round-trip on the pooled client; return the parsed JSON.
 
         Goes through the pooled :class:`httpx.AsyncClient` **directly** rather
         than the inherited ``_post_json`` seam, for two load-bearing reasons:
@@ -361,8 +370,10 @@ class ProfiledRestConnector(HttpConnector):
           a profiled connector's ``auth_headers`` is *what is establishing
           this session*, so routing the login POST through it would recurse
           (and deadlock on the non-reentrant session lock the caller already
-          holds). The login carries its credentials in the **body**, not an
-          ``Authorization`` header, so it must skip ``auth_headers`` entirely.
+          holds). The login carries its credentials in the request body
+          (``session_login`` / ``oauth2_mint``) or as an HTTP Basic header
+          built here (``session_login_basic``), never via ``auth_headers``,
+          so it must skip ``auth_headers`` entirely.
         * The login round-trip is "one attempt, surface the failure cleanly"
           — it deliberately bypasses the idempotent-GET tenacity retry, the
           same posture
@@ -370,13 +381,27 @@ class ProfiledRestConnector(HttpConnector):
           takes for the typed connectors.
 
         The client is still the pooled per-target client, so it inherits the
-        connector's TLS-trust / base-URL / timeout config. The body slot is
-        picked from the spec's ``encoding`` (``json`` → ``json=``, ``form`` →
-        ``data=``). A non-2xx surfaces as :exc:`httpx.HTTPStatusError`.
+        connector's TLS-trust / base-URL / timeout config. Credential
+        carriage is picked from the spec's ``login_credentials``:
+        ``"basic"`` sends HTTP Basic creds (from the profile's first two
+        declared secret fields) and an empty body — vCenter's
+        ``POST /api/session`` shape; ``"body"`` picks the body slot from the
+        spec's ``encoding`` (``json`` → ``json=``, ``form`` → ``data=``). A
+        non-2xx surfaces as :exc:`httpx.HTTPStatusError`.
         """
         client = await self._http_client(target)
         request_headers = dict(spec.request_headers)
-        if spec.encoding == "form":
+        if spec.login_credentials == "basic":
+            basic_auth = spec.build_login_auth(auth, secret)
+            if basic_auth is None:
+                # A basic-credentials scheme must yield a (user, pass) pair;
+                # None here is a scheme-wiring error, not an operator fault.
+                raise ProfileAuthError(
+                    f"{auth.scheme!r} declares login_credentials='basic' but its "
+                    f"build_login_auth produced no credential pair"
+                )
+            resp = await client.post(path, headers=request_headers, auth=basic_auth)
+        elif spec.encoding == "form":
             resp = await client.post(path, data=dict(body), headers=request_headers)
         else:
             resp = await client.post(path, json=dict(body), headers=request_headers)

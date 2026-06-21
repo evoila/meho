@@ -73,6 +73,7 @@ def _profile(scheme: str, **auth_overrides: object) -> ExecutionProfile:
         "basic": {"secret_fields": ("username", "password")},
         "static_header": {"secret_fields": ("token",), "value_kind": "bearer"},
         "session_login": {"secret_fields": ("username", "password")},
+        "session_login_basic": {"secret_fields": ("username", "password")},
         "oauth2_mint": {"secret_fields": ("client_id", "client_secret")},
     }[scheme]
     auth_kwargs: dict[str, object] = {"scheme": scheme, **defaults}
@@ -245,6 +246,126 @@ async def test_session_login_missing_token_raises_naming_scheme_and_target() -> 
 
     assert "session_login" in str(exc.value)
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# session_login_basic (vCenter parity) — basic-auth login -> raw-string token
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_mints_token_via_basic_auth_post() -> None:
+    """``session_login_basic`` POSTs with HTTP Basic and no body.
+
+    Behaviour parity with VmwareRestConnector's modern ``/api/session``:
+    credentials ride an HTTP Basic ``Authorization`` header (not the body),
+    the response body *is* the raw JSON-string token, and the established
+    token is applied verbatim in the ``vmware-api-session-id`` header.
+    """
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        route = mock.post("/api/session").respond(200, json="sess-token-xyz")
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    # Raw token (no Bearer wrap) in vCenter's bespoke session header.
+    assert headers == {"vmware-api-session-id": "sess-token-xyz"}
+    request = route.calls[0].request
+    # Credentials ride HTTP Basic, not the request body.
+    expected_basic = base64.b64encode(b"svc:pw").decode()
+    assert request.headers.get("authorization") == f"Basic {expected_basic}"
+    # The login POST carries an empty body (no JSON creds).
+    assert request.read() == b""
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_caches_token_single_flight() -> None:
+    """A second call reuses the cached vCenter session — exactly one login POST."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        route = mock.post("/api/session").respond(200, json="sess-cached")
+        h1 = await connector.auth_headers(target, operator=_operator())
+        h2 = await connector.auth_headers(target, operator=_operator())
+
+    assert h1 == h2 == {"vmware-api-session-id": "sess-cached"}
+    assert route.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_does_not_proactively_expire_on_ttl() -> None:
+    """A session_login_basic token has no proactive TTL — caches until invalidated."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        mock.post("/api/session").respond(200, json="s")
+        await connector.auth_headers(target, operator=_operator())
+
+    cached = connector._session_tokens[target_cache_key(target)]
+    assert cached.expires_at is None
+    assert cached.is_fresh(time.monotonic() + 10_000) is True
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"value": "obj-shaped"}, "", 123])
+async def test_session_login_basic_non_string_body_raises_naming_target(
+    payload: object,
+) -> None:
+    """A 2xx login whose body is not a non-empty string raises naming the target.
+
+    Modern ``/api/session`` returns the token as a JSON string; an object
+    body (legacy shape, out of scope), an empty string, or a non-string is
+    treated as "no usable token" so the harness raises the consistent
+    target-named :exc:`ProfileAuthError`.
+    """
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        mock.post("/api/session").respond(200, json=payload)
+        with pytest.raises(ProfileAuthError, match=r"vcenter") as exc:
+            await connector.auth_headers(target, operator=_operator())
+
+    assert "session_login_basic" in str(exc.value)
+    await connector.aclose()
+
+
+def test_session_login_basic_build_body_and_extract_token_directly() -> None:
+    """Unit-level cover of the scheme's build_body + extract_token + login auth.
+
+    Mirrors the ``session_login`` direct-spec coverage: ``build_body``
+    returns an empty body (creds ride HTTP Basic), ``build_login_auth``
+    yields the ``(username, password)`` pair, and ``extract_token`` coerces
+    a raw JSON-string body to a no-TTL token while rejecting non-string /
+    empty bodies.
+    """
+    from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+
+    spec = SESSION_SCHEME_SPECS["session_login_basic"]
+    auth = AuthSpec(scheme="session_login_basic", secret_fields=("username", "password"))
+    secret = {"username": "svc", "password": "pw"}
+
+    assert spec.build_body(auth, secret) == {}
+    assert spec.build_login_auth(auth, secret) == ("svc", "pw")
+    assert spec.login_path(auth) == "/api/session"
+    assert spec.login_credentials == "basic"
+    assert spec.token_header == "vmware-api-session-id"
+    assert spec.token_value_kind == "raw"
+
+    minted = spec.extract_token("raw-string-token")
+    assert minted is not None
+    assert minted.token == "raw-string-token"
+    assert minted.ttl_seconds is None
+
+    assert spec.extract_token("") is None
+    assert spec.extract_token({"value": "obj"}) is None
+    assert spec.extract_token(123) is None
 
 
 # ---------------------------------------------------------------------------

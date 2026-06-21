@@ -33,7 +33,7 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 | 6 | argocd | `argocd/connector.py` `auth_headers` | Static pre-issued token → `Authorization: Bearer <token>` | `token` | `dict[str,str]` | **`static_header`** (`value_kind=bearer`) |
 | 7 | keycloak | `keycloak/connector.py` `auth_headers` | OAuth2 client-credentials form grant `POST /realms/{r}/protocol/openid-connect/token` → cached Bearer | `client_id`, `client_secret` | `dict[str,str]` (Bearer) | **`oauth2_mint`** |
 | 8 | vcf_logs (vRLI) | `vcf_logs/connector.py` `auth_headers` | Session login `POST /api/v2/sessions` (JSON `{username,password,provider}`) → `sessionId` → cached Bearer | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login`** |
-| 9 | vmware_rest | `vmware_rest/session.py` | Session login `POST /api/session` (Basic) → token from body → cached Bearer | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login`** |
+| 9 | vmware_rest | `vmware_rest/connector.py` `_establish_session` | Session login `POST /api/session` (HTTP Basic, no body) → raw JSON-string token from body → cached, sent in `vmware-api-session-id` header | `username`, `password` | `dict[str,str]` (raw `vmware-api-session-id`) | **`session_login_basic`** |
 | 10 | github | `github/connector.py` `auth_headers` | App-JWT: mint RS256 JWT → exchange for installation token (or PAT passthrough) | `app_id`, `private_key_pem`, `installation_id` (or `token`) | `dict[str,str]` (Bearer) | **RESERVED** `github_app_jwt` |
 | 11 | gcloud | `gcloud/connector.py` `auth_headers` | ADC + `impersonated_credentials` for `target.gcp_impersonate_sa` → refreshed token | ADC source + impersonation target (no static secret) | `dict[str,str]` (Bearer) | **RESERVED** `gcp_sa_impersonation` |
 | 12 | vault | `vault/connector.py` (`vault_client_for_operator`) | Operator-context OIDC JWT forward; no per-call header dict | operator `raw_jwt` | not a header dict | **RESERVED** `operator_jwt_forward` |
@@ -55,7 +55,9 @@ Six connectors (five if `vcf_operations`'s query-param merge is counted as
 - **`basic`** — harbor, sddc_manager, vcf_fleet, vcf_operations, hetzner_robot
 - **`static_header`** — argocd
 - **`oauth2_mint`** — keycloak
-- **`session_login`** — vcf_logs, vmware_rest
+- **`session_login`** — vcf_logs (vRLI: JSON creds body → `sessionId` → Bearer)
+- **`session_login_basic`** — vmware_rest (vCenter: HTTP Basic login, no body
+  → raw JSON-string token → `vmware-api-session-id` header; #2025)
 
 Eight stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
 vcf_automation — because their auth is stateful, asymmetric-crypto, or
@@ -86,7 +88,8 @@ six in-catalog connectors.
 
 ## T4 (#1970) — the runtime extractors + hoisted session harness
 
-T3's catalog named four schemes; T4 lands the Python that runs them, so a
+T3's catalog named four schemes (a fifth, `session_login_basic`, was added
+in #2025 for vCenter's HTTP-Basic login shape); T4 lands the Python that runs them, so a
 stamped `ProfiledRestConnector` actually dispatches. Each `AuthSchemeName`
 value now resolves to one vetted extractor, with **no behaviour loss**
 against the typed connectors the row was grounded on:
@@ -96,17 +99,23 @@ against the typed connectors the row was grounded on:
   the header from the secret bundle on every call (Basic `base64(user:pass)`;
   bearer-wrapped or raw pre-issued token per `value_kind`). No token cache,
   no login round-trip.
-- **`session_login` (vRLI) / `oauth2_mint` (keycloak)** — *session-stateful*.
-  The per-target lock / token cache (keyed `(tenant_id, id)`) / single-flight
-  / TTL-or-expiry refresh / empty-`raw_jwt` fail-closed harness lives **once**
-  in `ProfiledRestConnector` (it was duplicated across `vcf_logs` and
-  `keycloak` before). The scheme-specific login mechanics — login path, body
-  encoding (`json` for vRLI's `{username,password,provider}`, `form` for the
-  OAuth2 client-credentials grant), and the token + TTL extractor — are
-  `SessionSchemeSpec` entries in `SESSION_SCHEME_SPECS`, selected by
-  `profile.auth.scheme`. `session_login` caches until a downstream re-login
-  (idle-expiry, `ttl_seconds=None`); `oauth2_mint` re-mints once the
-  monotonic clock passes the margin-adjusted `expires_in`.
+- **`session_login` (vRLI) / `session_login_basic` (vCenter) / `oauth2_mint`
+  (keycloak)** — *session-stateful*. The per-target lock / token cache (keyed
+  `(tenant_id, id)`) / single-flight / TTL-or-expiry refresh / empty-`raw_jwt`
+  fail-closed harness lives **once** in `ProfiledRestConnector` (it was
+  duplicated across `vcf_logs` and `keycloak` before). The scheme-specific
+  login mechanics — login path, credential carriage (`body` for vRLI's
+  `{username,password,provider}` JSON / the OAuth2 form grant, `basic` for
+  vCenter's HTTP-Basic `POST /api/session`), body encoding, the token + TTL
+  extractor, and how the established token is applied (`Bearer` in
+  `Authorization` for vRLI / keycloak, raw in `vmware-api-session-id` for
+  vCenter) — are `SessionSchemeSpec` entries in `SESSION_SCHEME_SPECS`,
+  selected by `profile.auth.scheme`. `session_login` / `session_login_basic`
+  cache until a downstream re-login (idle-expiry, `ttl_seconds=None`);
+  `oauth2_mint` re-mints once the monotonic clock passes the margin-adjusted
+  `expires_in`. `session_login_basic` mirrors only the typed connector's
+  modern `/api/session` path — the legacy `/rest/com/vmware/cis/session`
+  fallback is out of scope for the profiled shape (#2025).
 
 The login POST goes through the pooled `httpx.AsyncClient` directly (not the
 `auth_headers`-stamping `_post_json` seam) — the login *is* what establishes

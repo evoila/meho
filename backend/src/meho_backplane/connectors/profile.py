@@ -11,7 +11,7 @@ the dispatchable sibling of the auto-shim whose one hand-coded slot is
 fills that slot.
 
 **The catalog selects a vetted extractor by name — it is not a DSL.**
-``AuthSchemeName`` is a closed :data:`typing.Literal` enumerating the four
+``AuthSchemeName`` is a closed :data:`typing.Literal` enumerating the
 auth shapes a profile can declare. Each value *names a vetted Python
 extractor* (hoisted from the existing connectors in T4 #1970); the profile
 carries **no** ``token_location`` / ``field_map`` / ``value_template`` /
@@ -26,8 +26,9 @@ interpreter, not selecting a reviewed extractor.
 not picked from memory.** The coverage trace lives in
 ``docs/codebase/connector-auth-coverage.md``. Six connectors fit a named
 scheme (harbor / sddc_manager / vcf_fleet / vcf_operations → ``basic``;
-argocd → ``static_header``; keycloak → ``oauth2_mint``; vcf_logs / vmware_rest
-→ ``session_login``). The remaining eight need bespoke Python the closed
+argocd → ``static_header``; keycloak → ``oauth2_mint``; vcf_logs →
+``session_login``; vmware_rest → ``session_login_basic`` #2025). The
+remaining eight need bespoke Python the closed
 catalog deliberately does **not** model — github (App RS256 JWT), gcloud
 (SA-JSON / ADC impersonation), vault (operator-JWT-forward), kubernetes
 (kubeconfig), nsx (cookie-jar session), vcf_automation (dual-plane
@@ -112,7 +113,12 @@ DEFAULT_EXPIRY_STATUSES: frozenset[int] = frozenset({401})
 #:   (argocd's static API token). ``value_kind`` picks bearer-wrapping vs
 #:   raw placement.
 #: * ``session_login`` — exchange credentials at a login endpoint for a
-#:   short-lived token, then send it as ``Bearer`` (vcf_logs / vmware_rest).
+#:   short-lived token via a JSON creds body, then send it as ``Bearer``
+#:   (vcf_logs / vRLI).
+#: * ``session_login_basic`` — exchange HTTP Basic credentials (no body) at
+#:   a login endpoint for a short-lived token returned as a raw JSON-string
+#:   body, then send it verbatim in a bespoke header (vmware_rest / vCenter's
+#:   ``POST /api/session`` → ``vmware-api-session-id``; #2025).
 #: * ``oauth2_mint`` — OAuth2 client-credentials form grant minting a
 #:   ``Bearer`` token (keycloak admin).
 #:
@@ -123,6 +129,7 @@ AuthSchemeName = Literal[
     "basic",
     "static_header",
     "session_login",
+    "session_login_basic",
     "oauth2_mint",
 ]
 

@@ -113,6 +113,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
@@ -121,12 +122,14 @@ from meho_backplane.connectors._shared.vcf_auth import (
     vcf_session_login,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.profile import split_version
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vcf_logs.profile import VRLI_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_logs.session import (
     VcfCredentialsLoader,
     VcfLogsTargetLike,
@@ -143,19 +146,28 @@ _log = structlog.get_logger(__name__)
 # ``{username, password, provider}``; success returns 200 with a JSON
 # body carrying ``sessionId`` + ``ttl``. Per the consumer wrapper at
 # https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-logs.sh
-_SESSION_CREATE_PATH = "/api/v2/sessions"
+# Sourced from the reviewed ``vrli_session`` ExecutionProfile (G0.28-T8
+# #1974) via the named ``session_login`` scheme's vetted login-path builder
+# so the typed connector and a profiled connector share one declaration of
+# the session endpoint rather than two literals that could drift.
+_SESSION_CREATE_PATH = SESSION_SCHEME_SPECS[VRLI_EXECUTION_PROFILE.auth.scheme].login_path(
+    VRLI_EXECUTION_PROFILE.auth
+)
 
 # Unauthenticated version endpoint for fingerprint + probe. Returns JSON
 # ``{version, releaseName}`` where ``version`` is e.g.
 # ``"9.0.0.0.21761695"`` (dot-separated). The wrapper splits the value
 # at dots and reports ``parts[0:3]`` as the public version + ``parts[4]``
-# as the build; we mirror that shape in :class:`FingerprintResult`.
-_VERSION_PATH = "/api/v2/version"
+# as the build; we mirror that shape in :class:`FingerprintResult`. The
+# path comes from the profile's fingerprint recipe (single source of truth).
+_VERSION_PATH = VRLI_EXECUTION_PROFILE.fingerprint.path
 
 # Default vRLI identity-source name. Matches the wrapper's
 # ``PROVIDER="Local"`` default; ``ActiveDirectory`` / ``vIDM`` are
 # permitted alternatives a target may declare via
-# :attr:`VcfLogsTargetLike.provider`.
+# :attr:`VcfLogsTargetLike.provider`. The profile's ``session_login``
+# scheme hardcodes ``"Local"``; the typed connector keeps the per-target
+# override the declarative scheme deliberately does not model.
 _DEFAULT_PROVIDER = "Local"
 
 # Downstream statuses that mean "the cached session token is no longer
@@ -164,8 +176,10 @@ _DEFAULT_PROVIDER = "Local"
 # invalid Authorization). Both feed
 # :meth:`VcfLogsConnector._get_json_with_session_retry`; see the module
 # "Session-expiry retry-once contract" docstring above for why 440 is the
-# case that bites (#1909).
-_SESSION_EXPIRED_STATUSES: frozenset[int] = frozenset({401, 440})
+# case that bites (#1909). Sourced from the profile's ``expiry_statuses``
+# (G0.28-T7 #1973) so the typed connector and the dispatcher's auth-class
+# arm narrow the same closed set from one declaration.
+_SESSION_EXPIRED_STATUSES: frozenset[int] = VRLI_EXECUTION_PROFILE.expiry_statuses
 
 
 def _vrli_payload_builder(
@@ -193,23 +207,26 @@ def _vrli_payload_builder(
 def _parse_vrli_version(version_full: Any) -> tuple[str | None, str | None, str | None]:
     """Render a vRLI ``version`` string as ``(public, build, patch)``.
 
-    vRLI reports ``version`` as a dot-separated tuple such as
-    ``"9.0.0.0.21761695"``. The wrapper at ``vcf-logs.sh`` lines
-    226-251 renders ``parts[0:3]`` as the public version and
-    ``parts[4]`` as the build, with ``parts[3]`` exposed as the patch
-    component. Mirror that contract so ``meho connector fingerprint``
-    stays byte-compatible with ``vcf-logs.sh --probe``.
+    The ``(public, build)`` split is the profile's ``vrli_five_part`` named
+    splitter (G0.28-T6 #1972) — the same vetted parser a profiled vRLI
+    connector uses, so the typed connector and the profile cannot disagree
+    on the public version / build for any input. ``patch`` (``parts[3]``)
+    is the one component the named splitter deliberately drops; it stays
+    bespoke typed-only enrichment surfaced in ``fingerprint``'s ``extras``,
+    mirroring the wrapper at ``vcf-logs.sh`` lines 226-251.
 
     Returns ``(None, None, None)`` if *version_full* is not a non-empty
     string -- the appliance returning a malformed response shouldn't
-    crash the fingerprint round-trip.
+    crash the fingerprint round-trip (the splitter is equally tolerant).
     """
-    if not isinstance(version_full, str) or not version_full:
+    version, build = split_version(
+        VRLI_EXECUTION_PROFILE.fingerprint.version_splitter,
+        version_full if isinstance(version_full, str) else None,
+    )
+    if version is None:
         return None, None, None
     parts = version_full.split(".")
-    version = ".".join(parts[0:3]) if len(parts) >= 3 else version_full
     patch = parts[3] if len(parts) > 3 else None
-    build = parts[4] if len(parts) > 4 else None
     return version, build, patch
 
 
@@ -245,6 +262,29 @@ class VcfLogsConnector(HttpConnector):
     :class:`CredentialsCache` instance). The :attr:`priority` is set to
     ``1`` so a future ``GenericRestConnector`` auto-shim that somehow
     registers for the same triple loses the registry's tie-break ladder.
+
+    Profile-derived auth + fingerprint (G0.28-T8 #1974)
+    ===================================================
+
+    The connector's declarative auth + fingerprint surfaces are sourced
+    from the reviewed
+    :data:`~meho_backplane.connectors.vcf_logs.profile.VRLI_EXECUTION_PROFILE`
+    rather than hand-coded literals: the session-create path comes from the
+    profile's ``session_login`` scheme spec, the version endpoint + the
+    ``(public, build)`` split come from the profile's fingerprint recipe
+    (the ``vrli_five_part`` named splitter), and the session-expiry status
+    set is the profile's ``expiry_statuses`` (``{401, 440}``). This makes
+    the profile the single source of truth shared with a profiled vRLI
+    connector — the capstone of Initiative #1965, with per-method dispatch
+    parity proven in the integration lane (``tests/integration/
+    test_connectors_vrli_profile_parity.py``).
+
+    Two surfaces stay typed-only because the declarative profile cannot
+    model them: the per-target ``provider`` (``ActiveDirectory`` / ``vIDM``;
+    the ``session_login`` scheme hardcodes ``"Local"``) and the fingerprint
+    ``extras`` (``release_name`` / ``version_full`` / ``patch``). The
+    ``ResultHandle`` large-result path is the connector-agnostic JSONFlux
+    dispatch mechanism, not connector code, and is untouched.
     """
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple

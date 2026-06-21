@@ -94,7 +94,11 @@ from tests.acceptance._vrli_canary_fixtures import (
     VRLI_CANARY_SESSION_REFRESH_ID,
     VRLI_CONSTRAINT_OP_PARAMS,
     VRLI_FORCE_HANDLE_LIST_OP_ID,
+    VRLI_RESERVED_CONSTRAINT_OP_ID,
+    VRLI_RESERVED_CONSTRAINT_VALUE,
     _insert_vrli_descriptors,
+    _insert_vrli_reserved_constraint_descriptor,
+    _register_vrli_reserved_constraint_route,
     _register_vrli_routes,
     _vrli_credentials_loader,
 )
@@ -932,4 +936,87 @@ async def test_vrli_e2e_jsonflux_handle_populated_for_event_query(
     payload = result_envelope.get("result")
     assert payload is not None and payload.get("row_count") == expected_rows, (
         f"Expected reducer summary on result.row_count={expected_rows}; got result={payload!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reserved-expansion constraint canary (#2003)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def vrli_e2e_reserved_constraint(
+    captured_events: list[Any],
+) -> AsyncIterator[tuple[_VrliE2EBundle, Any]]:
+    """vRLI setup seeding the ``{+constraints}`` reserved-expansion events op.
+
+    Layers a single non-curated ``GET:/api/v2/events/{+constraints}``
+    descriptor on top of the standard happy-path setup and registers a
+    respx route against the **literal-slash** wire path. The route is
+    yielded so the test can assert it was hit — a ``%2F``-mangled URL
+    would miss it.
+    """
+    del captured_events
+
+    await _insert_vrli_descriptors()
+    await _insert_vrli_reserved_constraint_descriptor()
+    seeded_target = await _seed_target()
+    instance = _resolve_connector()
+
+    async with respx.mock(
+        base_url=VRLI_CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        _register_vrli_routes(mock)
+        reserved_route = _register_vrli_reserved_constraint_route(mock)
+        try:
+            yield (
+                _VrliE2EBundle(
+                    target_name=_E2E_TARGET_NAME,
+                    connector_instance=instance,
+                    db_target=seeded_target,
+                ),
+                reserved_route,
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()
+
+
+async def test_vrli_e2e_reserved_constraint_keeps_slash_literal_on_wire(
+    vrli_e2e_reserved_constraint: tuple[_VrliE2EBundle, Any],
+) -> None:
+    """A non-empty ``{+constraints}`` query keeps ``/`` literal on the wire.
+
+    The constraint-query gap the empty-constraint canary cannot exercise:
+    a reserved-char constraint (``text/CONTAINS error/...``) dispatched
+    through the full ``call_operation`` stack must reach vRLI with the
+    slash-delimited chain intact (``%2F``-mangling 400s the appliance).
+    Asserts the dispatch succeeds AND the literal-slash respx route was
+    the one hit — proof the wire URL was not over-encoded (#2003).
+    """
+    bundle, reserved_route = vrli_e2e_reserved_constraint
+
+    result_envelope = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": VRLI_CONNECTOR_ID,
+            "op_id": VRLI_RESERVED_CONSTRAINT_OP_ID,
+            "target": {"name": bundle.target_name},
+            "params": {"constraints": VRLI_RESERVED_CONSTRAINT_VALUE},
+        },
+    )
+
+    assert result_envelope["status"] == "ok", (
+        f"reserved-constraint dispatch did not succeed: {result_envelope!r}"
+    )
+    assert reserved_route.called, (
+        "literal-slash wire route was never hit — the constraint chain was "
+        "over-encoded (%2F) instead of passing through as reserved expansion"
+    )
+    # The wire path on the actual request keeps the structural slashes.
+    wire_path = reserved_route.calls.last.request.url.path
+    assert wire_path == "/api/v2/events/text/CONTAINS error/hostname/CONTAINS vcsa", (
+        f"unexpected wire path: {wire_path!r}"
     )

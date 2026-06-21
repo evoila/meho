@@ -260,7 +260,14 @@ Treat `result + handle` as a tagged union: `result` carries either the raw paylo
 
 ### Path-parameter substitution for ingested ops
 
-[`_branches.py::_substitute_path`](../../backend/src/meho_backplane/operations/_branches.py) handles OpenAPI path-templating. `parameter_schema` properties carry an `x-meho-param-loc` extension (set by G0.7's ingester) — one of `"path"` / `"query"` / `"header"` / `"body"` (default `"query"`). The dispatcher splits incoming `params` into four buckets, substitutes `{var}` placeholders in `descriptor.path` with `urllib.parse.quote(safe="")`-encoded values, and routes idempotent verbs (GET / HEAD / OPTIONS) through `HttpConnector._request_json` (with retry) and non-idempotent verbs through `HttpConnector._post_json` (no retry).
+[`_branches.py::_substitute_path`](../../backend/src/meho_backplane/operations/_branches.py) handles OpenAPI path-templating. `parameter_schema` properties carry an `x-meho-param-loc` extension (set by G0.7's ingester) — one of `"path"` / `"query"` / `"header"` / `"body"` (default `"query"`). The dispatcher splits incoming `params` into four buckets, substitutes the placeholders in `descriptor.path`, and routes idempotent verbs (GET / HEAD / OPTIONS) through `HttpConnector._request_json` (with retry) and non-idempotent verbs through `HttpConnector._post_json` (no retry).
+
+Substitution honours the RFC6570 expression operator so the encoding matches the spec author's intent:
+
+- **Simple expansion** `{var}` (RFC6570 §3.2.2) — the value is `urllib.parse.quote(safe="")`-encoded, so a reserved char like `/` becomes `%2F` (OpenAPI's default `style: simple` path parameter: a value cannot leak a path separator).
+- **Reserved expansion** `{+var}` / `{#var}` (RFC6570 §3.2.3) — the value is quoted with the reserved/gen-delim safe set (`:/?#[]@!$&'()*+,;=`), so structural chars pass through literal. This is the form a template carrying a *sub-path* expression uses, e.g. vRLI's `/api/v2/events/{+constraints}` where the constraint is itself a slash-delimited chain (`text/CONTAINS error/...`); simple expansion would `%2F`-mangle it and the appliance 400s.
+
+In both forms a genuinely-unsafe char (space, control chars) is still percent-encoded — only the reserved structural chars differ. The lookup keys on the bare variable name (operator stripped), so `{+constraints}` resolves the param named `constraints`.
 
 ### Audit contextvar binding pattern
 

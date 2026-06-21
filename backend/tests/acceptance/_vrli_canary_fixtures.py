@@ -43,6 +43,7 @@ from uuid import UUID
 
 import pytest
 import respx
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
@@ -72,9 +73,14 @@ __all__ = [
     "VRLI_CANARY_SESSION_ID",
     "VRLI_CANARY_SESSION_REFRESH_ID",
     "VRLI_FORCE_HANDLE_LIST_OP_ID",
+    "VRLI_RESERVED_CONSTRAINT_OP_ID",
+    "VRLI_RESERVED_CONSTRAINT_VALUE",
+    "VRLI_RESERVED_CONSTRAINT_WIRE_PATH",
     "VRLI_TARGET_NAME",
     "IngestedVrliCanary",
     "_insert_vrli_descriptors",
+    "_insert_vrli_reserved_constraint_descriptor",
+    "_register_vrli_reserved_constraint_route",
     "_register_vrli_routes",
     "_vrli_credentials_loader",
     "ingested_vrli_canary",
@@ -341,6 +347,88 @@ def _register_vrli_routes(mock: respx.MockRouter) -> None:
     mock.get("/api/v2/content/contentpack/list").respond(200, json=_VRLI_CANARY_CONTENT_PACKS)
     # vrli.alert.list — configured alert definitions.
     mock.get("/api/v2/alerts").respond(200, json=_VRLI_CANARY_ALERTS)
+
+
+#: A non-curated reserved-expansion events op the #2003 canary seeds
+#: directly. Its path uses RFC6570 reserved expansion ``{+constraints}``
+#: so the slash-delimited constraint chain stays literal on the wire —
+#: the exact vRLI constraint-query shape the curated empty-constraint op
+#: cannot exercise. Kept off :data:`VRLI_CORE_OPS` so the curated 7-op
+#: set (and every test keyed on its op_ids) is untouched.
+VRLI_RESERVED_CONSTRAINT_OP_ID: str = "GET:/api/v2/events/{+constraints}"
+
+#: A non-empty constraint carrying reserved structural chars: the
+#: slash-delimited ``field/OP value`` chain vRLI's printQuery renders.
+#: Under reserved expansion the slashes pass through literal, so the wire
+#: path is ``/api/v2/events/text/CONTAINS%20error/hostname/CONTAINS%20vcsa``
+#: (space still encoded; only the structural ``/`` differs from simple
+#: expansion's ``%2F`` mangling).
+VRLI_RESERVED_CONSTRAINT_VALUE: str = "text/CONTAINS error/hostname/CONTAINS vcsa"
+
+#: The literal wire path the reserved-expansion op resolves to — slashes
+#: preserved, space percent-encoded. The respx route registers against it.
+VRLI_RESERVED_CONSTRAINT_WIRE_PATH: str = (
+    "/api/v2/events/text/CONTAINS%20error/hostname/CONTAINS%20vcsa"
+)
+
+
+async def _insert_vrli_reserved_constraint_descriptor() -> None:
+    """Seed one ``{+constraints}`` reserved-expansion events descriptor (#2003).
+
+    Reuses the ``vrli-events`` group seeded by
+    :func:`_insert_vrli_descriptors`; insert that first. The descriptor's
+    ``parameter_schema`` declares ``constraints`` as a path param, so the
+    dispatcher routes the caller's value into ``_substitute_path`` — which,
+    seeing the ``+`` operator, keeps the slash-delimited constraint chain
+    literal on the wire.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_row = (
+            await session.execute(
+                select(OperationGroup).where(OperationGroup.group_key == "vrli-events")
+            )
+        ).scalar_one()
+        method, path = VRLI_RESERVED_CONSTRAINT_OP_ID.split(":", 1)
+        descriptor = EndpointDescriptor(
+            tenant_id=None,
+            product=VRLI_PRODUCT,
+            version=VRLI_VERSION,
+            impl_id=VRLI_IMPL_ID,
+            op_id=VRLI_RESERVED_CONSTRAINT_OP_ID,
+            source_kind="ingested",
+            method=method,
+            path=path,
+            handler_ref=None,
+            group_id=group_row.id,
+            summary="vRLI events query with reserved-expansion constraint (#2003).",
+            description="vRLI events query with reserved-expansion constraint (#2003).",
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "constraints": {"type": "string", "x-meho-param-loc": "path"},
+                },
+                "required": ["constraints"],
+            },
+            response_schema={"type": "object"},
+            llm_instructions="Reserved-expansion constraint canary.",
+            safety_level="safe",
+            requires_approval=False,
+            is_enabled=True,
+            tags=["spec:vcf-logs-9.0/openapi.yaml"],
+        )
+        session.add(descriptor)
+        await session.commit()
+
+
+def _register_vrli_reserved_constraint_route(mock: respx.MockRouter) -> Any:
+    """Register the literal-slash wire route for the reserved-expansion op.
+
+    Returns the respx route so a test can assert it was called — proof the
+    wire URL kept ``/`` literal (a ``%2F``-mangled URL would miss this
+    route and 404 against the catch-all).
+    """
+    return mock.get(VRLI_RESERVED_CONSTRAINT_WIRE_PATH).respond(200, json=VRLI_CANARY_EVENTS)
 
 
 @dataclass(frozen=True)

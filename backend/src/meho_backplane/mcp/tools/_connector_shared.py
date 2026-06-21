@@ -24,7 +24,7 @@ modules — the single-source discipline #407 called out for the
 from __future__ import annotations
 
 import json
-from typing import Any, Final, NoReturn
+from typing import Any, Final, Literal, NoReturn, cast
 from uuid import UUID
 
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -83,6 +83,40 @@ _TENANT_ID_PROPERTY: Final[dict[str, Any]] = {
         "tenant requests are rejected."
     ),
 }
+
+
+#: Optional closed-set scope selector shared by the two scope-resolving
+#: read/write tools (``review`` / ``enable_reads``). Disambiguates a
+#: ``connector_id`` that maps to BOTH a tenant-curated row and a built-in
+#: row (G0.26-T? #2029): ``"tenant"`` targets the operator's tenant row,
+#: ``"builtin"`` the built-in scope. Omitted → the #1801 fail-loud
+#: ``-32602`` ambiguity error. The built-in scope keeps its
+#: ``tenant_admin`` gate, re-checked in the service resolver.
+_PREFER_PROPERTY: Final[dict[str, Any]] = {
+    "type": ["string", "null"],
+    "enum": ["tenant", "builtin", None],
+    "description": (
+        "Disambiguate a connector_id that resolves to BOTH a "
+        "tenant-curated row and a built-in (tenant_id IS NULL) row. "
+        "'tenant' targets the operator's tenant row; 'builtin' the "
+        "built-in scope (tenant_admin only). Omit for the default "
+        "fail-loud ambiguous-scope error carrying the candidate list."
+    ),
+}
+
+
+def _coerce_prefer(raw: Any) -> Literal["tenant", "builtin"] | None:
+    """Narrow the ``prefer`` selector from JSON-RPC to the service Literal.
+
+    The JSON-Schema-validated value is always ``"tenant"`` /
+    ``"builtin"`` / ``None`` (the ``enum`` in :data:`_PREFER_PROPERTY`
+    constrains it before this handler runs), so the :func:`cast` is
+    sound — it documents that the schema validator, not this helper,
+    owns the value-space check, the same trust ``_list_handler`` places
+    in its validated ``status`` literal. Keeps the handler symmetric
+    with :func:`_coerce_tenant_id`.
+    """
+    return cast("Literal['tenant', 'builtin'] | None", raw)
 
 
 def _coerce_tenant_id(raw: Any) -> UUID | None:

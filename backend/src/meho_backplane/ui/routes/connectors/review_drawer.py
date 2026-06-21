@@ -286,6 +286,7 @@ async def render_review_drawer(
         payload: ConnectorReviewPayload = await get_review_endpoint(
             connector_id=connector_id,
             operator=operator,
+            prefer=None,
         )
     except HTTPException as exc:
         return _panel_from_http_exception(request, exc, connector_id=connector_id)
@@ -333,7 +334,11 @@ async def render_group_body(
     _validate_connector_id(connector_id)
     _validate_group_key(group_key)
     try:
-        payload = await get_review_endpoint(connector_id=connector_id, operator=operator)
+        payload = await get_review_endpoint(
+            connector_id=connector_id,
+            operator=operator,
+            prefer=None,
+        )
     except HTTPException as exc:
         return _panel_from_http_exception(request, exc, connector_id=connector_id)
 
@@ -538,7 +543,11 @@ async def _render_edited_row(
     exactly one group; a miss (re-ingest / delete race between the write
     and the re-read) renders a 404 panel rather than a blank row.
     """
-    payload = await get_review_endpoint(connector_id=connector_id, operator=operator)
+    payload = await get_review_endpoint(
+        connector_id=connector_id,
+        operator=operator,
+        prefer=None,
+    )
     edited = _find_op(payload, op_id)
     if edited is None:
         return _render_error_panel(

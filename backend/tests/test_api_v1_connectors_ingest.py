@@ -1713,6 +1713,78 @@ async def test_get_review_ambiguous_scope_returns_409(
     ]
 
 
+@pytest.mark.asyncio
+async def test_get_review_prefer_tenant_returns_tenant_row(
+    client: TestClient,
+) -> None:
+    """#2029: ``GET /{id}/review?prefer=tenant`` resolves the tenant row (200).
+
+    Same ambiguous seed as the 409 test, but the ``prefer=tenant`` query
+    param targets the tenant-curated row directly — 200 with the tenant
+    payload (3 ops) rather than the 409.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "tenant"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] == str(operator_tenant)
+    assert body["total_op_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_review_prefer_builtin_returns_builtin_row(
+    client: TestClient,
+) -> None:
+    """#2029: ``GET /{id}/review?prefer=builtin`` resolves the built-in row (200)."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "builtin"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] is None
+    assert body["total_op_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_get_review_prefer_rejects_out_of_vocabulary_value(
+    client: TestClient,
+) -> None:
+    """#2029: an unknown ``prefer`` value is a 422 (the closed-set contract).
+
+    The selector is a closed ``Literal["tenant", "builtin"]``; FastAPI
+    rejects any other value at validation time, so the closed-set
+    guarantee holds at the wire.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "global"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+
+
 # ---------------------------------------------------------------------------
 # PATCH /{id}/groups/{key}
 # ---------------------------------------------------------------------------

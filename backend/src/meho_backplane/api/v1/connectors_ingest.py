@@ -159,7 +159,7 @@ from __future__ import annotations
 
 import asyncio
 from json import JSONDecodeError
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 from uuid import UUID
 
 import httpx
@@ -252,6 +252,28 @@ router = APIRouter(prefix="/api/v1/connectors", tags=["connectors"])
 #: :mod:`meho_backplane.api.v1.operations`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Closed-set scope selector for the ambiguous tenant-vs-built-in case
+#: (G0.26-T? #2029). ``tenant`` resolves the operator's tenant-curated
+#: row; ``builtin`` the ``tenant_id IS NULL`` built-in row. Omitted →
+#: the #1801 fail-loud ambiguity 409. Shared by ``GET /{id}/review``
+#: and ``POST /{id}/enable-reads``; the resolver enforces the same
+#: ``tenant_admin`` gate on the built-in scope it always has.
+ConnectorScopePreference = Literal["tenant", "builtin"]
+
+#: Module-level :func:`Query` default — a call in a default-argument
+#: position is disallowed under the project's ruff config, the same
+#: reason ``_require_admin`` is hoisted above.
+_PREFER_QUERY = Query(
+    default=None,
+    description=(
+        "Disambiguate a connector_id that resolves to BOTH a "
+        "tenant-curated row and a built-in (tenant_id IS NULL) row. "
+        "'tenant' targets the operator's tenant row; 'builtin' the "
+        "built-in scope (tenant_admin only). Omit for the default "
+        "fail-loud 409 connector_scope_ambiguous response."
+    ),
+)
 
 
 #: Mutable module-level holder for the LLM-client factory used by the
@@ -1159,6 +1181,7 @@ async def catalog_endpoint(
 async def get_review_endpoint(
     connector_id: str,
     operator: Operator = _require_operator,
+    prefer: ConnectorScopePreference | None = _PREFER_QUERY,
 ) -> ConnectorReviewPayload:
     """Return the full review payload for *connector_id*.
 
@@ -1171,10 +1194,20 @@ async def get_review_endpoint(
     tenant row and a built-in row → 409 ``connector_scope_ambiguous``
     with the candidate list (G0.26-T1 #1801), identical to the write
     sibling ``POST /{id}/enable-reads`` via the shared service resolver.
+
+    The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
+    makes that 409 actionable: it resolves directly to the named scope
+    and skips the ambiguity probe, so an operator who has both rows can
+    target the tenant-curated one (``prefer=tenant``) or the built-in
+    one (``prefer=builtin``). Omitted → the fail-loud default.
     """
     service = ReviewService(operator)
     try:
-        return await service.get_review_payload(connector_id, operator.tenant_id)
+        return await service.get_review_payload(
+            connector_id,
+            operator.tenant_id,
+            prefer=prefer,
+        )
     except AmbiguousConnectorScopeError as exc:
         # The label resolves to both a tenant row and a built-in row;
         # 409 (not 404) with a structured candidate list so the operator
@@ -1329,6 +1362,7 @@ async def enable_endpoint(
 async def enable_reads_endpoint(
     connector_id: str,
     operator: Operator = _require_admin,
+    prefer: ConnectorScopePreference | None = _PREFER_QUERY,
 ) -> EnableReadsResponse:
     """Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).
 
@@ -1362,12 +1396,19 @@ async def enable_reads_endpoint(
     scope is always the calling operator's tenant from the JWT. The
     MCP sibling ``meho.connector.enable_reads`` accepts an optional
     ``tenant_id`` for the built-in / global scope (tenant_admin only).
+
+    The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
+    resolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies
+    to the operator's tenant row, ``prefer=builtin`` to the built-in row
+    (the built-in scope is re-checked against the ``tenant_admin`` gate
+    in the service resolver). Omitted → the fail-loud default.
     """
     service = ReviewService(operator)
     try:
         ops_enabled = await service.enable_reads(
             connector_id,
             tenant_id=operator.tenant_id,
+            prefer=prefer,
         )
     except AmbiguousConnectorScopeError as exc:
         # Same shared-resolver outcome as GET /{id}/review: a label that

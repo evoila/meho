@@ -389,7 +389,12 @@ async def _submit_enable_reads(
     """``POST .../enable-reads`` -- bulk-enable read-class ops via the REST handler."""
     _validate_connector_id(connector_id)
     try:
-        await enable_reads_endpoint(connector_id=connector_id, operator=operator)
+        # Direct in-process call (the forms_router pattern) bypasses
+        # FastAPI's Query resolution, so pass prefer=None explicitly
+        # rather than letting it default to the Query(...) sentinel
+        # object (#2029). The console has no scope-disambiguation UI —
+        # an ambiguous label surfaces the 409 panel for the operator.
+        await enable_reads_endpoint(connector_id=connector_id, operator=operator, prefer=None)
     except HTTPException as exc:
         return _panel_from_http_exception(request, exc, connector_id=connector_id)
     _log.info(

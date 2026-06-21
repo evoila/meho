@@ -25,11 +25,15 @@ the contract on this page holds.
 
 ## What the backplane needs
 
-Five distinct Vault surfaces. The first four ship via Goal #11's
+Six distinct Vault surfaces. The first four ship via Goal #11's
 cross-repo deps (consumer commitment #5 — see
 [`#261`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/261)
 in the consumer repo). The fifth — the federation-proof test KV
-path — is the surface most easily missed during provisioning.
+path — is the surface most easily missed during provisioning. The
+sixth — the **scheduler service token** — is a *separate* static-token
+identity (not the JWT-login role) that the scheduler uses to read and
+**write** agent `client_credentials` secrets; its write capability is
+the one most easily under-provisioned (see surface 6).
 
 ### 1. JWT auth method — on a **dedicated mount**
 
@@ -159,6 +163,63 @@ read returning a non-error response with a `version` field). Any
 non-empty key set works; the two keys above are a self-documenting
 default the lab admin can grep for during incident response.
 
+### 6. Scheduler service token — read **and write** on agent credentials
+
+The scheduler is operator-less (no Keycloak JWT to forward to Vault's
+JWT auth method), so it authenticates with a **static service token**
+passed via `VAULT_SCHEDULER_TOKEN`
+([`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)).
+This is a *distinct* identity from the `meho-mcp` JWT-login role
+(surfaces 1–3): it is bound to its own narrow policy on the
+agent-credentials KV path
+(`scheduler_agent_vault_path_pattern`, default
+`secret/data/agents/*/credentials`).
+
+The capability scope must be **read + write**, not read-only:
+
+- **Read** — the scheduler resolves an agent's `client_credentials`
+  secret Vault-first before firing a scheduled invocation
+  ([`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)).
+- **Write** (`create` + `update`) — agent-principal **registration**
+  mints the Keycloak-generated client secret into Vault under the same
+  token
+  ([`write_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py),
+  called from
+  [`AgentPrincipalService.register`](../../backend/src/meho_backplane/auth/agent_principals.py)).
+  A read-only token makes Vault answer the write with a 403, which the
+  backplane surfaces as a `502 scheduler_vault_write_error` (REST/UI) or
+  a JSON-RPC `-32602` "scheduler Vault write failed" (MCP
+  `meho_agent_principals_register`); registration then rolls back the
+  just-created Keycloak client so no unschedulable agent is left behind.
+
+```hcl
+# Policy: meho-scheduler
+# KV v2 splits the secret value (/data/) from its metadata (/metadata/).
+# The write path mints + updates the value; the metadata read is needed
+# for create_or_update_secret's check-and-set bookkeeping.
+path "secret/data/agents/*/credentials" {
+  capabilities = ["create", "read", "update"]
+}
+path "secret/metadata/agents/*/credentials" {
+  capabilities = ["read"]
+}
+```
+
+Mint the token bound to that policy and feed it to the backplane Pod as
+`VAULT_SCHEDULER_TOKEN` (e.g. a long-lived periodic token, or a token a
+Vault Agent sidecar renews into the env var):
+
+```bash
+vault policy write meho-scheduler meho-scheduler.hcl
+vault token create -policy=meho-scheduler -period=768h -field=token
+```
+
+Substitute the path prefix if you set a non-default
+`SCHEDULER_AGENT_VAULT_PATH_PATTERN`. Unset `VAULT_SCHEDULER_TOKEN`
+disables the Vault path entirely — the scheduler then falls back to the
+`SCHEDULER_AGENT_SECRET_ENV_PATTERN` env-var convention (an *unset*
+token is not an error; an *under-scoped* one is).
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`
@@ -189,6 +250,15 @@ vault kv get -format=json secret/meho/test/federation \
 # Expect: a positive integer (the KV-v2 version number).
 # A "No value found at secret/data/meho/test/federation" error is
 # the smoking gun for missing surface #5.
+
+# 6. Scheduler token can WRITE agent credentials (the surface most
+#    easily under-provisioned). Run with the scheduler service token:
+vault token capabilities "$VAULT_SCHEDULER_TOKEN" \
+  secret/data/agents/example/credentials
+# Expect: a set including "create" and "update" (e.g.
+# "create read update"). A bare "read" is the live cause of
+# meho_agent_principals_register failing — widening the policy to
+# include create+update unblocks registration with no code change.
 ```
 
 When commands 1-5 all return non-error output and the JSON
@@ -205,9 +275,11 @@ everything it needs from Vault.
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on `secret/meho/*`. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/*` and `secret/metadata/meho/*` |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: KeyError"` or `read_failed: TypeError` | Vault returned an unexpected payload shape — KV-v1 mount instead of v2, proxy mangling the response, etc. | Verify surface 4 (KV v2 mount); the mount must be type `kv` with `options.version="2"` |
+| Agent-principal registration fails — REST `502 scheduler_vault_write_error`, or MCP `meho_agent_principals_register` JSON-RPC `-32602` "scheduler Vault write failed" — while reads/listing still work | **Under-scoped surface 6** — `VAULT_SCHEDULER_TOKEN` policy grants read but not write on the agent-credentials path, so the secret-mint write is denied (Vault 403). Reads stay healthy because the read path is read-only-sufficient. | Verify surface 6 (`vault token capabilities "$VAULT_SCHEDULER_TOKEN" secret/data/agents/<name>/credentials`); widen the `meho-scheduler` policy to include `create`+`update` on `secret/data/agents/*/credentials` |
 
 ## References
 
+- Scheduler service-token read/write path (surface 6): [`docs/codebase/scheduler.md`](../codebase/scheduler.md), [`backend/src/meho_backplane/scheduler/vault_credentials.py`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
 - Producer-side handler: [`backend/src/meho_backplane/api/v1/health.py`](../../backend/src/meho_backplane/api/v1/health.py)
 - Producer-side Vault client: [`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py)
 - Backplane settings (env-var contract): [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)

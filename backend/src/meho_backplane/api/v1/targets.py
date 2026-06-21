@@ -386,6 +386,7 @@ def _to_full(t: TargetORM) -> Target:
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
+        tls_server_name=t.tls_server_name,
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,

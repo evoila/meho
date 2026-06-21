@@ -338,6 +338,36 @@ class HttpConnector(Connector):
         port = f":{target.port}" if target.port and target.port != 443 else ""
         return f"{scheme}://{target.host}{port}"
 
+    def _request_extensions(self, target: Target) -> dict[str, Any]:
+        """Return per-request httpx ``extensions`` for *target* (or ``{}``).
+
+        Decouples the TLS SNI / certificate-verification name from the
+        URL-derived ``host`` (evoila/meho#2002). httpx derives the TCP
+        connect address, the wire ``Host:`` header **and** the TLS SNI +
+        cert-CN/SAN verification name all from the client's ``base_url``
+        host (httpcore: ``server_hostname =
+        request.extensions["sni_hostname"] or origin.host``). When a
+        target sets ``tls_server_name`` we keep ``base_url=https://<host>``
+        (so connect + ``Host:`` stay the operator-routed value -- the IP a
+        cert-CN-pinning appliance accepts) and pass
+        ``extensions={"sni_hostname": <name>}`` so the handshake offers the
+        override as SNI and verifies the presented cert's CN/SAN against
+        it. This lets an operator keep ``verify_tls=true`` (and optionally
+        ``tls_ca_pin``) against an appliance that pins its cert to an FQDN
+        but demands ``Host: <IP>``, instead of dropping to the insecure
+        ``verify_tls=false`` to dodge the hostname mismatch.
+
+        Returns an empty dict when the target sets no override, so the
+        request is dispatched byte-identically to today (the SNI / verify
+        name derives from ``base_url`` as before). Threading it at this
+        shared :class:`HttpConnector` layer covers both request helpers
+        and the profiled-dispatch path automatically.
+        """
+        server_name = getattr(target, "tls_server_name", None)
+        if server_name:
+            return {"sni_hostname": server_name}
+        return {}
+
     async def auth_headers(self, target: Target, operator: Operator) -> dict[str, str]:
         """Return auth headers for the request.
 
@@ -393,7 +423,14 @@ class HttpConnector(Connector):
         headers = await self.auth_headers(target, operator)
         if extra_headers:
             headers = {**headers, **extra_headers}
-        resp = await client.request(method, path, params=params, json=json, headers=headers)
+        resp = await client.request(
+            method,
+            path,
+            params=params,
+            json=json,
+            headers=headers,
+            extensions=self._request_extensions(target),
+        )
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
@@ -453,7 +490,14 @@ class HttpConnector(Connector):
         headers = await self.auth_headers(target, operator)
         if extra_headers:
             headers = {**headers, **extra_headers}
-        resp = await client.request(verb, path, json=json, data=data, headers=headers)
+        resp = await client.request(
+            verb,
+            path,
+            json=json,
+            data=data,
+            headers=headers,
+            extensions=self._request_extensions(target),
+        )
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 

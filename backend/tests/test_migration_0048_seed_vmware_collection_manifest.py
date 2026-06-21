@@ -305,17 +305,25 @@ def test_upgrade_is_idempotent(
     the sibling ``0046`` / ``0011`` tests use. The second pass finds the
     prose already present, so no row is rewritten (no second ``updated_at``
     bump).
+
+    Both passes pin the target to ``0048`` (not ``head``) so future
+    non-idempotent schema migrations cannot leak into the stamp-back
+    replay: ``command.stamp`` only rewrites alembic's version table — it
+    does not run downgrade SQL — so any column a later migration adds on
+    the first upgrade is still physically present, and replaying its
+    non-idempotent DDL through ``head`` would fail (e.g. 0050's
+    ``add_column("targets", "tls_server_name")`` → "duplicate column").
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "0047")
 
     row_id = _insert_collection(sync_url)
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0048")
     updated_after_first = _read_row(sync_url, row_id)["updated_at"]
 
     command.stamp(cfg, "0047")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0048")
 
     row_after_second = _read_row(sync_url, row_id)
     assert row_after_second["description"] == _DESCRIPTION
@@ -331,15 +339,21 @@ def test_downgrade_clears_seeded_prose_but_keeps_operator_edit(
 
     A ``when_to_use`` an operator rewrote after the seed survives the
     rollback; the seed-authored ``description`` is cleared back to NULL.
+
+    Pin the two upgrades to ``0048`` (not ``head``) so the stamp-back
+    re-seed below replays only 0048's body: ``command.stamp`` skips
+    downgrade SQL, so a later migration's non-idempotent DDL (e.g. 0050's
+    ``add_column("targets", "tls_server_name")``) would otherwise re-run
+    against a column that already exists and fail with "duplicate column".
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0048")
 
     row_id = _insert_collection(sync_url)
     # Run the seed by stamping back + re-upgrading (the row was inserted at
-    # head, after 0048 already ran on an empty DB).
+    # 0048, after 0048 already ran on an empty DB).
     command.stamp(cfg, "0047")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0048")
 
     # Operator rewrites when_to_use after the seed; description stays seeded.
     sync_eng = sa_create_engine(sync_url)

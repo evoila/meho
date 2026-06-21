@@ -129,14 +129,67 @@ class _SynthesisOutput(BaseModel):
     cited_chunk_ids: list[str] = Field(default_factory=list)
 
 
+#: JSON Schema validation keywords the Anthropic structured-outputs schema
+#: compiler does not support. ``min_length`` on :class:`_SynthesisOutput.answer`
+#: makes Pydantic emit ``"minLength": 1`` into ``model_json_schema()``; passed
+#: raw via ``output_config.format`` that risks a schema-compilation 400 on every
+#: real ``claude-sonnet-4-6`` synthesis call (#1999). The SDK strips these only
+#: on the ``messages.parse()`` / ``output_format`` helper paths (via
+#: ``transform_schema``), not on a plain ``output_config`` on
+#: ``messages.create()`` — so we strip them ourselves before building the wire
+#: schema. Mirrors the SDK's own unsupported set (string-length + numeric +
+#: array-cardinality constraints): structured outputs reject all of them.
+_UNSUPPORTED_SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minProperties",
+        "maxProperties",
+    }
+)
+
+
+def _strip_unsupported_schema_keywords(node: object) -> object:
+    """Recursively drop structured-outputs-unsupported keywords from a schema.
+
+    Returns a new structure; the input is not mutated. The Pydantic
+    ``min_length=1`` constraint on :class:`_SynthesisOutput.answer` stays in
+    force for *validation* (``model_validate`` still rejects an empty answer in
+    :func:`_parse_synthesis_output`) — this only sanitises the schema sent to
+    the model so the API's schema compiler does not 400 on a keyword it cannot
+    handle. Walking nested objects/arrays keeps the strip robust if the output
+    shape grows constrained sub-fields later.
+    """
+    if isinstance(node, dict):
+        return {
+            key: _strip_unsupported_schema_keywords(value)
+            for key, value in node.items()
+            if key not in _UNSUPPORTED_SCHEMA_KEYWORDS
+        }
+    if isinstance(node, list):
+        return [_strip_unsupported_schema_keywords(item) for item in node]
+    return node
+
+
 #: The Messages-API ``output_config.format`` value that forces the model
 #: to emit JSON matching :class:`_SynthesisOutput` (GA structured outputs
 #: on ``claude-sonnet-4-6``). Derived from the Pydantic model so the wire
-#: schema and the validation shape cannot drift. Prefill of ``{`` is
+#: schema and the validation shape cannot drift, then sanitised of
+#: structured-outputs-unsupported keywords (see
+#: :data:`_UNSUPPORTED_SCHEMA_KEYWORDS`) so the raw ``output_config`` path does
+#: not reach the API with a ``minLength`` that 400s. Prefill of ``{`` is
 #: deliberately NOT used — it 400s on the 4.6+ model family.
 _SYNTHESIS_RESPONSE_FORMAT: Final[dict[str, object]] = {
     "type": "json_schema",
-    "schema": _SynthesisOutput.model_json_schema(),
+    "schema": _strip_unsupported_schema_keywords(_SynthesisOutput.model_json_schema()),
 }
 
 

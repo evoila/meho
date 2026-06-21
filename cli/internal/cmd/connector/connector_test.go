@@ -2385,24 +2385,28 @@ func TestGetCatalogDecodesEntries(t *testing.T) {
 
 // TestPrintCatalogTableHappyPath — happy-path table render with one
 // registered and one unregistered entry; the cross-reference column
-// reflects map membership.
+// reflects map membership and the `ships` column reflects the
+// shipped spec/profile resources.
 func TestPrintCatalogTableHappyPath(t *testing.T) {
 	specVer := "9.0.1"
 	upstream := []string{"https://example.test/x.yaml"}
 	notes := "generic"
 	notesV := "typed"
+	specRes := "vmware-9.0.yaml"
+	profRes := "vmware-9.0-profile.yaml"
 	var buf bytes.Buffer
 	registered := map[string]bool{tripleKey("vmware", "9.0", "vmware-rest"): true}
 	printCatalogTable(&buf, &api.CatalogListResponse{Catalog: []api.ConnectorSpecEntry{
 		{Product: "vmware", Version: "9.0", ImplId: "vmware-rest",
 			RequiresConnectorClass: "VmwareRestConnector",
 			Upstream:               &upstream,
-			SpecInfoVersion:        &specVer, Notes: &notes},
+			SpecInfoVersion:        &specVer, Notes: &notes,
+			SpecResource: &specRes, ProfileResource: &profRes},
 		{Product: "vault", Version: "1.x", ImplId: "vault",
 			RequiresConnectorClass: "VaultConnector", Notes: &notesV},
 	}}, registered)
 	out := buf.String()
-	for _, want := range []string{"vmware/9.0", "VmwareRestConnector", "9.0.1", "yes", "vault/1.x", "no"} {
+	for _, want := range []string{"vmware/9.0", "VmwareRestConnector", "9.0.1", "yes", "vault/1.x", "no", "ships", "spec+prof"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("catalog table missing %q\n%s", want, out)
 		}
@@ -2430,6 +2434,39 @@ func TestPrintCatalogTableEmpty(t *testing.T) {
 	printCatalogTable(&buf, &api.CatalogListResponse{}, map[string]bool{})
 	if !strings.Contains(buf.String(), "0 catalog entries") {
 		t.Errorf("empty catalog render wrong: %q", buf.String())
+	}
+}
+
+// TestShippedResourceLabel — the `ships` column distinguishes all four
+// independent spec_resource/profile_resource combinations, and treats
+// nil and empty-string resource fields identically.
+func TestShippedResourceLabel(t *testing.T) {
+	spec := "vmware-9.0.yaml"
+	prof := "vmware-9.0-profile.yaml"
+	empty := ""
+	cases := []struct {
+		name string
+		spec *string
+		prof *string
+		want string
+	}{
+		{"both", &spec, &prof, "spec+prof"},
+		{"spec-only", &spec, nil, "spec"},
+		{"profile-only", nil, &prof, "prof"},
+		{"neither-nil", nil, nil, "-"},
+		{"neither-empty", &empty, &empty, "-"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shippedResourceLabel(api.ConnectorSpecEntry{
+				SpecResource:    tc.spec,
+				ProfileResource: tc.prof,
+			})
+			if got != tc.want {
+				t.Errorf("shippedResourceLabel(spec=%v, prof=%v) = %q; want %q",
+					tc.spec, tc.prof, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -4,23 +4,15 @@
 # ExecutionProfile for the `vmware/9.0` profile-backed catalog row
 # (#1964 T2 #1976). Pairs with operations/ingest/specs/vmware_rest_minimal.yaml.
 #
-# AUTH. `session_login` — the vSphere Automation API authenticates by
-# exchanging credentials at a login endpoint for a short-lived session
-# token, the vetted classification in docs/codebase/connector-auth-coverage.md
-# and the shape the typed VmwareRestConnector establishes. No DSL: the
-# scheme names a vetted session-harness extractor (#1970); the profile
-# carries only the secret-field names.
-#
-# KNOWN DISPATCH-TIME CAVEAT (does not affect #1976 ingest/boot acceptance).
-# The `session_login` named extractor (#1970) is currently hardcoded to the
-# vRLI login shape (POST {username,password,provider} to /api/v2/sessions,
-# read `sessionId`, send Bearer). vCenter's login differs (POST /api/session
-# with HTTP Basic, token returned in the `vmware-api-session-id` header).
-# So a profiled vCenter will INGEST and pass the boot validator, but full
-# session dispatch parity needs the session extractor to grow a vCenter
-# variant — owned by the profiled-dispatch wiring (#1971/#1972), not this
-# data task. The scheme classification is nonetheless correct per the
-# coverage trace; using `basic` here would mis-describe the auth shape.
+# AUTH. `session_login_basic` — the vCenter-shaped session scheme (#2025):
+# POST /api/session with HTTP Basic credentials and no body, read the raw
+# JSON-string token out of the response body, then send it on downstream
+# requests in the `vmware-api-session-id` header. This is the modern
+# vSphere Automation API flow the typed VmwareRestConnector establishes
+# (SESSION_PATH_MODERN). No DSL: the scheme names a vetted session-harness
+# extractor (#1970); the profile carries only the secret-field names. The
+# (legacy /rest/com/vmware/cis/session fallback the typed connector also
+# tries is out of scope for the profiled shape — modern path only.)
 #
 # FINGERPRINT. `/api/about` returns a top-level `version` string, satisfying
 # the FingerprintSpec literal-top-level-key constraint (#1177); it is the
@@ -39,7 +31,7 @@
 product: vmware
 version: "9.0"
 auth:
-  scheme: session_login
+  scheme: session_login_basic
   secret_fields:
     - username
     - password

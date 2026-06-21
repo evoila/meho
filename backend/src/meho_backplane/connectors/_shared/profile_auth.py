@@ -11,7 +11,7 @@ profile names a scheme, the scheme names a function, the function returns a
 ``dict[str, str]`` (the substrate-minimalism line #1177 holds: the profile
 configures *which* reviewed extractor runs, never *how* a token is parsed).
 
-The four named schemes split on whether they hold session state:
+The named schemes split on whether they hold session state:
 
 * **Stateless per request** — ``basic`` (HTTP Basic from
   ``username``/``password``) and ``static_header`` (a pre-issued token
@@ -19,10 +19,13 @@ The four named schemes split on whether they hold session state:
   bundle on every call; no token cache, no login round-trip.
 * **Session-stateful** — ``session_login`` (POST credentials to a login
   endpoint, read a short-lived token out of the JSON body, send it as
-  ``Bearer``; vRLI's shape) and ``oauth2_mint`` (an OAuth2
-  client-credentials *form* grant minting a ``Bearer`` token with a TTL;
-  keycloak's shape). These two need the per-target lock / token cache /
-  single-flight / TTL-or-expiry-driven refresh / fail-closed harness, which
+  ``Bearer``; vRLI's shape), ``session_login_basic`` (POST with HTTP Basic
+  credentials and no body, read the raw JSON-string token out of the
+  response body, send it in a bespoke header; vCenter's ``/api/session``
+  shape, #2025) and ``oauth2_mint`` (an OAuth2 client-credentials *form*
+  grant minting a ``Bearer`` token with a TTL; keycloak's shape). These
+  need the per-target lock / token cache / single-flight /
+  TTL-or-expiry-driven refresh / fail-closed harness, which
   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` owns
   **once** (the whole point of T4 — the harness was duplicated across vRLI
   and keycloak before).
@@ -179,10 +182,13 @@ class SessionSchemeSpec:
 
     The connector-owned harness drives the lock / cache / single-flight /
     refresh; this spec supplies what differs per scheme — the login path,
-    the request body encoding, the request headers, and how the token (plus
-    TTL) is read out of the response. One instance per session scheme lives
-    in :data:`SESSION_SCHEME_SPECS`, selected by the profile's
-    ``auth.scheme``.
+    how the login carries its credentials, the request body encoding, the
+    request headers, how the token (plus TTL) is read out of the response,
+    and how it is applied to downstream requests. One instance per session
+    scheme lives in :data:`SESSION_SCHEME_SPECS`, selected by the profile's
+    ``auth.scheme``. Every field is a vetted per-scheme constant — none is a
+    profile-supplied knob, so the closed-catalog / no-DSL line (#1177)
+    holds: the profile names a scheme, the scheme fixes the shape.
 
     Attributes
     ----------
@@ -190,12 +196,28 @@ class SessionSchemeSpec:
         Builds the login endpoint path from the resolved ``AuthSpec`` (a
         constant for vRLI; keycloak's realm path is profile-independent so
         it is also constant here — realm routing is a T6 concern).
+    login_credentials
+        Where the login round-trip carries its credentials. ``"body"``
+        sends them in the request body built by :attr:`build_body` (vRLI's
+        JSON creds, keycloak's form grant). ``"basic"`` sends them as an
+        HTTP Basic ``Authorization`` header on the login POST with an empty
+        body (vCenter's ``POST /api/session``).
     encoding
         ``"json"`` serialises the login body as JSON (vRLI);
         ``"form"`` serialises it as ``application/x-www-form-urlencoded``
-        (OAuth2 token grants). Picks the matching ``_post_json`` body slot.
+        (OAuth2 token grants). Ignored when ``login_credentials="basic"``
+        (the login carries no body). Picks the matching ``_post_json`` body
+        slot.
     build_body
-        Builds the login request body from the secret bundle.
+        Builds the login request body from the secret bundle. Returns an
+        empty mapping for a ``login_credentials="basic"`` scheme (the creds
+        ride the Basic header, not the body).
+    build_login_auth
+        Returns the ``(username, password)`` HTTP Basic credentials the
+        login POST is sent with, or ``None`` for a ``login_credentials="body"``
+        scheme (whose creds ride the body instead). Keeps secret-field
+        knowledge inside this module — the harness just forwards the tuple
+        to httpx's ``auth=``.
     request_headers
         Static headers sent on the login POST (``Content-Type`` /
         ``Accept``).
@@ -203,13 +225,37 @@ class SessionSchemeSpec:
         Reads ``(token, ttl)`` out of the parsed JSON response body, or
         ``None`` when no usable token is present (the harness then raises a
         target-named :class:`ProfileAuthError`).
+    token_header
+        The header name the established session token is written into on
+        downstream requests. ``"Authorization"`` for the Bearer schemes;
+        vCenter's session token rides a bespoke ``vmware-api-session-id``
+        header.
+    token_value_kind
+        How the established token is placed in :attr:`token_header`.
+        ``"bearer"`` wraps it as ``"Bearer <token>"`` (vRLI / keycloak);
+        ``"raw"`` places it verbatim (vCenter's session-id header).
     """
 
     login_path: Callable[[AuthSpec], str]
+    login_credentials: str
     encoding: str
     build_body: Callable[[AuthSpec, Mapping[str, str]], dict[str, str]]
+    build_login_auth: Callable[[AuthSpec, Mapping[str, str]], tuple[str, str] | None]
     request_headers: Mapping[str, str]
     extract_token: Callable[[Any], SessionToken | None]
+    token_header: str
+    token_value_kind: str
+
+
+def _no_login_auth(_auth: AuthSpec, _secret: Mapping[str, str]) -> tuple[str, str] | None:
+    """No HTTP Basic credentials on the login POST.
+
+    The body-carried schemes (``session_login`` / ``oauth2_mint``) send
+    their credentials in the request body, so the login POST takes no
+    ``auth=`` tuple. The basic-auth schemes override this with a builder
+    that reads the credential pair out of the secret bundle.
+    """
+    return None
 
 
 # -- session_login (vRLI: json login -> body .sessionId -> Bearer) ----------
@@ -255,6 +301,68 @@ def _extract_session_login_token(payload: Any) -> SessionToken | None:
     if not isinstance(value, str) or not value:
         return None
     return SessionToken(token=value, ttl_seconds=None)
+
+
+# -- session_login_basic (vCenter: basic-auth login -> raw-string token) ----
+
+#: vCenter's modern (vSphere 7.0+) session-establish endpoint. The connector
+#: POSTs with HTTP Basic credentials and no body; the response body *is* the
+#: session token as a JSON-quoted string. Behaviour parity with
+#: :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`'s
+#: ``SESSION_PATH_MODERN``. The legacy ``/rest/com/vmware/cis/session``
+#: fallback the typed connector also tries is out of scope for the profiled
+#: shape (modern path only — #2025).
+_VCENTER_SESSION_PATH = "/api/session"
+
+#: The header a vCenter session token rides on downstream requests, per
+#: Broadcom's vSphere Automation API. Matches the typed connector's
+#: ``_SESSION_HEADER``.
+_VCENTER_SESSION_HEADER = "vmware-api-session-id"
+
+
+def _session_login_basic_body(_auth: AuthSpec, _secret: Mapping[str, str]) -> dict[str, str]:
+    """Build vCenter's (empty) login body.
+
+    ``POST /api/session`` carries its credentials as an HTTP Basic
+    ``Authorization`` header (see :func:`_session_login_basic_auth`) — not
+    in the request body. The body is therefore always empty; this builder
+    exists so the spec's ``build_body`` contract is uniform across session
+    schemes.
+    """
+    return {}
+
+
+def _session_login_basic_auth(auth: AuthSpec, secret: Mapping[str, str]) -> tuple[str, str] | None:
+    """Build vCenter's ``(username, password)`` HTTP Basic credentials.
+
+    ``POST /api/session`` authenticates with HTTP Basic, mirroring the typed
+    :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`'s
+    ``client.post(SESSION_PATH_MODERN, auth=(username, password))``. The
+    field names come from the profile's first two declared
+    ``secret_fields`` (conventionally ``username`` / ``password``); reading
+    them by position keeps this builder field-name-agnostic while still
+    failing closed via :func:`_require_field` on a missing value.
+    """
+    username = _require_field(secret, auth.secret_fields[0], scheme=auth.scheme)
+    password = _require_field(secret, auth.secret_fields[1], scheme=auth.scheme)
+    return (username, password)
+
+
+def _extract_session_login_basic_token(payload: Any) -> SessionToken | None:
+    """Read the session token out of vCenter's ``/api/session`` response.
+
+    The modern endpoint returns the token as a JSON-quoted **string** — the
+    body *is* the token, parsed by ``response.json()`` into :class:`str`
+    (parity with the typed connector's ``_extract_session_token`` modern
+    shape; the legacy object shape is out of scope per #2025). The session
+    has no proactive TTL — it caches until a downstream session-expiry
+    status triggers a re-login — so ``ttl_seconds`` is ``None``. Returns
+    ``None`` for a non-string / empty body so the harness raises the
+    consistent target-named error.
+    """
+    if not isinstance(payload, str) or not payload:
+        return None
+    return SessionToken(token=payload, ttl_seconds=None)
 
 
 # -- oauth2_mint (keycloak: form client-credentials grant -> Bearer) --------
@@ -319,19 +427,38 @@ def _extract_oauth2_token(payload: Any) -> SessionToken | None:
 SESSION_SCHEME_SPECS: dict[str, SessionSchemeSpec] = {
     "session_login": SessionSchemeSpec(
         login_path=lambda _auth: _VRLI_SESSION_PATH,
+        login_credentials="body",
         encoding="json",
         build_body=_session_login_body,
+        build_login_auth=_no_login_auth,
         request_headers={"Content-Type": "application/json", "Accept": "application/json"},
         extract_token=_extract_session_login_token,
+        token_header="Authorization",
+        token_value_kind="bearer",
+    ),
+    "session_login_basic": SessionSchemeSpec(
+        login_path=lambda _auth: _VCENTER_SESSION_PATH,
+        login_credentials="basic",
+        encoding="json",
+        build_body=_session_login_basic_body,
+        build_login_auth=_session_login_basic_auth,
+        request_headers={"Accept": "application/json"},
+        extract_token=_extract_session_login_basic_token,
+        token_header=_VCENTER_SESSION_HEADER,
+        token_value_kind="raw",
     ),
     "oauth2_mint": SessionSchemeSpec(
         login_path=lambda _auth: _OAUTH2_TOKEN_PATH,
+        login_credentials="body",
         encoding="form",
         build_body=_oauth2_mint_body,
+        build_login_auth=_no_login_auth,
         request_headers={
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
         },
         extract_token=_extract_oauth2_token,
+        token_header="Authorization",
+        token_value_kind="bearer",
     ),
 }

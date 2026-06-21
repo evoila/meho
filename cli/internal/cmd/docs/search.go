@@ -332,7 +332,7 @@ func printSearchTable(w io.Writer, r *api.SearchDocsResponse) {
 		fmt.Fprintf(w, "%-5d %-8s %-40s %s\n",
 			i+1,
 			formatScore(chunk.Score),
-			truncate(chunk.DocumentId, 40),
+			truncate(docID(chunk.DocumentId), 40),
 			truncate(snippetOf(chunk.Content), 80),
 		)
 	}
@@ -362,10 +362,21 @@ func printFanoutTable(w io.Writer, chunks []api.DocsChunk) {
 			i+1,
 			truncate(collection, 16),
 			formatScore(chunk.Score),
-			truncate(chunk.DocumentId, 32),
+			truncate(docID(chunk.DocumentId), 32),
 			truncate(snippetOf(chunk.Content), 80),
 		)
 	}
+}
+
+// docID dereferences the optional document-id citation, which is now a
+// *string on the wire (DocsChunk.DocumentId). A nil id renders as a blank
+// cell — mirroring the nil-guard used for the optional Collection field —
+// so an absent citation stays empty rather than panicking on a nil deref.
+func docID(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // formatScore renders the corpus score, which is optional on the wire

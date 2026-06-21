@@ -21804,6 +21804,7 @@
           },
           "document_id": {
             "type": "string",
+            "nullable": true,
             "title": "Document Id"
           },
           "content": {
@@ -21829,11 +21830,10 @@
         "type": "object",
         "required": [
           "chunk_id",
-          "document_id",
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback."
       },
       "DraftTemplateRequest": {
         "properties": {

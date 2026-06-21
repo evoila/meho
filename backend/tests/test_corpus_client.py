@@ -322,6 +322,75 @@ async def test_results_envelope_with_text_fields_returns_real_hits(
 
 
 @pytest.mark.asyncio
+async def test_document_id_threads_through_from_results_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated ``document_id`` arrives on the chunk (#2004).
+
+    The contract names the field ``document_id`` and MEHO.Knowledge speaks
+    that exact key (unlike ``content``/``source_url``, it has no second wire
+    name to alias), so a non-blank value must thread straight through the
+    ``results`` envelope onto the consumed ``document_id``.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d-042",
+                    "text": "owning-doc body",
+                    "source_uri": "https://docs.example/d-042",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].document_id == "d-042"
+
+
+@pytest.mark.asyncio
+async def test_blank_document_id_normalises_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``document_id`` is honestly typed as ``None`` (#2004).
+
+    MEHO.Knowledge returns ``document_id: ""`` for a chunk with no owning-
+    document concept. ``document_id`` is ``str | None``; a blank-after-strip
+    value normalises to ``None`` rather than threading a misleading ``""``,
+    so the citation-label fallback (``title -> document_id -> filename ->
+    URL``) skips a cleanly-``None`` rung. The blank must NOT fail parse —
+    ``document_id`` is a label fallback, not a grounding key.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "",
+                    "text": "no owning doc",
+                    "source_uri": "https://docs.example/c1",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].document_id is None
+    # The chunk still parses and carries its other consumed fields.
+    assert result.chunks[0].chunk_id == "c1"
+    assert result.chunks[0].content == "no owning doc"
+
+
+@pytest.mark.asyncio
 async def test_unrecognized_envelope_fails_loud_not_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

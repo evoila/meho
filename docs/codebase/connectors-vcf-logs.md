@@ -27,6 +27,33 @@ helper. The session-expiry retry-once loop (440 or 401) wraps downstream
 calls and lives in this connector module (not in the shared helper)
 because the downstream paths differ per connector.
 
+### Profile-derived auth + fingerprint (#1974, capstone of #1965)
+
+The connector's declarative auth + fingerprint surfaces are now sourced
+from the reviewed `VRLI_EXECUTION_PROFILE`
+(`connectors/vcf_logs/profile.py`) rather than hand-coded literals — the
+pilot that proves an `ExecutionProfile` can serve a shipped bespoke
+connector's auth + fingerprint. The single declaration drives both the
+typed connector and a profiled connector:
+
+- the **session-create path** (`/api/v2/sessions`) comes from the
+  profile's `session_login` named scheme spec (#1970);
+- the **version endpoint** (`/api/v2/version`) and the `(public, build)`
+  split come from the profile's fingerprint recipe — the `vrli_five_part`
+  named splitter (#1972);
+- the **session-expiry status set** `{401, 440}` is the profile's
+  `expiry_statuses` (#1973), the one frozenset the retry seam narrows.
+
+Two surfaces stay typed-only because the declarative profile cannot model
+them: the per-target `provider` (`ActiveDirectory` / `vIDM`; the
+`session_login` scheme hardcodes `"Local"`) and the fingerprint `extras`
+(`release_name` / `version_full` / `patch`). The `ResultHandle`
+large-result path is the connector-agnostic JSONFlux dispatch mechanism
+(`connectors/schemas.ResultHandle` + `operations/jsonflux_reducer`), not
+connector code, and is untouched. Per-method dispatch parity between the
+typed and profiled paths is proven in
+`tests/integration/test_connectors_vrli_profile_parity.py`.
+
 ## Key types
 
 - **`VcfLogsConnector(HttpConnector)`** —

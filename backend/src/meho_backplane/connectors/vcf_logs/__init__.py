@@ -46,6 +46,7 @@ from meho_backplane.connectors.vcf_logs.core_ops import (
     apply_vrli_core_curation,
     classify_vrli_op,
 )
+from meho_backplane.connectors.vcf_logs.profile import VRLI_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_logs.session import (
     VcfCredentialsLoader,
     VcfLogsTargetLike,
@@ -76,6 +77,7 @@ __all__ = [
     "VRLI_CONNECTOR_ID",
     "VRLI_CORE_GROUPS",
     "VRLI_CORE_OPS",
+    "VRLI_EXECUTION_PROFILE",
     "VRLI_IMPL_ID",
     "VRLI_PATH_RULES",
     "VRLI_PRODUCT",

@@ -21,6 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from meho_backplane.connectors.profile import (
+    DEFAULT_EXPIRY_STATUSES,
     NAMED_AUTH_SCHEMES,
     RESERVED_AUTH_SCHEMES,
     AuthSchemeName,
@@ -246,3 +247,96 @@ def test_reserved_set_names_typed_connectors() -> None:
         "cookie_jar_session",
         "dual_plane_session",
     } == RESERVED_AUTH_SCHEMES
+
+
+# --------------------------------------------------------------------------
+# expiry_statuses — the single profile-declared source (#1973)
+# --------------------------------------------------------------------------
+
+
+def test_expiry_statuses_defaults_to_401() -> None:
+    """A profile omitting the field gets the connector-agnostic {401} floor."""
+    profile = _profile()
+    assert profile.expiry_statuses == frozenset({401})
+    assert profile.expiry_statuses == DEFAULT_EXPIRY_STATUSES
+
+
+def test_expiry_statuses_vrli_declares_401_and_440() -> None:
+    """The vRLI appliance declares its own 440 expiry code alongside 401."""
+    profile = ExecutionProfile(
+        product="vcf_logs",
+        version="2.x",
+        auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        expiry_statuses=frozenset({401, 440}),
+    )
+    assert profile.expiry_statuses == frozenset({401, 440})
+
+
+def test_expiry_statuses_coerces_a_list() -> None:
+    """A JSON-shaped list round-trips into the frozenset field."""
+    profile = ExecutionProfile.model_validate(
+        {
+            "product": "vcf_logs",
+            "version": "2.x",
+            "auth": {"scheme": "session_login", "secret_fields": ["username", "password"]},
+            "expiry_statuses": [401, 440],
+        }
+    )
+    assert profile.expiry_statuses == frozenset({401, 440})
+
+
+def test_expiry_statuses_rejects_empty_set() -> None:
+    """Every profile recognises at least one expiry status."""
+    with pytest.raises(ValidationError, match="at least one status"):
+        ExecutionProfile(
+            product="harbor",
+            version="2.x",
+            auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            expiry_statuses=frozenset(),
+        )
+
+
+@pytest.mark.parametrize("bad_status", [200, 302, 403, 404, 422, 429, 500, 503])
+def test_expiry_statuses_rejects_non_expiry_status(bad_status: int) -> None:
+    """Only the 401 floor + 4xx vendor codes (>=440) are admissible."""
+    with pytest.raises(ValidationError, match="vendor session-expiry"):
+        ExecutionProfile(
+            product="harbor",
+            version="2.x",
+            auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            expiry_statuses=frozenset({401, bad_status}),
+        )
+
+
+def test_expiry_statuses_requires_401_floor() -> None:
+    """Dropping 401 stops classifying the connector-agnostic expiry case."""
+    with pytest.raises(ValidationError, match="must include 401"):
+        ExecutionProfile(
+            product="vcf_logs",
+            version="2.x",
+            auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+            expiry_statuses=frozenset({440}),
+        )
+
+
+def test_expiry_statuses_serialization_roundtrip() -> None:
+    """A profile round-trips through JSON preserving its declared set."""
+    profile = ExecutionProfile(
+        product="vcf_logs",
+        version="2.x",
+        auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        expiry_statuses=frozenset({401, 440}),
+    )
+    restored = ExecutionProfile.model_validate_json(profile.model_dump_json())
+    assert restored.expiry_statuses == frozenset({401, 440})
+
+
+def test_expiry_statuses_extra_forbid_unaffected() -> None:
+    """The field is a known key; an unrelated extra key still fails."""
+    with pytest.raises(ValidationError):
+        ExecutionProfile(
+            product="harbor",
+            version="2.x",
+            auth=AuthSpec(scheme="basic", secret_fields=("username", "password")),
+            bogus="x",  # type: ignore[call-arg]
+        )

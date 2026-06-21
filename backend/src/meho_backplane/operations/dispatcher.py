@@ -122,8 +122,10 @@ Detail payloads land in ``extras``. Codes:
   ``connector_http_422`` (#1649) covers a ``422`` invalid-payload
   rejection in the same arm.
 * ``connector_auth_failed`` -- the connector raised
-  :exc:`httpx.HTTPStatusError` with an auth-class status (``401``, plus
-  vRLI's ``440``): the credential reached the host but was rejected on
+  :exc:`httpx.HTTPStatusError` with an auth-class status (typed connectors:
+  ``401`` plus vRLI's ``440``; a profiled connector: its profile-declared
+  ``expiry_statuses``, the single source #1973 shares with the session
+  harness): the credential reached the host but was rejected on
   authentication. T5 (#1804), the auth sibling of ``connector_http_403``
   in the same arm. The session connectors already retry once on a 401
   internally, so a 401 here means re-login *also* failed -- the
@@ -545,6 +547,35 @@ def _elapsed_ms(started: float) -> float:
     return (time.monotonic() - started) * 1000
 
 
+def _profile_expiry_statuses(connector_instance: Connector | None) -> frozenset[int] | None:
+    """The profile-declared session-expiry status set, or ``None`` if typed.
+
+    A profiled connector carries an
+    :class:`~meho_backplane.connectors.profile.ExecutionProfile` whose
+    ``expiry_statuses`` is the single source #1973 unifies across the
+    session-retry harness and the dispatcher's auth-class arm. Returning it
+    here lets :func:`~meho_backplane.operations._errors.is_auth_failed_status`
+    classify a profiled connector's auth failure against the *profile's*
+    set (default ``{401}``; vRLI ``{401, 440}``) rather than the typed-
+    connector global.
+
+    Typed (hand-coded) connectors have no profile, so this returns ``None``
+    and the caller falls back to the unchanged global
+    ``_AUTH_FAILED_STATUSES`` -- the regression guard in this task's AC. The
+    ``getattr`` probe is deliberately duck-typed: the profile is bound onto
+    the connector instance by T4 (#1970); until then no instance exposes it
+    and every connector classifies via the global, so this change is inert
+    for shipped connectors and live only once a profile is attached.
+    """
+    profile = getattr(connector_instance, "profile", None)
+    if profile is None:
+        return None
+    expiry_statuses = getattr(profile, "expiry_statuses", None)
+    if not isinstance(expiry_statuses, frozenset):
+        return None
+    return expiry_statuses
+
+
 async def _execute_and_audit(
     *,
     op_id: str,
@@ -942,7 +973,7 @@ async def _run_branch_with_error_handling(
             return result_connector_http_403(op_id, http_exc, duration_ms)
         if status_code == 422:
             return result_connector_http_422(op_id, http_exc, duration_ms)
-        if is_auth_failed_status(status_code):
+        if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
             return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
         return result_connector_error(op_id, http_exc, duration_ms)
     except httpx.ConnectError as conn_exc:

@@ -403,8 +403,14 @@ def test_short_twin_collision_is_skipped_not_crashed(
         group_key="system",
     )
 
-    # Must not raise -- the guard, not the unique index, decides.
-    command.upgrade(cfg, "head")
+    # Must not raise -- the guard, not the unique index, decides. Pin the
+    # target to ``0038`` so this exercises 0038's collision-skip in
+    # isolation: a later leaf migration (``0049``) is the destructive
+    # complement that retires exactly this skipped long row, and running
+    # the full chain through ``head`` would delete it before the assertion
+    # below. The retire case is covered by
+    # ``test_migration_0049_*::test_orphan_with_live_twin_is_retired``.
+    command.upgrade(cfg, "0038")
 
     for table, long_id, short_id in (
         ("endpoint_descriptor", long_descriptor, short_descriptor),

@@ -39,6 +39,10 @@
     * ``total_op_count`` -- int: the across-all-groups op total.
     * ``groups``         -- list[dict]: {group_key, name, when_to_use,
                             review_status, op_count} -- NO ops (lazy).
+    * ``kind``           -- str: authoring-mode discriminator (#1979) --
+                            typed / ingested-shim / profiled /
+                            profiled-but-unreviewed.
+    * ``dispatchable``   -- bool: roll-up of ``kind`` (#1971).
     * ``is_tenant_admin``-- bool: forwarded to each lazy group body.
     * ``csrf_token``     -- str: minted double-submit token.
 -#}
@@ -62,6 +66,35 @@
           &middot; {{ total_op_count }} operation{{ "" if total_op_count == 1 else "s" }}
           in {{ groups | length }} group{{ "" if groups | length == 1 else "s" }}
         </p>
+        {#- Authoring-mode badge (#1980, fed by ConnectorReviewPayload.kind /
+            #1979 + #1971). Display-only. The profiled-but-staged sub-state is
+            badged distinctly: a profile-backed connector whose review gate has
+            NOT cleared is not yet dispatchable, so the operator sees why the
+            review still matters here. -#}
+        <div class="mt-2">
+          {% if kind == "typed" %}
+            <span class="badge badge-primary badge-sm" data-connector-kind="typed"
+                  title="Hand-coded connector class — dispatchable">
+              typed
+            </span>
+          {% elif kind == "profiled" %}
+            <span class="badge badge-info badge-sm" data-connector-kind="profiled"
+                  title="Profile-backed (ExecutionProfile) connector — dispatchable">
+              profiled
+            </span>
+          {% elif kind == "profiled-but-unreviewed" %}
+            <span class="badge badge-warning badge-sm"
+                  data-connector-kind="profiled-but-unreviewed"
+                  title="Profile-backed but not yet review-cleared — not yet dispatchable; clear the review gate to dispatch">
+              profiled — staged
+            </span>
+          {% else %}
+            <span class="badge badge-ghost badge-sm" data-connector-kind="ingested-shim"
+                  title="Bare ingested shim — not dispatchable until replaced">
+              ingested shim
+            </span>
+          {% endif %}
+        </div>
       </div>
       <form method="dialog">
         <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">

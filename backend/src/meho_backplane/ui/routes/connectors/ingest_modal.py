@@ -263,6 +263,14 @@ def _build_catalog_entries(catalog: Any) -> list[dict[str, Any]]:
     Each option is a ``"<product>/<version>"`` ref (the catalog-entry
     reference :func:`ingest_endpoint` resolves) plus the ``impl_id`` so
     the operator can disambiguate two versions of the same product.
+
+    ``ships_local`` (#1980) is ``True`` when the catalog row carries a
+    MEHO-authored ``spec_resource`` and/or ``profile_resource`` shipped as
+    package data (#1975 / #1976) -- the catalog-driven ingest loads those
+    bytes via ``importlib.resources`` rather than fetching ``upstream``, so
+    the row needs no operator-supplied spec upload. Display-only: it marks
+    the option so the operator knows a ``--catalog`` ingest of that row is
+    self-contained.
     """
     return [
         {
@@ -270,6 +278,7 @@ def _build_catalog_entries(catalog: Any) -> list[dict[str, Any]]:
             "product": entry.product,
             "version": entry.version,
             "impl_id": entry.impl_id,
+            "ships_local": entry.spec_resource is not None or entry.profile_resource is not None,
         }
         for entry in catalog.catalog
     ]

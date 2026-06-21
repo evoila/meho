@@ -276,6 +276,10 @@ async def render_review_drawer(
     or ``404`` renders an inline panel instead of a 5xx. ``is_tenant_admin``
     drives the edit-control soft-hide (operators see the read drawer with
     no edit affordances).
+
+    The payload's ``kind`` / ``dispatchable`` (#1979 / #1971) ride into
+    the context so the drawer header badges a profiled-but-staged
+    connector distinctly (#1980) -- display-only, no governance logic.
     """
     _validate_connector_id(connector_id)
     try:
@@ -294,6 +298,8 @@ async def render_review_drawer(
         "impl_id": payload.impl_id,
         "total_op_count": payload.total_op_count,
         "groups": [_group_summary_context(group) for group in payload.groups],
+        "kind": payload.kind,
+        "dispatchable": payload.dispatchable,
         "is_tenant_admin": is_tenant_admin,
         "csrf_token": csrf_token,
     }

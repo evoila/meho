@@ -787,6 +787,40 @@ def test_ingest_modal_renders_for_admin() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AC (#1980): catalog rows that ship a local spec/profile are marked
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_rows_mark_shipped_local_spec() -> None:
+    """A catalog row carrying spec_resource/profile_resource is marked (#1980).
+
+    Uses the real in-process ``catalog_endpoint``: the packaged catalog's
+    ``vmware/9.0`` row ships a local spec + profile (#1975 / #1976), so its
+    ``<option>`` carries the ``data-ships-local`` attribute + the
+    "ships local spec/profile — no upload" suffix and the legend note renders;
+    a fetch-from-upstream row (``harbor/2.x``) is NOT marked.
+    """
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        resp = client.get("/ui/connectors/registry/ingest")
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    # The vmware/9.0 option ships a local spec/profile -> marked + suffixed.
+    assert 'data-ships-local="true"' in body
+    assert "ships local spec/profile" in body
+    assert "no upload" in body
+    # The legend note renders when at least one row ships local.
+    assert "data-ships-local-note" in body
+
+
+# ---------------------------------------------------------------------------
 # Entry-point soft-hide: the "Ingest" button is admin-only on the T1 list
 # ---------------------------------------------------------------------------
 

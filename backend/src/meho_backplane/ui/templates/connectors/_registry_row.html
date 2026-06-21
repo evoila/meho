@@ -17,7 +17,8 @@
   Context contract:
     * ``row``           -- dict | None: connector_id / product / version /
                            impl_id / is_builtin / state / *_group_count /
-                           operation_count / enabled_operation_count.
+                           operation_count / enabled_operation_count / kind /
+                           dispatchable.
     * ``connector_id``  -- str: the row id (always present; drives the
                            ``<tr>`` id even when ``row`` is None on delete).
     * ``is_tenant_admin`` -- bool: soft-hide the per-row action buttons.
@@ -34,7 +35,7 @@
     {#- Deleted: an empty placeholder cell. The OOB swap replaces the old
         row with this id-only stub, removing it from the operator's view;
         a follow-up filter/sort re-render drops the stub entirely. -#}
-    <td colspan="6" class="hidden"></td>
+    <td colspan="7" class="hidden"></td>
   {%- else -%}
     <td class="font-mono text-sm">{{ row.connector_id }}</td>
     <td>
@@ -64,6 +65,30 @@
       {% else %}
         <span class="badge badge-ghost badge-sm" title="Registered but no descriptor rows yet (not yet dispatchable)">
           {{ row.state }}
+        </span>
+      {% endif %}
+    </td>
+    <td>
+      {#- Authoring-mode chip (#1980, fed by ConnectorListItem.kind / #1979).
+          Display-only: typed / profiled are dispatchable (the dispatcher
+          resolves operations against a hand-coded or profile-backed class);
+          ingested-shim is a bare non-dispatchable shim; profiled-but-unreviewed
+          is a profile-backed connector still awaiting review-gate clearance. -#}
+      {% if row.kind == "typed" %}
+        <span class="badge badge-primary badge-sm" title="Hand-coded connector class — dispatchable">
+          typed
+        </span>
+      {% elif row.kind == "profiled" %}
+        <span class="badge badge-info badge-sm" title="Profile-backed (ExecutionProfile) connector — dispatchable">
+          profiled
+        </span>
+      {% elif row.kind == "profiled-but-unreviewed" %}
+        <span class="badge badge-warning badge-sm" title="Profile-backed but not yet review-cleared — not yet dispatchable">
+          profiled (staged)
+        </span>
+      {% else %}
+        <span class="badge badge-ghost badge-sm" title="Bare ingested shim — not dispatchable until replaced">
+          ingested shim
         </span>
       {% endif %}
     </td>
@@ -162,6 +187,6 @@
     swap instead, leaving this slot empty. -#}
 {% if row is not none %}
   <tr id="registry-result-{{ connector_id }}" {% if oob %}hx-swap-oob="true"{% endif %}>
-    <td colspan="6" class="p-0"></td>
+    <td colspan="7" class="p-0"></td>
   </tr>
 {% endif %}

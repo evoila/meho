@@ -349,6 +349,15 @@ const (
 	Node TopologyDiffEntrySource = "node"
 )
 
+// Defines values for UnderscoreKindFilter.
+const (
+	UnderscoreKindFilterAll                   UnderscoreKindFilter = "all"
+	UnderscoreKindFilterIngestedShim          UnderscoreKindFilter = "ingested-shim"
+	UnderscoreKindFilterProfiled              UnderscoreKindFilter = "profiled"
+	UnderscoreKindFilterProfiledButUnreviewed UnderscoreKindFilter = "profiled-but-unreviewed"
+	UnderscoreKindFilterTyped                 UnderscoreKindFilter = "typed"
+)
+
 // Defines values for UnderscoreSortDirection.
 const (
 	Asc  UnderscoreSortDirection = "asc"
@@ -388,10 +397,10 @@ const (
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
-	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
-	ListEndpointApiV1ConnectorsGetParamsStatusDisabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
-	ListEndpointApiV1ConnectorsGetParamsStatusEnabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
-	ListEndpointApiV1ConnectorsGetParamsStatusStaged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
+	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
+	Disabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
+	Enabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
+	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -6082,6 +6091,21 @@ type UnderscoreEdgeEndpoint struct {
 	Name string  `json:"name"`
 }
 
+// UnderscoreKindFilter Closed enum for the “?kind=“ authoring-mode filter.
+//
+// Mirrors the backend
+// :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`
+// literal (“typed“ / “ingested-shim“ / “profiled“ /
+// “profiled-but-unreviewed“) plus an “ALL“ no-narrowing sentinel.
+// Unlike “status“, “kind“ is not a backend service argument --
+// :func:`list_ingested_connectors` does not filter on it -- so the
+// handler narrows the returned rows in-process (the same in-Python
+// pass the “product“ filter already uses). Giving the query param a
+// real enum still 422s an out-of-range “?kind=“ at the HTTP boundary
+// rather than silently no-op-ing the swap. The “str“ mixin keeps
+// “{{ kind_filter }}“ rendering stable.
+type UnderscoreKindFilter string
+
 // UnderscoreSortDirection Sort direction -- “asc“ (default) or “desc“.
 type UnderscoreSortDirection string
 
@@ -7022,6 +7046,7 @@ type UiConnectorsListUiConnectorsGetParams struct {
 type UiConnectorsRegistryListUiConnectorsRegistryGetParams struct {
 	Status  *UnderscoreStatusFilter `form:"status,omitempty" json:"status,omitempty"`
 	Product *string                 `form:"product,omitempty" json:"product,omitempty"`
+	Kind    *UnderscoreKindFilter   `form:"kind,omitempty" json:"kind,omitempty"`
 }
 
 // UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams defines parameters for UiConnectorsDeleteSubmitUiConnectorsNameDeletePost.
@@ -26715,6 +26740,22 @@ func NewUiConnectorsRegistryListUiConnectorsRegistryGetRequestWithBody(server st
 		if params.Product != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, *params.Product); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

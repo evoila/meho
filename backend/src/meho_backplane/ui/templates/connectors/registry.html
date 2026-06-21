@@ -126,6 +126,32 @@
           {% endfor %}
         </select>
       </label>
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        {# Authoring-mode filter (#1980, fed by ConnectorListItem.kind / #1979).
+           Same footgun-safe shape as Status: the ``all`` option is a REAL
+           sentinel (never ``value=""``) because the ``_KindFilter`` enum 422s
+           on an out-of-range value. The handler narrows the returned rows
+           in-process (kind is not a backend service argument). #}
+        <select
+          name="kind"
+          class="select select-bordered select-sm"
+          aria-label="Filter by connector kind"
+        >
+          {%- set kind_options = [
+            ("all", "All kinds"),
+            ("typed", "Typed"),
+            ("profiled", "Profiled"),
+            ("profiled-but-unreviewed", "Profiled (staged)"),
+            ("ingested-shim", "Ingested shim"),
+          ] -%}
+          {% for value, label in kind_options %}
+            <option value="{{ value }}" {% if value == kind_filter %}selected{% endif %}>
+              {{ label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
     </div>
   </form>
 
@@ -138,6 +164,7 @@
           <th>Product</th>
           <th>Scope</th>
           <th>State</th>
+          <th>Kind</th>
           <th>Groups / Ops</th>
           <th class="text-right">Actions</th>
         </tr>

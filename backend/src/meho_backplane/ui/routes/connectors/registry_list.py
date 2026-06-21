@@ -61,6 +61,7 @@ from meho_backplane.operations.ingest import (
     ConnectorStatusFilter,
     list_ingested_connectors,
 )
+from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.connectors.operator import (
@@ -97,6 +98,29 @@ class _StatusFilter(StrEnum):
     ALL = "all"
 
 
+class _KindFilter(StrEnum):
+    """Closed enum for the ``?kind=`` authoring-mode filter.
+
+    Mirrors the backend
+    :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`
+    literal (``typed`` / ``ingested-shim`` / ``profiled`` /
+    ``profiled-but-unreviewed``) plus an ``ALL`` no-narrowing sentinel.
+    Unlike ``status``, ``kind`` is not a backend service argument --
+    :func:`list_ingested_connectors` does not filter on it -- so the
+    handler narrows the returned rows in-process (the same in-Python
+    pass the ``product`` filter already uses). Giving the query param a
+    real enum still 422s an out-of-range ``?kind=`` at the HTTP boundary
+    rather than silently no-op-ing the swap. The ``str`` mixin keeps
+    ``{{ kind_filter }}`` rendering stable.
+    """
+
+    TYPED = "typed"
+    INGESTED_SHIM = "ingested-shim"
+    PROFILED = "profiled"
+    PROFILED_BUT_UNREVIEWED = "profiled-but-unreviewed"
+    ALL = "all"
+
+
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 idiom
 #: matching the list / detail / corpus routes (no calls in default
 #: argument positions).
@@ -127,6 +151,8 @@ def _row_context(item: ConnectorListItem) -> dict[str, Any]:
         "disabled_group_count": item.disabled_group_count,
         "operation_count": item.operation_count,
         "enabled_operation_count": item.enabled_operation_count,
+        "kind": item.kind,
+        "dispatchable": item.dispatchable,
     }
 
 
@@ -202,6 +228,7 @@ def render_registry_table(
     items: list[ConnectorListItem],
     status_filter: _StatusFilter,
     product_filter: str | None,
+    kind_filter: _KindFilter,
     session_ctx: UISessionContext,
     is_tenant_admin: bool,
 ) -> HTMLResponse:
@@ -217,6 +244,7 @@ def render_registry_table(
         "rows": [_row_context(item) for item in items],
         "status_filter": status_filter.value,
         "product_filter": product_filter or "",
+        "kind_filter": kind_filter.value,
         "is_tenant_admin": is_tenant_admin,
         "csrf_token": csrf_token,
     }
@@ -234,6 +262,7 @@ async def _render(
     *,
     status_filter: _StatusFilter,
     product_filter: str | None,
+    kind_filter: _KindFilter,
     session_ctx: UISessionContext,
     operator: Operator,
     is_tenant_admin: bool,
@@ -255,6 +284,9 @@ async def _render(
     items = await list_ingested_connectors(operator=operator, status=service_status)
     if product_filter:
         items = [item for item in items if item.product == product_filter]
+    if kind_filter != _KindFilter.ALL:
+        kind_value = cast(ConnectorAuthoringKind, kind_filter.value)
+        items = [item for item in items if item.kind == kind_value]
 
     if request.headers.get("hx-request", "").lower() == "true":
         return render_registry_table(
@@ -262,6 +294,7 @@ async def _render(
             items=items,
             status_filter=status_filter,
             product_filter=product_filter,
+            kind_filter=kind_filter,
             session_ctx=session_ctx,
             is_tenant_admin=is_tenant_admin,
         )
@@ -274,6 +307,7 @@ async def _render(
         "product_options": _distinct_products(items),
         "status_filter": status_filter.value,
         "product_filter": product_filter or "",
+        "kind_filter": kind_filter.value,
         "is_tenant_admin": is_tenant_admin,
         "csrf_token": csrf_token,
     }
@@ -302,6 +336,7 @@ def build_registry_list_router() -> APIRouter:
         request: Request,
         status: _StatusFilter = Query(default=_StatusFilter.ALL),
         product: str | None = Query(default=None, max_length=100),
+        kind: _KindFilter = Query(default=_KindFilter.ALL),
         session_ctx: UISessionContext = _require_ui_session_dep,
         role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
@@ -311,6 +346,7 @@ def build_registry_list_router() -> APIRouter:
             request,
             status_filter=status,
             product_filter=product,
+            kind_filter=kind,
             session_ctx=session_ctx,
             operator=operator,
             is_tenant_admin=role_probe.is_tenant_admin,

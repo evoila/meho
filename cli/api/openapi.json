@@ -10193,6 +10193,15 @@
               "nullable": true,
               "title": "Product"
             }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_KindFilter",
+              "default": "all"
+            }
           }
         ],
         "requestBody": {
@@ -26185,6 +26194,18 @@
         ],
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
+      },
+      "_KindFilter": {
+        "type": "string",
+        "enum": [
+          "typed",
+          "ingested-shim",
+          "profiled",
+          "profiled-but-unreviewed",
+          "all"
+        ],
+        "title": "_KindFilter",
+        "description": "Closed enum for the ``?kind=`` authoring-mode filter.\n\nMirrors the backend\n:data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`\nliteral (``typed`` / ``ingested-shim`` / ``profiled`` /\n``profiled-but-unreviewed``) plus an ``ALL`` no-narrowing sentinel.\nUnlike ``status``, ``kind`` is not a backend service argument --\n:func:`list_ingested_connectors` does not filter on it -- so the\nhandler narrows the returned rows in-process (the same in-Python\npass the ``product`` filter already uses). Giving the query param a\nreal enum still 422s an out-of-range ``?kind=`` at the HTTP boundary\nrather than silently no-op-ing the swap. The ``str`` mixin keeps\n``{{ kind_filter }}`` rendering stable."
       },
       "_SortDirection": {
         "type": "string",

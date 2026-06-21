@@ -47,6 +47,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -707,3 +708,173 @@ def test_write_verbs_require_csrf() -> None:
     assert delete_no_csrf.status_code == 403, delete_no_csrf.text
     # The CSRF rejection is the middleware's, not the route's RBAC 403.
     assert enable_no_csrf.headers.get("x-csrf-rejection-reason") is not None
+
+
+# ---------------------------------------------------------------------------
+# AC (#1980): the list shows + filters on connector kind
+# ---------------------------------------------------------------------------
+
+
+def test_registry_list_renders_kind_chip() -> None:
+    """The list renders the per-row authoring-mode kind chip (#1980).
+
+    ``vmware-rest`` is a hand-coded v2 connector class, so the resolver maps
+    it to ``kind="typed"`` (dispatchable). The row must carry the typed chip
+    + the Kind column header.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/connectors/registry")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The Kind column header + the typed chip for the hand-coded connector.
+    assert "<th>Kind</th>" in body
+    assert 'badge-primary badge-sm" title="Hand-coded connector class' in body
+    # The kind filter <select> is present with the all-sentinel option.
+    assert 'name="kind"' in body
+    assert 'value="all"' in body
+    assert 'value="profiled-but-unreviewed"' in body
+
+
+def test_registry_list_kind_filter_narrows() -> None:
+    """``?kind=`` narrows the rows in-process; a bad value 422s at the enum.
+
+    The seeded ``vmware-rest`` resolves to ``kind="typed"``, so ``?kind=typed``
+    keeps it and ``?kind=ingested-shim`` (or ``?kind=profiled``) hides it. An
+    out-of-range ``?kind=`` 422s at the ``_KindFilter`` enum boundary (the
+    filter contract), exactly like ``?status=``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A)
+
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        # The all-sentinel keeps the typed row.
+        all_kinds = client.get("/ui/connectors/registry?kind=all", headers={"HX-Request": "true"})
+        # A matching kind keeps it.
+        typed_only = client.get(
+            "/ui/connectors/registry?kind=typed", headers={"HX-Request": "true"}
+        )
+        # A non-matching kind drops it.
+        shim_only = client.get(
+            "/ui/connectors/registry?kind=ingested-shim",
+            headers={"HX-Request": "true"},
+        )
+        # An out-of-range kind 422s at the enum boundary.
+        bad = client.get("/ui/connectors/registry?kind=bogus")
+    finally:
+        mock.stop()
+
+    assert all_kinds.status_code == 200, all_kinds.text
+    assert _CONNECTOR_ID in all_kinds.text
+    assert typed_only.status_code == 200, typed_only.text
+    assert _CONNECTOR_ID in typed_only.text
+    assert shim_only.status_code == 200, shim_only.text
+    assert _CONNECTOR_ID not in shim_only.text
+    assert bad.status_code == 422, bad.text
+
+
+def test_row_context_carries_kind_and_dispatchable() -> None:
+    """``_row_context`` flattens ``ConnectorListItem.kind`` / ``dispatchable`` (#1980)."""
+    from meho_backplane.operations.ingest import ConnectorListItem
+    from meho_backplane.ui.routes.connectors.registry_list import _row_context
+
+    item = ConnectorListItem(
+        connector_id="acme-rest-1.0",
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        tenant_id=None,
+        group_count=1,
+        staged_group_count=1,
+        enabled_group_count=0,
+        disabled_group_count=0,
+        operation_count=3,
+        enabled_operation_count=0,
+        kind="profiled-but-unreviewed",
+        dispatchable=False,
+    )
+    ctx = _row_context(item)
+    assert ctx["kind"] == "profiled-but-unreviewed"
+    assert ctx["dispatchable"] is False
+
+
+def test_registry_row_renders_each_kind_chip() -> None:
+    """Every ``kind`` value renders its distinct chip in the row fragment (#1980).
+
+    Exercises the four template branches directly via ``render_registry_table``
+    (no full pipeline seed needed for the non-``typed`` kinds): typed / profiled
+    are dispatchable, ingested-shim is the bare dead end, profiled-but-unreviewed
+    badges the not-yet-cleared profile-backed sub-state.
+    """
+    from meho_backplane.operations.ingest import ConnectorListItem
+    from meho_backplane.ui.routes.connectors.registry_list import (
+        _KindFilter,
+        _StatusFilter,
+        render_registry_table,
+    )
+
+    def _item(kind: str, dispatchable: bool) -> ConnectorListItem:
+        return ConnectorListItem(
+            connector_id=f"{kind}-rest-1.0",
+            product=kind,
+            version="1.0",
+            impl_id=f"{kind}-rest",
+            tenant_id=None,
+            group_count=1,
+            staged_group_count=1,
+            enabled_group_count=0,
+            disabled_group_count=0,
+            operation_count=1,
+            enabled_operation_count=0,
+            kind=kind,  # type: ignore[arg-type]
+            dispatchable=dispatchable,
+        )
+
+    items = [
+        _item("typed", True),
+        _item("profiled", True),
+        _item("ingested-shim", False),
+        _item("profiled-but-unreviewed", False),
+    ]
+
+    session_ctx = SimpleNamespace(session_id=uuid.uuid4())
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/ui/connectors/registry",
+            "headers": [],
+            "query_string": b"",
+            "state": {},
+        }
+    )
+    response = render_registry_table(
+        request,
+        items=items,
+        status_filter=_StatusFilter.ALL,
+        product_filter=None,
+        kind_filter=_KindFilter.ALL,
+        session_ctx=session_ctx,  # type: ignore[arg-type]
+        is_tenant_admin=False,
+    )
+    body = response.body.decode()
+    assert "badge-primary badge-sm" in body  # typed
+    assert "badge-info badge-sm" in body  # profiled
+    assert "ingested shim" in body  # ingested-shim
+    assert "profiled (staged)" in body  # profiled-but-unreviewed

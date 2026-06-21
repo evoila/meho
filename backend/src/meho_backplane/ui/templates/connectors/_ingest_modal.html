@@ -35,8 +35,12 @@
   token + re-set the matching ``meho_csrf`` cookie.
 
   Context contract:
-    * ``catalog_entries`` -- list[dict]: {ref, product, version, impl_id}
-                             for the catalog dropdown (may be empty).
+    * ``catalog_entries`` -- list[dict]: {ref, product, version, impl_id,
+                             ships_local} for the catalog dropdown (may be
+                             empty). ``ships_local`` (#1980) flags a row that
+                             ships a MEHO-authored spec/profile as package
+                             data (#1975 / #1976) -- a ``--catalog`` ingest of
+                             that row needs no operator-supplied spec upload.
     * ``csrf_token``      -- str: minted double-submit token for the POST.
 -#}
 {% from "_icons.html" import icon %}
@@ -111,12 +115,28 @@
               class="select select-bordered select-sm"
               aria-label="Catalog entry"
             >
+              {#- ``ships_local`` (#1980) marks a row that ships a MEHO-authored
+                  spec/profile as package data (#1975 / #1976): the catalog
+                  ingest loads those bytes directly, so no spec upload is
+                  needed. ``<option>`` cannot hold child markup, so the marker
+                  rides as a text suffix + a ``data-ships-local`` attribute. -#}
               {% for entry in catalog_entries %}
-                <option value="{{ entry.ref }}">
+                <option
+                  value="{{ entry.ref }}"
+                  {% if entry.ships_local %}data-ships-local="true"{% endif %}
+                >
                   {{ entry.ref }} &middot; {{ entry.impl_id }}
+                  {%- if entry.ships_local %} &middot; ships local spec/profile — no upload{% endif %}
                 </option>
               {% endfor %}
             </select>
+            {% if catalog_entries | selectattr("ships_local") | list %}
+              <span class="label-text-alt mt-1 opacity-70" data-ships-local-note>
+                Entries marked &ldquo;ships local spec/profile&rdquo; bundle a
+                MEHO-authored spec/profile &mdash; the catalog ingest needs no
+                spec upload.
+              </span>
+            {% endif %}
           {% else %}
             <div role="alert" class="alert alert-info mt-1 text-xs">
               <span>

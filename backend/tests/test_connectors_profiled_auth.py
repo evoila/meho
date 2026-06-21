@@ -369,6 +369,195 @@ def test_session_login_basic_build_body_and_extract_token_directly() -> None:
 
 
 # ---------------------------------------------------------------------------
+# session_login_basic modern→legacy 404 fallback + op-path mount (#2031)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_uses_modern_path_when_served() -> None:
+    """The modern ``/api/session`` wins when served; no legacy attempt."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid", assert_all_called=False) as mock:
+        modern = mock.post("/api/session").respond(200, json="modern-tok")
+        legacy = mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"vmware-api-session-id": "modern-tok"}
+    assert modern.call_count == 1
+    assert legacy.call_count == 0
+    assert connector._session_login_paths[target_cache_key(target)] == "/api/session"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_falls_back_to_legacy_on_404() -> None:
+    """A 404 on modern triggers exactly one legacy ``/rest/...`` retry."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcsim", host="vcsim.invalid")
+
+    async with respx.mock(base_url="https://vcsim.invalid") as mock:
+        modern = mock.post("/api/session").respond(404)
+        legacy = mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"vmware-api-session-id": "legacy-tok"}
+    assert modern.call_count == 1
+    assert legacy.call_count == 1
+    # Both attempts carry the same HTTP Basic credentials, no body.
+    expected_basic = base64.b64encode(b"svc:pw").decode()
+    assert legacy.calls[0].request.headers.get("authorization") == f"Basic {expected_basic}"
+    assert legacy.calls[0].request.read() == b""
+    assert connector._session_login_paths[target_cache_key(target)] == (
+        "/rest/com/vmware/cis/session"
+    )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modern_status", [401, 403, 500, 503])
+async def test_session_login_basic_does_not_fall_back_on_non_404(modern_status: int) -> None:
+    """401 / 403 / 5xx on modern are auth/server failures — no legacy retry."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid", assert_all_called=False) as mock:
+        modern = mock.post("/api/session").respond(modern_status)
+        legacy = mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.auth_headers(target, operator=_operator())
+
+    assert modern.call_count == 1
+    assert legacy.call_count == 0
+    # No session recorded — the establish failed.
+    assert target_cache_key(target) not in connector._session_login_paths
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_basic_legacy_404_too_surfaces_status_error() -> None:
+    """When both modern and legacy 404, the error surfaces (no third attempt)."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        modern = mock.post("/api/session").respond(404)
+        legacy = mock.post("/rest/com/vmware/cis/session").respond(404)
+        with pytest.raises(httpx.HTTPStatusError):
+            await connector.auth_headers(target, operator=_operator())
+
+    assert modern.call_count == 1
+    assert legacy.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_modern_prefixes_api() -> None:
+    """When modern wins, a spec-relative op path mounts under ``/api``."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        mock.post("/api/session").respond(200, json="modern-tok")
+        mounted = await connector.mount_op_path(target, "/vcenter/vm", operator=_operator())
+
+    assert mounted == "/api/vcenter/vm"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_legacy_prefixes_rest() -> None:
+    """When legacy wins (vcsim), a spec-relative op path mounts under ``/rest``."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcsim", host="vcsim.invalid")
+
+    async with respx.mock(base_url="https://vcsim.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        mounted = await connector.mount_op_path(target, "/vcenter/vm", operator=_operator())
+
+    assert mounted == "/rest/vcenter/vm"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_passes_through_already_mounted_path() -> None:
+    """A descriptor path already carrying a known mount prefix is unchanged."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcsim", host="vcsim.invalid")
+
+    async with respx.mock(base_url="https://vcsim.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        # Legacy won, but an explicit /api/... descriptor isn't re-prefixed.
+        mounted = await connector.mount_op_path(target, "/api/vcenter/vm", operator=_operator())
+
+    assert mounted == "/api/vcenter/vm"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_identity_for_scheme_without_fallback() -> None:
+    """A no-fallback session scheme (vRLI) returns the path unchanged."""
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    # No login round-trip needed — a scheme without a fallback is identity.
+    mounted = await connector.mount_op_path(target, "/api/v2/events", operator=_operator())
+
+    assert mounted == "/api/v2/events"
+    # No session was established for the identity path.
+    assert connector._session_login_paths == {}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_identity_for_stateless_scheme() -> None:
+    """A stateless scheme (basic) needs no session establish to mount."""
+    connector = _connector("basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="t", host="t.invalid")
+
+    mounted = await connector.mount_op_path(target, "/api/v2.0/projects", operator=_operator())
+
+    assert mounted == "/api/v2.0/projects"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_invalidate_session_drops_recorded_login_path() -> None:
+    """Invalidating a session clears its recorded login path too (#2031)."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcsim", host="vcsim.invalid")
+
+    async with respx.mock(base_url="https://vcsim.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        await connector.auth_headers(target, operator=_operator())
+
+    assert target_cache_key(target) in connector._session_login_paths
+    await connector._invalidate_session(target)
+    assert target_cache_key(target) not in connector._session_login_paths
+    await connector.aclose()
+
+
+def test_session_login_basic_declares_vetted_legacy_fallback() -> None:
+    """The fallback is a closed, vetted vCenter pair — and the only one."""
+    from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+
+    fallback = SESSION_SCHEME_SPECS["session_login_basic"].legacy_fallback
+    assert fallback is not None
+    assert fallback.legacy_login_path == "/rest/com/vmware/cis/session"
+    assert fallback.modern_op_mount == "/api"
+    assert fallback.legacy_op_mount == "/rest"
+    assert fallback.op_mount_for_login_path("/api/session") == "/api"
+    assert fallback.op_mount_for_login_path("/rest/com/vmware/cis/session") == "/rest"
+    # No other scheme carries a fallback — vRLI / keycloak are single-path.
+    assert SESSION_SCHEME_SPECS["session_login"].legacy_fallback is None
+    assert SESSION_SCHEME_SPECS["oauth2_mint"].legacy_fallback is None
+
+
+# ---------------------------------------------------------------------------
 # oauth2_mint (keycloak parity) — form grant + TTL refresh
 # ---------------------------------------------------------------------------
 

@@ -22,7 +22,8 @@ The named schemes split on whether they hold session state:
   ``Bearer``; vRLI's shape), ``session_login_basic`` (POST with HTTP Basic
   credentials and no body, read the raw JSON-string token out of the
   response body, send it in a bespoke header; vCenter's ``/api/session``
-  shape, #2025) and ``oauth2_mint`` (an OAuth2 client-credentials *form*
+  shape, #2025, with the vetted modern→legacy 404 fallback of #2031) and
+  ``oauth2_mint`` (an OAuth2 client-credentials *form*
   grant minting a ``Bearer`` token with a TTL; keycloak's shape). These
   need the per-target lock / token cache / single-flight /
   TTL-or-expiry-driven refresh / fail-closed harness, which
@@ -58,6 +59,7 @@ from meho_backplane.connectors.profile import AuthSpec
 __all__ = [
     "SESSION_SCHEME_SPECS",
     "STATELESS_SCHEMES",
+    "LegacyFallback",
     "ProfileAuthError",
     "SessionSchemeSpec",
     "SessionToken",
@@ -177,6 +179,59 @@ class SessionToken:
 
 
 @dataclass(frozen=True)
+class LegacyFallback:
+    """A vetted modern→legacy session-endpoint pair for a single scheme (#2031).
+
+    Some appliances expose the same session-establish semantics at two
+    different paths depending on deployment vintage: a *modern* path served
+    by current releases and a *legacy* path served by older releases (and by
+    the vendor's test simulator). The credentials and response shape are
+    identical across the pair — only the path (and the API mount the
+    subsequent ops live under) differs.
+
+    This is a **closed, per-scheme constant**, not a profile-supplied knob:
+    the scheme names exactly one vetted pair, the profile cannot widen it,
+    and there is no free-form list of candidate login paths (the #1177 /
+    #1969 no-DSL line). The only scheme that currently declares a fallback is
+    ``session_login_basic`` (vCenter's modern ``/api/session`` →
+    legacy ``/rest/com/vmware/cis/session``), mirroring the typed
+    :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`.
+
+    Attributes
+    ----------
+    legacy_login_path
+        The legacy session-establish path tried **only** when the modern
+        :attr:`SessionSchemeSpec.login_path` returns HTTP 404. A 401 / 403 /
+        5xx on the modern path is an auth / server failure, not "this
+        deployment lacks the modern endpoint", and does **not** trigger the
+        legacy attempt.
+    modern_op_mount
+        The API mount prefix ingested ops live under when the *modern* login
+        path won (vCenter modern: ``/api``).
+    legacy_op_mount
+        The API mount prefix ingested ops live under when the *legacy* login
+        path won (vCenter legacy / simulator: ``/rest``).
+    """
+
+    legacy_login_path: str
+    modern_op_mount: str
+    legacy_op_mount: str
+
+    def op_mount_for_login_path(self, login_path: str) -> str:
+        """Return the op-mount prefix the *winning* login path implies.
+
+        The legacy login path selects :attr:`legacy_op_mount`; any other
+        recorded path (the modern path, or an unrecognised value) selects
+        :attr:`modern_op_mount` so a future addition fails toward the
+        production-correct mount rather than silently misrouting every op.
+        Mirrors the typed connector's ``api_mount_for_session_path``.
+        """
+        if login_path == self.legacy_login_path:
+            return self.legacy_op_mount
+        return self.modern_op_mount
+
+
+@dataclass(frozen=True)
 class SessionSchemeSpec:
     """The scheme-specific mechanics of a session-stateful named scheme.
 
@@ -234,6 +289,14 @@ class SessionSchemeSpec:
         How the established token is placed in :attr:`token_header`.
         ``"bearer"`` wraps it as ``"Bearer <token>"`` (vRLI / keycloak);
         ``"raw"`` places it verbatim (vCenter's session-id header).
+    legacy_fallback
+        An optional vetted :class:`LegacyFallback` modern→legacy pair (#2031).
+        ``None`` for a scheme served at a single path (vRLI / keycloak). When
+        present, the harness retries the login at the legacy path on an HTTP
+        404 from the modern :attr:`login_path` (404 only) and records the
+        winning path so op-path mount + teardown follow it. Only
+        ``session_login_basic`` declares one (vCenter's
+        ``/api/session`` → ``/rest/com/vmware/cis/session``).
     """
 
     login_path: Callable[[AuthSpec], str]
@@ -245,6 +308,7 @@ class SessionSchemeSpec:
     extract_token: Callable[[Any], SessionToken | None]
     token_header: str
     token_value_kind: str
+    legacy_fallback: LegacyFallback | None = None
 
 
 def _no_login_auth(_auth: AuthSpec, _secret: Mapping[str, str]) -> tuple[str, str] | None:
@@ -318,6 +382,21 @@ _VCENTER_SESSION_PATH = "/api/session"
 #: Broadcom's vSphere Automation API. Matches the typed connector's
 #: ``_SESSION_HEADER``.
 _VCENTER_SESSION_HEADER = "vmware-api-session-id"
+
+#: The vetted vCenter modern→legacy session-endpoint pair (#2031). When the
+#: modern ``POST /api/session`` 404s, the harness retries the legacy
+#: ``POST /rest/com/vmware/cis/session`` — the only path the upstream
+#: ``vmware/vcsim`` simulator (and very old vCenter) registers. The winning
+#: path then selects the op mount: ``/api`` on modern, ``/rest`` on legacy.
+#: These constants intentionally duplicate the typed connector's
+#: ``vmware_rest/_mount.py`` values rather than importing them, keeping the
+#: generic profiled-auth module free of a vendor-module dependency (the same
+#: no-coupling decision the duplicated ``_basic_auth_value`` reflects).
+_VCENTER_LEGACY_FALLBACK = LegacyFallback(
+    legacy_login_path="/rest/com/vmware/cis/session",
+    modern_op_mount="/api",
+    legacy_op_mount="/rest",
+)
 
 
 def _session_login_basic_body(_auth: AuthSpec, _secret: Mapping[str, str]) -> dict[str, str]:
@@ -446,6 +525,7 @@ SESSION_SCHEME_SPECS: dict[str, SessionSchemeSpec] = {
         extract_token=_extract_session_login_basic_token,
         token_header=_VCENTER_SESSION_HEADER,
         token_value_kind="raw",
+        legacy_fallback=_VCENTER_LEGACY_FALLBACK,
     ),
     "oauth2_mint": SessionSchemeSpec(
         login_path=lambda _auth: _OAUTH2_TOKEN_PATH,

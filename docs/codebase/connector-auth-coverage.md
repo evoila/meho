@@ -113,9 +113,19 @@ against the typed connectors the row was grounded on:
   selected by `profile.auth.scheme`. `session_login` / `session_login_basic`
   cache until a downstream re-login (idle-expiry, `ttl_seconds=None`);
   `oauth2_mint` re-mints once the monotonic clock passes the margin-adjusted
-  `expires_in`. `session_login_basic` mirrors only the typed connector's
-  modern `/api/session` path — the legacy `/rest/com/vmware/cis/session`
-  fallback is out of scope for the profiled shape (#2025).
+  `expires_in`. `session_login_basic` carries the vetted vCenter
+  modern→legacy session fallback (#2031): the harness POSTs the modern
+  `/api/session` first and, on **HTTP 404 only** (401/403/5xx are auth/server
+  failures, not "endpoint absent"), retries the legacy
+  `/rest/com/vmware/cis/session` — the only path the upstream `vmware/vcsim`
+  simulator registers. The fallback is a closed, per-scheme
+  `LegacyFallback` constant on the `SessionSchemeSpec` (a single vetted
+  modern/legacy pair, **not** a profile-supplied candidate-path list — the
+  #1177 no-DSL line); only `session_login_basic` declares one. The winning
+  login path is recorded per target and drives both op-path mount
+  (`ProfiledRestConnector.mount_op_path`: `/api` on modern, `/rest` on
+  legacy) and session teardown, mirroring the typed connector's
+  `_session_paths`.
 
 The login POST goes through the pooled `httpx.AsyncClient` directly (not the
 `auth_headers`-stamping `_post_json` seam) — the login *is* what establishes

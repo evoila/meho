@@ -15,3 +15,17 @@ mypy/ruff/SonarQube hygiene). With the copyright holder's consent,
 this vendored tree is relicensed to Apache-2.0 to match the rest of
 MEHO; see docs/decisions/jsonflux-license.md for the license-chain
 provenance and signoff of record.
+
+---
+
+The MEHO-authored minimal OpenAPI specs and ExecutionProfiles shipped
+as package data for the vmware/9.0 and sddc/9.0 catalog rows
+(src/meho_backplane/operations/ingest/specs/{vmware_rest,sddc_manager}_minimal.yaml
+and src/meho_backplane/connectors/profiles/{vmware_rest,sddc_manager}_minimal.yaml)
+reproduce vendor API path/parameter/field names verbatim for
+interoperability (the dispatcher must address the appliance by its real
+names). They are Apache-2.0, evoila-authored, carry vendor-neutral
+MEHO-authored descriptions, and do NOT redistribute the full vendor
+specs (kept as upstream provenance pointers). See
+docs/decisions/shipped-spec-provenance.md for the derivative-work /
+interoperability provenance record and human signoff of record.

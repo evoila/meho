@@ -20,9 +20,12 @@
 # mirroring the canonical op paths in `connectors/vmware_rest/`. Paths and
 # params copy the vendor's verbatim names because the dispatcher must
 # address the real appliance with them; the descriptions are vendor-neutral,
-# MEHO-authored prose. The legacy /rest mount and the VI-JSON Performance
-# Manager surface are out of scope (the typed connector's `mounted_path`
-# maps the modern /api mount; full-surface ingest stays the upstream path).
+# MEHO-authored prose. The spec declares the modern /api op paths; both the
+# typed connector and the profiled path (#2031) re-mount them onto the
+# legacy /rest base when a target authenticates via the legacy session
+# endpoint (e.g. vcsim), so a legacy-only appliance is addressed correctly.
+# The VI-JSON Performance Manager surface stays out of scope (full-surface
+# ingest stays the upstream path).
 #
 # CONSTRAINTS. OpenAPI 3.0 (the parser rejects Swagger 2.0); self-contained
 # with only local `$ref`s (the parser rejects cross-document `$ref`); every

@@ -11,8 +11,11 @@
 # vSphere Automation API flow the typed VmwareRestConnector establishes
 # (SESSION_PATH_MODERN). No DSL: the scheme names a vetted session-harness
 # extractor (#1970); the profile carries only the secret-field names. The
-# (legacy /rest/com/vmware/cis/session fallback the typed connector also
-# tries is out of scope for the profiled shape — modern path only.)
+# profiled path now mirrors the typed connector's modern→legacy fallback
+# (#2031): on an HTTP 404 from /api/session it retries the legacy
+# /rest/com/vmware/cis/session, and the winning login path selects the
+# per-endpoint /api↔/rest op mount + teardown. The fallback is a vetted
+# scheme-level constant, not a profile field — still no DSL.
 #
 # FINGERPRINT. `/api/about` returns a top-level `version` string, satisfying
 # the FingerprintSpec literal-top-level-key constraint (#1177); it is the

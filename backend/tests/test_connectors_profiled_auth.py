@@ -313,14 +313,38 @@ async def test_session_login_basic_does_not_proactively_expire_on_ttl() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [{"value": "obj-shaped"}, "", 123])
-async def test_session_login_basic_non_string_body_raises_naming_target(
+async def test_session_login_basic_mints_token_from_legacy_object_body() -> None:
+    """The legacy ``{"value": "<tok>"}`` object body mints the token (#2047).
+
+    Pre-7.0 vCenter (and some vcsim builds) — the endpoint #2031's 404
+    login-path fallback reaches — return the token nested under ``value``
+    rather than as a raw JSON string. The profiled extractor now reads that
+    shape, mirroring the typed connector, so the legacy fallback can
+    actually establish a session.
+    """
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcenter", host="vcenter.invalid")
+
+    async with respx.mock(base_url="https://vcenter.invalid") as mock:
+        mock.post("/api/session").respond(200, json={"value": "legacy-tok"})
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"vmware-api-session-id": "legacy-tok"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"value": ""}, {"value": 123}, [], "", 123],
+)
+async def test_session_login_basic_unusable_body_raises_naming_target(
     payload: object,
 ) -> None:
-    """A 2xx login whose body is not a non-empty string raises naming the target.
+    """A 2xx login with no usable token raises naming the target.
 
-    Modern ``/api/session`` returns the token as a JSON string; an object
-    body (legacy shape, out of scope), an empty string, or a non-string is
+    A non-string / non-``{"value": <non-empty str>}`` body — empty object,
+    empty/non-string ``value``, list, empty string, bare non-string — is
     treated as "no usable token" so the harness raises the consistent
     target-named :exc:`ProfileAuthError`.
     """
@@ -342,10 +366,14 @@ def test_session_login_basic_build_body_and_extract_token_directly() -> None:
     Mirrors the ``session_login`` direct-spec coverage: ``build_body``
     returns an empty body (creds ride HTTP Basic), ``build_login_auth``
     yields the ``(username, password)`` pair, and ``extract_token`` coerces
-    a raw JSON-string body to a no-TTL token while rejecting non-string /
-    empty bodies.
+    both the modern raw JSON-string body and the legacy
+    ``{"value": "<tok>"}`` object body to a no-TTL token while rejecting
+    non-string / empty / malformed bodies.
     """
-    from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+    from meho_backplane.connectors._shared.profile_auth import (
+        SESSION_SCHEME_SPECS,
+        SESSION_TOKEN_OBJECT_KEY,
+    )
 
     spec = SESSION_SCHEME_SPECS["session_login_basic"]
     auth = AuthSpec(scheme="session_login_basic", secret_fields=("username", "password"))
@@ -358,13 +386,24 @@ def test_session_login_basic_build_body_and_extract_token_directly() -> None:
     assert spec.token_header == "vmware-api-session-id"
     assert spec.token_value_kind == "raw"
 
+    # Modern: raw JSON-string body is the token.
     minted = spec.extract_token("raw-string-token")
     assert minted is not None
     assert minted.token == "raw-string-token"
     assert minted.ttl_seconds is None
 
+    # Legacy (#2047): the token nested under the shared object key.
+    legacy = spec.extract_token({SESSION_TOKEN_OBJECT_KEY: "obj-tok"})
+    assert legacy is not None
+    assert legacy.token == "obj-tok"
+    assert legacy.ttl_seconds is None
+
+    # No usable token → None (harness then raises the target-named error).
     assert spec.extract_token("") is None
-    assert spec.extract_token({"value": "obj"}) is None
+    assert spec.extract_token({}) is None
+    assert spec.extract_token({SESSION_TOKEN_OBJECT_KEY: ""}) is None
+    assert spec.extract_token({SESSION_TOKEN_OBJECT_KEY: 123}) is None
+    assert spec.extract_token([]) is None
     assert spec.extract_token(123) is None
 
 

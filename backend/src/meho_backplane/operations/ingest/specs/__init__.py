@@ -12,10 +12,12 @@ package instead. The catalog-driven ingest route loads the bytes via
 :class:`~meho_backplane.operations.ingest.api_schemas.SpecSource.content`,
 bypassing the fetch.
 
-The directory is force-included in the wheel
-(``backend/pyproject.toml`` ``[tool.hatch.build.targets.wheel.force-include]``)
-so the specs survive into a deployed container, mirroring the alembic
-precedent. Every shipped spec is dry-run-parsed at startup by
+The directory lives inside the package tree, so hatch's ``packages`` glob
+collects its data files into the wheel; ``backend/pyproject.toml``'s
+``[tool.hatch.build.targets.wheel].artifacts`` lists the ``.yaml`` /
+``.json`` globs to make that non-``.py`` inclusion explicit, so the specs
+survive into a deployed container. Every shipped spec is dry-run-parsed at
+startup by
 :func:`~meho_backplane.operations.ingest.catalog.validate_shipped_artifacts`
 with the same :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`
 the live ingest uses, so a malformed spec crashes boot (and CI's app-boot

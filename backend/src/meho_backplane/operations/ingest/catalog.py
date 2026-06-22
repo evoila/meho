@@ -87,16 +87,19 @@ _CATALOG_RESOURCE = "catalog.yaml"
 
 #: Package holding MEHO-authored OpenAPI specs shipped as package data
 #: (one ``.yaml`` / ``.json`` per :attr:`ConnectorSpecEntry.spec_resource`).
-#: Resolved via :func:`importlib.resources.files`; force-included in the
-#: wheel (``backend/pyproject.toml`` ``[tool.hatch.build.targets.wheel.
-#: force-include]``) so it survives into a deployed container, mirroring
-#: the alembic precedent (#1964 T1).
+#: Resolved via :func:`importlib.resources.files`. The directory lives
+#: inside the package tree, so hatch's ``packages`` glob collects its data
+#: files into the wheel; ``backend/pyproject.toml``'s
+#: ``[tool.hatch.build.targets.wheel].artifacts`` lists the ``.yaml`` /
+#: ``.json`` globs to make that non-``.py`` inclusion explicit so it
+#: survives into a deployed container (#1964 T1).
 SPEC_RESOURCE_PACKAGE = "meho_backplane.operations.ingest.specs"
 
 #: Package holding MEHO-authored :class:`~meho_backplane.connectors.profile.ExecutionProfile`
 #: documents shipped as package data (one per
-#: :attr:`ConnectorSpecEntry.profile_resource`). Same wheel force-include
-#: + ``importlib.resources`` resolution as :data:`SPEC_RESOURCE_PACKAGE`.
+#: :attr:`ConnectorSpecEntry.profile_resource`). Same in-package
+#: ``artifacts``-based wheel inclusion + ``importlib.resources`` resolution
+#: as :data:`SPEC_RESOURCE_PACKAGE`.
 PROFILE_RESOURCE_PACKAGE = "meho_backplane.connectors.profiles"
 
 #: A SHA-256 digest is 64 lowercase hex characters.
@@ -539,8 +542,10 @@ def load_spec_resource(spec_resource: str) -> str:
             f"shipped spec resource {spec_resource!r} not found under "
             f"{SPEC_RESOURCE_PACKAGE!r}; the catalog row names a spec_resource "
             "that is not packaged. Add the spec to "
-            "backend/src/meho_backplane/operations/ingest/specs/ (force-included "
-            "in the wheel) or drop spec_resource from the row."
+            "backend/src/meho_backplane/operations/ingest/specs/ (in-package, so "
+            "the wheel collects it; listed in pyproject.toml's "
+            "[tool.hatch.build.targets.wheel].artifacts) or drop spec_resource "
+            "from the row."
         ) from exc
 
 
@@ -566,8 +571,10 @@ def load_profile_resource(profile_resource: str) -> str:
             f"shipped profile resource {profile_resource!r} not found under "
             f"{PROFILE_RESOURCE_PACKAGE!r}; the catalog row names a "
             "profile_resource that is not packaged. Add the profile to "
-            "backend/src/meho_backplane/connectors/profiles/ (force-included "
-            "in the wheel) or drop profile_resource from the row."
+            "backend/src/meho_backplane/connectors/profiles/ (in-package, so "
+            "the wheel collects it; listed in pyproject.toml's "
+            "[tool.hatch.build.targets.wheel].artifacts) or drop "
+            "profile_resource from the row."
         ) from exc
 
 

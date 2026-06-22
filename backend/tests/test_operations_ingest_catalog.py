@@ -451,7 +451,7 @@ def test_load_spec_resource_missing_raises_catalog_error() -> None:
 
 
 def test_resource_packages_are_importable() -> None:
-    """The force-included resource packages exist and are addressable."""
+    """The shipped resource packages (in-package data) exist and are addressable."""
     from importlib.resources import files
 
     assert files(SPEC_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
@@ -563,7 +563,7 @@ def test_shipped_vmware_sddc_profiles_validate_with_named_scheme(
 
 
 def test_shipped_vmware_sddc_resources_are_addressable() -> None:
-    """The real specs/profiles resolve as package data (wheel force-include)."""
+    """The real specs/profiles resolve as in-package wheel data (artifacts)."""
     from importlib.resources import files
 
     for name in ("vmware_rest_minimal.yaml", "sddc_manager_minimal.yaml"):

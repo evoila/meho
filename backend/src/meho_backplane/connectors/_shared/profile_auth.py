@@ -428,24 +428,42 @@ def _session_login_basic_auth(auth: AuthSpec, secret: Mapping[str, str]) -> tupl
     return (username, password)
 
 
+#: Key under which the legacy pre-7.0 vCenter session endpoint
+#: (``/rest/com/vmware/cis/session``) nests the token: ``{"value": "<tok>"}``.
+#: Single source of truth shared with the typed connector, which imports it
+#: from here — so the profiled and typed extractors can't silently diverge
+#: on the object-shape key (#2047).
+SESSION_TOKEN_OBJECT_KEY = "value"
+
+
 def _extract_session_login_basic_token(payload: Any) -> SessionToken | None:
     """Read the session token out of vCenter's ``/api/session`` response.
 
-    The modern endpoint returns the token as a JSON-quoted **string** — the
-    body *is* the token, parsed by ``response.json()`` into :class:`str`
-    (parity with the typed connector's ``_extract_session_token`` modern
-    shape). The 404 login-path fallback (#2031) reaches the legacy endpoint,
-    but the legacy ``{"value": "<token>"}`` response-object shape the typed
-    connector also tolerates is not parsed here — the profiled extractor
-    reads the JSON-string body only. The session
-    has no proactive TTL — it caches until a downstream session-expiry
-    status triggers a re-login — so ``ttl_seconds`` is ``None``. Returns
-    ``None`` for a non-string / empty body so the harness raises the
-    consistent target-named error.
+    Handles the two shapes vSphere has shipped, matching the typed
+    connector's ``_extract_session_token``:
+
+    * **JSON string body** — vSphere 7.0+ modern ``/api/session`` returns
+      the token as a JSON-quoted string; the body *is* the token, parsed by
+      ``response.json()`` into :class:`str`.
+    * **JSON object body** — pre-7.0 ``/rest/com/vmware/cis/session`` (the
+      target of #2031's login-path fallback) and some vcsim builds return
+      ``{"value": "<token>"}``; the token is read out of
+      :data:`SESSION_TOKEN_OBJECT_KEY` (#2047 completed this half of the
+      fallback).
+
+    The session has no proactive TTL — it caches until a downstream
+    session-expiry status triggers a re-login — so ``ttl_seconds`` is
+    ``None``. Returns ``None`` for any other / empty body (non-string,
+    empty string, object missing a non-empty string ``value``) so the
+    harness raises the consistent target-named error.
     """
-    if not isinstance(payload, str) or not payload:
-        return None
-    return SessionToken(token=payload, ttl_seconds=None)
+    if isinstance(payload, str):
+        return SessionToken(token=payload, ttl_seconds=None) if payload else None
+    if isinstance(payload, dict):
+        value = payload.get(SESSION_TOKEN_OBJECT_KEY)
+        if isinstance(value, str) and value:
+            return SessionToken(token=value, ttl_seconds=None)
+    return None
 
 
 # -- oauth2_mint (keycloak: form client-credentials grant -> Bearer) --------

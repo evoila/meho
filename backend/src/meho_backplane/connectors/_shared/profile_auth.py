@@ -373,9 +373,10 @@ def _extract_session_login_token(payload: Any) -> SessionToken | None:
 #: POSTs with HTTP Basic credentials and no body; the response body *is* the
 #: session token as a JSON-quoted string. Behaviour parity with
 #: :class:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector`'s
-#: ``SESSION_PATH_MODERN``. The legacy ``/rest/com/vmware/cis/session``
-#: fallback the typed connector also tries is out of scope for the profiled
-#: shape (modern path only — #2025).
+#: ``SESSION_PATH_MODERN``. This is the *modern* login path; the profiled
+#: harness now also tries the legacy ``/rest/com/vmware/cis/session`` on a
+#: 404, mirroring the typed connector (#2031 — see
+#: :data:`_VCENTER_LEGACY_FALLBACK`).
 _VCENTER_SESSION_PATH = "/api/session"
 
 #: The header a vCenter session token rides on downstream requests, per
@@ -433,7 +434,10 @@ def _extract_session_login_basic_token(payload: Any) -> SessionToken | None:
     The modern endpoint returns the token as a JSON-quoted **string** — the
     body *is* the token, parsed by ``response.json()`` into :class:`str`
     (parity with the typed connector's ``_extract_session_token`` modern
-    shape; the legacy object shape is out of scope per #2025). The session
+    shape). The 404 login-path fallback (#2031) reaches the legacy endpoint,
+    but the legacy ``{"value": "<token>"}`` response-object shape the typed
+    connector also tolerates is not parsed here — the profiled extractor
+    reads the JSON-string body only. The session
     has no proactive TTL — it caches until a downstream session-expiry
     status triggers a re-login — so ``ttl_seconds`` is ``None``. Returns
     ``None`` for a non-string / empty body so the harness raises the

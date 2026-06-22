@@ -63,8 +63,10 @@ entries:
     # --catalog vmware/9.0`` works without that upload, and a reviewed
     # ExecutionProfile (profile_resource) fills the dispatch auth slot.
     upstream: null
-    # Shipped OpenAPI spec + ExecutionProfile, both force-included in the
-    # wheel and dry-run-parsed at boot by validate_shipped_artifacts.
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
     spec_resource: vmware_rest_minimal.yaml
     profile_resource: vmware_rest_minimal.yaml
     catalog_ingest: supported
@@ -108,8 +110,10 @@ entries:
     # manual --spec upload (G0.18-T8 #1361, RDC #789 N8). A MEHO-authored
     # minimal spec + reviewed ExecutionProfile now ship as package data.
     upstream: null
-    # Shipped OpenAPI spec + ExecutionProfile, both force-included in the
-    # wheel and dry-run-parsed at boot by validate_shipped_artifacts.
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
     spec_resource: sddc_manager_minimal.yaml
     profile_resource: sddc_manager_minimal.yaml
     catalog_ingest: supported
@@ -284,8 +288,10 @@ entries:
     # dereference. _reject_unusable_entry exempts spec_resource rows from
     # the typed-/templated-upstream 422s.
     upstream: null
-    # Shipped OpenAPI spec + ExecutionProfile, both force-included in the
-    # wheel and dry-run-parsed at boot by validate_shipped_artifacts.
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
     spec_resource: _fixture_minimal.yaml
     profile_resource: _fixture_minimal.yaml
     spec_info_version: null

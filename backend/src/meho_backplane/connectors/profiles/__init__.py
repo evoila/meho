@@ -11,8 +11,10 @@ profile fills the one hand-coded slot
 ``auth_headers``) so an ingested REST connector dispatches without bespoke
 Python (Initiative #1965).
 
-The directory is force-included in the wheel
-(``backend/pyproject.toml`` ``[tool.hatch.build.targets.wheel.force-include]``).
+The directory lives inside the package tree, so hatch's ``packages`` glob
+collects its data files into the wheel; ``backend/pyproject.toml``'s
+``[tool.hatch.build.targets.wheel].artifacts`` lists the ``.yaml`` /
+``.json`` globs to make that non-``.py`` inclusion explicit.
 Every shipped profile is dry-run-parsed + scheme-validated at startup by
 :func:`~meho_backplane.operations.ingest.catalog.validate_shipped_artifacts`
 (the same :func:`~meho_backplane.connectors.profile.validate_execution_profile`

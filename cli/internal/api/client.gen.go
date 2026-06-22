@@ -403,6 +403,18 @@ const (
 	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
 )
 
+// Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
+const (
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferBuiltin EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "builtin"
+	EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPreferTenant  EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer = "tenant"
+)
+
+// Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
+const (
+	Builtin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	Tenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
+)
+
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
 const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll        UsageEndpointApiV1RetrieveUsageGetParamsSurface = "all"
@@ -6421,8 +6433,13 @@ type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
 
 // EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
 type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	Prefer        *EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
+	Authorization *string                                                                   `json:"authorization,omitempty"`
 }
+
+// EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer defines parameters for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPost.
+type EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer string
 
 // EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams defines parameters for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch.
 type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct {
@@ -6436,8 +6453,13 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
 
 // GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
 type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
-	Authorization *string `json:"authorization,omitempty"`
+	// Prefer Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.
+	Prefer        *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer `form:"prefer,omitempty" json:"prefer,omitempty"`
+	Authorization *string                                                           `json:"authorization,omitempty"`
 }
+
+// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
+type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer string
 
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
@@ -18220,6 +18242,28 @@ func NewEnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostRequest(serv
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Prefer != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "prefer", runtime.ParamLocationQuery, *params.Prefer); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -18405,6 +18449,28 @@ func NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(server strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Prefer != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "prefer", runtime.ParamLocationQuery, *params.Prefer); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)

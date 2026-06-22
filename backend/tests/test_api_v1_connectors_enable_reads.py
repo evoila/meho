@@ -365,3 +365,87 @@ async def test_enable_reads_ambiguous_scope_returns_409(client: TestClient) -> N
     # Nothing flipped on either scope.
     assert not any((await _ops_enabled_state(operator_tenant)).values())
     assert not any((await _ops_enabled_state(None)).values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_prefer_tenant_applies_to_tenant_row(client: TestClient) -> None:
+    """#2029: ``?prefer=tenant`` flips the tenant row's reads, not the built-in.
+
+    Same ambiguous seed as the 409 test; ``prefer=tenant`` resolves the
+    tenant-curated row directly — 200, GET+HEAD flip on the tenant scope,
+    and the built-in scope is left untouched.
+    """
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    await _seed_rows(tenant_id=operator_tenant)
+    await _seed_rows(tenant_id=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            params={"prefer": "tenant"},
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"connector_id": _CONNECTOR_ID, "ops_enabled": 2}
+    tenant_state = await _ops_enabled_state(operator_tenant)
+    for op_id, enabled in tenant_state.items():
+        method = op_id.split(":", 1)[0]
+        assert enabled is (method in _READ_METHODS)
+    # The built-in scope was never touched.
+    assert not any((await _ops_enabled_state(None)).values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_prefer_builtin_applies_to_builtin_row(client: TestClient) -> None:
+    """#2029: ``?prefer=builtin`` flips the built-in row's reads (tenant_admin)."""
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    await _seed_rows(tenant_id=operator_tenant)
+    await _seed_rows(tenant_id=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            params={"prefer": "builtin"},
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"connector_id": _CONNECTOR_ID, "ops_enabled": 2}
+    builtin_state = await _ops_enabled_state(None)
+    for op_id, enabled in builtin_state.items():
+        method = op_id.split(":", 1)[0]
+        assert enabled is (method in _READ_METHODS)
+    # The tenant scope was never touched.
+    assert not any((await _ops_enabled_state(operator_tenant)).values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_prefer_builtin_still_requires_tenant_admin(client: TestClient) -> None:
+    """#2029: ``?prefer=builtin`` does not bypass the route's tenant_admin gate.
+
+    An ``operator``-role caller gets 403 from ``_require_admin`` before
+    the service runs, regardless of ``prefer`` — the gate is on the
+    write surface, so the selector cannot smuggle an operator onto the
+    built-in write path. Nothing flips.
+    """
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant, role="operator")
+    await _seed_rows(tenant_id=operator_tenant)
+    await _seed_rows(tenant_id=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            params={"prefer": "builtin"},
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 403, response.text
+    assert not any((await _ops_enabled_state(None)).values())
+    assert not any((await _ops_enabled_state(operator_tenant)).values())

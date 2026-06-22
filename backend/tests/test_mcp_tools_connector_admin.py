@@ -112,6 +112,7 @@ class _FakeReviewService:
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
+        self.review_kwargs: list[dict[str, Any]] = []
         self.edit_group_calls: list[dict[str, Any]] = []
         self.edit_op_calls: list[dict[str, Any]] = []
         self.enable_calls: list[str] = []
@@ -123,8 +124,10 @@ class _FakeReviewService:
         self,
         connector_id: str,
         tenant_id: Any,
+        **kwargs: Any,
     ) -> ConnectorReviewPayload:
         self.review_calls.append((connector_id, tenant_id))
+        self.review_kwargs.append(kwargs)
         if self.raise_on_resolve is not None:
             raise self.raise_on_resolve
         return ConnectorReviewPayload(
@@ -484,6 +487,8 @@ def test_call_meho_connector_review_dispatches_to_review_service(
 
     [review] = stubbed_services["review"]
     assert review.review_calls == [("vmware-rest-9.0", None)]
+    # prefer defaults to None when the arg is omitted (#2029).
+    assert review.review_kwargs == [{"prefer": None}]
 
 
 @pytest.mark.parametrize(
@@ -785,9 +790,87 @@ def test_call_meho_connector_enable_reads_dispatches(
     }
 
     [review] = stubbed_services["review"]
+    # tenant_id + prefer both forward (prefer defaults to None) (#2029).
     assert review.enable_reads_calls == [
-        {"connector_id": "vmware-rest-9.0", "tenant_id": None},
+        {"connector_id": "vmware-rest-9.0", "tenant_id": None, "prefer": None},
     ]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_meho_connector_review_forwards_prefer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+) -> None:
+    """#2029: ``meho.connector.review`` forwards ``prefer`` to the service."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.review",
+                "arguments": {"connector_id": "vmware-rest-9.0", "prefer": "tenant"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    [review] = stubbed_services["review"]
+    assert review.review_kwargs == [{"prefer": "tenant"}]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_meho_connector_enable_reads_forwards_prefer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+) -> None:
+    """#2029: ``meho.connector.enable_reads`` forwards ``prefer`` to the service."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.enable_reads",
+                "arguments": {"connector_id": "vmware-rest-9.0", "prefer": "builtin"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    [review] = stubbed_services["review"]
+    assert review.enable_reads_calls == [
+        {"connector_id": "vmware-rest-9.0", "tenant_id": None, "prefer": "builtin"},
+    ]
+
+
+def test_review_tool_schema_advertises_prefer() -> None:
+    """#2029: the review + enable_reads tool schemas declare the ``prefer`` enum.
+
+    The closed-set selector is part of the tool contract an agent reads
+    off ``tools/list``; assert both scope-resolving tools advertise the
+    ``prefer`` property with the closed ``tenant``/``builtin`` vocabulary.
+    """
+    import meho_backplane.mcp.tools.connector_admin  # noqa: F401  (ensure registration)
+    from meho_backplane.mcp.registry import get_tool
+
+    for tool_name in ("meho.connector.review", "meho.connector.enable_reads"):
+        registered = get_tool(tool_name)
+        assert registered is not None, tool_name
+        definition, _handler = registered
+        prefer = definition.inputSchema["properties"]["prefer"]
+        assert prefer["enum"] == ["tenant", "builtin", None]
+        assert definition.inputSchema["additionalProperties"] is False
 
 
 @pytest.mark.parametrize(

@@ -461,6 +461,90 @@ async def test_get_review_payload_ambiguous_tenant_and_builtin_raises() -> None:
         assert candidate.impl_id == "vmware-rest"
 
 
+@pytest.mark.asyncio
+async def test_ambiguous_scope_message_names_prefer_retry_values() -> None:
+    """#2029: the ambiguous-scope message literally names the prefer retry.
+
+    The structured 409 / ``-32602`` envelope is the operator's only
+    actionable hint; per the error-message-shape contract it must name
+    the remediation. #2029 turns the candidate envelope into a retry
+    instruction, so the rendered message names both ``prefer=tenant``
+    and ``prefer=builtin``.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    service = ReviewService(_make_operator(tenant_id=operator_tenant, role=TenantRole.OPERATOR))
+
+    with pytest.raises(AmbiguousConnectorScopeError) as excinfo:
+        await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+    message = str(excinfo.value)
+    assert "prefer=tenant" in message
+    assert "prefer=builtin" in message
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_prefer_tenant_returns_tenant_row() -> None:
+    """#2029: ``prefer='tenant'`` resolves the tenant row, skipping the 409.
+
+    Both a tenant-curated row (3 ops) and a built-in row (5 ops) exist;
+    the distinct op counts prove which scope rendered. ``prefer='tenant'``
+    returns the tenant row's payload instead of raising.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    service = ReviewService(_make_operator(tenant_id=operator_tenant, role=TenantRole.OPERATOR))
+
+    payload = await service.get_review_payload(
+        "vmware-rest-9.0",
+        operator_tenant,
+        prefer="tenant",
+    )
+
+    assert payload.tenant_id == operator_tenant
+    assert payload.total_op_count == 3
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_prefer_builtin_returns_builtin_row() -> None:
+    """#2029: ``prefer='builtin'`` resolves the built-in row, skipping the 409."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    service = ReviewService(_make_operator(tenant_id=operator_tenant, role=TenantRole.OPERATOR))
+
+    payload = await service.get_review_payload(
+        "vmware-rest-9.0",
+        operator_tenant,
+        prefer="builtin",
+    )
+
+    assert payload.tenant_id is None
+    assert payload.total_op_count == 5
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_prefer_tenant_missing_row_raises_not_found() -> None:
+    """#2029: ``prefer='tenant'`` against a built-in-only label is a genuine miss.
+
+    The selector is exact, not a fall-back: an operator who explicitly
+    asked for their tenant row gets :class:`ConnectorNotFoundError` (not
+    a silent slide to the built-in row) when only the built-in exists.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    service = ReviewService(_make_operator(tenant_id=operator_tenant, role=TenantRole.OPERATOR))
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload(
+            "vmware-rest-9.0",
+            operator_tenant,
+            prefer="tenant",
+        )
+
+
 # ---------------------------------------------------------------------------
 # edit_group
 # ---------------------------------------------------------------------------
@@ -1412,6 +1496,61 @@ async def test_enable_reads_ambiguous_tenant_and_builtin_raises() -> None:
     builtin_state = await _ops_enabled_state(tenant_id=None)
     assert not any(tenant_state.values())
     assert not any(builtin_state.values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_prefer_tenant_applies_to_tenant_row() -> None:
+    """#2029: ``prefer='tenant'`` flips the tenant row's reads, not the built-in.
+
+    Both scopes hold an identical mixed-verb surface; ``prefer='tenant'``
+    must flip GET+HEAD on the operator's tenant row and leave the
+    built-in scope wholly untouched (no silent cross-scope flip).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=operator_tenant, op_is_enabled=False)
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    ops_enabled = await service.enable_reads(
+        "vmware-rest-9.0",
+        tenant_id=operator_tenant,
+        prefer="tenant",
+    )
+
+    assert ops_enabled == 2
+    tenant_state = await _ops_enabled_state(tenant_id=operator_tenant)
+    assert tenant_state["GET:/api/v1/resource"] is True
+    assert tenant_state["HEAD:/api/v1/resource"] is True
+    assert tenant_state["POST:/api/v1/resource"] is False
+    # The built-in scope was never touched.
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert not any(builtin_state.values())
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_prefer_builtin_applies_to_builtin_row() -> None:
+    """#2029: ``prefer='builtin'`` flips the built-in row's reads (tenant_admin)."""
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=operator_tenant, op_is_enabled=False)
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    ops_enabled = await service.enable_reads(
+        "vmware-rest-9.0",
+        tenant_id=operator_tenant,
+        prefer="builtin",
+    )
+
+    assert ops_enabled == 2
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert builtin_state["GET:/api/v1/resource"] is True
+    assert builtin_state["HEAD:/api/v1/resource"] is True
+    assert builtin_state["POST:/api/v1/resource"] is False
+    # The tenant scope was never touched.
+    tenant_state = await _ops_enabled_state(tenant_id=operator_tenant)
+    assert not any(tenant_state.values())
 
 
 @pytest.mark.asyncio

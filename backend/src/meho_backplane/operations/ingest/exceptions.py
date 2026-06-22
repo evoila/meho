@@ -574,9 +574,9 @@ class AmbiguousConnectorScopeError(Exception):
         super().__init__(
             f"connector {connector_id!r} is ambiguous: it resolves to "
             f"{len(self.candidates)} rows [{rendered}]. Disambiguate by "
-            f"acting on the built-in scope (tenant_admin, tenant_id=None) "
-            f"or the tenant-curated row explicitly. See "
-            f"docs/codebase/error-message-shape.md."
+            f"retry with prefer=tenant or prefer=builtin (the tenant-curated "
+            f"row resp. the built-in scope, tenant_admin, tenant_id=None). "
+            f"See docs/codebase/error-message-shape.md."
         )
 
 

@@ -3223,7 +3223,7 @@
           "connectors"
         ],
         "summary": "Get Review Endpoint",
-        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.",
+        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation). A label\nthat resolves to a built-in-only row still returns 200 (the\nG0.13-T5 #1135 global fallback); a label that maps to **both** a\ntenant row and a built-in row \u2192 409 ``connector_scope_ambiguous``\nwith the candidate list (G0.26-T1 #1801), identical to the write\nsibling ``POST /{id}/enable-reads`` via the shared service resolver.\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nmakes that 409 actionable: it resolves directly to the named scope\nand skips the ambiguity probe, so an operator who has both rows can\ntarget the tenant-curated one (``prefer=tenant``) or the built-in\none (``prefer=builtin``). Omitted \u2192 the fail-loud default.",
         "operationId": "get_review_endpoint_api_v1_connectors__connector_id__review_get",
         "parameters": [
           {
@@ -3234,6 +3234,22 @@
               "type": "string",
               "title": "Connector Id"
             }
+          },
+          {
+            "name": "prefer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "builtin"
+              ],
+              "type": "string",
+              "nullable": true,
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "title": "Prefer"
+            },
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",
@@ -3459,7 +3475,7 @@
           "connectors"
         ],
         "summary": "Enable Reads Endpoint",
-        "description": "Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).\n\nFlips ``is_enabled=true`` on every ingested operation whose HTTP\nmethod is GET or HEAD in one pass, leaving every write-shaped verb\n(POST / PUT / PATCH / DELETE) and every typed / composite op\ndefault-deny \u2014 writes keep their per-op / composite curation by\ndesign. The point is broad governed *read* coverage on big\ningested surfaces without a per-op death-march; the governance\nboundary (writes route through a hand-authored composite or\ncommand-template) is untouched.\n\nReturns 200 with an :class:`EnableReadsResponse` carrying the\n``ops_enabled`` count (not the 204 the enable / disable\ntransitions return) so the operator and the generated Go client\nsee how many ops flipped. Idempotent: a re-call once the reads are\nenabled flips nothing, writes no audit row, and returns\n``ops_enabled=0``. Unlike ``enable``, this does not move any\ngroup's ``review_status`` \u2014 it is a per-op flip, so there is no\nstate-machine guard (no transition 409). Unknown / cross-tenant\nconnector \u2192 404 (the deliberate conflation). Resolution shares\n:meth:`ReviewService._resolve_existing_scope` with\n``GET /{id}/review``, so a built-in-only label enables its reads\n(the #1135 global fallback, not a 404) and a label that maps to\n**both** a tenant row and a built-in row \u2192 409\n``connector_scope_ambiguous`` with the candidate list instead of a\nsilent flip (G0.26-T1 #1801). One ``meho.connector.enable_reads``\naudit row is written when at least one op flips.\n\nTenant scoping (#1699 contract): no ``tenant_id`` parameter \u2014 the\nscope is always the calling operator's tenant from the JWT. The\nMCP sibling ``meho.connector.enable_reads`` accepts an optional\n``tenant_id`` for the built-in / global scope (tenant_admin only).",
+        "description": "Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).\n\nFlips ``is_enabled=true`` on every ingested operation whose HTTP\nmethod is GET or HEAD in one pass, leaving every write-shaped verb\n(POST / PUT / PATCH / DELETE) and every typed / composite op\ndefault-deny \u2014 writes keep their per-op / composite curation by\ndesign. The point is broad governed *read* coverage on big\ningested surfaces without a per-op death-march; the governance\nboundary (writes route through a hand-authored composite or\ncommand-template) is untouched.\n\nReturns 200 with an :class:`EnableReadsResponse` carrying the\n``ops_enabled`` count (not the 204 the enable / disable\ntransitions return) so the operator and the generated Go client\nsee how many ops flipped. Idempotent: a re-call once the reads are\nenabled flips nothing, writes no audit row, and returns\n``ops_enabled=0``. Unlike ``enable``, this does not move any\ngroup's ``review_status`` \u2014 it is a per-op flip, so there is no\nstate-machine guard (no transition 409). Unknown / cross-tenant\nconnector \u2192 404 (the deliberate conflation). Resolution shares\n:meth:`ReviewService._resolve_existing_scope` with\n``GET /{id}/review``, so a built-in-only label enables its reads\n(the #1135 global fallback, not a 404) and a label that maps to\n**both** a tenant row and a built-in row \u2192 409\n``connector_scope_ambiguous`` with the candidate list instead of a\nsilent flip (G0.26-T1 #1801). One ``meho.connector.enable_reads``\naudit row is written when at least one op flips.\n\nTenant scoping (#1699 contract): no ``tenant_id`` parameter \u2014 the\nscope is always the calling operator's tenant from the JWT. The\nMCP sibling ``meho.connector.enable_reads`` accepts an optional\n``tenant_id`` for the built-in / global scope (tenant_admin only).\n\nThe optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)\nresolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies\nto the operator's tenant row, ``prefer=builtin`` to the built-in row\n(the built-in scope is re-checked against the ``tenant_admin`` gate\nin the service resolver). Omitted \u2192 the fail-loud default.",
         "operationId": "enable_reads_endpoint_api_v1_connectors__connector_id__enable_reads_post",
         "parameters": [
           {
@@ -3470,6 +3486,22 @@
               "type": "string",
               "title": "Connector Id"
             }
+          },
+          {
+            "name": "prefer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "builtin"
+              ],
+              "type": "string",
+              "nullable": true,
+              "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response.",
+              "title": "Prefer"
+            },
+            "description": "Disambiguate a connector_id that resolves to BOTH a tenant-curated row and a built-in (tenant_id IS NULL) row. 'tenant' targets the operator's tenant row; 'builtin' the built-in scope (tenant_admin only). Omit for the default fail-loud 409 connector_scope_ambiguous response."
           },
           {
             "name": "authorization",

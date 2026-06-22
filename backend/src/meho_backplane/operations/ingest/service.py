@@ -246,11 +246,70 @@ class ReviewService:
             tenant_id=tenant_id,
         )
 
+    async def _resolve_preferred_scope(
+        self,
+        connector_id: str,
+        tenant_id: UUID | None,
+        scope: ConnectorScope,
+        session: AsyncSession,
+        *,
+        prefer: Literal["tenant", "builtin"],
+    ) -> ConnectorScope:
+        """Resolve a connector to the explicitly-``prefer``-named scope (#2029).
+
+        The operator passed ``prefer`` to disambiguate a label that maps
+        to both a tenant-curated row and a built-in row, so this skips
+        the ambiguity probe entirely and resolves directly to the named
+        scope. *scope* is the already-parsed tenant scope from
+        :meth:`_resolve_scope` (carrying the operator's *tenant_id*).
+
+        * ``prefer == "tenant"`` — the tenant scope. ``tenant_id is None``
+          has no tenant row to prefer, so it is a miss; otherwise the
+          tenant row must hold rows or :class:`ConnectorNotFoundError` is
+          raised. There is **no** built-in fall-back: an explicit
+          ``prefer=tenant`` against a built-in-only label is a genuine
+          miss, not a silent slide to the built-in row.
+        * ``prefer == "builtin"`` — the built-in (``tenant_id IS NULL``)
+          scope, which must hold rows or :class:`ConnectorNotFoundError`.
+          No extra gate here: this mirrors the un-preferred built-in
+          fall-back in :meth:`_resolve_existing_scope`, which returns the
+          built-in scope to a tenant operator without re-gating — built-in
+          *reads* are operator-level by design (matching the list endpoint
+          + the #1135 read fall-back), and built-in *writes*
+          (:meth:`enable_reads`) are already ``tenant_admin``-gated at the
+          surface (the REST route's ``_require_admin`` dependency and the
+          MCP tool's ``required_role=TENANT_ADMIN``). So ``prefer=builtin``
+          grants no access the operator did not already have on the
+          built-in scope through the un-preferred path.
+        """
+        if prefer == "builtin":
+            builtin_scope = ConnectorScope(
+                product=scope.product,
+                version=scope.version,
+                impl_id=scope.impl_id,
+                tenant_id=None,
+            )
+            if await scope_has_groups(session, builtin_scope):
+                return builtin_scope
+            raise ConnectorNotFoundError(
+                connector_id=connector_id,
+                tenant_id=None,
+            )
+        # prefer == "tenant"
+        if tenant_id is not None and await scope_has_groups(session, scope):
+            return scope
+        raise ConnectorNotFoundError(
+            connector_id=connector_id,
+            tenant_id=tenant_id,
+        )
+
     async def _resolve_existing_scope(
         self,
         connector_id: str,
         tenant_id: UUID | None,
         session: AsyncSession,
+        *,
+        prefer: Literal["tenant", "builtin"] | None = None,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` to the one row-scope to act on.
 
@@ -261,25 +320,24 @@ class ReviewService:
         which scope actually holds rows:
 
         * ``tenant_id is None`` (the MCP admin path's explicit built-in
-          probe) — single-pass: the caller named the built-in scope
-          deliberately, so there is no tenant fallback and no
-          tenant-vs-built-in ambiguity. Returns the built-in scope when
-          rows exist, else :class:`ConnectorNotFoundError`.
+          probe) — single-pass: the built-in scope when rows exist, else
+          :class:`ConnectorNotFoundError`. No tenant fall-back, no
+          ambiguity.
         * ``tenant_id == operator.tenant_id`` (the daily-driver path) —
-          two-scope probe:
+          two-scope probe: both a tenant-curated **and** a built-in row
+          exist → :class:`AmbiguousConnectorScopeError` (no silent pick —
+          the footgun #1801 closes); only one exists → that scope (the
+          built-in-only case is the G0.13-T5 #1135 global fall-back,
+          now shared with writes and intentionally operator-readable —
+          writes are ``tenant_admin``-gated at the route); neither →
+          :class:`ConnectorNotFoundError`.
 
-          * a tenant-curated row **and** a built-in row exist → raise
-            :class:`AmbiguousConnectorScopeError` (don't silently pick one —
-            the silent-tenant-pick / silent-global-pick is the footgun
-            #1801 closes).
-          * only the tenant row exists → the tenant scope.
-          * only the built-in row exists → the built-in scope (the
-            G0.13-T5 #1135 global fallback, now shared with writes; the
-            built-in render bypasses :meth:`_authorize_scope`'s
-            admin-only gate intentionally — operator-level read access to
-            built-ins matches the list endpoint, and the write callers
-            are already ``tenant_admin``-gated at the route layer).
-          * neither exists → :class:`ConnectorNotFoundError`.
+        ``prefer`` (G0.26-T? #2029) makes the ambiguity *actionable*
+        without weakening the #1801 fail-loud default: when set it routes
+        through :meth:`_resolve_preferred_scope` (which skips the probe
+        and resolves directly to the named scope); when ``None`` the
+        probe + fail-loud raise below is byte-identical to the pre-#2029
+        resolver.
 
         A cross-tenant ``tenant_id`` (≠ the operator's, not ``None``)
         never reaches this method: :meth:`_resolve_scope` ->
@@ -288,6 +346,14 @@ class ReviewService:
         404 conflation.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
+        if prefer is not None:
+            return await self._resolve_preferred_scope(
+                connector_id,
+                tenant_id,
+                scope,
+                session,
+                prefer=prefer,
+            )
         if tenant_id is None:
             # Explicit built-in probe (admin path) — single-pass, no
             # fallback, no ambiguity.
@@ -338,6 +404,8 @@ class ReviewService:
         self,
         connector_id: str,
         tenant_id: UUID | None,
+        *,
+        prefer: Literal["tenant", "builtin"] | None = None,
     ) -> ConnectorReviewPayload:
         """Return the review payload for *connector_id* in *tenant_id*.
 
@@ -369,10 +437,21 @@ class ReviewService:
         explicitly as ``None`` (MCP admin path), the existing admin-only
         gate stays and the probe is single-pass; a cross-tenant probe
         keeps the 404 conflation.
+
+        *prefer* (G0.26-T? #2029) disambiguates that 409 without
+        weakening the default: ``prefer="tenant"`` returns the tenant
+        row directly, ``prefer="builtin"`` the built-in row, and
+        ``prefer=None`` (the default) keeps the fail-loud probe. See
+        :meth:`_resolve_existing_scope`.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            scope = await self._resolve_existing_scope(connector_id, tenant_id, session)
+            scope = await self._resolve_existing_scope(
+                connector_id,
+                tenant_id,
+                session,
+                prefer=prefer,
+            )
             return await self._render_payload(connector_id, scope, session)
 
     async def _render_payload(
@@ -701,6 +780,7 @@ class ReviewService:
         connector_id: str,
         *,
         tenant_id: UUID | None,
+        prefer: Literal["tenant", "builtin"] | None = None,
     ) -> int:
         """Enable every read-class (GET/HEAD) ingested op in one pass (G0.25-T7 #1749).
 
@@ -737,6 +817,12 @@ class ReviewService:
         when at least one op actually flipped: a re-run once the reads
         are enabled matches no rows, writes no audit row, and returns
         ``0``.
+
+        *prefer* (G0.26-T? #2029) resolves the ambiguous-scope 409
+        directly: ``prefer="tenant"`` applies to the tenant row,
+        ``prefer="builtin"`` to the built-in row (still behind the
+        ``tenant_admin`` gate :meth:`_resolve_existing_scope` re-checks),
+        and ``prefer=None`` (the default) keeps the fail-loud raise.
         """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
@@ -745,7 +831,12 @@ class ReviewService:
             # tell "no read ops to flip" from "no such connector", and
             # resolving here is what keeps this write path's target row
             # identical to the /review read path's.
-            scope = await self._resolve_existing_scope(connector_id, tenant_id, session)
+            scope = await self._resolve_existing_scope(
+                connector_id,
+                tenant_id,
+                session,
+                prefer=prefer,
+            )
             ops_enabled = await bulk_enable_read_ops(session, scope)
             if ops_enabled == 0:
                 # Idempotent no-op: nothing changed, so write no audit

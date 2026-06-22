@@ -90,6 +90,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.profile_auth import SESSION_TOKEN_OBJECT_KEY
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -130,8 +131,10 @@ _SESSION_HEADER = "vmware-api-session-id"
 # is ``">=8.5,<10.0"`` so the JSON-string shape is the load-bearing
 # one, but :meth:`_extract_session_token` handles both defensively —
 # vcsim has been known to swap between shapes between minor releases,
-# and a defensive read here costs nothing.
-_SESSION_TOKEN_OBJECT_KEY = "value"
+# and a defensive read here costs nothing. The object-shape key is the
+# shared :data:`SESSION_TOKEN_OBJECT_KEY` so the typed and profiled
+# (``session_login_basic``) extractors can't drift apart (#2047).
+_SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
 
 # Session endpoints + the spec-relative-op → /api-or-/rest mount
 # mapping live in ``._mount`` (extracted to keep this module within

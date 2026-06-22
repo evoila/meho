@@ -57,7 +57,8 @@ Six connectors (five if `vcf_operations`'s query-param merge is counted as
 - **`oauth2_mint`** — keycloak
 - **`session_login`** — vcf_logs (vRLI: JSON creds body → `sessionId` → Bearer)
 - **`session_login_basic`** — vmware_rest (vCenter: HTTP Basic login, no body
-  → raw JSON-string token → `vmware-api-session-id` header; #2025)
+  → token from a raw JSON-string body or the legacy `{"value": "<tok>"}`
+  object body → `vmware-api-session-id` header; #2025, legacy shape #2047)
 
 Eight stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
 vcf_automation — because their auth is stateful, asymmetric-crypto, or

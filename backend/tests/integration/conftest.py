@@ -288,7 +288,7 @@ def _integration_default_env(
     clear_jwks_cache()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def kb_ingest_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -297,14 +297,24 @@ def kb_ingest_root(
 
     The #101 ingest-root guard rejects any directory that resolves
     outside ``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``).
-    Integration tests that POST ``/api/v1/kb/ingest`` build their corpus
-    under ``tmp_path``, which lives below the OS temp dir — without this
-    override the call returns ``400 kb_ingest_path_outside_root``.
-    Mirrors the autouse fixture in :mod:`tests.test_kb_service` that
-    pins the same setting to ``tmp_path`` at the unit level. The
-    ``get_settings`` cache is cleared so the freshly-set env is picked
-    up; the autouse ``_integration_default_env`` fixture clears it again
-    on teardown.
+    Integration tests build their kb corpus under ``tmp_path``, which
+    lives below the OS temp dir — without this override an ingest
+    raises ``KbIngestRootError`` (the route maps it to ``400
+    kb_ingest_path_outside_root``).
+
+    **Autouse** so it covers every ingest call-site uniformly — the
+    HTTP route (``POST /api/v1/kb/ingest`` in test_kb_routes_pg /
+    test_tenant_seed_pg) *and* the direct service layer
+    (``KbService.ingest_directory`` in test_kb_service_pg) *and* any
+    future ingest test — rather than being opted into one file at a
+    time. Tests that need the pinned dir to write their corpus into
+    still request it by name (the fixture returns ``tmp_path``); tests
+    that merely transit a Settings load get the in-root pin for free.
+    Mirrors the autouse ``_required_settings_env`` fixture in
+    :mod:`tests.test_kb_service` that pins the same setting at the unit
+    level. The ``get_settings`` cache is cleared so the freshly-set env
+    is picked up; the autouse ``_integration_default_env`` fixture
+    clears it again on teardown.
     """
     monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
     get_settings.cache_clear()

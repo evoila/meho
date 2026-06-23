@@ -8,8 +8,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![OSS](https://img.shields.io/badge/OSS-public%20from%20day%201-success.svg)](./CONTRIBUTING.md#public-from-day-1-deliberately)
 
-**Status:** v0.9.0 released. The backplane image, Helm chart, and
-operator CLI are all shipped and cosign-signed.
+**Status:** Released — see the release badge above for the current version.
+The backplane image, Helm chart, and operator CLI are all shipped and cosign-signed.
 
 ## The problem
 

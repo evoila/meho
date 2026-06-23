@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-06-22
+
 ### Fixed — profiled vCenter legacy session-token shape
 
 - **Profiled `session_login_basic` now accepts vCenter's legacy `{"value": "<token>"}` session-token object shape** (#1964 / #2047): #2031 gave the profiled vCenter scheme a modern→legacy session **login-path** fallback (POST `/api/session`, on HTTP 404 retry `/rest/com/vmware/cis/session`), but the profiled **token extractor** was left modern-only — it read the token **only** as a raw JSON string body. The legacy vCenter session endpoint returns the token nested as `{"value": "<token>"}`, so on a genuinely legacy-only vCenter (or a vcsim build serving the legacy shape) the login-path fallback succeeded but token extraction then failed and the harness raised the target-named auth error — the fallback was only half-wired. `_extract_session_login_basic_token` now reads both shapes, mirroring the typed `VmwareRestConnector._extract_session_token`: a non-empty `str` body → token (unchanged), and a `{"value": <non-empty str>}` object body → token (new). Anything else (empty string, empty/missing/non-string `value`, list, non-`str`/non-`dict`) still returns `None` so the harness raises the consistent target-named error. The object-shape key is hoisted to a single shared `SESSION_TOKEN_OBJECT_KEY` constant in `_shared/profile_auth.py` that the typed connector imports, so the two paths can't silently diverge. Connector internals + tests only — no FastAPI route/schema change, OpenAPI snapshot unchanged; `validate_shipped_artifacts()` still boot-validates.
@@ -147,6 +149,43 @@ connector-related release-notes line.
 ### Fixed
 
 - **Operator-console "All" filter no-op** on `/ui/*` list views (#1963): the HTMX filter `<select>`s render an "All" `<option value="">`, so picking "All" (or clearing a filter — `hx-include` resubmits the sibling's empty value too) submitted an empty `status=` / `kind=` that failed the handler's `Literal[...] \| None` / `StrEnum \| None` query validation with HTTP 422. HTMX won't swap a 4xx, so the control silently no-op'd — the list never refreshed to the unfiltered view. A shared `BeforeValidator` (`meho_backplane.ui.query_filters.EMPTY_STR_TO_NONE`) now coerces the empty string to `None` **before** the literal/enum check on the runbook-runs, runbook-catalog, scheduler (`kind` + `status`), and agent-runs list filters, so "All"/cleared returns 200 with the unfiltered fragment. A genuinely out-of-vocabulary value (`?status=bogus`) still 422s — that rejection contract is unchanged.
+
+### Added — operator console (Goal #336: G10.13 / G10.15 / G10.17 / G10.18 / G10.19 + retrieval)
+
+- **Connector ingest modal** on `/ui/connectors/registry` (G10.13) — catalog or explicit-quadruple ingest from the console, with dry-run + async job-poll (#1951).
+- **Vault / secrets console** (G10.18) — read-only KV browser (target/mount picker → list/read/versions, redaction-aware) (#1956); confirm-gated KV writes (`put` CAS / `delete` / `secret.move`) with approval handoff (#1957); and a read-only status view (seal/health/mounts + auth-methods glance) (#1958).
+- **Keycloak realm-administration console** (G10.19) — read-only realm/client/client-scope browse (#1959); user management (list + create / reset-password / role-assign, tenant_admin, approval handoff) (#1960); and client-scope + protocol-mapper authoring (#1961).
+- **Topology console — curated-edge writes + temporal views** (G10.17) — curated-edge annotate/unannotate writes (in-process BFF, tenant_admin) (#1953); bulk-import (dry-run/apply, tenant_admin) + refresh-from-target (operator) (#1954); and temporal read views — timeline / history / diff (operator) (#1955).
+- **Audit forensic console** (G10.15) — `/ui/audit` filter-over-history query page with a forward-cursor pager + who-touched / by-work-ref / replay pivots (#1977); a deep-linkable row-detail drawer (by `audit_id`) + my-recent quick view (#1984); and a tenant_admin session-replay tree with a 413 over-cap flat fallback (#1986).
+- **Account page** `/ui/account` — real whoami / role / tenant / expiry + an active-session list with confirm-gated revoke-this / revoke-others (#1991).
+- **Broadcast Overrides tab** `/ui/broadcast` — tenant_admin detail-override rules table + glob create + delete-confirm (re-exposure) (#1992).
+- **Retrieval console tabs** `/ui/retrieval` — Usage Analytics + Eval Quality tabs (#1950) and a Retire-checklist tab (5-criterion three-state verdict, platform_admin tenant filter) (#1952).
+- **Profiled-connector surfacing** on `/ui/connectors/registry` — registry `kind` chip + filter, review-drawer staged badge, and ingest-modal local-spec indicator (#1980 / #2024).
+
+### Added — config-driven connectors (ExecutionProfile schema)
+
+- **`ExecutionProfile` schema + closed named auth catalog** (G0.28-T3 #1988): the reviewed declarative schema the profiled-connector machinery (T4–T7) consumes — a closed `AuthSchemeName` catalog validated at boot, with no free-form login/body DSL on the profile (the #1177 / #1969 closed-catalog line). Internal schema; no operator-visible behaviour on its own.
+
+### Fixed — connectors + MCP + docs-search
+
+- **Decouple TLS SNI / cert-verify host from the HTTP `Host` header** via a `tls_server_name` target field (#2002): a connector target fronted by a name-based proxy / SAN-mismatched cert can now verify TLS against the real server name while sending the operator's intended `Host`.
+- **Honour RFC6570 reserved expansion in ingested-op path substitution** (#2020): ingested-op path params that contain reserved characters expand per RFC6570 instead of being over-encoded, so the dispatched URL addresses the real resource.
+- **Map a scheduler Vault-write failure to JSON-RPC `-32602`, not opaque `-32603`** (MCP) (#2016): an agent-principal register whose scheduler-token Vault write fails now returns a structured, actionable error instead of a bare internal-error.
+- **Model corpus `document_id` as `Optional`, coercing blank → `None`** (docs-search) (#2004 / #2019): a blank `document_id` no longer trips downstream model validation.
+- **Migration 0049 — retire stale long-product (`vcf-logs`) ingest orphan rows** (#2001 / #2015): the historical product-namespace split left orphan `endpoint_descriptor` rows under the long product token; the migration retires them so dispatch resolves the canonical connector.
+
+### Changed — CI / test-infra
+
+- **Drop `--cov` from the unit lane** to stop an OOM kill on the heavy runner (#1982).
+- **Restore SonarCloud unit coverage** via a push-only offline-combine job (#1987 / #1994).
+
+### Docs
+
+- **Reconcile the `meho-docs-addon` `/search` wire-contract** to the post-#1732 dialect (#2032).
+
+### Dependencies
+
+- Bumped: `actions/checkout` 6.0.3 → 7.0.0 (#2039), `trufflesecurity/trufflehog` 3.95.5 → 3.95.6 (#2038), `duckdb` 1.5.3 → 1.5.4 (#2044), `sqlalchemy[asyncio]` (#2046), `pytest` 9.1.0 → 9.1.1 (#2045), `ruff` 0.15.17 → 0.15.18 (#2041), `google-auth` 2.54.0 → 2.55.0 (#2040).
 
 ## [0.18.0] - 2026-06-19
 

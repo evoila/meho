@@ -151,6 +151,7 @@ from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
+from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -542,10 +543,22 @@ app: FastAPI = FastAPI(
 # outermost layer (its ``__call__`` runs first on the request side and
 # last on the response side). The required runtime order for v0.2 is:
 #
-#   client → UISessionMiddleware → CSRFMiddleware
-#          → RequestContextMiddleware → BroadcastDetailMiddleware
-#          → AuditMiddleware → router → handler
+#   client → UIFramingHeadersMiddleware → UISessionMiddleware
+#          → CSRFMiddleware → RequestContextMiddleware
+#          → BroadcastDetailMiddleware → AuditMiddleware → router
+#          → handler
 #
+# - ``UIFramingHeadersMiddleware`` (L12 hardening) outermost so the
+#   clickjacking-defence headers
+#   (``Content-Security-Policy: frame-ancestors 'none'`` +
+#   ``X-Frame-Options: DENY``) land on EVERY ``/ui/*`` response,
+#   including the 302-to-login the inner ``UISessionMiddleware``
+#   short-circuits on an unauthenticated request -- a framed login
+#   page is itself a clickjacking surface. It is ``/ui/``-scoped by
+#   construction (out-of-prefix ``/api/*`` / ``/mcp`` responses pass
+#   through unstamped) and is header-only: it never reads the body,
+#   the session, or the request context, so its position relative to
+#   the inner chain is not load-bearing beyond "outside the redirect".
 # - ``UISessionMiddleware`` (G10.0-T4 #865, mounted by T5 #866)
 #   outermost so unauthenticated ``/ui/*`` requests 302 to
 #   ``/ui/auth/login`` BEFORE any inner middleware does
@@ -585,16 +598,17 @@ app: FastAPI = FastAPI(
 # To achieve that with ``add_middleware``'s last-added-is-outermost
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
 # then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``,
-# then ``CSRFMiddleware``, then ``UISessionMiddleware`` (becomes
-# outermost). Middleware is registered before routers so every
-# endpoint (including the Task #19 health/version/ready surfaces
-# and the Task #20 ``/metrics`` route) inherits the request-id
-# binding and the http_requests_total counter.
+# then ``CSRFMiddleware``, then ``UISessionMiddleware``, then
+# ``UIFramingHeadersMiddleware`` (becomes outermost). Middleware is
+# registered before routers so every endpoint (including the Task #19
+# health/version/ready surfaces and the Task #20 ``/metrics`` route)
+# inherits the request-id binding and the http_requests_total counter.
 app.add_middleware(AuditMiddleware)
 app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(UISessionMiddleware)
+app.add_middleware(UIFramingHeadersMiddleware)
 
 # G0.25 (#1694): app-level HTTPException handler. Intercepts exactly
 # the BFF refresh path's ``401 session_expired`` on ``/ui/*`` paths

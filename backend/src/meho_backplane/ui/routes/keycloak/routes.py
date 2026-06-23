@@ -111,14 +111,16 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, sta
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
 from meho_backplane.ui.routes.connectors.operator import (
@@ -205,25 +207,30 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     read ops authorise the operator-context Vault read that backs the
     admin-token mint). Mirrors the operations console's lift: load the
     decrypted session row and re-verify its access token through the
-    chassis JWT chain so a same-session role demotion is caught on the next
-    browse rather than cached for the session TTL.
+    chassis JWT chain via
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token serves the surface
+    instead of 401-ing mid-session, while a same-session role demotion is
+    still caught on the next browse rather than cached for the session TTL.
 
     Raises :class:`fastapi.HTTPException` 401 when the session was revoked
-    / expired between the middleware check and here.
+    / expired between the middleware check and here, or when the refresh
+    attempt itself fails (``session_expired`` -- the BFF error handler maps
+    it to a login redirect for HTML requests).
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session.session_id)
+    decrypted = await load_fresh_session(session.session_id)
     if decrypted is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",
         )
     settings = get_settings()
-    return await verify_jwt_for_audience(
-        f"Bearer {decrypted.access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
+    return operator
 
 
 async def _list_keycloak_targets(operator: Operator) -> list[dict[str, Any]]:

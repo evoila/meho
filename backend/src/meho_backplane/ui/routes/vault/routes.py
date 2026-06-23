@@ -118,15 +118,16 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest.list_connectors import list_ingested_connectors
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_vault_router"]
@@ -179,26 +180,32 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     tenant-scope guard's binding identity, and ``operator.raw_jwt`` for
     the vault handlers' JWT/OIDC login). Mirrors the operations router's
     same lift: load the decrypted session row and re-verify its access
-    token through the chassis JWT chain so a same-session role demotion is
-    caught the next time the operator browses.
+    token through the chassis JWT chain via
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token serves the surface
+    (and ``operator.raw_jwt`` carries the refreshed token into the vault
+    handlers' JWT/OIDC login) instead of 401-ing mid-session, while a
+    same-session role demotion is still caught the next time the operator
+    browses.
 
     Raises :class:`fastapi.HTTPException` 401 when the session was revoked
-    / expired between the middleware check and here (the BFF error handler
-    maps ``ui_session_required`` to a login redirect for HTML requests).
+    / expired between the middleware check and here, or when the refresh
+    attempt itself fails (``session_expired`` -- the BFF error handler maps
+    it to a login redirect for HTML requests).
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session.session_id)
+    decrypted = await load_fresh_session(session.session_id)
     if decrypted is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ui_session_required",
         )
     settings = get_settings()
-    return await verify_jwt_for_audience(
-        f"Bearer {decrypted.access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
+    return operator
 
 
 async def _vault_connector_id(operator: Operator) -> str | None:

@@ -93,9 +93,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     ListTemplatesFilter,
@@ -108,7 +106,10 @@ from meho_backplane.runbooks.service import (
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
@@ -167,23 +168,26 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
     so the admin-vs-operator distinction the opacity floor needs is resolved
     by decrypting the stored access token and re-running the chassis JWT
     chain (the same lift
-    :mod:`meho_backplane.ui.routes.connectors.operator` performs).
+    :mod:`meho_backplane.ui.routes.connectors.operator` performs) through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token lifts the real role
+    instead of degrading the operator to the restricted view mid-session.
 
     Fails **soft**: any hiccup (session row vanished between the middleware
-    check and here, JWKS transiently unreachable, identity mismatch on the
-    decoded token) returns ``None`` -- the caller then treats the request as
-    a plain operator (no admin privilege). The opacity-floor branch is the
-    safe default; an unavailable role lift must never 5xx the read surface.
+    check and here, JWKS transiently unreachable, refresh unavailable,
+    identity mismatch on the decoded token) returns ``None`` -- the caller
+    then treats the request as a plain operator (no admin privilege). The
+    opacity-floor branch is the safe default; an unavailable role lift must
+    never 5xx the read surface.
     """
     try:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as db_session, db_session.begin():
-            decrypted = await load_session(db_session, session_ctx.session_id)
+        decrypted = await load_fresh_session(session_ctx.session_id)
         if decrypted is None:
             return None
         settings = get_settings()
-        operator = await verify_jwt_for_audience(
-            f"Bearer {decrypted.access_token}",
+        _refreshed, operator = await verify_access_token_with_refresh(
+            decrypted,
             expected_audience=settings.keycloak_audience,
         )
     except Exception as exc:

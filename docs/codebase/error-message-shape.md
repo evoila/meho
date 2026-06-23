@@ -56,8 +56,8 @@ Examples in current use:
 - `ui_oauth_not_configured`
 - `keycloak_admin_not_configured`
 - `invalid_audience` / `invalid_issuer` / `missing_sub` /
-  `missing_exp` / `signature_invalid` / `token_expired` /
-  `token_not_yet_valid`
+  `missing_exp` / `signature_verification_failed` / `token_expired` /
+  `token_not_yet_valid` / `malformed_jws`
 - `spec_label_mismatch` / `multi_spec_inconsistent` /
   `uncovered_version_label`
 - `no_connector` (dispatcher resolver miss)
@@ -207,8 +207,8 @@ v0.6.0):
 - **`invalid_token` residual** at `auth/jwt.py` — after the
   G0.9.1-T12 #797 decode-stage classifier landed
   (`invalid_audience` / `invalid_issuer` / `missing_sub` /
-  `missing_exp` / `signature_invalid` / `token_expired` /
-  `token_not_yet_valid`),
+  `missing_exp` / `signature_verification_failed` / `token_expired` /
+  `token_not_yet_valid` / `malformed_jws`),
   the remaining `invalid_token` cases are genuinely
   unclassifiable: JWS decode errors, fetch-JWKS failures with no
   retryable cause, JOSE library exceptions we don't reflect to the
@@ -391,8 +391,8 @@ set).
   the underlying exception types the builders consume.
 - `backend/src/meho_backplane/auth/jwt.py` — decode-stage classifier
   emitting `invalid_audience` / `invalid_issuer` / `missing_sub` /
-  `missing_exp` / `signature_invalid` / `token_expired` /
-  `token_not_yet_valid` / residual `invalid_token`.
+  `missing_exp` / `signature_verification_failed` / `token_expired` /
+  `token_not_yet_valid` / `malformed_jws` / residual `invalid_token`.
 - `backend/src/meho_backplane/connectors/resolver.py` —
   `NoMatchingConnector` (`no_connector` classifier) and
   `AmbiguousConnectorResolution` (diagnostic message landing in the

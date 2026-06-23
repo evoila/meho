@@ -36,16 +36,20 @@ and Vault's KV v2 read mirror the patterns established in
 
 from __future__ import annotations
 
+import io
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import respx
 import structlog
 from alembic import command
 from fastapi.testclient import TestClient
+from httpx import ASGITransport
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -167,6 +171,35 @@ async def isolated_audit_engine(
     finally:
         await dispose_engine()
         reset_engine_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Structlog capture
+# ---------------------------------------------------------------------------
+
+
+def _configure_capture(buf: io.StringIO) -> None:
+    structlog.reset_defaults()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+
+
+@pytest.fixture
+def log_buffer() -> Iterator[io.StringIO]:
+    buf = io.StringIO()
+    _configure_capture(buf)
+    yield buf
+    structlog.reset_defaults()
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +468,7 @@ async def test_audit_write_failure_converts_request_to_500(
 async def test_handler_exception_writes_audit_row_with_status_500(
     isolated_audit_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
+    log_buffer: io.StringIO,
 ) -> None:
     """A handler exception still produces an audit row with ``status=500``.
 
@@ -454,10 +488,11 @@ async def test_handler_exception_writes_audit_row_with_status_500(
     circuit before the audit write — the test would prove the wrong
     branch.
 
-    ``TestClient`` is constructed with ``raise_server_exceptions=False``
-    so the re-raised handler exception surfaces as the 500 the
-    operator would actually see in production rather than failing the
-    test with a propagated exception.
+    Driven via ``httpx.AsyncClient`` with
+    ``ASGITransport(raise_app_exceptions=False)`` so the re-raised
+    handler exception surfaces as the 500 the operator would actually
+    see in production rather than leaking through TestClient's portal
+    teardown.
     """
     import meho_backplane.api.v1.health as health_module
 
@@ -470,13 +505,14 @@ async def test_handler_exception_writes_audit_row_with_status_500(
 
     monkeypatch.setattr(health_module, "_probe_vault_federation", _raising_probe)
 
-    client = TestClient(app, raise_server_exceptions=False)
-    with respx.mock as mock_router:
-        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
-        response = client.get(
-            "/api/v1/health",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
+        with respx.mock as mock_router:
+            _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+            response = await client.get(
+                "/api/v1/health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
     # Outer ServerErrorMiddleware converts the re-raised handler
     # exception into a 500 response with Starlette's generic body —

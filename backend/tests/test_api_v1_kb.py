@@ -51,11 +51,13 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport
 from sqlalchemy import select
 
 from meho_backplane.api.v1.kb import router as kb_router
@@ -240,18 +242,18 @@ def test_all_five_routes_mounted_on_main_app() -> None:
     """All five routes appear in :mod:`meho_backplane.main`'s app + OpenAPI."""
     from meho_backplane.main import app
 
+    # Verify the OpenAPI doc enumerates every method on each path.
+    openapi = app.openapi()
+    paths = openapi["paths"]
+
     expected_paths = {
         "/api/v1/kb",
         "/api/v1/kb/{slug}",
         "/api/v1/kb/ingest",
     }
-    actual_paths = {getattr(r, "path", None) for r in app.routes}
-    missing = expected_paths - actual_paths
+    missing = expected_paths - paths.keys()
     assert not missing, f"missing routes: {missing}"
 
-    # Verify the OpenAPI doc enumerates every method on each path.
-    openapi = app.openapi()
-    paths = openapi["paths"]
     assert "get" in paths["/api/v1/kb"]
     assert "post" in paths["/api/v1/kb"]
     assert "get" in paths["/api/v1/kb/{slug}"]
@@ -1026,7 +1028,9 @@ async def test_delete_writes_audit_row_with_existed_flag(
 
 
 @pytest.mark.asyncio
-async def test_delete_substrate_exception_still_writes_kb_delete_audit_row() -> None:
+async def test_delete_substrate_exception_still_writes_kb_delete_audit_row(
+    log_buffer: io.StringIO,
+) -> None:
     """Substrate raising during delete still produces ``op_id="kb.delete"`` audit row.
 
     Regression for the bind-ordering bug: before the fix the
@@ -1044,25 +1048,27 @@ async def test_delete_substrate_exception_still_writes_kb_delete_audit_row() -> 
     whether the row existed because the query failed), which is the
     truthful signal.
 
-    Uses a TestClient constructed with
-    ``raise_server_exceptions=False`` so the re-raised handler
-    exception surfaces as the 500 an operator would actually see
-    in production, rather than failing the test with the
-    propagated exception. Same posture as
-    :mod:`tests.test_audit_middleware`'s 500-classification tests.
+    Driven via ``httpx.AsyncClient`` with
+    ``ASGITransport(raise_app_exceptions=False)`` so the re-raised
+    handler exception surfaces as the 500 an operator would actually
+    see in production, rather than leaking through TestClient's portal
+    teardown.
     """
     tenant_a = uuid.uuid4()
     key, token = _admin_token(tenant_id=tenant_a)
     # Substrate raises RuntimeError mid-delete -- mimics a PG
     # connection drop or a deadlock that fails the statement.
     fake_delete = AsyncMock(side_effect=RuntimeError("simulated substrate failure"))
-    raising_client = TestClient(_build_app(), raise_server_exceptions=False)
-    with (
-        respx.mock as mock_router,
-        patch("meho_backplane.api.v1.kb.KbService.delete_entry", fake_delete),
-    ):
-        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
-        response = raising_client.delete("/api/v1/kb/k8s-ingress", headers=_authed(token))
+    transport = ASGITransport(app=_build_app(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://testserver"
+    ) as raising_client:
+        with (
+            respx.mock as mock_router,
+            patch("meho_backplane.api.v1.kb.KbService.delete_entry", fake_delete),
+        ):
+            _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+            response = await raising_client.delete("/api/v1/kb/k8s-ingress", headers=_authed(token))
 
     # The outer ServerErrorMiddleware converts the re-raised handler
     # exception into a 500 -- the audit row still commits with the

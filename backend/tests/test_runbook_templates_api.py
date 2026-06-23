@@ -262,18 +262,18 @@ def test_all_six_routes_mounted_on_main_app() -> None:
     """All six routes appear in :mod:`meho_backplane.main`'s app + OpenAPI."""
     from meho_backplane.main import app
 
+    openapi = app.openapi()
+    paths = openapi["paths"]
+
     expected_paths = {
         "/api/v1/runbooks/templates",
         "/api/v1/runbooks/templates/{slug}",
         "/api/v1/runbooks/templates/{slug}/publish",
         "/api/v1/runbooks/templates/{slug}/deprecate",
     }
-    actual_paths = {getattr(r, "path", None) for r in app.routes}
-    missing = expected_paths - actual_paths
+    missing = expected_paths - paths.keys()
     assert not missing, f"missing routes: {missing}"
 
-    openapi = app.openapi()
-    paths = openapi["paths"]
     assert "post" in paths["/api/v1/runbooks/templates"]
     assert "get" in paths["/api/v1/runbooks/templates"]
     assert "get" in paths["/api/v1/runbooks/templates/{slug}"]

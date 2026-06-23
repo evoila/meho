@@ -51,10 +51,16 @@ name: chart
 
 on:
   pull_request:
+    # NO `paths:` filter here, deliberately. `helm install + helm test
+    # (pgvector preflight)` is a REQUIRED status check on `main` (#349). A
+    # workflow skipped by an `on.*.paths` filter leaves its required check
+    # permanently "Expected / waiting for status" on PRs that don't match the
+    # filter, blocking merge (GitHub "skipped but required" behaviour). Instead
+    # the workflow always triggers and the `changes` job below detects whether
+    # chart files changed; the expensive jobs are gated with a job-level `if:`.
+    # A job skipped via `if:` reports Success, so the required check is
+    # satisfied on non-chart PRs without spinning up kind.
     branches: [main]
-    paths:
-      - 'deploy/charts/meho/**'
-      - '.github/workflows/chart.yml'
   push:
     # No `paths:` filter here. Path filtering applies to BOTH branch and tag
     # pushes when set, which would cause a v* tag annotating a non-chart
@@ -78,13 +84,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect chart-relevant changes
+    # Gate-keeper for the required `helm-test` check (see the `on:` note above).
+    # Runs on every PR; the expensive jobs read `outputs.chart` in their `if:`.
+    # On push (main / v* tags) the chart jobs always run — their `if:`
+    # short-circuits on `github.event_name != 'pull_request'` before reading
+    # this output — so we just emit `true` to satisfy their `needs`.
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      chart: ${{ steps.detect.outputs.chart }}
+    steps:
+      - name: Detect chart-relevant changes
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename')
+          if grep -qE '^(deploy/charts/meho/|\.github/workflows/chart\.yml$)' <<<"$files"; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart=false" >> "$GITHUB_OUTPUT"
+          fi
+
   validate:
     name: Lint + template + kubeconform (PR build gate)
     # Fork-PR guard: never execute chart logic from a fork on the self-hosted
     # runner pool. Mirrors image.yml's stance — `runs-on` is internal infra,
     # so fork PRs are skipped entirely. push events (main, v*) short-circuit
-    # the OR.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # the OR. The trailing `needs.changes.outputs.chart` clause skips this job
+    # (→ reported Success) on PRs that don't touch the chart.
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.chart == 'true')
     runs-on: meho-runners-ci
     timeout-minutes: 15
     steps:
@@ -330,8 +375,15 @@ jobs:
     # needs Docker-in-Docker support that the self-hosted runner
     # pool isn't configured for; the GitHub-hosted runners ship
     # Docker pre-installed and helm/kind-action works out of the box.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    needs: validate
+    #
+    # This is the REQUIRED check on `main` (#349). The `needs.changes` clause
+    # skips it (→ reported Success) on PRs that don't touch the chart, so the
+    # required check is satisfied without running kind — see the `on:` note.
+    needs: [changes, validate]
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.chart == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -66,6 +66,13 @@ __all__ = [
 #: :data:`~meho_backplane.ui.auth.middleware._UI_PREFIX`; out-of-prefix
 #: paths pass through untouched.
 _UI_PREFIX: Final[str] = "/ui/"
+#: The bare console root WITHOUT the trailing slash. FastAPI answers a
+#: ``GET /ui`` with a ``307`` redirect to the canonical ``/ui/``; that
+#: redirect would otherwise slip past a ``startswith("/ui/")`` guard, so
+#: the canonical entrypoint is matched exactly to keep the headers on
+#: every console response (defence-in-depth over a redirect that itself
+#: cannot be meaningfully framed).
+_UI_ROOT: Final[str] = "/ui"
 #: CSP value denying all framing (CSP Level 2 ``frame-ancestors``).
 FRAME_ANCESTORS_CSP: Final[str] = "frame-ancestors 'none'"
 #: Legacy anti-framing header value for pre-CSP browsers.
@@ -93,8 +100,10 @@ class UIFramingHeadersMiddleware:
         path = scope.get("path")
         # Out-of-prefix paths pass through unchanged -- the headers only
         # protect the browser-rendered ``/ui/*`` console, not the JSON
-        # API / MCP surfaces.
-        if not (isinstance(path, str) and path.startswith(_UI_PREFIX)):
+        # API / MCP surfaces. The bare ``/ui`` (no trailing slash) is
+        # matched exactly alongside the ``/ui/`` prefix so the canonical
+        # redirect to ``/ui/`` is stamped too.
+        if not (isinstance(path, str) and (path == _UI_ROOT or path.startswith(_UI_PREFIX))):
             await self.app(scope, receive, send)
             return
 

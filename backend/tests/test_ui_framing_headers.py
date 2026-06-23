@@ -188,6 +188,24 @@ def test_unauthenticated_ui_redirect_carries_framing_headers() -> None:
     assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
 
 
+def test_bare_ui_root_redirect_carries_framing_headers() -> None:
+    """``GET /ui`` (no trailing slash) -> 307 to ``/ui/`` is stamped too.
+
+    FastAPI redirects the bare canonical root to ``/ui/``; a
+    ``startswith("/ui/")`` guard alone would skip it. The exact-match on
+    ``/ui`` keeps the headers on the canonical entrypoint (also flagged
+    by CodeRabbit).
+    """
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui")
+
+    assert response.status_code == 307
+    assert response.headers["location"].endswith("/ui/")
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+
+
 def test_api_surface_not_stamped() -> None:
     """Out-of-prefix ``/api/*`` responses are deliberately NOT stamped."""
     with respx.mock(assert_all_called=False):

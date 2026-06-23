@@ -41,7 +41,7 @@ from meho_backplane.kb.schemas import (
     KbIngestionResult,
     validate_slug,
 )
-from meho_backplane.kb.service import KbService
+from meho_backplane.kb.service import KbIngestRootError, KbService
 
 __all__ = [
     "KB_KIND_ENTRY",
@@ -50,6 +50,7 @@ __all__ = [
     "InvalidKbSlugError",
     "KbEntry",
     "KbEntrySearchHit",
+    "KbIngestRootError",
     "KbIngestionResult",
     "KbService",
     "validate_slug",

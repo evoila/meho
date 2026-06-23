@@ -47,17 +47,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.kb.schemas import InvalidKbSlugError
-from meho_backplane.kb.service import KbService
+from meho_backplane.kb.service import KbIngestRootError, KbService
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
 
 
 @pytest.fixture(autouse=True)
-def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin env vars the :class:`Settings` model requires for this module."""
+def _required_settings_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[None]:
+    """Pin env vars the :class:`Settings` model requires for this module.
+
+    Also pins ``KB_INGEST_ROOT`` to the per-test ``tmp_path`` so the
+    #101 ingest-root guard (resolved-directory must be within the
+    root) admits the corpora every test builds under ``tmp_path``.
+    The dedicated out-of-root rejection tests override this to a
+    narrower root so an escaping directory is genuinely outside it.
+    """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -224,6 +235,131 @@ async def test_ingest_directory_continues_past_bad_files(
     assert result.error_count == 2
     assert any("BadCase" in e for e in result.errors)
     assert any("binary" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# KB_INGEST_ROOT guard -- path-traversal / LFI (#101 L8 + L14)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_directory_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """A directory that escapes ``KB_INGEST_ROOT`` is rejected, unread.
+
+    Regression for #101 L8 + L14: a ``tenant_admin`` must not be able
+    to ingest an arbitrary ``.md`` elsewhere on the host. Pin the root
+    to a child of ``tmp_path`` and aim the ingest at a *sibling*
+    directory (reached via a ``..`` traversal) that is genuinely
+    outside the root but still holds a real, ingestible corpus -- so
+    the test fails for the right reason (the guard fired), not because
+    the directory was empty or missing.
+    """
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "secrets"
+    _make_corpus(outside, n=2)  # real .md files, just out of root
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    # Use a ``..`` traversal payload so the literal argument *looks*
+    # like it is under the root yet resolves outside it.
+    traversal = root / ".." / "secrets"
+    with pytest.raises(KbIngestRootError) as exc_info:
+        await service.ingest_directory(traversal, uuid.uuid4())
+
+    assert "kb_ingest_path_outside_root" in str(exc_info.value)
+    # Nothing was read -- the embedding compute never ran.
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_dry_run_rejects_directory_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``dry_run=True`` does not bypass the ``KB_INGEST_ROOT`` guard.
+
+    The guard runs before the ``dry_run`` flag is consulted, so a
+    dry-run against an out-of-root directory must still be refused --
+    a dry-run that *walked and read* the files would be an
+    information-disclosure hole in its own right (#101 L8 + L14).
+    """
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "secrets"
+    _make_corpus(outside, n=2)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    with pytest.raises(KbIngestRootError):
+        await service.ingest_directory(
+            root / ".." / "secrets",
+            uuid.uuid4(),
+            dry_run=True,
+        )
+
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_symlink_escaping_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """A symlink inside the root that points outside it is rejected.
+
+    ``Path.resolve`` follows symlinks, so a link living under the root
+    but targeting an out-of-root corpus resolves outside the root and
+    must be refused -- the escaping-symlink half of the #101 fix.
+    """
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside-corpus"
+    _make_corpus(outside, n=2)
+    link = root / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    with pytest.raises(KbIngestRootError):
+        await service.ingest_directory(link, uuid.uuid4())
+
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_admits_directory_inside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """A directory within ``KB_INGEST_ROOT`` ingests normally.
+
+    The positive half of the guard: confirm the constraint does not
+    reject a legitimate in-root corpus (which would make the rejection
+    tests vacuously pass for the wrong reason).
+    """
+    root = tmp_path / "allowed"
+    corpus = root / "sub"
+    _make_corpus(corpus, n=2)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    result = await service.ingest_directory(corpus, uuid.uuid4())
+
+    assert result.inserted_count == 2
+    assert result.error_count == 0
+    assert stub_embedding.call_count == 2
 
 
 # ---------------------------------------------------------------------------

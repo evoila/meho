@@ -65,6 +65,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.kb.schemas import KbEntry, KbIngestionResult
+from meho_backplane.kb.service import KbIngestRootError
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -908,6 +909,35 @@ def test_ingest_missing_directory_returns_400(client: TestClient) -> None:
         )
     assert response.status_code == 400
     assert "directory_not_found" in response.json()["detail"]
+
+
+def test_ingest_path_outside_root_returns_400(client: TestClient) -> None:
+    """Substrate raising KbIngestRootError → 400 ``kb_ingest_path_outside_root``.
+
+    Regression for #101 L8 + L14: the path-traversal / LFI guard in
+    :meth:`KbService.ingest_directory` surfaces as a structured 400 at
+    the route -- never a 500 and never a read of the out-of-root file.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    fake_ingest = AsyncMock(
+        side_effect=KbIngestRootError(
+            "kb_ingest_path_outside_root: /etc resolves to /etc, which is "
+            "outside the configured ingest root /opt/meho/kb-ingest"
+        )
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.ingest_directory", fake_ingest),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb/ingest",
+            json={"directory": "/etc"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 400
+    assert "kb_ingest_path_outside_root" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

@@ -196,6 +196,7 @@
         "databasePoolTimeout",
         "retrievalEmbeddingModel",
         "retrievalModelCacheDir",
+        "kbIngestRoot",
         "forwardedAllowIps"
       ],
       "properties": {
@@ -223,6 +224,12 @@
           "minLength": 1,
           "pattern": "^/",
           "description": "Absolute filesystem path fastembed reads cached ONNX weights from. Default `/opt/meho/model-cache` is the image layer the shipped default model is baked into at build time (evoila/meho#574) — offline + version-locked first boot, no PVC needed. Repoint to a writable `retrieval.modelCache.mountPath` (and set `retrieval.modelCache.enabled: true`) only when overriding `config.retrievalEmbeddingModel` to a non-default model fetched at runtime; the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+        },
+        "kbIngestRoot": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/",
+          "description": "Absolute filesystem root the server-side kb bulk ingest (`POST /api/v1/kb/ingest`, `meho kb ingest`) is confined to (#101 L8 + L14). The ingest directory is resolved (symlinks followed, `..` collapsed) and rejected with a 400 `kb_ingest_path_outside_root` unless it lands within this root — a `tenant_admin` cannot read an arbitrary `.md` elsewhere on the host (path-traversal / LFI). Default `/opt/meho/kb-ingest`. The chart does not pre-create or mount this path: mount the kb content (a checked-out consumer repo / CI artefact) under it via `extraVolumes` + `extraVolumeMounts`, or repoint this value to where the content lives. A chassis-only deploy that never ingests carries the default harmlessly."
         },
         "backplaneUrl": {
           "type": "string",

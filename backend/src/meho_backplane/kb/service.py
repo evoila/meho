@@ -80,8 +80,50 @@ from meho_backplane.kb.schemas import (
 )
 from meho_backplane.retrieval.indexer import compute_body_hash, index_document
 from meho_backplane.retrieval.retriever import retrieve
+from meho_backplane.settings import get_settings
 
-__all__ = ["KbService"]
+__all__ = ["KbIngestRootError", "KbService"]
+
+
+class KbIngestRootError(ValueError):
+    """The requested ingest directory resolves outside ``KB_INGEST_ROOT``.
+
+    Raised by :meth:`KbService.ingest_directory` before any file is
+    read when the supplied directory -- after :meth:`Path.resolve`
+    follows every symlink and normalises ``..`` segments -- does not
+    land within the configured :attr:`~meho_backplane.settings.Settings.kb_ingest_root`.
+    This is the path-traversal / local-file-inclusion guard for the
+    privileged bulk-ingest surface (#101 rows L8 + L14): a
+    ``tenant_admin`` cannot point the ingest at an arbitrary ``.md``
+    file elsewhere on the backplane host.
+
+    Subclass of :class:`ValueError` -- same parent as
+    :class:`~meho_backplane.kb.schemas.InvalidKbSlugError` -- so a
+    caller treating it as an input-shape problem can use one ``except``
+    clause. The route layer maps it to a structured 400.
+    """
+
+
+def _resolve_within_ingest_root(directory: Path) -> Path:
+    """Resolve *directory* and confirm it lands within ``KB_INGEST_ROOT``.
+
+    Both the configured root and the requested directory are resolved
+    -- :meth:`Path.resolve` follows symlinks and collapses ``..`` --
+    so a traversal payload (``<root>/../../etc``) and an escaping
+    symlink (a link inside the root pointing at ``/etc``) both resolve
+    outside the root and are rejected. Returns the resolved directory
+    (the walker re-resolves idempotently); raises
+    :class:`KbIngestRootError` when it escapes the root (#101 L8 + L14).
+    """
+    root = Path(get_settings().kb_ingest_root).resolve()
+    resolved = directory.resolve()
+    if not resolved.is_relative_to(root):
+        raise KbIngestRootError(
+            f"kb_ingest_path_outside_root: {directory} resolves to "
+            f"{resolved}, which is outside the configured ingest root "
+            f"{root}"
+        )
+    return resolved
 
 
 #: First-N characters of a body returned in :class:`KbEntrySearchHit.snippet`
@@ -143,8 +185,10 @@ class KbService:
         Parameters
         ----------
         directory
-            Path to the kb directory. Must exist and be a directory;
-            otherwise :class:`NotADirectoryError` /
+            Path to the kb directory. Confined to ``KB_INGEST_ROOT``
+            by :func:`_resolve_within_ingest_root` (raises
+            :class:`KbIngestRootError` on escape, #101). Must exist and
+            be a directory; otherwise :class:`NotADirectoryError` /
             :class:`FileNotFoundError` propagates.
         tenant_id
             The tenant on whose behalf the corpus is being ingested.
@@ -159,12 +203,14 @@ class KbService:
             destructive run.
         """
         log = structlog.get_logger()
+        # Confine to KB_INGEST_ROOT before any read; dry-run too (#101).
+        resolved = _resolve_within_ingest_root(directory)
         inserted = 0
         updated = 0
         skipped = 0
         errors: list[str] = []
 
-        for record in walk_kb_directory(directory, errors=errors):
+        for record in walk_kb_directory(resolved, errors=errors):
             try:
                 action = await self._ingest_one(
                     tenant_id=tenant_id,

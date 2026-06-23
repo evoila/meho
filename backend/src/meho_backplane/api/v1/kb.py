@@ -128,7 +128,12 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.kb import KbEntry, KbIngestionResult, KbService
+from meho_backplane.kb import (
+    KbEntry,
+    KbIngestionResult,
+    KbIngestRootError,
+    KbService,
+)
 from meho_backplane.kb.schemas import InvalidKbSlugError
 
 __all__ = ["router"]
@@ -537,14 +542,15 @@ async def ingest_kb(
 
     Walks the supplied directory via
     :meth:`KbService.ingest_directory` and returns the four-bucket
-    :class:`KbIngestionResult`. The directory path is **not**
-    sanitised against an allowlist -- the route is gated on
-    ``tenant_admin``, the path is interpreted relative to the
-    backplane host's filesystem, and the substrate is responsible
-    for failing closed if the path does not exist or is not a
-    directory. An operator with tenant_admin can already drive the
-    same ingest via the CLI verb (T4 #418), so the route does not
-    introduce a new privilege surface.
+    :class:`KbIngestionResult`. The directory is **confined to**
+    ``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path
+    resolving outside it (``..`` traversal or escaping symlink) raises
+    :class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**
+    ``kb_ingest_path_outside_root`` here before any file is read --
+    closing the path-traversal / LFI hole (#101 L8 + L14) even for a
+    ``tenant_admin``. A path inside the root that does not exist or is
+    not a directory fails closed with ``directory_not_found`` /
+    ``not_a_directory`` (also 400).
 
     Binds ``audit_op_id="kb.ingest"`` + ``audit_op_class="write"``
     plus the four ``KbIngestionResult`` counters in the audit
@@ -592,6 +598,15 @@ async def ingest_kb(
             tenant_id=operator.tenant_id,
             dry_run=body.dry_run,
         )
+    except KbIngestRootError as exc:
+        # Path-traversal / LFI guard (#101): directory resolved outside
+        # KB_INGEST_ROOT. 400 with the ``kb_ingest_path_outside_root``
+        # marker (same ``<marker>: <detail>`` shape as the branches
+        # below) -- the file is never read.
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,

@@ -224,6 +224,17 @@ config:
   # `retrieval.modelCache.enabled: true`.
   retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
   retrievalModelCacheDir: "/opt/meho/model-cache"
+  # Root the server-side kb bulk ingest (`POST /api/v1/kb/ingest`,
+  # `meho kb ingest`) is confined to (#101 L8 + L14). The ingest
+  # directory is resolved (symlinks followed) and rejected with a 400
+  # unless it lands within this root, so a `tenant_admin` cannot read
+  # an arbitrary `.md` elsewhere on the host (path-traversal / LFI).
+  # The chart does NOT pre-create or mount this path. To ingest, mount
+  # the kb content (a checked-out consumer repo / CI artefact) under
+  # `kbIngestRoot` via `extraVolumes` + `extraVolumeMounts`, or repoint
+  # this value to wherever the content lives. A chassis-only deploy
+  # that never ingests carries the default harmlessly.
+  kbIngestRoot: "/opt/meho/kb-ingest"
   # -- Reverse-proxy trust list (Issue #730 / Signal #3, RDC dogfood
   # 2026-05-20). The backplane Dockerfile invokes uvicorn with
   # `--proxy-headers`, which honours `X-Forwarded-Proto` /

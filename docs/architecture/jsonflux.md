@@ -185,6 +185,29 @@ verbatim on the `register()` docstring.
 > `register()`, so the row count (the threshold input) is correct for
 > every vendor shape. See `_normalize_rows` in `jsonflux_reducer.py`.
 
+### Connection sandbox
+
+Data only ever enters the engine via in-memory Arrow tables
+(`conn.register`); DuckDB is never asked to read a file or URL itself —
+sources are decoded in Python (`msgspec`) and handed over as Arrow. The
+`QueryEngine` constructor enforces that contract on the `:memory:`
+connection via `_harden_connection()`:
+
+```python
+self.conn.execute("SET enable_external_access=false")
+self.conn.execute("SET allow_community_extensions=false")
+self.conn.execute("SET lock_configuration=true")  # must be last
+```
+
+`enable_external_access=false` denies `ATTACH`, `COPY`, and
+`read_csv`/`read_json`/`read_parquet`; `allow_community_extensions=false`
+blocks third-party extension installs; `lock_configuration=true` freezes
+all further configuration and so must be applied **last** (it would
+otherwise prevent the preceding `SET`s). This is defense-in-depth against
+the latent arbitrary-file-read / SSRF / untrusted-extension surface that
+arbitrary SQL (e.g. a future `result_query` drill-in) would expose. See
+the [DuckDB securing guide](https://duckdb.org/docs/operations_manual/securing_duckdb/overview).
+
 ## Reducer adapter
 
 The dispatcher does not call the vendored package directly. The bridge is

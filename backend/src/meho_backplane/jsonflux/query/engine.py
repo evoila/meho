@@ -164,8 +164,24 @@ class QueryEngine:
 
     def __init__(self) -> None:
         self.conn = duckdb.connect(":memory:")
+        self._harden_connection()
         self.tables: dict[str, dict[str, Any]] = {}
         self._closed = False
+
+    def _harden_connection(self) -> None:
+        """Sandbox the in-memory DuckDB connection (defense-in-depth).
+
+        Data only ever enters this engine via in-memory Arrow tables
+        (``conn.register``); DuckDB never reads files or URLs itself. These
+        settings make that contract enforced rather than incidental, closing
+        the latent arbitrary-file-read / SSRF / untrusted-extension surface
+        that arbitrary SQL (e.g. a future ``result_query`` drill-in) would
+        otherwise expose. ``lock_configuration`` must be applied last because
+        it freezes all further configuration changes.
+        """
+        self.conn.execute("SET enable_external_access=false")
+        self.conn.execute("SET allow_community_extensions=false")
+        self.conn.execute("SET lock_configuration=true")
 
     def register(  # NOSONAR (cognitive complexity)
         self,

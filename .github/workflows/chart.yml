@@ -326,13 +326,6 @@ jobs:
     #      tripped Docker Hub's rate-limit on this repo's other CI
     #      lanes -- pre-loading sidesteps it.
     #
-    # ``continue-on-error: true`` is the v0.2 transitional posture:
-    # the job runs on every chart-affecting PR + push but does not
-    # block merge while operators iterate on kind/k3d wiring nuances
-    # (image-pull caches, runner-side Docker permissions, etc.). A
-    # follow-up issue lands the hardening pass that removes
-    # continue-on-error once we have ~10 green runs (per G6.1-T8 AC).
-    #
     # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
     # needs Docker-in-Docker support that the self-hosted runner
     # pool isn't configured for; the GitHub-hosted runners ship
@@ -341,7 +334,6 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0

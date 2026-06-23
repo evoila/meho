@@ -34,18 +34,22 @@ contextvar binding all run for real.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import uuid
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport
 from sqlalchemy import select
 
 from meho_backplane.api.v1.memory import router as memory_router
@@ -113,6 +117,35 @@ def _fake_embedding_service() -> Iterator[None]:
         return_value=fake,
     ):
         yield
+
+
+# ---------------------------------------------------------------------------
+# Structlog capture
+# ---------------------------------------------------------------------------
+
+
+def _configure_capture(buf: io.StringIO) -> None:
+    structlog.reset_defaults()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+
+
+@pytest.fixture
+def log_buffer() -> Iterator[io.StringIO]:
+    buf = io.StringIO()
+    _configure_capture(buf)
+    yield buf
+    structlog.reset_defaults()
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +286,8 @@ def test_promote_route_mounted_on_main_app() -> None:
     """The promote route appears on the main app + OpenAPI document."""
     from meho_backplane.main import app
 
-    actual_paths = {getattr(r, "path", None) for r in app.routes}
-    assert "/api/v1/memory/{scope}/{slug}/promote" in actual_paths
-
     openapi = app.openapi()
+    assert "/api/v1/memory/{scope}/{slug}/promote" in openapi["paths"]
     assert "post" in openapi["paths"]["/api/v1/memory/{scope}/{slug}/promote"]
 
 
@@ -629,6 +660,10 @@ async def test_promote_audit_row_carries_promotion_target_scope_payload_key(
 # ---------------------------------------------------------------------------
 
 
+# usefixtures(log_buffer): requested for its side effect only — it routes
+# structlog to a buffer so the 0.137 re-raised handler exception doesn't
+# surface as a teardown ERROR. ASGITransport alone does not suppress it.
+@pytest.mark.usefixtures("log_buffer")
 @pytest.mark.asyncio
 async def test_promote_failed_target_insert_leaves_source_intact(
     client: TestClient,
@@ -645,22 +680,25 @@ async def test_promote_failed_target_insert_leaves_source_intact(
     key, token = _operator_token(tenant_id=tenant_a, sub=alice_sub)
     await _insert_user_memory(tenant_id=tenant_a, user_sub=alice_sub)
 
-    raising_client = TestClient(_build_app(), raise_server_exceptions=False)
-    with (
-        respx.mock as mock_router,
-        patch(
-            "meho_backplane.memory.service.index_document",
-            side_effect=RuntimeError("simulated insert failure"),
-        ),
-    ):
-        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
-        response = raising_client.post(
-            "/api/v1/memory/user/wine-preference/promote",
-            json={"to": "user-tenant", "move": True},
-            headers=_authed(token),
-        )
+    transport = ASGITransport(app=_build_app(), raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://testserver"
+    ) as raising_client:
+        with (
+            respx.mock as mock_router,
+            patch(
+                "meho_backplane.memory.service.index_document",
+                side_effect=RuntimeError("simulated insert failure"),
+            ),
+        ):
+            _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+            response = await raising_client.post(
+                "/api/v1/memory/user/wine-preference/promote",
+                json={"to": "user-tenant", "move": True},
+                headers=_authed(token),
+            )
 
-    # Handler exception → 500 with raise_server_exceptions=False.
+    # Handler exception → 500 with ASGITransport(raise_app_exceptions=False).
     assert response.status_code == 500
     # Source row still there: the failed transaction rolled back the
     # in-flight delete (the delete and insert share the same session).

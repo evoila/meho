@@ -88,6 +88,7 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._route_tree_helpers import iter_routes
 
 _BACKPLANE_URL = "https://meho.test"
 
@@ -402,13 +403,16 @@ def test_registry_list_status_filter_all_sentinel_renders() -> None:
 def test_registry_route_registered_before_detail() -> None:
     """First-match-wins: ``/ui/connectors/registry`` precedes ``/ui/connectors/{name}``."""
     router = build_connectors_router()
-    paths = [route.path for route in router.routes]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    leaves = list(iter_routes(router.routes))
+    paths = [route.path for route in leaves]
 
     registry_index = paths.index("/ui/connectors/registry")
     # The detail GET route -- distinguished from the PATCH on the same path.
     detail_index = next(
         i
-        for i, route in enumerate(router.routes)
+        for i, route in enumerate(leaves)
         if route.path == "/ui/connectors/{name}" and "GET" in (route.methods or set())
     )
     assert registry_index < detail_index, (

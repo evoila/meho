@@ -463,18 +463,20 @@ def test_all_routes_mounted_on_main_app() -> None:
     """
     from meho_backplane.main import app
 
+    openapi_paths = app.openapi()["paths"]
+
     expected_paths = {
         "/api/v1/connectors/ingest",
         "/api/v1/connectors/ingest/jobs/{job_id}",
         "/api/v1/connectors",
         "/api/v1/connectors/{connector_id}/review",
         "/api/v1/connectors/{connector_id}/groups/{group_key}",
-        "/api/v1/connectors/{connector_id}/operations/{op_id:path}",
+        # FastAPI 0.137 strips the `:path` converter in OpenAPI path keys
+        "/api/v1/connectors/{connector_id}/operations/{op_id}",
         "/api/v1/connectors/{connector_id}/enable",
         "/api/v1/connectors/{connector_id}/disable",
     }
-    actual_paths = {getattr(r, "path", None) for r in app.routes}
-    missing = expected_paths - actual_paths
+    missing = expected_paths - openapi_paths.keys()
     assert not missing, f"missing routes: {missing}"
 
 

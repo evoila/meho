@@ -86,6 +86,7 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._route_tree_helpers import iter_routes
 
 _BACKPLANE_URL = "https://meho.test"
 
@@ -756,11 +757,14 @@ def test_review_unknown_connector_panel() -> None:
 def test_review_routes_registered_before_detail() -> None:
     """First-match-wins: the review + op routes precede ``/ui/connectors/{name}``."""
     router = build_connectors_router()
-    paths = [route.path for route in router.routes]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    leaves = list(iter_routes(router.routes))
+    paths = [route.path for route in leaves]
 
     detail_index = next(
         i
-        for i, route in enumerate(router.routes)
+        for i, route in enumerate(leaves)
         if route.path == "/ui/connectors/{name}" and "GET" in (route.methods or set())
     )
     review_index = paths.index("/ui/connectors/registry/{connector_id}/review")
@@ -782,7 +786,7 @@ def test_op_route_uses_path_converter() -> None:
     and ``group_key`` are slash-free plain string params.
     """
     router = build_connectors_router()
-    paths = [route.path for route in router.routes]
+    paths = [route.path for route in iter_routes(router.routes)]
     # The op route carries the :path converter on op_id only.
     assert "/ui/connectors/registry/{connector_id}/operations/{op_id:path}" in paths
     # The drawer + group-body routes use plain params (no :path).

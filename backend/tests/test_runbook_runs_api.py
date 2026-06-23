@@ -309,18 +309,18 @@ def test_all_five_routes_mounted_on_main_app() -> None:
     """All five routes appear in :mod:`meho_backplane.main`'s app + OpenAPI."""
     from meho_backplane.main import app
 
+    openapi = app.openapi()
+    paths = openapi["paths"]
+
     expected_paths = {
         "/api/v1/runbooks/runs",
         "/api/v1/runbooks/runs/{run_id}/next",
         "/api/v1/runbooks/runs/{run_id}/abort",
         "/api/v1/runbooks/runs/{run_id}/reassign",
     }
-    actual_paths = {getattr(r, "path", None) for r in app.routes}
-    missing = expected_paths - actual_paths
+    missing = expected_paths - paths.keys()
     assert not missing, f"missing routes: {missing}"
 
-    openapi = app.openapi()
-    paths = openapi["paths"]
     assert "post" in paths["/api/v1/runbooks/runs"]
     assert "get" in paths["/api/v1/runbooks/runs"]
     assert "post" in paths["/api/v1/runbooks/runs/{run_id}/next"]

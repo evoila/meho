@@ -157,16 +157,16 @@ def test_all_topology_routes_mounted_on_main_app() -> None:
     """The four topology routes appear on the prod app + OpenAPI doc."""
     from meho_backplane.main import app
 
+    paths = app.openapi()["paths"]
+
     expected = {
         "/api/v1/topology/dependents/{name}",
         "/api/v1/topology/dependencies/{name}",
         "/api/v1/topology/path",
         "/api/v1/topology/refresh/{target_name}",
     }
-    actual = {getattr(r, "path", None) for r in app.routes}
-    assert not (expected - actual), f"missing: {expected - actual}"
+    assert not (expected - paths.keys()), f"missing: {expected - paths.keys()}"
 
-    paths = app.openapi()["paths"]
     assert "get" in paths["/api/v1/topology/dependents/{name}"]
     assert "get" in paths["/api/v1/topology/dependencies/{name}"]
     assert "get" in paths["/api/v1/topology/path"]
@@ -640,14 +640,14 @@ def test_curated_edge_routes_mounted_on_main_app() -> None:
     """The three curated-edge routes appear on the prod app + OpenAPI doc."""
     from meho_backplane.main import app
 
+    paths = app.openapi()["paths"]
+
     expected = {
         "/api/v1/topology/edges",
         "/api/v1/topology/edges/{edge_id}",
     }
-    actual = {getattr(r, "path", None) for r in app.routes}
-    assert not (expected - actual), f"missing: {expected - actual}"
+    assert not (expected - paths.keys()), f"missing: {expected - paths.keys()}"
 
-    paths = app.openapi()["paths"]
     assert "post" in paths["/api/v1/topology/edges"]
     assert "get" in paths["/api/v1/topology/edges"]
     assert "delete" in paths["/api/v1/topology/edges/{edge_id}"]

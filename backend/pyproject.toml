@@ -6,12 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-    # Pinned <0.137: FastAPI 0.137.0 regressed include_router for prefixed
-    # routers — every `/api/v1/*` router (built APIRouter(prefix=...) + relative
-    # routes) mounts ZERO routes on the app, dropping the entire API surface
-    # (caught by test_all_routes_mounted_on_main_app). Unpin once the app is
-    # adapted to 0.137's include_router semantics (tracked follow-up).
-    "fastapi>=0.136.3,<0.137",
+    "fastapi>=0.137.1,<0.138",
     "uvicorn[standard]>=0.49.0",
     "pydantic[email]>=2.13.4",
     "structlog>=26.1.0",

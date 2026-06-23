@@ -86,6 +86,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests._route_tree_helpers import iter_routes
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -311,7 +312,9 @@ def test_topology_ui_temporal_routes_register_before_node_param() -> None:
     convention ``topology/__init__.py`` documents.
     """
     router = build_topology_router()
-    paths = [route.path for route in router.routes if hasattr(route, "methods")]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    paths = [route.path for route in iter_routes(router.routes) if hasattr(route, "methods")]
     node_idx = paths.index("/ui/topology/node/{node_id}")
     for literal in (
         "/ui/topology/timeline",
@@ -324,14 +327,16 @@ def test_topology_ui_temporal_routes_register_before_node_param() -> None:
     # Resolve through a real app: each temporal route binds GET and is its own
     # handler, not the node-detail param route.
     app = _build_app()
+    by_path = {
+        route.path: route.methods for route in iter_routes(app.routes) if hasattr(route, "methods")
+    }
     for literal in (
         "/ui/topology/timeline",
         "/ui/topology/diff",
         "/ui/topology/history/{name}",
     ):
-        matched = [route for route in app.routes if getattr(route, "path", None) == literal]
-        assert matched, f"{literal} not registered on the app"
-        assert "GET" in matched[0].methods  # type: ignore[attr-defined]
+        assert literal in by_path, f"{literal} not registered on the app"
+        assert "GET" in by_path[literal], f"GET not registered for {literal}"
 
 
 # ---------------------------------------------------------------------------

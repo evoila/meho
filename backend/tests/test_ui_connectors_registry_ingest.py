@@ -98,6 +98,7 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._route_tree_helpers import iter_routes
 
 _BACKPLANE_URL = "https://meho.test"
 
@@ -293,9 +294,12 @@ def _job_count() -> int:
 def test_ingest_routes_registered_before_detail_and_param() -> None:
     """First-match-wins: the literal ingest routes precede the param routes."""
     router = build_connectors_router()
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    leaves = list(iter_routes(router.routes))
 
     def _index(path: str, method: str) -> int:
-        for i, route in enumerate(router.routes):
+        for i, route in enumerate(leaves):
             if route.path == path and method in (route.methods or set()):
                 return i
         raise AssertionError(f"route not found: {method} {path}")

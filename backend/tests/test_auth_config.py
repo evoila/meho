@@ -178,15 +178,8 @@ def test_auth_config_route_is_registered_in_main_app() -> None:
     404s in production. The assertion is path-and-method-specific so a
     typo in the prefix would surface as a mismatch.
     """
-    matching_routes = [
-        route
-        for route in app.routes
-        # FastAPI's APIRoute exposes ``path`` + ``methods``; non-APIRoute
-        # entries (Mount, etc.) don't have ``methods`` so guard the
-        # attribute access defensively.
-        if getattr(route, "path", None) == "/api/v1/auth-config"
-        and "GET" in getattr(route, "methods", set())
-    ]
-    assert len(matching_routes) == 1, (
-        f"expected exactly one GET /api/v1/auth-config route, got {len(matching_routes)}"
+    openapi_paths = app.openapi()["paths"]
+    assert "/api/v1/auth-config" in openapi_paths, "expected /api/v1/auth-config in OpenAPI paths"
+    assert "get" in openapi_paths["/api/v1/auth-config"], (
+        "expected GET /api/v1/auth-config in OpenAPI paths"
     )

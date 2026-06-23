@@ -81,6 +81,7 @@ from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._route_tree_helpers import iter_routes
 
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -599,7 +600,9 @@ def test_keycloak_ui_client_detail_route_resolves_to_detail_handler() -> None:
     ``/ui/keycloak/clients/`` prefix.
     """
     router = build_keycloak_router()
-    paths = [getattr(route, "path", None) for route in router.routes]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    paths = [getattr(route, "path", None) for route in iter_routes(router.routes)]
     assert "/ui/keycloak/clients/{client_uuid}" in paths
     assert "/ui/keycloak" in paths
     # The client-detail (parametrised) route is registered before the bare
@@ -1001,7 +1004,9 @@ def test_keycloak_ui_user_routes_literal_before_param() -> None:
     First-match-wins: ``create`` must never be captured as a ``{user_uuid}``.
     """
     router = build_keycloak_router()
-    paths = [getattr(route, "path", None) for route in router.routes]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    paths = [getattr(route, "path", None) for route in iter_routes(router.routes)]
     assert "/ui/keycloak/users" in paths
     assert "/ui/keycloak/users/create" in paths
     create_idx = paths.index("/ui/keycloak/users/create")

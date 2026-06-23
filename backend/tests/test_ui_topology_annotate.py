@@ -83,6 +83,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests._route_tree_helpers import iter_routes
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -334,7 +335,9 @@ def test_topology_ui_annotate_route_registers_before_node_param() -> None:
     convention ``topology/__init__.py`` documents.
     """
     router = build_topology_router()
-    paths = [route.path for route in router.routes if hasattr(route, "methods")]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    paths = [route.path for route in iter_routes(router.routes) if hasattr(route, "methods")]
     annotate_idx = paths.index("/ui/topology/edges/annotate")
     node_idx = paths.index("/ui/topology/node/{node_id}")
     assert annotate_idx < node_idx, paths
@@ -346,7 +349,7 @@ def test_topology_ui_annotate_route_registers_before_node_param() -> None:
     app = _build_app()
     matched = [
         route
-        for route in app.routes
+        for route in iter_routes(app.routes)
         if getattr(route, "path", None) == "/ui/topology/edges/annotate"
     ]
     assert matched, "annotate route not registered on the app"

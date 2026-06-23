@@ -912,7 +912,7 @@ def _build_app() -> FastAPI:
 
 
 def test_catalog_route_is_mounted() -> None:
-    paths = {route.path for route in _build_app().routes}  # type: ignore[attr-defined]
+    paths = _build_app().openapi()["paths"]
     assert "/api/v1/connectors/catalog" in paths
 
 

@@ -1412,6 +1412,7 @@ class KubernetesConnector(Connector):
 
         if descriptor is None:
             known_op_count = await count_known_ops(
+                tenant_id=None,  # operator-less chassis path: global rows only
                 product=self.product,
                 version=self.version,
                 impl_id=self.impl_id,

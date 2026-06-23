@@ -534,13 +534,15 @@ def test_dispatch_probes_resolve_reconciled_connector(
         # closes so no aiosqlite connection outlives its loop.
         reset_engine_for_testing()
         try:
+            probe_tenant = uuid4()
             exists = await connector_exists(
-                tenant_id=uuid4(),
+                tenant_id=probe_tenant,
                 product=product,
                 version=version,
                 impl_id=impl_id,
             )
             known = await count_known_ops(
+                tenant_id=probe_tenant,
                 product=product,
                 version=version,
                 impl_id=impl_id,

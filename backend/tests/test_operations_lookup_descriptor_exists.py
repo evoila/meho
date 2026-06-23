@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._lookup import (
+    count_known_ops,
     descriptor_exists_any_state,
     lookup_descriptor,
 )
@@ -223,3 +224,68 @@ async def test_probe_does_not_leak_other_tenants_disabled_rows(
         op_id=op_id,
     )
     assert present_for_b is True, "tenant B sees its own disabled row"
+
+
+@pytest.mark.asyncio
+async def test_count_known_ops_does_not_leak_other_tenants_op_count(
+    session: AsyncSession,
+) -> None:
+    """``count_known_ops`` must not count tenant B's ops for tenant A (#101 L3).
+
+    ``count_known_ops`` feeds the ``known_op_count`` field of the
+    ``unknown_op`` error payload. Without a tenant predicate it is a
+    cross-tenant op-count / connector-existence oracle: a tenant-A
+    caller probing a connector private to tenant B would learn how many
+    enabled ops that connector has. The count is scoped exactly like
+    ``connector_exists`` — global rows plus the caller's own rows.
+
+    This asserts the boundary on **enabled** rows (the only ones
+    ``count_known_ops`` counts): tenant B owns one enabled op; tenant A
+    must see zero of it, tenant B sees its own.
+    """
+    await _insert_descriptor(
+        session, op_id="GET:/vcenter/private-b", is_enabled=True, tenant_id=_TENANT_B
+    )
+
+    count_for_a = await count_known_ops(
+        tenant_id=_TENANT_A,
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+    )
+    assert count_for_a == 0, "tenant B's op must not be counted for tenant A"
+
+    count_for_b = await count_known_ops(
+        tenant_id=_TENANT_B,
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+    )
+    assert count_for_b == 1, "tenant B counts its own enabled op"
+
+
+@pytest.mark.asyncio
+async def test_count_known_ops_counts_global_rows_for_any_tenant(
+    session: AsyncSession,
+) -> None:
+    """Global (``tenant_id IS NULL``) enabled ops count for every caller.
+
+    The scoping must not over-restrict: built-in / global descriptors
+    are caller-visible to every tenant and to the operator-less chassis
+    path (``tenant_id=None``). All three must see the same count.
+    """
+    await _insert_descriptor(
+        session, op_id="GET:/vcenter/global-vm", is_enabled=True, tenant_id=None
+    )
+    await _insert_descriptor(
+        session, op_id="GET:/vcenter/global-host", is_enabled=True, tenant_id=None
+    )
+
+    for caller in (_TENANT_A, _TENANT_B, None):
+        count = await count_known_ops(
+            tenant_id=caller,
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+        )
+        assert count == 2, f"global enabled ops must count for caller {caller!r}"

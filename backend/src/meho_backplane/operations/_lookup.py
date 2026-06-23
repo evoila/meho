@@ -186,21 +186,38 @@ async def descriptor_exists_any_state(
 
 async def count_known_ops(
     *,
+    tenant_id: UUID | None,
     product: str,
     version: str,
     impl_id: str,
 ) -> int:
-    """Count enabled descriptors for *(product, version, impl_id)*.
+    """Count *caller-visible* enabled descriptors for *(product, version, impl_id)*.
 
     Returned in the ``unknown_op`` error's ``extras`` so the caller has
     a "did you mean…" signal without enumerating every op id (the
     actual enumeration belongs to the ``list_operation_groups`` /
     ``search_operations`` meta-tools shipped in T8 #399).
+
+    The count is scoped to what the calling operator can see: built-in /
+    global rows (``tenant_id IS NULL``) plus this tenant's own rows
+    (``tenant_id == tenant_id``). This mirrors the tenant boundary
+    :func:`connector_exists` and the data-returning meta-tools enforce.
+    Without it the count is a cross-tenant oracle — a connector private
+    to tenant B would leak its enabled-op count into a tenant-A caller's
+    ``unknown_op`` error payload.
+
+    ``tenant_id=None`` is the operator-less chassis / CLI dispatch path
+    (the typed-connector ``execute`` shims, which resolve descriptors
+    against global rows only): the ``tenant_id == None`` clause compiles
+    to ``IS NULL``, so the predicate collapses to global rows — matching
+    those callers' own ``tenant_id IS NULL`` descriptor query.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
             select(EndpointDescriptor.id).where(
+                (EndpointDescriptor.tenant_id.is_(None))
+                | (EndpointDescriptor.tenant_id == tenant_id),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,

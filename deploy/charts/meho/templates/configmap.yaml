@@ -67,6 +67,16 @@ data:
   # documented on `retrieval.modelCache`).
   RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
   RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}
+  # #101 (L8 + L14) — root the server-side kb bulk ingest
+  # (`POST /api/v1/kb/ingest`, `meho kb ingest`) is confined to. The
+  # ingest directory is resolved (symlinks followed) and rejected
+  # unless it lands within this root, so a `tenant_admin` cannot read
+  # an arbitrary `.md` elsewhere on the host (path-traversal / LFI).
+  # The chart does NOT pre-create or mount this path — mount the
+  # operator's kb content (a checked-out consumer repo / CI artefact)
+  # under it via `extraVolumes`, or repoint `config.kbIngestRoot` to
+  # wherever the content lives.
+  KB_INGEST_ROOT: {{ .Values.config.kbIngestRoot | quote }}
   # Issue #730 (Signal #3, RDC dogfood 2026-05-20). Restricts the
   # connecting peers uvicorn trusts as upstream proxies when parsing
   # `X-Forwarded-Proto` / `X-Forwarded-For`. uvicorn reads

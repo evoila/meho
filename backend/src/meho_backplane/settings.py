@@ -331,6 +331,26 @@ class Settings(BaseModel):
         ``RETRIEVAL_MODEL_CACHE_DIR`` typically point at
         ``$HOME/.cache/fastembed`` so a developer's existing cache is
         reused across runs.
+    kb_ingest_root:
+        Filesystem root the server-side kb bulk-ingest
+        (``POST /api/v1/kb/ingest`` / ``meho kb ingest``) is confined
+        to. The ingest ``directory`` argument is resolved (symlinks
+        followed) and rejected unless it lands **within** this root —
+        a ``tenant_admin`` cannot point the ingest at an arbitrary
+        ``.md`` file elsewhere on the backplane host (path-traversal /
+        local-file-inclusion). Default ``/opt/meho/kb-ingest`` sits
+        under the same ``/opt/meho`` parent the image already uses for
+        :attr:`retrieval_model_cache_dir`; the deploy mounts the
+        operator's kb content (a checked-out consumer repo, a CI
+        artefact, etc.) under that path, or the operator overrides the
+        root via ``KB_INGEST_ROOT`` to wherever the content actually
+        lives. The chart does **not** pre-create or mount this path —
+        an ingest against a default deploy with no kb content mounted
+        fails closed with ``directory_not_found`` rather than reading
+        anything. The configured root itself need not exist at startup
+        (it is validated per-request against the resolved argument), so
+        a chassis-only deploy that never ingests carries the default
+        harmlessly.
     broadcast_redis_url:
         Connection URL for the Valkey (Redis-protocol-compatible)
         broadcast substrate the G6 activity-broadcast Initiative
@@ -855,6 +875,16 @@ class Settings(BaseModel):
         default=BAKED_MODEL_CACHE_DIR,
         min_length=1,
     )
+    # L8 + L14 (#101) — root the server-side kb bulk-ingest is confined
+    # to. The ingest ``directory`` argument is resolved (symlinks
+    # followed) and rejected unless it lands within this root, so a
+    # tenant_admin cannot read an arbitrary ``.md`` elsewhere on the
+    # host (path-traversal / LFI). Default ``/opt/meho/kb-ingest``
+    # mirrors the ``/opt/meho`` parent ``retrieval_model_cache_dir``
+    # already uses; operators mount their kb content there or override
+    # via ``KB_INGEST_ROOT``. See the field docstring for the full
+    # deploy contract.
+    kb_ingest_root: str = Field(default="/opt/meho/kb-ingest", min_length=1)
     broadcast_redis_url: str = Field(
         default="redis://localhost:6379",
         min_length=1,
@@ -1384,6 +1414,10 @@ def get_settings() -> Settings:
             "RETRIEVAL_MODEL_CACHE_DIR",
             BAKED_MODEL_CACHE_DIR,
         ),
+        kb_ingest_root=os.environ.get(
+            "KB_INGEST_ROOT",
+            "/opt/meho/kb-ingest",
+        ).strip(),
         broadcast_redis_url=os.environ.get(
             "BROADCAST_REDIS_URL",
             "redis://localhost:6379",

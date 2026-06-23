@@ -851,6 +851,7 @@ def mint_token(
     algorithm: str = "RS256",
     kid: str | None = None,
     omit_sub: bool = False,
+    omit_exp: bool = False,
     tenant_id: str | None = DEFAULT_TENANT_ID,
     tenant_role: str | None = DEFAULT_TENANT_ROLE,
     tenant_claim_name: str = "tenant_id",
@@ -870,6 +871,9 @@ def mint_token(
       drive the kid-miss → JWKS-refresh path.
     * ``omit_sub`` — when ``True``, drops the ``sub`` claim from the
       payload to verify the missing-claim 401 contract.
+    * ``omit_exp`` — when ``True``, drops the ``exp`` claim so the
+      decoder's essential-``exp`` enforcement surfaces a
+      ``missing_exp`` 401 rather than accepting a non-expiring token.
     * ``tenant_id`` / ``tenant_role`` — defaults to
       :data:`DEFAULT_TENANT_ID` / :data:`DEFAULT_TENANT_ROLE` so
       pre-G0.1 chassis tests keep flowing through ``verify_jwt``
@@ -891,9 +895,10 @@ def mint_token(
             "iss": issuer,
             "aud": audience,
             "iat": now,
-            "exp": now + expires_in,
             "nbf": now + not_before_offset,
         }
+        if not omit_exp:
+            payload["exp"] = now + expires_in
         if not omit_sub:
             payload["sub"] = sub
         if name is not None:

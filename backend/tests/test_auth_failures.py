@@ -29,6 +29,9 @@ event — never in the unauthenticated 401 body — mirroring the existing
 * JWT with wrong audience (``aud`` != configured) → 401 ``invalid_audience``
 * JWT with wrong issuer (``iss`` != configured) → 401 ``invalid_issuer``
 * JWT missing required claim (``sub``) → 401 ``missing_sub``
+* JWT missing required claim (``exp``) → 401 ``missing_exp`` (security
+  backlog row L1 — without essential-``exp`` enforcement a token with
+  no ``exp`` is accepted as non-expiring)
 * JWT with the wrong algorithm (``HS256`` when only ``RS256`` accepted)
   → 401 ``invalid_token`` (authlib raises a non-``DecodeError``
   :class:`JoseError` for unsupported algorithms; falls to the residual)
@@ -48,8 +51,9 @@ Each test asserts:
 3. No leaked exception message — the reason string is one of the
    centrally-defined tokens (``missing_token`` / ``invalid_token`` /
    ``malformed_jws`` / ``invalid_audience`` / ``invalid_issuer`` /
-   ``missing_sub`` / ``token_expired`` / ``token_not_yet_valid`` /
-   ``signature_verification_failed`` / ``jwks_unavailable``).
+   ``missing_sub`` / ``missing_exp`` / ``token_expired`` /
+   ``token_not_yet_valid`` / ``signature_verification_failed`` /
+   ``jwks_unavailable``).
 
 Test isolation re-uses the fixture pattern Task #22 established: respx
 intercepts the OIDC discovery + JWKS HTTP calls, RSA fixture keys mint
@@ -447,6 +451,32 @@ def test_missing_sub_claim_returns_missing_sub() -> None:
 
     assert response.status_code == 401
     assert response.json() == {"detail": "missing_sub"}
+
+
+def test_missing_exp_claim_returns_missing_exp() -> None:
+    """A token without ``exp`` → ``missing_exp`` (security row L1).
+
+    RFC 9068 §2.2.1 makes ``exp`` REQUIRED on access tokens. Without
+    essential-``exp`` enforcement a JWT lacking ``exp`` decodes cleanly
+    and is accepted as non-expiring — there is no expiry for
+    ``claims.validate()`` to reject. The decoder marks ``exp`` as
+    essential so authlib surfaces the absence as a ``MissingClaimError``
+    during decode and :func:`_classify_decode_error` returns the
+    specific ``missing_exp`` code (mirroring ``missing_sub``).
+    """
+    key = make_rsa_keypair("kid-A")
+    token = mint_token(key, omit_exp=True)
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "missing_exp"}
 
 
 # ---------------------------------------------------------------------------

@@ -258,6 +258,20 @@ connector-related release-notes line.
 - Fix a vRLI dispatch dead end where a `product="vrli"` target — the natural token `meho connector list` emits — resolved an auto-registered `GenericRestConnector` shim (`connector_unsupported` / `auth_headers` `NotImplementedError`) instead of the shipped `VcfLogsConnector`, because the connector registered under a divergent `product="vcf-logs"` namespace while the dispatcher derives `"vrli"` from the `vrli-rest` connector-id. `VcfLogsConnector` is now aligned to the dispatch-canonical `product="vrli"` (round-trips `parse_connector_id`), spec-ingest defers to a hand-coded connector instead of scaffolding a shadowing shim under a divergent product token, and `register_connector_v2` logs a structured WARN (not a boot failure) when a registration's `product` ≠ its connector-id-derived product. A migration reconciles existing `product="vcf-logs"` targets to `"vrli"` (no new `PRODUCT_ALIASES` entry). The five remaining sanctioned `_PRODUCT_SPLITS` connectors WARN, pointing at the family-realignment Initiative #1810 (#1798).
 - `meho targets import --dry-run` is now existence-aware: it routes through the live planner (one read-only `GET /api/v1/targets`, zero writes), so an existing target previews as `UPDATE` instead of the misleading `CREATE` the offline planner always showed; a brand-new target still previews as `CREATE`. The dry-run godoc is aligned to the read-only behaviour (#1785 / #1861 / #1870).
 - Pin `fastapi <0.137`: 0.137.0 drops the entire `/api` router surface from `app.routes` (and leaks a handler-500 at `TestClient` teardown), so the Dependabot bump was reverted and the dependency held at `0.136.3` pending a compatibility pass (#1820).
+- Deflaked `test_corpus_client.py::test_forwarded_jwt_never_logged`, which
+  asserted on structlog events from a module-level production logger via
+  `structlog.testing.capture_logs()`. Under `pytest -n 6 --dist loadscope` a
+  logger warmed-and-orphaned by an earlier test on the same xdist worker —
+  `cache_logger_on_first_use=True` pins a `BoundLogger` to a processor-list
+  instance that a later `structlog.configure(...)` then replaces — caused
+  `capture_logs` to miss the event (empty list), reddening the whole
+  `Python (ruff + mypy + pytest)` job and letting the JWT-absence check pass
+  vacuously against an empty capture. The test now binds a private
+  `structlog.testing.LogCapture` and monkeypatches the subject module's
+  `_log`, the established #1254 pattern (the sibling
+  `test_operations_register_ingested.py` orphan-class assertions were
+  converted the same way by #1712); the convention is documented in
+  `docs/codebase/backend.md`. No production logging config change. (#1622)
 
 ### Documentation
 

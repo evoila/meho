@@ -660,10 +660,13 @@ async def test_promote_audit_row_carries_promotion_target_scope_payload_key(
 # ---------------------------------------------------------------------------
 
 
+# usefixtures(log_buffer): requested for its side effect only — it routes
+# structlog to a buffer so the 0.137 re-raised handler exception doesn't
+# surface as a teardown ERROR. ASGITransport alone does not suppress it.
+@pytest.mark.usefixtures("log_buffer")
 @pytest.mark.asyncio
 async def test_promote_failed_target_insert_leaves_source_intact(
     client: TestClient,
-    log_buffer: io.StringIO,
 ) -> None:
     """AC: failed target insert leaves source intact (transaction boundary).
 

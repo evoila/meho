@@ -1027,10 +1027,12 @@ async def test_delete_writes_audit_row_with_existed_flag(
     assert payload["existed"] is True
 
 
+# usefixtures(log_buffer): requested for its side effect only — it routes
+# structlog to a buffer so the 0.137 re-raised handler exception doesn't
+# surface as a teardown ERROR. ASGITransport alone does not suppress it.
+@pytest.mark.usefixtures("log_buffer")
 @pytest.mark.asyncio
-async def test_delete_substrate_exception_still_writes_kb_delete_audit_row(
-    log_buffer: io.StringIO,
-) -> None:
+async def test_delete_substrate_exception_still_writes_kb_delete_audit_row() -> None:
     """Substrate raising during delete still produces ``op_id="kb.delete"`` audit row.
 
     Regression for the bind-ordering bug: before the fix the

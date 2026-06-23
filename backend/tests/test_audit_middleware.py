@@ -464,11 +464,14 @@ async def test_audit_write_failure_converts_request_to_500(
     assert response.headers.get("x-request-id")
 
 
+# usefixtures(log_buffer): requested for its side effect only — it routes
+# structlog to a buffer so the 0.137 re-raised handler exception doesn't
+# surface as a teardown ERROR. ASGITransport alone does not suppress it.
+@pytest.mark.usefixtures("log_buffer")
 @pytest.mark.asyncio
 async def test_handler_exception_writes_audit_row_with_status_500(
     isolated_audit_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
-    log_buffer: io.StringIO,
 ) -> None:
     """A handler exception still produces an audit row with ``status=500``.
 

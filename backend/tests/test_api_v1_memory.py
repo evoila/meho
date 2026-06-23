@@ -1246,10 +1246,12 @@ async def test_forget_writes_audit_row_with_existed_flag(
     assert payload["existed"] is True
 
 
+# usefixtures(log_buffer): requested for its side effect only — it routes
+# structlog to a buffer so the 0.137 re-raised handler exception doesn't
+# surface as a teardown ERROR. ASGITransport alone does not suppress it.
+@pytest.mark.usefixtures("log_buffer")
 @pytest.mark.asyncio
-async def test_remember_substrate_exception_still_writes_memory_remember_audit_row(
-    log_buffer: io.StringIO,
-) -> None:
+async def test_remember_substrate_exception_still_writes_memory_remember_audit_row() -> None:
     """Substrate raising mid-remember still produces ``op_id="memory.remember"`` audit row.
 
     Regression guarantee for the bind-ordering rule: the audit

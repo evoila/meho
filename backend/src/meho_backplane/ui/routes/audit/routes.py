@@ -104,14 +104,16 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
@@ -187,23 +189,25 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
     so the admin-vs-operator distinction the replay pivot needs is resolved
     by decrypting the stored access token and re-running the chassis JWT
     chain -- the same lift :func:`meho_backplane.ui.routes.runbooks.routes._resolve_role`
-    performs.
+    performs -- through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying, so an expired-but-refreshable token lifts the real role
+    instead of degrading the operator mid-session.
 
     Fails **soft**: any hiccup (session row vanished between the middleware
-    check and here, JWKS transiently unreachable, identity mismatch on the
-    decoded token) returns ``None`` -- the caller then treats the request as
-    a plain operator (the replay pivot renders disabled). An unavailable role
-    lift must never 5xx the read surface.
+    check and here, JWKS transiently unreachable, refresh unavailable,
+    identity mismatch on the decoded token) returns ``None`` -- the caller
+    then treats the request as a plain operator (the replay pivot renders
+    disabled). An unavailable role lift must never 5xx the read surface.
     """
     try:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as db_session, db_session.begin():
-            decrypted = await load_session(db_session, session_ctx.session_id)
+        decrypted = await load_fresh_session(session_ctx.session_id)
         if decrypted is None:
             return None
         settings = get_settings()
-        operator = await verify_jwt_for_audience(
-            f"Bearer {decrypted.access_token}",
+        _refreshed, operator = await verify_access_token_with_refresh(
+            decrypted,
             expected_audience=settings.keycloak_audience,
         )
     except Exception as exc:

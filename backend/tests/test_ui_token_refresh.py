@@ -68,6 +68,7 @@ from meho_backplane.ui.auth import (
     ui_session_expired_exception_handler,
 )
 from meho_backplane.ui.auth.flow import clear_discovery_cache
+from meho_backplane.ui.auth.middleware import require_ui_session
 from meho_backplane.ui.auth.refresh import refresh_session_tokens
 from meho_backplane.ui.auth.session_store import (
     create_session,
@@ -75,6 +76,9 @@ from meho_backplane.ui.auth.session_store import (
     load_session_for_update,
     reset_fernet_cache_for_testing,
     revoke_session,
+)
+from meho_backplane.ui.routes.agents.operator import (
+    _lift_operator as _lift_agents_operator,
 )
 from tests.conftest import (
     DEFAULT_AUDIENCE,
@@ -95,6 +99,7 @@ _TOKEN_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/token"
 _AUTHORIZATION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/auth"
 _JWKS_URL = f"{DEFAULT_ISSUER}/protocol/openid-connect/certs"
 _PROBE_PATH = "/ui/admin-probe"
+_AGENTS_PROBE_PATH = "/ui/agents-lift-probe"
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +172,18 @@ def _build_app() -> FastAPI:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="token_expired",
         )
+
+    @app.get(_AGENTS_PROBE_PATH)
+    async def agents_lift_probe(
+        ctx: UISessionContext = Depends(require_ui_session),
+    ) -> dict[str, str]:
+        # Drives the agents-console operator lift (#121): the same
+        # load_fresh_session + verify_access_token_with_refresh seam the
+        # write gate (resolve_operator_or_403) and read probe use. Pre-#121
+        # the lift bare-verified the stored token and 401-ed on a
+        # token_expired access token even with a live refresh token.
+        operator = await _lift_agents_operator(ctx)
+        return {"operator": operator.sub}
 
     return app
 
@@ -657,3 +674,96 @@ def test_load_session_for_update_is_side_effect_free() -> None:
     expired, missing = asyncio.run(_gone_states())
     assert expired is None
     assert missing is None
+
+
+# ---------------------------------------------------------------------------
+# Per-route seam coverage (#121) -- the agents-console operator lift
+# ---------------------------------------------------------------------------
+#
+# AC #2 / #3: every token-consuming /ui/* route now routes its operator
+# lift through verify_access_token_with_refresh. The agents console was the
+# named bare-load gap; these tests pin that its lift refreshes once on an
+# expired-but-refreshable token (instead of 401-ing mid-session) and fails
+# soft-closed to the documented terminal state when refresh is unavailable
+# -- never an unhandled 500. The lift is shared verbatim by the connectors /
+# memory / kb / runbooks / operations / audit / keycloak / vault lifts, so
+# this is the representative coverage for the whole seam adoption.
+
+
+def test_agents_lift_refreshes_expired_token_and_serves() -> None:
+    """AC #121-2: expired access token + live refresh -> agents lift serves 200.
+
+    Pre-#121 ``agents.operator._lift_operator`` bare-verified the stored
+    token through the JWT chain and 401-ed on ``token_expired`` even with a
+    valid refresh token; now it routes through the refresh-on-401 seam, so
+    the row round-trips Keycloak's refresh grant once and the lift returns
+    the operator off the rotated token.
+    """
+    key = make_rsa_keypair("kid-agents-1")
+    stale = _admin_jwt(key, expires_in=-120)  # beyond the 30 s leeway
+    fresh = _admin_jwt(key)
+    session_id = _seed_session(access_token=stale)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc(mock_router, public_jwks(key))
+        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=_refresh_response(fresh),
+        )
+        response = _client(_build_app(), session_id).get(_AGENTS_PROBE_PATH)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"operator": "op-77"}
+    # Exactly one refresh grant, and the row holds the rotated pair.
+    assert token_route.call_count == 1
+    rotated = _load_row(session_id)
+    assert rotated is not None
+    assert rotated.access_token == fresh
+
+
+def test_agents_lift_refresh_unavailable_redirects_html_to_login() -> None:
+    """AC #121-3 (HTML): refresh unavailable -> 302 login, not a 500.
+
+    The refresh token is expired / revoked, so Keycloak answers the grant
+    with ``invalid_grant``. The seam fails closed to ``session_expired``,
+    which the BFF handler maps to a login redirect for an HTML request --
+    the documented terminal state, never an unhandled 500.
+    """
+    key = make_rsa_keypair("kid-agents-2")
+    stale = _admin_jwt(key, expires_in=-120)
+    session_id = _seed_session(access_token=stale)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc(mock_router, public_jwks(key))
+        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+        client = _client(_build_app(), session_id)
+        response = client.get(
+            _AGENTS_PROBE_PATH,
+            headers={"accept": "text/html,application/xhtml+xml"},
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+    assert "Max-Age=0" in response.headers["set-cookie"]
+    assert token_route.call_count == 1
+
+
+def test_agents_lift_refresh_unavailable_keeps_json_shape() -> None:
+    """AC #121-3 (JSON): refresh unavailable -> 401 session_expired, not a 500."""
+    key = make_rsa_keypair("kid-agents-3")
+    stale = _admin_jwt(key, expires_in=-120)
+    session_id = _seed_session(access_token=stale)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc(mock_router, public_jwks(key))
+        mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+        response = _client(_build_app(), session_id).get(
+            _AGENTS_PROBE_PATH,
+            headers={"accept": "application/json"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "session_expired"}

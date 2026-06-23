@@ -146,9 +146,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.settings import get_settings
@@ -157,7 +155,10 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_admin,
     require_ui_session,
 )
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
@@ -208,26 +209,25 @@ _require_admin = Depends(require_ui_admin)
 async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
     """Verify the session's access token carries at least ``tenant_admin`` role.
 
-    Loads the full :class:`DecryptedSession` via
-    :func:`~meho_backplane.ui.auth.session_store.load_session` so the
-    plaintext access token is available for JWT re-verification.
-    :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` re-runs the
-    full JWKS chain (signature, claims, audience) and surfaces the
-    ``tenant_role`` claim.
+    Loads the full :class:`DecryptedSession` and presents its access
+    token to the chassis JWT chain through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token is refreshed
+    rather than 401-ing mid-session. The re-run surfaces the
+    ``tenant_role`` claim off the freshly verified token.
 
     Raises :class:`fastapi.HTTPException` 403 when the session's role is
     below ``TENANT_ADMIN`` or when the session has been revoked/expired
     between the middleware check and this call (extremely rare but
     possible under concurrent logout).
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session_ctx.session_id)
+    decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
         raise HTTPException(status_code=403, detail="session_not_found")
     settings = get_settings()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {decrypted.access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
     if operator.tenant_role != TenantRole.TENANT_ADMIN:

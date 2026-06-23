@@ -25,9 +25,10 @@ Suite shape:
 * :func:`_seed_session_sync` creates a session with the fake access token
   used across all UI unit tests.
 * For the ``POST /ui/kb/new`` RBAC gate, ``_require_tenant_admin`` calls
-  :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`; tests patch it
-  so the fake "access-token-plaintext" session token does not trip the real
-  JWKS chain.
+  :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`
+  (the refresh-on-401 seam); tests patch it to return
+  ``(session, operator)`` so the fake "access-token-plaintext" session
+  token does not trip the real JWKS chain.
 * The preview endpoint (``POST /ui/kb/editor-preview``) is read-only; no
   mocking needed beyond the standard session setup.
 """
@@ -359,9 +360,9 @@ def test_editor_save_creates_entry_and_redirects() -> None:
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(
-                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
                 new_callable=AsyncMock,
-                return_value=_make_fake_admin_operator(_TENANT_A),
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
             ),
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
@@ -389,9 +390,9 @@ def test_editor_save_operator_role_returns_403() -> None:
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with patch(
-            "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+            "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
             new_callable=AsyncMock,
-            return_value=_make_fake_operator_operator(_TENANT_A),
+            return_value=(None, _make_fake_operator_operator(_TENANT_A)),
         ):
             response = client.post(
                 "/ui/kb/new",
@@ -415,9 +416,9 @@ def test_editor_save_invalid_slug_returns_422_with_error() -> None:
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(
-                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
                 new_callable=AsyncMock,
-                return_value=_make_fake_admin_operator(_TENANT_A),
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
             ),
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
@@ -480,9 +481,9 @@ def test_editor_save_is_tenant_scoped() -> None:
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(
-                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
                 new_callable=AsyncMock,
-                return_value=_make_fake_admin_operator(_TENANT_A),
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
             ),
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
@@ -583,9 +584,9 @@ def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
         # --- Step 1: trigger a 422 ---
         with (
             patch(
-                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
                 new_callable=AsyncMock,
-                return_value=_make_fake_admin_operator(_TENANT_A),
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
             ),
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
@@ -644,9 +645,9 @@ def test_editor_save_422_rerenders_modal_with_editor_anchor_and_csrf() -> None:
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
         with (
             patch(
-                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
                 new_callable=AsyncMock,
-                return_value=_make_fake_admin_operator(_TENANT_A),
+                return_value=(None, _make_fake_admin_operator(_TENANT_A)),
             ),
             patch(
                 "meho_backplane.ui.routes.kb.routes.KbService.create_entry",

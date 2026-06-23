@@ -53,12 +53,13 @@ from __future__ import annotations
 import structlog
 from fastapi import HTTPException, Request, status
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 
 __all__ = ["build_read_operator", "resolve_ui_operator"]
 
@@ -89,27 +90,6 @@ def build_read_operator(session_ctx: UISessionContext) -> Operator:
         tenant_id=session_ctx.tenant_id,
         tenant_role=TenantRole.OPERATOR,
     )
-
-
-async def _load_session_or_401(session_ctx: UISessionContext) -> str:
-    """Load the encrypted session row and return the decrypted access token.
-
-    The session middleware already validated the cookie before this
-    dependency runs; if the row vanished in the gap (revoked / expired
-    while the request was in-flight), raise 401 so the operator's
-    browser knows to re-authenticate. Centralised so the JWT-decode
-    branch of :func:`resolve_ui_operator` stays a one-liner.
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session_ctx.session_id)
-    if decrypted is None:
-        _log.info("ui_memory_session_gone", session_id=str(session_ctx.session_id))
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="ui_session_required",
-        )
-    return decrypted.access_token
 
 
 def _assert_token_matches_session(
@@ -143,17 +123,24 @@ async def resolve_ui_operator(
     """FastAPI dependency: lift the full :class:`Operator` from the BFF session.
 
     Used by every memory write handler (``PATCH`` / ``DELETE``). Reads
-    the encrypted session row, decrypts the access token, and re-runs
-    it through the chassis JWT chain to produce a fully-validated
-    :class:`Operator` carrying :attr:`tenant_role`. Failure modes:
+    the encrypted session row and presents its access token to the
+    chassis JWT chain through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying, to produce a fully-validated :class:`Operator`
+    carrying :attr:`tenant_role`. Failure modes:
 
     * The session middleware should have rejected the request before
       this dependency runs; if the session row vanished between the
       middleware check and now (revoked / expired in the gap), this
       raises ``401`` with ``ui_session_required``.
-    * The decrypted access token failing JWT validation
-      (signature drift, expired, etc.) raises ``401`` with the chassis
-      JWT chain's own ``detail`` code -- propagated unchanged so the
+    * An expired-but-refreshable access token is refreshed once and the
+      write proceeds; a refresh that itself fails raises ``401`` with
+      ``session_expired`` (the BFF error handler maps it to a login
+      redirect for HTML requests).
+    * A non-expiry JWT-validation failure (signature drift, wrong
+      audience, structural break) raises ``401`` with the chassis JWT
+      chain's own ``detail`` code -- propagated unchanged so the
       operator can see the actual reason.
 
     Parameters
@@ -169,10 +156,16 @@ async def resolve_ui_operator(
     """
     if session_ctx is None:
         session_ctx = await require_ui_session(request)
-    access_token = await _load_session_or_401(session_ctx)
+    decrypted = await load_fresh_session(session_ctx.session_id)
+    if decrypted is None:
+        _log.info("ui_memory_session_gone", session_id=str(session_ctx.session_id))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="ui_session_required",
+        )
     settings = get_settings()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
     _assert_token_matches_session(operator, session_ctx)

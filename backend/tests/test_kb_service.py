@@ -278,6 +278,37 @@ async def test_ingest_rejects_directory_outside_root(
 
 
 @pytest.mark.asyncio
+async def test_ingest_dry_run_rejects_directory_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding: AsyncMock,
+) -> None:
+    """``dry_run=True`` does not bypass the ``KB_INGEST_ROOT`` guard.
+
+    The guard runs before the ``dry_run`` flag is consulted, so a
+    dry-run against an out-of-root directory must still be refused --
+    a dry-run that *walked and read* the files would be an
+    information-disclosure hole in its own right (#101 L8 + L14).
+    """
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "secrets"
+    _make_corpus(outside, n=2)
+    monkeypatch.setenv("KB_INGEST_ROOT", str(root))
+    get_settings.cache_clear()
+
+    service = KbService()
+    with pytest.raises(KbIngestRootError):
+        await service.ingest_directory(
+            root / ".." / "secrets",
+            uuid.uuid4(),
+            dry_run=True,
+        )
+
+    assert stub_embedding.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_ingest_rejects_symlink_escaping_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

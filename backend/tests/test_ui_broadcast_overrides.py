@@ -84,6 +84,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests._route_tree_helpers import iter_routes
 
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -121,15 +122,6 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
-
-
-def _iter_routes(routes):  # type: ignore[no-untyped-def]
-    """Recursively yield leaf routes from the FastAPI 0.137+ route tree."""
-    for route in routes:
-        if hasattr(route, "routes"):
-            yield from _iter_routes(route.routes)
-        else:
-            yield route
 
 
 def _build_app() -> FastAPI:
@@ -492,11 +484,11 @@ def test_overrides_route_resolves_before_event() -> None:
     # (path, method) to disambiguate. The GET must bind the overrides
     # list handler (registered before the event router), never the event
     # drawer's ``/ui/broadcast/event/{audit_id}``.
-    # Use _iter_routes to walk the 0.137+ route tree (include_router now
+    # Use iter_routes to walk the 0.137+ route tree (include_router now
     # produces nested _IncludedRouter objects, not a flat list).
     routes = {
         (getattr(route, "path", ""), method): getattr(route, "name", None)
-        for route in _iter_routes(app.routes)
+        for route in iter_routes(app.routes)
         for method in (getattr(route, "methods", None) or set())
         if getattr(route, "path", "").startswith("/ui/broadcast/overrides")
     }
@@ -509,17 +501,11 @@ def test_overrides_route_resolves_before_event() -> None:
 
     # The overrides router is included before the event router in
     # build_router(), so a literal /ui/broadcast/overrides resolves to the
-    # overrides list handler, not the event handler.
-    overrides_idx = next(
-        i
-        for i, route in enumerate(app.routes)
-        if getattr(route, "path", "") == "/ui/broadcast/overrides"
-    )
-    event_idx = next(
-        i
-        for i, route in enumerate(app.routes)
-        if getattr(route, "path", "") == "/ui/broadcast/event/{audit_id}"
-    )
+    # overrides list handler, not the event handler. iter_routes flattens the
+    # 0.137+ tree in registration order, preserving first-match-wins order.
+    ordered_paths = [getattr(route, "path", "") for route in iter_routes(app.routes)]
+    overrides_idx = ordered_paths.index("/ui/broadcast/overrides")
+    event_idx = ordered_paths.index("/ui/broadcast/event/{audit_id}")
     assert overrides_idx < event_idx
 
     # And it actually renders the overrides pane (not the event drawer).

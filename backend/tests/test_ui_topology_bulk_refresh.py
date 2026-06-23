@@ -90,6 +90,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests._route_tree_helpers import iter_routes
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -369,7 +370,9 @@ def test_topology_ui_batch_routes_register_before_node_param() -> None:
     route so the first-match-wins lookup never binds them as a node id.
     """
     router = build_topology_router()
-    paths = [route.path for route in router.routes if hasattr(route, "methods")]
+    # 0.137+ nests included routers; iter_routes flattens the tree in
+    # registration order so the first-match-wins ordering check still holds.
+    paths = [route.path for route in iter_routes(router.routes) if hasattr(route, "methods")]
     bulk_idx = paths.index("/ui/topology/edges/bulk")
     refresh_idx = paths.index("/ui/topology/refresh/{target_name}")
     node_idx = paths.index("/ui/topology/node/{node_id}")
@@ -379,16 +382,14 @@ def test_topology_ui_batch_routes_register_before_node_param() -> None:
     # Resolve through a real app: the routes must be registered with their
     # expected methods (the role gate fires inside the handlers, not here).
     app = _build_app()
-    openapi_paths = app.openapi()["paths"]
-    assert "get" in openapi_paths.get("/ui/topology/edges/bulk", {}), (
-        "GET /ui/topology/edges/bulk not registered"
-    )
-    assert "post" in openapi_paths.get("/ui/topology/edges/bulk", {}), (
-        "POST /ui/topology/edges/bulk not registered"
-    )
-    assert "post" in openapi_paths.get("/ui/topology/refresh/{target_name}", {}), (
-        "POST /ui/topology/refresh/{target_name} not registered"
-    )
+    by_path: dict[str, set[str]] = {}
+    for route in iter_routes(app.routes):
+        path = getattr(route, "path", None)
+        if path in ("/ui/topology/edges/bulk", "/ui/topology/refresh/{target_name}"):
+            by_path.setdefault(path, set()).update(route.methods)  # type: ignore[attr-defined]
+    assert "GET" in by_path["/ui/topology/edges/bulk"]
+    assert "POST" in by_path["/ui/topology/edges/bulk"]
+    assert "POST" in by_path["/ui/topology/refresh/{target_name}"]
 
 
 # ---------------------------------------------------------------------------

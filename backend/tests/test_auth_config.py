@@ -179,9 +179,7 @@ def test_auth_config_route_is_registered_in_main_app() -> None:
     typo in the prefix would surface as a mismatch.
     """
     openapi_paths = app.openapi()["paths"]
-    assert "/api/v1/auth-config" in openapi_paths, (
-        "expected /api/v1/auth-config in OpenAPI paths"
-    )
+    assert "/api/v1/auth-config" in openapi_paths, "expected /api/v1/auth-config in OpenAPI paths"
     assert "get" in openapi_paths["/api/v1/auth-config"], (
         "expected GET /api/v1/auth-config in OpenAPI paths"
     )

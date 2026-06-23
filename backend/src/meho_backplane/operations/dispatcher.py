@@ -1532,6 +1532,7 @@ async def dispatch(
     )
     if descriptor is None:
         known_op_count = await count_known_ops(
+            tenant_id=operator.tenant_id,
             product=product,
             version=version,
             impl_id=impl_id,

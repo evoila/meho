@@ -33,5 +33,13 @@
 <link rel="preload" href="/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
 {# Vendored JS — pinned SHA256 in static/src/vendor/VENDOR.md. #}
 <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+{# App-shell session-expiry safety net (#122). Registers a single global
+   ``htmx:beforeOnLoad`` listener on <body> that surfaces a recovery banner
+   on any ``401`` from an htmx request (a session-expiry that would otherwise
+   present as a silently dead control). ``defer`` after ``htmx.min.js`` so the
+   listener attaches before the first htmx request can resolve, and after the
+   document is parsed so ``document.body`` exists. Acts ONLY on 401 -- non-auth
+   responses (incl. 422 form-validation swaps) flow through untouched. #}
+<script src="/ui/static/src/app/session-expiry.js" defer></script>
 <script src="/ui/static/src/vendor/sse.min.js" defer></script>
 <script src="/ui/static/src/vendor/alpine.min.js" defer></script>

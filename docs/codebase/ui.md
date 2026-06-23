@@ -225,6 +225,33 @@ on that id) are byte-identical before and after a rotation, so
 already-rendered pages and their forms keep working -- the
 cookie-rotation desync class #1706 diagnosed cannot occur here.
 
+Client-side session-expiry safety net (#122): the server-side handler
+above only converts a `401 session_expired` to a login redirect when the
+request carries `Accept: text/html` (a full-page navigation). A
+background htmx XHR (the approvals badge poll, a form submit) sends
+`Accept: */*`, so it gets the JSON 401 body instead -- and htmx 2.0.9's
+default `responseHandling` classifies `[45]..` as
+`{swap: false, error: true}`, so that 401 is a silent no-op: the target
+container stays empty and the operator faces a dead control. The
+app-shell script `static/src/app/session-expiry.js` closes that gap with
+a single global `htmx:beforeOnLoad` listener on `<body>` (loaded from
+`_head_assets.html` after `htmx.min.js`). htmx fires `htmx:beforeOnLoad`
+for every response before any swap or redirect-header handling, and
+`preventDefault()` there aborts htmx's entire response processing for
+that request. The handler acts **only** on `xhr.status === 401`: it
+cancels the dead swap and reveals a fixed top banner ("Your session
+expired -- please sign in again") with a link to
+`/ui/auth/login?return_to=<encoded current path>` (matching the server
+handler's `quote(full_path, safe="")` contract, accepted by the login
+route's `_safe_return_to`). Every other status -- a `2xx` swap, a `422`
+form-validation re-render, a `403` CSRF error a form's
+`hx-on::response-error` handles -- returns early and flows through
+untouched, so legitimate non-auth responses are never hijacked. The
+banner is created once and reused, so a burst of failing background
+polls cannot stack duplicates. This is the client-side recovery path
+(Axis B); the refresh seam above reduces how *often* a 401 occurs
+(Axis A).
+
 Logout: revoke the row, clear the cookie, 302 to Keycloak's
 `end_session_endpoint` with `client_id` + `post_logout_redirect_uri`
 pointing back to `/ui/auth/login`. The IdP-side hop is best-effort

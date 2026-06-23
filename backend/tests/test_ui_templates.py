@@ -44,6 +44,8 @@ _EXPECTED_SURFACE_HREFS = (
     "/ui/topology",
     "/ui/connectors",
     "/ui/memory",
+    # Agents console (G10.8-T1 #1825) -- a top-level sidebar surface.
+    "/ui/agents",
 )
 
 
@@ -301,6 +303,12 @@ _INJECTED_DIALOG_TEMPLATES = (
     "connectors/_create_modal.html",
     "connectors/_edit_modal.html",
     "connectors/_delete_modal.html",
+    "agents/_create_modal.html",
+    "agents/_edit_modal.html",
+    "agents/_delete_modal.html",
+    "agents/grants/_create_modal.html",
+    "agents/grants/_elevate_modal.html",
+    "agents/grants/_revoke_modal.html",
 )
 
 #: Re-find every opening ``<dialog ...>`` tag in a template source. Matches the
@@ -397,3 +405,103 @@ def test_base_template_modal_controller_renders_in_html(ui_env: Environment) -> 
     """The controller ``<script>`` survives a real render of ``base.html``."""
     html = ui_env.get_template("base.html").render(ready=True)
     assert '<script src="/ui/static/src/app/modal-dialogs.js" defer></script>' in html
+
+
+# ---------------------------------------------------------------------------
+# Session-expiry safety net (#122)
+#
+# htmx 2.0.9 classifies a 401 as ``{swap: false, error: true}`` by default,
+# so a session-expiry on an ``hx-*`` request is a silent no-op -- a dead
+# control with no operator signal. The app-shell ``session-expiry.js`` handler
+# is the client-side recovery path: a single global ``htmx:beforeOnLoad``
+# listener that, on a 401 only, ``preventDefault()``s the dead swap and
+# surfaces a banner with a login link carrying ``return_to=<current path>``.
+# No JS test runner ships in this repo (no ``package.json`` under the UI
+# package); these tests assert the wiring (the deferred script tag, loaded
+# after ``htmx.min.js``) and the served handler's load-bearing contract by
+# inspecting its source -- mirroring how ``test_ui_broadcast_feed.py`` pins
+# the served ``broadcast-feed.js`` content.
+# ---------------------------------------------------------------------------
+
+
+def test_base_template_loads_session_expiry_handler_after_htmx() -> None:
+    """``_head_assets.html`` loads the 401 handler deferred, after ``htmx.min.js``.
+
+    AC #4: the handler is registered once globally and loads via the shared
+    head-asset block after the htmx bundle, so its ``htmx:beforeOnLoad``
+    listener is attached before the first htmx request can resolve. ``defer``
+    also guarantees ``document.body`` exists when the listener registers.
+    """
+    source = (templates_dir() / "_head_assets.html").read_text(encoding="utf-8")
+    assert '<script src="/ui/static/src/app/session-expiry.js" defer></script>' in source, (
+        "_head_assets.html must load the session-expiry handler (deferred)"
+    )
+    htmx_pos = source.index("/ui/static/src/vendor/htmx.min.js")
+    handler_pos = source.index("/ui/static/src/app/session-expiry.js")
+    assert htmx_pos < handler_pos, (
+        "the session-expiry handler must load AFTER htmx.min.js so the "
+        "htmx:beforeOnLoad listener attaches before the first request resolves"
+    )
+
+
+def test_session_expiry_handler_renders_once_in_base_html(ui_env: Environment) -> None:
+    """The handler ``<script>`` survives a real render and is included exactly once.
+
+    AC #4: registered once globally, not duplicated per template. ``base.html``
+    includes ``_head_assets.html`` exactly once, so the tag appears once.
+    """
+    html = ui_env.get_template("base.html").render(ready=True)
+    assert html.count("/ui/static/src/app/session-expiry.js") == 1
+
+
+def test_session_expiry_handler_source_carries_401_contract() -> None:
+    """The served handler embeds the load-bearing 401-only safety-net logic.
+
+    Asserts the grep-able contract issue #122 AC #3 pins, plus the behavioural
+    seams a JS unit test would otherwise drive:
+
+    * AC #1 -- on a 401 it surfaces a recovery path: ``preventDefault()`` the
+      dead swap + show a banner + a login link with ``return_to=<path>``.
+    * AC #2 -- it acts ONLY on 401: a guard returns early for every other
+      status, so a 422 form-validation re-render (and any non-auth response)
+      is never intercepted.
+    * AC #4 -- registered once on ``htmx:beforeOnLoad`` (the seam htmx fires
+      for every response before any swap; ``preventDefault()`` there aborts
+      htmx's whole response processing).
+    """
+    handler = static_src_dir() / "app" / "session-expiry.js"
+    assert handler.is_file(), f"session-expiry handler missing: {handler}"
+    source = handler.read_text(encoding="utf-8")
+
+    # AC #4 -- the global seam, registered on <body>.
+    assert "htmx:beforeOnLoad" in source
+    assert 'addEventListener("htmx:beforeOnLoad"' in source
+
+    # AC #2 -- 401-only: an early-return guard keyed on the xhr status, so a
+    # 422 (or any other status) flows through untouched. Asserting both the
+    # status read and the not-401 short-circuit pins the "don't hijack 422"
+    # contract.
+    assert "event.detail.xhr" in source
+    assert "xhr.status !== 401" in source
+
+    # AC #1 -- the recovery path: cancel the dead swap, show the banner, and
+    # link to the login route with the current path as ``return_to``.
+    assert "event.preventDefault()" in source
+    assert "/ui/auth/login?return_to=" in source
+    assert "encodeURIComponent" in source
+    assert "Your session expired" in source
+
+
+def test_session_expiry_handler_served_as_static_asset() -> None:
+    """The handler is reachable under the ``/ui/static/src/app/`` mount path.
+
+    The file lives where the ``StaticFiles`` mount serves
+    ``/ui/static/src/app/session-expiry.js`` from, so the deferred script tag
+    in ``_head_assets.html`` resolves at runtime (same posture as the other
+    app-shell scripts).
+    """
+    handler = static_src_dir() / "app" / "session-expiry.js"
+    assert handler.is_file()
+    # SPDX header posture matches the sibling app-shell scripts.
+    source = handler.read_text(encoding="utf-8")
+    assert "SPDX-License-Identifier: Apache-2.0" in source

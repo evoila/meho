@@ -181,8 +181,8 @@ class VcfFleetConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"fleet-rest-9.0"`` -> (``"vcf-fleet"``, ``"9.0"``, ``"fleet-rest"``).
-    product = "vcf-fleet"
+    # ``"fleet-rest-9.0"`` -> (``"fleet"``, ``"9.0"``, ``"fleet-rest"``).
+    product = "fleet"
     version = "9.0"
     impl_id = "fleet-rest"
     supported_version_range = ">=9.0,<10.0"
@@ -197,7 +197,7 @@ class VcfFleetConnector(HttpConnector):
         loader: VcfFleetCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
-        self._creds: CredentialsCache = CredentialsCache(loader, product_label="vcf-fleet")
+        self._creds: CredentialsCache = CredentialsCache(loader, product_label="fleet")
 
     async def auth_headers(self, target: VcfFleetTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
@@ -281,7 +281,7 @@ class VcfFleetConnector(HttpConnector):
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",
-                product="vcf-fleet",
+                product="fleet",
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=_FLEET_PROBE_METHOD,
@@ -295,7 +295,7 @@ class VcfFleetConnector(HttpConnector):
         datacenter_count = len(payload) if isinstance(payload, list) else None
         return FingerprintResult(
             vendor="vmware",
-            product="vcf-fleet",
+            product="fleet",
             # Carry the LCM API version into `version` as the only
             # version string Fleet exposes via a working endpoint in
             # 9.0; the product version itself stays None (operators
@@ -350,7 +350,7 @@ class VcfFleetConnector(HttpConnector):
 
         The connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"fleet-rest-9.0"`` → (product=``"vcf-fleet"``,
+        ``"fleet-rest-9.0"`` → (product=``"fleet"``,
         version=``"9.0"``, impl_id=``"fleet-rest"``).
         """
         from uuid import UUID

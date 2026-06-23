@@ -24,7 +24,7 @@ G0.7 spec ingestion of the vROps `/suite-api` OpenAPI spec (G3.6-T2
 through `HttpConnector._request_json` by the G0.6 `dispatch_ingested`
 branch. The connector class
 [`VcfOperationsConnector`](../../backend/src/meho_backplane/connectors/vcf_operations/connector.py)
-registers under the `(product="vcf-operations", version="9.0",
+registers under the `(product="vrops", version="9.0",
 impl_id="vrops-rest")` registry triple — the connector id
 `vrops-rest-9.0`. Auth is HTTP Basic on every request (vROps'
 `/suite-api/api/*` surface is stateless — no session token, no 401
@@ -80,7 +80,7 @@ a separate data path and is **not** mirrored on the MCP surface
   Basic auth is stateless on vROps — no session token to refresh.
 - **A registered vROps target.** The CLI verbs take `--target <slug>`
   (e.g. `--target rdc-vrops`). The target carries
-  `product="vcf-operations"`, `host` (the vROps FQDN — no `https://`),
+  `product="vrops"`, `host` (the vROps FQDN — no `https://`),
   `port` (default 443), `secret_ref` (the Vault path to the
   credentials), and `auth_model="shared_service_account"`. Optional
   `target.auth_source` routes the Basic challenge to a non-local vROps
@@ -130,7 +130,7 @@ verb in v0.2 — `import` is the CLI's only write path):
 # rdc-vrops.yaml
 targets:
   - name: rdc-vrops
-    product: vcf-operations
+    product: vrops
     host: vrops-mgr.rdc.evoila.io
     port: 443
     secret_ref: kv/data/vcf-operations/rdc-vrops
@@ -161,8 +161,8 @@ are mutually exclusive — see the [per-target TLS-trust guide](../../deploy/val
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-vrops --json | jq '{product, version, reachable}'
-# expected: {"product": "vcf-operations", "version": "9.0.0.…", "reachable": true}
+meho targets probe rdc-vrops --json | jq '{product, version, reachable}'
+# expected: {"product": "vrops", "version": "9.0.0.…", "reachable": true}
 ```
 
 ## Quick-start

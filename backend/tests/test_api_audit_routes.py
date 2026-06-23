@@ -700,7 +700,8 @@ async def test_replay_returns_seeded_multi_level_tree(client: TestClient) -> Non
     root, child, grandchild = await _seed_session_tree(_TENANT_A, session_id)
 
     key = make_rsa_keypair("kid-A")
-    token = _token(key, tenant_id=_TENANT_A)
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.get(
@@ -730,7 +731,9 @@ async def test_replay_tenant_isolation_foreign_session_is_empty(client: TestClie
 
     key = make_rsa_keypair("kid-A")
     # Caller is tenant B requesting the session id seeded under tenant A.
-    token = _token(key, tenant_id=_TENANT_B)
+    # #1843: cross-session replay is tenant_admin-gated; the cross-tenant
+    # isolation guard is orthogonal and must still return empty (not A's rows).
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_B)
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.get(
@@ -750,7 +753,8 @@ async def test_replay_unknown_session_returns_empty_not_404(client: TestClient) 
     """An unknown session id yields ``root=[]`` / ``row_count=0`` — not 404."""
     session_id = uuid.uuid4()
     key = make_rsa_keypair("kid-A")
-    token = _token(key, tenant_id=_TENANT_A)
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.get(
@@ -775,7 +779,8 @@ def test_replay_over_cap_returns_413_without_building_tree(client: TestClient) -
     """
     session_id = uuid.uuid4()
     key = make_rsa_keypair("kid-A")
-    token = _token(key, tenant_id=_TENANT_A)
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
     spy_replay = AsyncMock(return_value=[])
     over_cap_count = AsyncMock(return_value=10_001)
     with (
@@ -798,7 +803,8 @@ def test_replay_at_cap_boundary_returns_200(client: TestClient) -> None:
     """A session of exactly 10k rows is allowed — the cap is strictly ``>``."""
     session_id = uuid.uuid4()
     key = make_rsa_keypair("kid-A")
-    token = _token(key, tenant_id=_TENANT_A)
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
     spy_replay = AsyncMock(return_value=[])
     at_cap_count = AsyncMock(return_value=10_000)
     with (
@@ -818,7 +824,11 @@ def test_replay_at_cap_boundary_returns_200(client: TestClient) -> None:
 
 
 def test_replay_read_only_role_returns_403(client: TestClient) -> None:
-    """AC4: ``read_only`` is below the operator gate — 403; substrate untouched."""
+    """AC4: ``read_only`` is below the cross-session replay gate — 403; substrate untouched.
+
+    #1843 lifted this route to ``tenant_admin``, so ``read_only`` remains
+    403 (now two ranks below the gate rather than one).
+    """
     key = make_rsa_keypair("kid-A")
     token = _token(key, role=TenantRole.READ_ONLY)
     spy_replay = AsyncMock(return_value=[])
@@ -835,19 +845,46 @@ def test_replay_read_only_role_returns_403(client: TestClient) -> None:
     spy_replay.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_replay_operator_and_tenant_admin_roles_return_200(client: TestClient) -> None:
-    """AC4: both ``operator`` and ``tenant_admin`` clear the gate."""
+def test_replay_operator_role_returns_403(client: TestClient) -> None:
+    """#1843: cross-session replay is ``tenant_admin``-only — ``operator`` → 403.
+
+    The replay route takes an *arbitrary* ``session_id`` and reconstructs
+    another principal's full session trace, so it gates one rank above the
+    flat / self-scoped routes (which stay ``operator``). This matches the
+    MCP ``meho.audit.replay`` tool and ``docs/cross-repo/audit-replay.md``.
+    The substrate is never reached — RBAC rejects before dispatch.
+    """
     key = make_rsa_keypair("kid-A")
-    for role in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
-        token = _token(key, role=role, tenant_id=_TENANT_A)
-        with respx.mock as r:
-            mock_discovery_and_jwks(r, public_jwks(key))
-            resp = client.get(
-                f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        assert resp.status_code == 200, role
+    token = _token(key, role=TenantRole.OPERATOR, tenant_id=_TENANT_A)
+    spy_replay = AsyncMock(return_value=[])
+    spy_count = AsyncMock(return_value=0)
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.replay_session", new=spy_replay),
+        patch("meho_backplane.api.v1.audit._count_session_rows", new=spy_count),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 403
+    spy_replay.assert_not_awaited()
+    spy_count.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replay_tenant_admin_role_returns_200(client: TestClient) -> None:
+    """#1843: ``tenant_admin`` clears the cross-session replay gate (operator no longer does)."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
 
 
 def test_replay_binds_replay_op_id_and_aggregate_only_class(
@@ -862,7 +899,8 @@ def test_replay_binds_replay_op_id_and_aggregate_only_class(
     structlog lines (full aggregate-only payload assertion is T7).
     """
     key = make_rsa_keypair("kid-A")
-    token = _token(key, tenant_id=_TENANT_A)
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.get(

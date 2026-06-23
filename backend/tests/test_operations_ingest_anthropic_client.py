@@ -96,11 +96,18 @@ def test_factory_accepts_bare_model_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_generate_json_calls_messages_api_with_mapped_args() -> None:
-    """``generate_json`` maps the Protocol kwargs onto ``messages.create``."""
+    """``generate_json`` maps the Protocol kwargs onto ``messages.create``.
+
+    The grouping path passes no ``response_format``, so the request must
+    carry the exact kwarg set it always has — no ``output_config`` member
+    (#1999: the structured-output param defaults off so this caller is
+    byte-for-byte unchanged).
+    """
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(
         return_value=SimpleNamespace(
             content=[TextBlock(type="text", text="grouped-json", citations=None)],
+            stop_reason="end_turn",
         ),
     )
     adapter = AnthropicMessagesLlmClient(client=mock_client, model="claude-sonnet-4-6")
@@ -132,6 +139,7 @@ async def test_generate_json_concatenates_only_text_blocks() -> None:
                 SimpleNamespace(type="thinking", text="[ignored]"),
                 TextBlock(type="text", text="[part-2]", citations=None),
             ],
+            stop_reason="end_turn",
         ),
     )
     adapter = AnthropicMessagesLlmClient(client=mock_client, model="claude-sonnet-4-6")
@@ -149,7 +157,7 @@ async def test_generate_json_empty_content_returns_empty_string() -> None:
     """No text blocks -> "" (the T3 parser turns that into LlmOutputInvalid)."""
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(
-        return_value=SimpleNamespace(content=[]),
+        return_value=SimpleNamespace(content=[], stop_reason="end_turn"),
     )
     adapter = AnthropicMessagesLlmClient(client=mock_client, model="claude-sonnet-4-6")
 
@@ -160,6 +168,66 @@ async def test_generate_json_empty_content_returns_empty_string() -> None:
     )
 
     assert result == ""
+
+
+async def test_generate_structured_json_threads_stop_reason_and_text() -> None:
+    """``generate_structured_json`` returns text + ``stop_reason`` (#1999).
+
+    Without a ``response_format`` the request is identical to the grouping
+    call (no ``output_config`` kwarg), but the richer result carries the
+    ``stop_reason`` the answer legs need to split a truncation fault.
+    """
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[TextBlock(type="text", text='{"answer": "x"}', citations=None)],
+            stop_reason="max_tokens",
+        ),
+    )
+    adapter = AnthropicMessagesLlmClient(client=mock_client, model="claude-sonnet-4-6")
+
+    result = await adapter.generate_structured_json(
+        system_prompt="s",
+        user_prompt="u",
+        max_output_tokens=2048,
+    )
+
+    assert result.text == '{"answer": "x"}'
+    assert result.stop_reason == "max_tokens"
+    mock_client.messages.create.assert_awaited_once_with(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        system="s",
+        messages=[{"role": "user", "content": "u"}],
+    )
+
+
+async def test_generate_structured_json_passes_output_config_when_schema_given() -> None:
+    """A ``response_format`` is forwarded as the Messages-API ``output_config`` (#1999)."""
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[TextBlock(type="text", text='{"answer": "x"}', citations=None)],
+            stop_reason="end_turn",
+        ),
+    )
+    adapter = AnthropicMessagesLlmClient(client=mock_client, model="claude-sonnet-4-6")
+    schema = {"type": "json_schema", "schema": {"type": "object"}}
+
+    await adapter.generate_structured_json(
+        system_prompt="s",
+        user_prompt="u",
+        max_output_tokens=2048,
+        response_format=schema,
+    )
+
+    mock_client.messages.create.assert_awaited_once_with(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        system="s",
+        messages=[{"role": "user", "content": "u"}],
+        output_config={"format": schema},
+    )
 
 
 # ---------------------------------------------------------------------------

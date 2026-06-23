@@ -1,0 +1,221 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent run transcript fragment (Initiative #1824 Task #1829). Returned
+  by ``POST /ui/agents/{name}/run`` on a successful authorise; swapped
+  into ``#agent-run-transcript``. Opens the cookie-authed SSE bridge and
+  renders the run's frames live.
+
+  Live-streaming model (mirrors broadcast/_feed.html)
+  ---------------------------------------------------
+  The HTMX ``sse`` extension owns the ``EventSource`` pointed at the
+  bridge URL (``/ui/agents/{name}/run/stream?token=...``). The bridge
+  proxies ``invoker.stream_events``, emitting one frame per event under a
+  named ``event:`` (``turn`` / ``tool_call`` / ``tool_result`` / ``final``
+  / ``error``). One ``sse-swap`` per kind subscribes to each; the
+  ``agentRunConsole`` Alpine controller hooks ``htmx:sse-before-message``,
+  ``preventDefault()``s the raw swap (so a frame field containing markup
+  is never parsed into live DOM -- the same injection class the broadcast
+  surface closed in PR #1044), parses the JSON, and appends a typed
+  transcript entry rendered via ``x-text`` (inert).
+
+  SSE buffering #1389 is fixed + the bridge sets ``X-Accel-Buffering: no``,
+  so frames flush per-event and the transcript paints turn-by-turn rather
+  than only at completion.
+
+  No Stop affordance: closing the page / navigating away closes the
+  EventSource (the controller does not cancel the run). T9 #1833 adds the
+  Stop button over the T8 #1828 cancel backend.
+
+  XSS hardening: ``x-data`` is SINGLE-quoted and every interpolated value
+  rides through ``| tojson`` (which escapes ``'`` to ``'`` and never
+  emits a raw single quote), so a crafted token / name cannot break out
+  of the attribute -- the same posture broadcast/_feed.html documents for
+  its reflected ``op_id`` filter.
+
+  Stop button (T9 #1833): the cancel POST targets the cookie-authed BFF
+  proxy ``POST /ui/agents/{name}/run/{run_id}/cancel``. The run_id is not
+  known at render time (it lands on the first SSE frame), so the template
+  hands the controller a URL with a ``__RUN_ID__`` placeholder it
+  substitutes client-side. The CSRF token is threaded in explicitly --
+  the page-level ``hx-headers`` is HTMX-only and is NOT inherited by the
+  Alpine ``fetch`` the Stop button issues.
+-#}
+{% from "_icons.html" import icon %}
+<div
+  id="agent-run-transcript-live"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  x-data='agentRunConsole({
+    streamUrl: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode)) | tojson }},
+    agentName: {{ agent_name | tojson }},
+    csrfToken: {{ csrf_token | tojson }},
+    cancelUrlTemplate: {{ ("/ui/agents/" ~ (agent_name | urlencode) ~ "/run/__RUN_ID__/cancel") | tojson }}
+  })'
+>
+  {# ---------- SSE sink ----------
+     Hidden element the sse extension binds the EventSource to. One
+     ``sse-swap`` per run-event kind; the controller routes each through
+     ``onFrame`` after cancelling the raw swap. -#}
+  <div
+    hx-ext="sse"
+    sse-connect="{{ "/ui/agents/" ~ (agent_name | urlencode) ~ "/run/stream?token=" ~ (run_token | urlencode) }}"
+    sse-swap="turn,tool_call,tool_result,final,error"
+    class="hidden"
+    aria-hidden="true"
+    x-on:htmx:sse-before-message="onFrame($event)"
+    x-on:htmx:sse-open="connected = true"
+    x-on:htmx:sse-error="onStreamError($event)"
+  ></div>
+
+  <div class="card-body p-4 space-y-3">
+    {# ---------- Status bar -- connection + run status pill + run_id ---------- #}
+    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+      <span class="flex items-center gap-1.5" aria-live="polite">
+        <span
+          class="inline-block h-2 w-2 rounded-full"
+          :class="statusDotClass()"
+          aria-hidden="true"
+        ></span>
+        <span x-text="statusLabel()" data-role="status-label"></span>
+      </span>
+      <span class="flex items-center gap-2">
+        <template x-if="runId">
+          <a
+            class="link link-hover font-mono opacity-80"
+            :href="'/ui/agents/runs/' + runId"
+            x-text="'run ' + runId.slice(0, 8)"
+            data-role="run-link"
+          ></a>
+        </template>
+        <span
+          x-show="finalStatus"
+          class="badge badge-sm"
+          :class="finalBadgeClass()"
+          x-text="finalStatus"
+          data-role="final-pill"
+        ></span>
+        {# Cancelled pill -- the operator-stop terminal (muted/ghost),
+           distinct from the success/failure final pill above. #}
+        <span
+          x-show="cancelled"
+          class="badge badge-sm badge-ghost"
+          data-role="cancelled-pill"
+        >cancelled</span>
+        {# ---------- Stop button ----------
+           Shown only while the run is live (controller ``canStop()``).
+           Destructive + terminal, so it opens a native <dialog> confirm
+           rather than firing the cancel directly. The token is carried by
+           the controller's fetch, not the button, so no CSRF wiring is
+           needed on the element itself. -#}
+        <button
+          type="button"
+          x-show="canStop()"
+          class="btn btn-xs btn-error btn-outline"
+          data-action="stop"
+          @click="$refs.stopConfirm.showModal()"
+          :disabled="cancelling"
+        >
+          {{ icon("circle-stop", class="size-3.5") }}
+          <span x-text="cancelling ? 'Stopping…' : 'Stop'"></span>
+        </button>
+      </span>
+    </div>
+
+    {# ---------- Cancel error (404 / 403) ----------
+       A 409 (already terminal) is not surfaced here -- it transitions the
+       console to cancelled silently. Only an actionable failure shows. -#}
+    <div
+      x-show="cancelError"
+      role="alert"
+      class="alert alert-warning text-xs"
+      data-role="cancel-error"
+    >
+      <span x-text="cancelError"></span>
+    </div>
+
+    {# ---------- Stop confirm dialog ----------
+       Native <dialog> (the console's destructive-action confirm pattern).
+       The run id is interpolated client-side so the operator sees exactly
+       which run halts. The agent stops after its current step (the cancel
+       is observed on the next turn boundary, not a synchronous tear-down). -#}
+    <dialog x-ref="stopConfirm" class="modal" data-role="stop-confirm">
+      <div class="modal-box max-w-md">
+        <h3 class="text-base font-semibold">Stop this run?</h3>
+        <p class="py-3 text-sm opacity-80">
+          Stop run
+          <span class="font-mono" x-text="runId ? runId.slice(0, 8) : ''"></span>?
+          The agent halts after its current step; partial work is kept.
+        </p>
+        <div class="modal-action">
+          <form method="dialog" class="flex gap-2">
+            <button class="btn btn-sm btn-ghost" data-action="stop-cancel">Keep running</button>
+            <button
+              class="btn btn-sm btn-error"
+              data-action="stop-confirm"
+              @click="cancel()"
+            >Stop run</button>
+          </form>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button aria-label="Close">close</button>
+      </form>
+    </dialog>
+
+    {# ---------- awaiting_approval banner ----------
+       A run that hits awaiting_approval pauses for an operator decision;
+       deep-link to the approvals console (T7) rather than re-implementing
+       decide here. Shown only when the controller observes the pause. -#}
+    <div
+      x-show="awaitingApproval"
+      role="alert"
+      class="alert alert-info text-sm"
+      data-role="awaiting-approval"
+    >
+      {{ icon("bell", class="size-4") }}
+      <span>This run is paused awaiting approval.
+        <a class="link font-medium" href="/ui/approvals">Open the approvals queue</a>
+        to decide.</span>
+    </div>
+
+    {# ---------- Transcript ----------
+       Newest-last (chronological): turn boundaries, tool calls + args,
+       tool results, the final output, and errors render as typed rows.
+       All dynamic text rides ``x-text`` so a frame field is inert. -#}
+    <ol
+      class="space-y-2"
+      role="list"
+      aria-label="Agent run transcript"
+      aria-live="polite"
+      data-role="transcript"
+    >
+      <template x-for="(entry, idx) in entries" :key="idx">
+        <li class="rounded-box border border-base-300 bg-base-200 p-2 text-xs">
+          <div class="flex items-center gap-2">
+            <span
+              class="badge badge-xs"
+              :class="kindBadgeClass(entry.kind)"
+              x-text="entry.kind"
+              data-role="entry-kind"
+            ></span>
+            <span class="font-mono opacity-80" x-show="entry.title" x-text="entry.title"></span>
+          </div>
+          <pre
+            x-show="entry.body"
+            class="mt-1 whitespace-pre-wrap break-words font-mono opacity-90"
+            x-text="entry.body"
+          ></pre>
+        </li>
+      </template>
+    </ol>
+
+    <p
+      x-show="entries.length === 0 && !finalStatus"
+      class="px-1 py-4 text-center opacity-60 text-xs"
+      data-state="streaming"
+    >
+      Waiting for the agent's first turn…
+    </p>
+  </div>
+</div>

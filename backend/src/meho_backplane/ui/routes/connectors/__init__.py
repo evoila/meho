@@ -70,8 +70,12 @@ from fastapi import APIRouter
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
 from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
+from meho_backplane.ui.routes.connectors.ingest_router import build_ingest_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
+from meho_backplane.ui.routes.connectors.registry_actions import build_registry_actions_router
+from meho_backplane.ui.routes.connectors.registry_list import build_registry_list_router
+from meho_backplane.ui.routes.connectors.review_router import build_review_router
 
 __all__ = ["build_router"]
 
@@ -96,7 +100,34 @@ def build_router() -> APIRouter:
     reason -- its literal ``/ui/connectors/import`` /
     ``/ui/connectors/import/confirm`` routes must win the first-match
     lookup over ``GET /ui/connectors/{name}`` (otherwise ``"import"``
-    binds to ``name``). The probe route's path is fully literal
+    binds to ``name``). The G10.13-T1 (#1885) registry routers are
+    included for the same reason -- the literal ``/ui/connectors/registry``
+    list route and the literal-suffixed per-row action routes
+    (``/ui/connectors/registry/{connector_id}/enable`` etc.) must win the
+    first-match-wins lookup over ``GET /ui/connectors/{name}`` (otherwise
+    ``"registry"`` binds to ``name`` and the registry list 404s through
+    the detail handler). The G10.13-T2 (#1886) ingest router is included
+    **before** the registry-actions router (and the detail router) for the
+    same reason -- its three literal ``/ui/connectors/registry/ingest``
+    routes (the modal ``GET``/submit ``POST`` + the
+    ``/ingest/jobs/{job_id}`` poll ``GET``) must win the first-match-wins
+    lookup over both the ``/ui/connectors/registry/{connector_id}/...``
+    param routes (otherwise ``"ingest"`` binds to ``connector_id``) and
+    the ``GET /ui/connectors/{name}`` detail catch-all. The G10.13-T3
+    (#1887) review router is included for the same reason -- its three
+    routes (``GET /ui/connectors/registry/{connector_id}/review`` +
+    ``.../review/groups/{group_key}`` + the per-op
+    ``PATCH .../operations/{op_id:path}``) must win the first-match-wins
+    lookup over ``GET /ui/connectors/{name}`` (otherwise ``"registry"``
+    binds to ``name``). Each review route carries a literal segment after
+    ``{connector_id}`` (``/review`` or ``/operations``) so it is
+    unambiguous against the registry-actions ``.../{connector_id}/enable``
+    siblings, and the per-op ``PATCH`` is further method-distinct; the
+    ``{op_id:path}`` converter on the per-op route is the only ``:path``
+    param in the connectors surface -- the slash-containing natural key
+    ``f"{method}:{path}"`` round-trips intact, whereas ``connector_id``
+    and ``group_key`` are slash-free and use plain string params. The
+    probe route's path is fully literal
     (``/ui/connectors/{name}/probe``) so the ``POST`` verb plus the
     extra ``/probe`` segment makes it unambiguous regardless of order;
     we still include it last for the same readability convention the
@@ -108,6 +139,10 @@ def build_router() -> APIRouter:
     router.include_router(build_list_router())
     router.include_router(build_forms_router())
     router.include_router(build_import_router())
+    router.include_router(build_registry_list_router())
+    router.include_router(build_ingest_router())
+    router.include_router(build_registry_actions_router())
+    router.include_router(build_review_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())
     return router

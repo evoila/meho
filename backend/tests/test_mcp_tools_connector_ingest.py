@@ -55,6 +55,7 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.mcp.tools.connector_ingest as ci_mod
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     GroupingResult,
@@ -449,6 +450,62 @@ async def test_inline_uncovered_version_maps_to_invalid_params(
     assert data is not None
     assert data["product"] == "t9-vmware"
     assert data["version"] == "7.0"
+
+
+async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> None:
+    """The MCP ingest tool rejects a divergent product whose impl_id is hand-coded.
+
+    G0.27 / T3 (#1817) — the hole #1851 closes. The
+    ``meho.connector.ingest`` tool calls
+    :meth:`IngestionPipelineService.ingest` directly, never the REST 422
+    guard. Before #1851, ``--product vcf-logs --impl-id vrli-rest`` (where
+    ``VcfLogsConnector`` is registered under the canonical ``vrli``)
+    persisted rows under ``vcf-logs`` with no exception: the auto-register
+    deferral branch returns ``False`` without reaching
+    ``register_connector_v2``'s #1816 hard-fail. Moving the round-trip
+    enforcement into the service layer makes this tool fail closed —
+    surfacing the divergence as a structured JSON-RPC ``-32602`` (an
+    actionable agent-facing error) instead of a silent non-dispatchable
+    shadow row.
+
+    Drives the **real** ``_ingest_handler`` (no service stub) so the guard
+    is exercised on the production path the MCP tool actually takes; the
+    guard fires before any spec fetch or DB write, so no DB is needed.
+    """
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+
+    # Register the hand-coded class only if the eager-import / a prior
+    # test in this process hasn't already placed it (the autouse registry
+    # isolation snapshots/restores ``_REGISTRY_V2`` contents, so the key
+    # may already be present) — re-registering the same triple raises.
+    if ("vrli", "9.0", "vrli-rest") not in all_connectors_v2():
+        register_connector_v2(
+            product="vrli",
+            version="9.0",
+            impl_id="vrli-rest",
+            cls=VcfLogsConnector,
+        )
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "vcf-logs",  # diverges from the parser-derived "vrli"
+                "version": "9.0",
+                "impl_id": "vrli-rest",
+                "specs": [{"uri": "https://example.test/vrli.yaml"}],
+                "tenant_id": str(OPERATOR_TENANT_ID),
+            },
+        )
+    data = caught.value.data
+    assert data is not None
+    assert data["kind"] == "product_impl_id_mismatch"
+    assert data["product"] == "vcf-logs"
+    assert data["derived_product"] == "vrli"
+    # The message names both spellings so the driving agent can self-correct.
+    assert "vcf-logs" in str(caught.value)
+    assert "vrli" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

@@ -107,11 +107,15 @@ from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
     _OP_CLASS_WRITE,
+    _PREFER_PROPERTY,
     _TENANT_ID_PROPERTY,
+    _coerce_prefer,
     _coerce_tenant_id,
     _model_dump_json_safe,
+    raise_invalid_params_for_ambiguous_scope,
 )
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     ConnectorStatusFilter,
     ReviewService,
     list_ingested_connectors,
@@ -158,8 +162,17 @@ async def _review_handler(
     """Return the full review payload for one connector."""
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    prefer = _coerce_prefer(arguments.get("prefer"))
     service = ReviewService(operator)
-    payload = await service.get_review_payload(connector_id, tenant_id)
+    try:
+        payload = await service.get_review_payload(connector_id, tenant_id, prefer=prefer)
+    except AmbiguousConnectorScopeError as exc:
+        # A label that resolves to both a tenant-curated and a built-in
+        # row maps to a structured -32602 carrying the candidate scopes
+        # (MCP↔REST parity, #1801); without this it would fall through to
+        # the dispatcher's bare -32603. See
+        # raise_invalid_params_for_ambiguous_scope.
+        raise_invalid_params_for_ambiguous_scope(exc)
     return _model_dump_json_safe(payload)
 
 
@@ -267,8 +280,20 @@ async def _enable_reads_handler(
     """
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    prefer = _coerce_prefer(arguments.get("prefer"))
     service = ReviewService(operator)
-    ops_enabled = await service.enable_reads(connector_id, tenant_id=tenant_id)
+    try:
+        ops_enabled = await service.enable_reads(
+            connector_id,
+            tenant_id=tenant_id,
+            prefer=prefer,
+        )
+    except AmbiguousConnectorScopeError as exc:
+        # Same ambiguous-scope mapping as _review_handler: structured
+        # -32602 with the candidate scopes instead of a bare -32603
+        # (#1801 / this is #1910). enable_reads shares the resolver with
+        # the review read path, so it can raise the same error.
+        raise_invalid_params_for_ambiguous_scope(exc)
     return {
         "connector_id": connector_id,
         "ops_enabled": ops_enabled,
@@ -394,7 +419,11 @@ register_mcp_tool(
             "meho.connector.edit_group / meho.connector.edit_op to "
             "modify them. Read-only; visible to operator and "
             "tenant_admin roles. Tenant-scoped: cross-tenant reads are "
-            "rejected with a ConnectorNotFoundError."
+            "rejected with a ConnectorNotFoundError. When a connector_id "
+            "maps to BOTH a tenant-curated row and a built-in row the "
+            "call fails with a structured ambiguous-scope error listing "
+            "the candidates; pass prefer='tenant' or prefer='builtin' to "
+            "target one directly."
         ),
         inputSchema={
             "type": "object",
@@ -405,6 +434,7 @@ register_mcp_tool(
                     "description": _CONNECTOR_ID_DESCRIPTION,
                 },
                 "tenant_id": _TENANT_ID_PROPERTY,
+                "prefer": _PREFER_PROPERTY,
             },
             "required": ["connector_id"],
             "additionalProperties": False,
@@ -564,7 +594,12 @@ register_mcp_tool(
             "Writes one meho.connector.enable_reads audit row when at "
             "least one op flips. Omit tenant_id (or pass null) for "
             "built-in / global connectors; pass the operator's own "
-            "tenant UUID for tenant-curated rows."
+            "tenant UUID for tenant-curated rows. When a connector_id "
+            "maps to BOTH a tenant-curated row and a built-in row the "
+            "call fails with a structured ambiguous-scope error listing "
+            "the candidates; pass prefer='tenant' or prefer='builtin' to "
+            "apply to one directly (the built-in scope stays "
+            "tenant_admin-gated)."
         ),
         inputSchema={
             "type": "object",
@@ -575,6 +610,7 @@ register_mcp_tool(
                     "description": _CONNECTOR_ID_DESCRIPTION,
                 },
                 "tenant_id": _TENANT_ID_PROPERTY,
+                "prefer": _PREFER_PROPERTY,
             },
             "required": ["connector_id"],
             "additionalProperties": False,

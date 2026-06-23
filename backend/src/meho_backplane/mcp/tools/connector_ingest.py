@@ -63,8 +63,12 @@ mistakes), ``UpstreamNotSpecError`` (URL served HTML, not a spec),
 ``UnsupportedSpecError`` (Swagger 2.0 / OpenAPI 4.x / cross-document
 ``$ref``), ``InvalidSpecError`` (not a structurally valid spec),
 ``InvalidSchemaError`` (broken ``$ref`` / schema), ``OpIdCollision``
-(two ops share an ``op_id``), and ``LlmOutputInvalid`` (grouping LLM
-returned invalid output). Before #1534 only the first two were caught;
+(two ops share an ``op_id``), ``LlmOutputInvalid`` (grouping LLM
+returned invalid output), and ``ProductImplIdMismatch`` (#1817 — the
+supplied ``product`` doesn't round-trip its ``connector_id``; the
+service-layer round-trip guard reaches this tool now, so the divergence
+surfaces as a structured ``-32602`` instead of silently persisting a
+non-dispatchable shadow row). Before #1534 only the first two were caught;
 the rest fell through to the dispatcher's generic ``except Exception``
 and surfaced as a bare ``-32603 "internal error: <ClassName>"`` with
 ``str(exc)`` discarded — the MCP↔REST asymmetry #1534 closes (REST

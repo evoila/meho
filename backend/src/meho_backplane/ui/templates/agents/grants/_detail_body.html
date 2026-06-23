@@ -1,0 +1,103 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Agent-grant detail body fragment (Initiative #1824 Task #1832). The
+  full ``AgentGrantRead`` projection: the principal + op pattern +
+  target scope, the colour-coded verdict badge, the permanent-vs-elevation
+  expiry, and the audit metadata (created by / created / updated). Shared
+  by ``detail.html`` (full page) and returned standalone on an HTMX body
+  swap.
+
+  The verdict badge colour + label both derive from the same verdict
+  string (``views.verdict_badge_class``), so a ``deny`` grant always
+  reads red + "deny" -- never like an allow (an acceptance criterion on
+  #1832).
+
+  Revoke is the only write on the detail view (grants are immutable rows
+  -- "edit" is revoke + re-create). The revoke button opens the
+  HTMX-loaded confirm dialog.
+-#}
+<div id="grant-detail-body" class="space-y-4">
+  <header
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    data-grant-id="{{ grant.id }}"
+    data-verdict="{{ grant.verdict }}"
+  >
+    <div class="card-body p-4 space-y-3">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="space-y-1">
+          <h1 class="text-xl font-semibold font-mono break-all">{{ grant.op_pattern }}</h1>
+          <div class="flex flex-wrap items-center gap-1.5 text-xs">
+            <span
+              class="badge badge-sm {{ grant.verdict_badge }}"
+              data-verdict-badge="{{ grant.verdict }}"
+            >
+              {{ grant.verdict }}
+            </span>
+            {% if grant.is_elevation %}
+              <span class="badge badge-outline badge-warning badge-sm">elevation</span>
+            {% else %}
+              <span class="badge badge-outline badge-sm">permanent</span>
+            {% endif %}
+          </div>
+        </div>
+        {% if can_write %}
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="btn btn-sm btn-error btn-outline"
+              data-action="revoke"
+              hx-get="/ui/agents/grants/{{ grant.id }}/revoke"
+              hx-target="#grants-modal-container"
+              hx-swap="innerHTML"
+            >
+              Revoke
+            </button>
+          </div>
+        {% endif %}
+      </div>
+
+      <dl class="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Principal</dt>
+          <dd class="font-mono break-all">{{ grant.principal_sub }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Target scope</dt>
+          <dd class="break-all">
+            {% if grant.target_scope in (None, "*") %}
+              <span class="opacity-60">{{ grant.target_scope_display }}</span>
+            {% else %}
+              <span class="font-mono">{{ grant.target_scope }}</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Expiry</dt>
+          <dd>
+            {% if grant.is_elevation %}
+              <span data-expires-at="{{ grant.expires_at.isoformat() }}">
+                auto-expires {{ grant.expires_at.isoformat() }}
+              </span>
+            {% else %}
+              <span class="opacity-60">permanent (no expiry)</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Created by</dt>
+          <dd class="break-all">{{ grant.created_by_sub }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Created</dt>
+          <dd data-created-at="{{ grant.created_at.isoformat() }}">{{ grant.created_at.isoformat() }}</dd>
+        </div>
+        <div class="flex gap-2">
+          <dt class="font-medium opacity-70">Updated</dt>
+          <dd data-updated-at="{{ grant.updated_at.isoformat() }}">{{ grant.updated_at.isoformat() }}</dd>
+        </div>
+      </dl>
+    </div>
+  </header>
+</div>

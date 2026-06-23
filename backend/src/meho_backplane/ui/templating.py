@@ -165,13 +165,20 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     ready = bool(getattr(request.state, "ui_ready", False))
     session_ctx = getattr(request.state, "ui_session", None)
     if session_ctx is None:
-        return {"session_tenant": None, "ready": ready}
+        return {"session_tenant": None, "session_operator_sub": None, "ready": ready}
     return {
         "session_tenant": {
             "id": str(session_ctx.tenant_id),
             "slug": session_ctx.tenant_slug,
             "name": session_ctx.tenant_name,
         },
+        # The Keycloak ``sub`` of the signed-in operator, surfaced into the
+        # sidebar account chip (G10.11-T1 #1892) to replace the hardcoded
+        # "OP / Operator" literal. Cheap (a frozen-field read off the
+        # already-bound session context). The chip links to ``/ui/account``,
+        # where the **live** role (a fresh JWT verify) is shown -- the chip
+        # itself does not pay a per-render token verify just to label a role.
+        "session_operator_sub": session_ctx.operator_sub,
         "ready": ready,
     }
 

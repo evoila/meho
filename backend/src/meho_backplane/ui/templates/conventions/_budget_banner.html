@@ -1,0 +1,72 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Always-on preamble token-budget banner (Initiative #1838 Task #1895).
+  The headline value of the conventions surface: it surfaces the
+  otherwise-silent preamble budget-overflow drop.
+
+  Two states:
+    * Within budget (``budget.over_budget`` false) -- a calm success
+      alert showing ``estimated / max tokens``.
+    * Over budget -- an ``alert-error`` banner showing the same token
+      math PLUS every dropped slug rendered in red, each with explicit
+      "dropped from agent preamble -- agents never see this rule" copy
+      so the operator cannot miss that the rule is not in effect.
+
+  The banner reflects the FULL ``operational`` set regardless of the
+  active kind tab -- ``budget_status`` is computed over the whole tenant
+  operational set, so a ``kind=workflow`` view still shows the truthful
+  budget signal.
+-#}
+{% from "_icons.html" import icon %}
+{% if budget.over_budget %}
+  <div
+    role="alert"
+    class="alert alert-error items-start"
+    data-budget-state="over"
+    aria-live="polite"
+  >
+    {{ icon("gauge", class="size-5 shrink-0") }}
+    <div class="space-y-2">
+      <div>
+        <span class="font-semibold">Preamble over budget:</span>
+        <span class="font-mono">{{ budget.estimated_tokens }} / {{ budget.max_tokens }} tokens</span>
+      </div>
+      <p class="text-sm">
+        The following convention{{ "" if budget.dropped_slugs | length == 1 else "s" }}
+        {{ "is" if budget.dropped_slugs | length == 1 else "are" }}
+        dropped from the agent preamble &mdash; agents never see
+        {{ "this rule" if budget.dropped_slugs | length == 1 else "these rules" }}:
+      </p>
+      <ul class="flex flex-wrap gap-2" aria-label="Dropped conventions">
+        {% for slug in budget.dropped_slugs %}
+          <li>
+            <a
+              href="/ui/conventions/{{ slug | urlencode }}"
+              class="badge badge-error gap-1 font-mono"
+              data-dropped-slug="{{ slug }}"
+              title="Dropped from agent preamble — agents never see this rule"
+            >
+              {{ slug }}
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+{% else %}
+  <div
+    role="status"
+    class="alert alert-success"
+    data-budget-state="ok"
+    aria-live="polite"
+  >
+    {{ icon("gauge", class="size-5 shrink-0") }}
+    <div>
+      <span class="font-semibold">Preamble within budget:</span>
+      <span class="font-mono">{{ budget.estimated_tokens }} / {{ budget.max_tokens }} tokens</span>
+      <span class="opacity-80">&mdash; every operational rule reaches the agent preamble.</span>
+    </div>
+  </div>
+{% endif %}

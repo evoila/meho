@@ -145,7 +145,7 @@ class HetznerRobotConnector(HttpConnector):
     the same triple.
     """
 
-    product = "hetzner-robot"
+    product = "hetzner"
     version = "2026.04"
     impl_id = "hetzner-rest"
     supported_version_range = None  # Webservice API versioned by date, not semver
@@ -390,7 +390,7 @@ class HetznerRobotConnector(HttpConnector):
 
         The connector's natural key is encoded as the dispatcher's
         ``connector_id``: ``"hetzner-rest-2026.04"`` →
-        (product=``"hetzner-robot"``, version=``"2026.04"``,
+        (product=``"hetzner"``, version=``"2026.04"``,
         impl_id=``"hetzner-rest"``).
         """
         from uuid import UUID

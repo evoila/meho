@@ -1,0 +1,197 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit-query forensic console page (Initiative #1841 G10.15, Task #1944).
+
+  The entry surface for the console's forensic audit query: a filter form
+  over unbounded ``audit_log`` history, a first result page, forward-cursor
+  "Load more" paging, and one-click pivots (who-touched / by-work-ref /
+  replay). T2 adds the row detail drawer; T3 adds the replay tree -- this
+  page deep-links to the T3 replay surface for tenant admins.
+
+  Filter-submit wiring:
+    * The form ``hx-get``s ``/ui/audit/results`` and swaps the rendered
+      console block into ``#audit-results`` (``hx-swap="innerHTML"``). The
+      filter inputs fire on change / debounced keyup so refining the filter
+      re-runs the query without a page reload.
+    * ``hx-push-url`` keeps the browser URL in sync so a filtered view is
+      bookmarkable / shareable; a copy-pasted URL reproduces the view because
+      the page route accepts the same filters.
+
+  CSRF: the form ``hx-get``s, so the page mints + sets the ``meho_csrf``
+  cookie and echoes the token on the form's ``hx-headers`` -- the chassis
+  double-submit convention every surface pairs, even on read-only GET forms.
+
+  Context (built by ``audit/routes.py`` + shared with ``_results.html``):
+    csrf_token              -- str: the minted double-submit token
+    op_class_options        -- tuple[str]: op_class dropdown vocabulary
+    result_status_options   -- tuple[str]: result_status dropdown vocabulary
+    *_filter                -- str: echoed filter values (keep form state)
+    rows / next_cursor / has_more / duration_error / filter_error / page_size
+                            -- the result context (see ``_results.html``)
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Audit &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Audit</h1>
+      <p class="text-sm opacity-70">
+        Query this tenant's full audit history &mdash; who touched what, which
+        writes a change ticket authorised, and what an agent session did.
+      </p>
+    </div>
+  </header>
+
+  {#- Filter form. Every input targets ``#audit-results``; the form-level
+      ``hx-get`` is the submit, individual inputs re-fetch on change /
+      debounced keyup so refining the filter re-runs the query. ``hx-headers``
+      carries the CSRF double-submit token. ``cursor`` is intentionally NOT a
+      form field: a new filter always starts at page 1 (the cursor is a
+      pager-only continuation token). -#}
+  <form
+    id="audit-filter-form"
+    class="grid gap-3 rounded-box border border-base-300 bg-base-100 p-4 sm:grid-cols-2 lg:grid-cols-4"
+    hx-get="/ui/audit/results"
+    hx-target="#audit-results"
+    hx-swap="innerHTML"
+    hx-trigger="submit, change, keyup changed delay:400ms from:input[type=search]"
+    hx-push-url="true"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+    role="search"
+    aria-label="Filter audit history"
+  >
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Target</span>
+      <input
+        type="search" name="target" value="{{ target_filter }}"
+        placeholder="e.g. rdc-vcenter"
+        class="input input-bordered input-sm w-full"
+        aria-label="Filter by target" autocomplete="off"
+      />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Principal</span>
+      <input
+        type="search" name="principal" value="{{ principal_filter }}"
+        placeholder="operator sub (partial match)"
+        class="input input-bordered input-sm w-full"
+        aria-label="Filter by principal" autocomplete="off"
+      />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Operation (op_id)</span>
+      <input
+        type="search" name="op_id" value="{{ op_id_filter }}"
+        placeholder="e.g. vsphere.vm.* (glob)"
+        class="input input-bordered input-sm w-full font-mono"
+        aria-label="Filter by op_id glob" autocomplete="off"
+      />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Op class</span>
+      <select
+        name="op_class" class="select select-bordered select-sm w-full"
+        aria-label="Filter by op class"
+      >
+        <option value=""{% if not op_class_filter %} selected{% endif %}>Any</option>
+        {% for option in op_class_options %}
+          <option value="{{ option }}"{% if option == op_class_filter %} selected{% endif %}>
+            {{ option }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Result</span>
+      <select
+        name="result_status" class="select select-bordered select-sm w-full"
+        aria-label="Filter by result status"
+      >
+        <option value=""{% if not result_status_filter %} selected{% endif %}>Any</option>
+        {% for option in result_status_options %}
+          <option value="{{ option }}"{% if option == result_status_filter %} selected{% endif %}>
+            {{ option }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Since</span>
+      <input
+        type="text" name="since" value="{{ since_filter }}"
+        placeholder="e.g. 24h, 7d, 2026-01-01"
+        class="input input-bordered input-sm w-full"
+        aria-label="Window start (duration or ISO date)" autocomplete="off"
+      />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Until</span>
+      <input
+        type="text" name="until" value="{{ until_filter }}"
+        placeholder="e.g. 1h, 2026-02-01"
+        class="input input-bordered input-sm w-full"
+        aria-label="Window end (duration or ISO date)" autocomplete="off"
+      />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Change ticket (work_ref)</span>
+      <input
+        type="search" name="work_ref" value="{{ work_ref_filter }}"
+        placeholder="e.g. gh:evoila/meho#1"
+        class="input input-bordered input-sm w-full font-mono"
+        aria-label="Filter by change ticket" autocomplete="off"
+      />
+    </label>
+
+    {#- The T3 replay over-cap pivot's flat filter. It has no visible field,
+        but it rides the form as a hidden input so the "Load more" pager's
+        ``hx-include="#audit-filter-form"`` re-applies the session pre-filter
+        on every continuation. Emitted only when a session was pivoted to so
+        an unfiltered page never carries an empty ``agent_session_id``. -#}
+    {% if agent_session_id_filter %}
+      <input type="hidden" name="agent_session_id" value="{{ agent_session_id_filter }}" />
+    {% endif %}
+  </form>
+
+  {#- Results region + the row-detail drawer slot. The results list swaps
+      into ``#audit-results``; a row's "details" affordance ``hx-get``s
+      ``/ui/audit/show/{id}`` into ``#audit-drawer`` (T2). On a ``?audit_id=``
+      deep-link the drawer is pre-rendered server-side so a pasted ticket
+      link opens the row immediately. -#}
+  <div class="grid gap-5 lg:grid-cols-[1fr_22rem]">
+    <div id="audit-results">
+      {% include "audit/_results.html" %}
+    </div>
+
+    {#- Drawer slot. Empty until a row is clicked (or a deep-link pre-renders
+        it). The placeholder keeps the grid column from collapsing. -#}
+    {% if drawer %}
+      {% with row=drawer.row, op_id=drawer.op_id, op_class=drawer.op_class,
+              badge_class=drawer.badge_class, aggregate_only=drawer.aggregate_only,
+              request_payload=drawer.request_payload,
+              gated_op_classes=drawer.gated_op_classes,
+              agent_session_id=drawer.agent_session_id,
+              parent_audit_id=drawer.parent_audit_id,
+              replay_enabled=drawer.replay_enabled %}
+        {% include "audit/_drawer.html" %}
+      {% endwith %}
+    {% else %}
+      <div id="audit-drawer" aria-hidden="true"></div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

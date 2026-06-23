@@ -1,0 +1,176 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Connector Registry list (Initiative #1839
+  Task #1885 T1). Extends ``base.html`` so the chrome matches the rest
+  of the console. Distinct from ``list.html`` (the ``/ui/connectors``
+  TARGETS list): this surface lists the connector REGISTRY -- the
+  ingested / typed / composite connectors whose grouped operations the
+  operator curates and enables for dispatch.
+
+  Layout (top-down):
+    * Filter bar -- a status ``<select>`` (staged / enabled / disabled /
+      all) and a product ``<select>``, both HTMX-bound to
+      ``/ui/connectors/registry`` swapping ``#registry-table-body``.
+    * Table body (``_registry_table.html`` partial) -- one row per
+      connector with the per-row enable / enable-reads / disable / delete
+      actions (tenant_admin only).
+
+  Filter footgun: the status ``<select>`` submits the real ``all``
+  sentinel (never ``value=""``). The backend ``ConnectorStatusFilter``
+  enum 422s on an out-of-range value; an empty-string option would fail
+  enum validation and make the HTMX swap silently no-op.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Connector Registry &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Connector Registry</h1>
+      <p class="text-sm opacity-70">
+        Ingested and registered connectors. Review the grouped operations,
+        govern per-op safety, and enable a connector for dispatch. Distinct
+        from <a href="/ui/connectors" class="link link-hover">Targets</a>
+        (the connectable hosts + credentials).
+      </p>
+    </div>
+    {# Ingest entry point -- soft-hidden from non-admins (the ingest BFF
+       routes are TENANT_ADMIN-gated server-side regardless). Loads the
+       ingest modal fragment into the modal container; the shared modal
+       controller opens it via ``showModal()`` on swap (#1803). The
+       button carries the page-level ``X-CSRF-Token`` (from the section's
+       ``hx-headers``) on its GET; the modal render re-mints the cookie +
+       puts the token on the submit form's own ``hx-headers``. #}
+    {% if is_tenant_admin %}
+      <button
+        type="button"
+        class="btn btn-primary btn-sm gap-1"
+        data-action="open-ingest"
+        hx-get="/ui/connectors/registry/ingest"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+      >
+        {% from "_icons.html" import icon %}
+        {{ icon("package", class="size-4") }}
+        Ingest
+      </button>
+    {% endif %}
+  </header>
+
+  {# HTMX modal mount point -- each confirm modal fragment is swapped in
+     here; the shared modal controller opens the inserted
+     ``<dialog class="modal">`` via ``showModal()`` on swap (#1803). #}
+  <div id="connectors-modal-container"></div>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/connectors/registry"
+    hx-target="#registry-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="change from:find select"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter connector registry"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-3">
+      <label class="form-control">
+        <span class="label-text">Status</span>
+        {# The ``all`` option is a REAL sentinel value, NOT ``value=""`` --
+           the backend enum 422s on an out-of-range value and an empty
+           string would make the swap silently no-op. #}
+        <select
+          name="status"
+          class="select select-bordered select-sm"
+          aria-label="Filter by review status"
+        >
+          {%- set status_options = [
+            ("all", "All"),
+            ("staged", "Staged"),
+            ("enabled", "Enabled"),
+            ("disabled", "Disabled"),
+          ] -%}
+          {% for value, label in status_options %}
+            <option value="{{ value }}" {% if value == status_filter %}selected{% endif %}>
+              {{ label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Product</span>
+        {# Same footgun-safe shape: the "all products" option omits the
+           ``product`` filter by submitting an empty string, which the
+           handler treats as "no narrowing" -- ``product`` is a plain
+           ``str | None`` (not the strict enum), so an empty value is
+           safe here (it maps to ``None``), unlike the status enum. #}
+        <select
+          name="product"
+          class="select select-bordered select-sm"
+          aria-label="Filter by product"
+        >
+          <option value="">All products</option>
+          {% for option in product_options %}
+            <option value="{{ option }}" {% if option == product_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        {# Authoring-mode filter (#1980, fed by ConnectorListItem.kind / #1979).
+           Same footgun-safe shape as Status: the ``all`` option is a REAL
+           sentinel (never ``value=""``) because the ``_KindFilter`` enum 422s
+           on an out-of-range value. The handler narrows the returned rows
+           in-process (kind is not a backend service argument). #}
+        <select
+          name="kind"
+          class="select select-bordered select-sm"
+          aria-label="Filter by connector kind"
+        >
+          {%- set kind_options = [
+            ("all", "All kinds"),
+            ("typed", "Typed"),
+            ("profiled", "Profiled"),
+            ("profiled-but-unreviewed", "Profiled (staged)"),
+            ("ingested-shim", "Ingested shim"),
+          ] -%}
+          {% for value, label in kind_options %}
+            <option value="{{ value }}" {% if value == kind_filter %}selected{% endif %}>
+              {{ label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Connector</th>
+          <th>Product</th>
+          <th>Scope</th>
+          <th>State</th>
+          <th>Kind</th>
+          <th>Groups / Ops</th>
+          <th class="text-right">Actions</th>
+        </tr>
+      </thead>
+      {% include "connectors/_registry_table.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

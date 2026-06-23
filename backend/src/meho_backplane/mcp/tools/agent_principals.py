@@ -30,6 +30,12 @@ Error mapping
 * :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminError`
   → :class:`~meho_backplane.mcp.server.McpInvalidParamsError` with the
   error class name for operator diagnostics.
+* :class:`~meho_backplane.scheduler.vault_credentials.SchedulerVaultBrokerError`
+  (register only) → :class:`~meho_backplane.mcp.server.McpInvalidParamsError`
+  naming the ``VAULT_SCHEDULER_TOKEN`` write-policy remediation, mirroring
+  the REST/UI ``scheduler_vault_write_error`` 502 mapping. Without this
+  the broker error bubbled to the dispatcher's catch-all and surfaced as
+  an opaque ``-32603`` internal error.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from meho_backplane.auth.keycloak_admin import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
 
 _log = structlog.get_logger(__name__)
 
@@ -155,6 +162,18 @@ async def _register_handler(
         ) from exc
     except KeycloakAdminError as exc:
         raise McpInvalidParamsError(f"Keycloak admin error: {type(exc).__name__}") from exc
+    except SchedulerVaultBrokerError as exc:
+        # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
+        # (unreachable / denied — most often a read-only token policy). The
+        # just-created Keycloak client is already rolled back. Mirror the
+        # REST/UI 502 ``scheduler_vault_write_error`` mapping so the MCP
+        # caller gets an actionable ``-32602`` naming the cause, not the
+        # opaque ``-32603`` a bubbled exception would produce. The message
+        # names the remediation without leaking the secret.
+        raise McpInvalidParamsError(
+            "scheduler Vault write failed — VAULT_SCHEDULER_TOKEN policy must "
+            "grant create/update on the agent-credentials path"
+        ) from exc
     except ValueError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
     return _row_to_dict(entry)

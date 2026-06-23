@@ -1,0 +1,132 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook runs results partial. Swapped into ``#runbook-runs-list`` by the
+  filter controls (state select + assignee keyup); also included directly
+  into ``runs.html`` for the initial full-page render so both paths share
+  identical markup.
+
+  Initiative #1837 (G10.11 Runbook runs UI), Task #1884 (T1).
+
+  Context variables:
+    runs            -- list[RunSummary]: role-scoped run rows (service-
+                       enforced: own runs for OPERATOR, all for TENANT_ADMIN)
+    is_admin        -- bool: caller is tenant_admin (adds the Assignee
+                       column so an admin can see whose run each row is)
+    status_filter   -- str: active state filter ("" = all)
+    assignee_filter -- str: active assignee filter ("" = all, admin only)
+
+  Opacity: RunSummary carries run-level state only -- NO step body content.
+  ``position`` ("step n of total") is the only structural hint; it is
+  ``None`` for terminal runs (completed / abandoned have no current step).
+  Each row links to the T2 driver (``/ui/runbooks/runs/{run_id}``), which
+  is where step bodies are revealed one at a time.
+
+  Layout:
+    * Non-empty: DaisyUI table of template@version / target / state badge /
+      [assignee, admin] / position / work_ref / started_at, each row a link
+      to the run driver.
+    * Empty: friendly empty-state card (filter-aware copy when a filter is
+      active).
+-#}
+<div id="runbook-runs-list" class="space-y-3">
+  {% if runs %}
+    <div class="card bg-base-100 border-base-300 overflow-x-auto border shadow-sm">
+      <table class="table table-sm" aria-label="Runbook runs">
+        <thead>
+          <tr>
+            <th scope="col">Template</th>
+            <th scope="col" class="hidden md:table-cell">Target</th>
+            <th scope="col">State</th>
+            {% if is_admin %}
+              <th scope="col" class="hidden sm:table-cell">Assignee</th>
+            {% endif %}
+            <th scope="col" class="hidden lg:table-cell">Step</th>
+            <th scope="col" class="hidden xl:table-cell">Work ref</th>
+            <th scope="col" class="hidden lg:table-cell">Started</th>
+            <th scope="col" class="sr-only">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+            <tr>
+              <td class="font-mono">
+                <a href="/ui/runbooks/runs/{{ run.run_id }}" class="link link-primary">
+                  {{ run.template_slug }}<span class="opacity-70">@v{{ run.template_version }}</span>
+                </a>
+              </td>
+              <td class="hidden md:table-cell opacity-70">{{ run.target }}</td>
+              <td>
+                {#- State badge. DaisyUI semantic colour per run state;
+                    ``aria-label`` carries the same signal so colour is never
+                    the only cue (WCAG 1.4.1). -#}
+                {% if run.state == "in_progress" %}
+                  <span class="badge badge-info badge-outline" aria-label="State: in progress">
+                    in progress
+                  </span>
+                {% elif run.state == "completed" %}
+                  <span class="badge badge-success badge-outline" aria-label="State: completed">
+                    completed
+                  </span>
+                {% else %}
+                  <span class="badge badge-ghost badge-outline" aria-label="State: abandoned">
+                    abandoned
+                  </span>
+                {% endif %}
+              </td>
+              {% if is_admin %}
+                <td class="hidden sm:table-cell font-mono text-xs opacity-70">
+                  {{ run.assigned_to }}
+                </td>
+              {% endif %}
+              <td class="hidden lg:table-cell opacity-70">
+                {% if run.position %}
+                  step {{ run.position.n }} of {{ run.position.total }}
+                {% else %}
+                  &mdash;
+                {% endif %}
+              </td>
+              <td class="hidden xl:table-cell font-mono text-xs opacity-70">
+                {{ run.work_ref or "—" }}
+              </td>
+              <td class="hidden lg:table-cell text-xs opacity-70">
+                {{ run.started_at.strftime("%Y-%m-%d %H:%M") }}
+              </td>
+              <td>
+                <div class="flex items-center justify-end gap-1">
+                  <a
+                    href="/ui/runbooks/runs/{{ run.run_id }}"
+                    class="btn btn-ghost btn-xs"
+                    aria-label="Open run {{ run.run_id }}"
+                  >
+                    {% if run.state == "in_progress" %}Open{% else %}View{% endif %}
+                  </a>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {# Empty state -- no runs match (or none exist for this caller's scope). #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-10 text-center">
+        {% if status_filter or assignee_filter %}
+          <p class="text-lg opacity-60">No runs match the current filters</p>
+          <p class="text-sm opacity-40">
+            Adjust the filters, or
+            <a href="/ui/runbooks/runs" class="link">clear them</a>.
+          </p>
+        {% else %}
+          <p class="text-lg opacity-60">No runbook runs yet</p>
+          <p class="text-sm opacity-40">
+            Start a run from a published template with the
+            <strong>+ Start run</strong> button above.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

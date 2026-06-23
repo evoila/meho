@@ -283,6 +283,15 @@ def _decode_with_jwks(
                 # opaque ``invalid_token`` code v0.3.1 shipped — see
                 # G0.9.1-T12, consumer Addendum II walls #2 / #3).
                 "sub": {"essential": True},
+                # ``exp`` is REQUIRED by RFC 9068 §2.2.1 on access
+                # tokens. Without ``essential`` authlib's
+                # ``claims.validate()`` only checks expiry *when ``exp``
+                # is present* — a token omitting ``exp`` decodes cleanly
+                # and is accepted as non-expiring. Marking it essential
+                # turns the absence into a ``MissingClaimError`` so
+                # :func:`_classify_missing_claim` surfaces ``missing_exp``
+                # (security backlog row L1).
+                "exp": {"essential": True},
             },
         )
         claims.validate(leeway=settings.keycloak_jwt_leeway_seconds)
@@ -385,6 +394,13 @@ def _classify_missing_claim(
         # :func:`_operator_from_claims`) to a specific code per
         # G0.9.1-T12.
         return "missing_sub", {"claim_name": "sub"}
+    if claim_name == "exp":
+        # RFC 9068 §2.2.1 makes ``exp`` REQUIRED on access tokens. A
+        # token without ``exp`` would otherwise be accepted as
+        # non-expiring; the essential-``exp`` entry in
+        # :func:`_decode_with_jwks`'s ``claims_options`` routes the
+        # absence here so it fails closed (security backlog row L1).
+        return "missing_exp", {"claim_name": "exp"}
     if claim_name == "aud":
         return "missing_audience", {"claim_name": "aud"}
     if claim_name == "iss":
@@ -407,7 +423,7 @@ def _classify_decode_error(
 
     * ``detail_code`` — value put into the 401 body. Machine-readable
       and low info-leak: ``invalid_audience`` / ``invalid_issuer`` /
-      ``missing_sub`` / ``token_expired`` /
+      ``missing_sub`` / ``missing_exp`` / ``token_expired`` /
       ``signature_verification_failed`` / ``token_not_yet_valid`` /
       ``malformed_jws`` (structural break: non-JWT bearer prefix,
       wrong segment count, base64 garbage — caught by authlib's
@@ -864,7 +880,8 @@ async def verify_jwt_for_audience(
     operator chasing the 401 can name the failed check (see
     :func:`_classify_decode_error` for the full mapping):
     ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
-    ``token_expired`` / ``signature_verification_failed`` /
+    ``missing_exp`` / ``token_expired`` /
+    ``signature_verification_failed`` /
     ``token_not_yet_valid`` / ``malformed_jws``, with the residual
     ``invalid_token`` kept only for the small set of structural
     failures that aren't authlib :class:`DecodeError` (``alg: none``

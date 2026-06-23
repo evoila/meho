@@ -194,6 +194,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
         agent_grants,
+        agent_principals,
         agent_runs,
         agents,
         approvals,
@@ -304,6 +305,15 @@ def isolated_registry() -> Iterator[None]:
     # RBAC suites (G11.2 follow-up #1113) rely on this entry to
     # exercise ``tools/list`` filter + ``tools/call`` re-check gates.
     importlib.reload(agent_grants)
+    # G11.2-T1 (#815): the agent-principal lifecycle MCP tools
+    # (``meho.agent_principals.{list,register,revoke}``) join the reload
+    # list for the same reason every other tool module does -- the autouse
+    # ``clear_registries()`` above would otherwise leave them unregistered
+    # in any test file that imports this fixture after the first one runs
+    # in the process. The register error-mapping suite (#2000) relies on
+    # this entry to exercise the ``SchedulerVaultBrokerError`` -> -32602
+    # wire mapping.
+    importlib.reload(agent_principals)
     importlib.reload(approvals)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)

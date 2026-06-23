@@ -791,7 +791,7 @@ async def test_list_splits_enabled_vs_total_operation_count(
 
 @pytest.fixture
 def _registered_class_only_connectors() -> Iterator[None]:
-    """Ensure harbor + sddc-manager are registered against the v2 registry.
+    """Ensure harbor + sddc are registered against the v2 registry.
 
     The autouse ``_isolate_global_registries`` fixture in conftest
     snapshots the registry before each test and restores after, so the
@@ -808,6 +808,7 @@ def _registered_class_only_connectors() -> Iterator[None]:
     ``RuntimeError: connector already registered``.
     """
     from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.connectors.registry import (
         all_connectors_v2,
         register_connector_v2,
@@ -824,12 +825,22 @@ def _registered_class_only_connectors() -> Iterator[None]:
             impl_id="harbor-rest",
             cls=HarborConnector,
         )
-    if ("sddc-manager", "9.0", "sddc-rest") not in existing:
+    if ("sddc", "9.0", "sddc-rest") not in existing:
         register_connector_v2(
-            product="sddc-manager",
+            product="sddc",
             version="9.0",
             impl_id="sddc-rest",
             cls=SddcManagerConnector,
+        )
+    # nsx/9.0 stays catalog_ingest: spec-only (fqdn-templated upstream, no
+    # shipped spec) after #1976 made vmware/sddc profile-backed, so the
+    # spec-only next_step test below pivots onto it.
+    if ("nsx", "9.0", "nsx-rest") not in existing:
+        register_connector_v2(
+            product="nsx",
+            version="9.0",
+            impl_id="nsx-rest",
+            cls=NsxConnector,
         )
     yield
 
@@ -855,31 +866,25 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       *registered-but-not-yet-dispatchable* from *ingested-and-ready*.
     * The emitted ``product`` is what
       :func:`~meho_backplane.operations._lookup.parse_connector_id`
-      derives from the ``connector_id``, not the v2 registry's
-      ``product`` field. For SDDC the registry stores
-      ``product="sddc-manager"`` but the listing emits ``"sddc"`` —
-      consistent with what the dispatcher derives from
+      derives from the ``connector_id``, which — since #1814
+      (Initiative #1810) realigned the SDDC connector to register under
+      the short token — equals the v2 registry's ``product`` field. For
+      SDDC the registry stores ``product="sddc"`` and the listing emits
+      ``"sddc"``, consistent with what the dispatcher derives from
       ``parse_connector_id("sddc-rest-9.0")`` and with
       ``SDDC_PRODUCT="sddc"`` writing into ``endpoint_descriptor``
       rows. When DB rows land under the parser-derived product the
       row transitions cleanly from ``state="registered"`` to
       ``state="ingested"`` without a ``connector_id`` change.
 
-    G0.18-T2 (#1355) — the parser-derived ``"sddc"`` token the
-    listing emits is bridged to the registry's canonical
-    ``"sddc-manager"`` by the
-    :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES`
-    map at the write surface (see
-    :func:`~meho_backplane.connectors.registry.canonical_product_token`).
-    So an operator copying ``product`` out of this listing into
-    ``POST /api/v1/targets`` succeeds: the alias normalises ``"sddc"``
-    to the canonical ``"sddc-manager"`` before the registered-product
-    validator runs, and the canonical token is what gets stored.
-    The listing keeps emitting ``"sddc"`` (not ``"sddc-manager"``)
-    because that is the parser-derived token, load-bearing for the
-    #773 connector_id round-trip; the round-trip closure for the
-    operator is now end-to-end (closes #1312 acceptance B,
-    re-flagged by RDC #789 Finding 6).
+    #1814 (Initiative #1810) — the SDDC connector registers under the
+    short, dispatch-canonical ``"sddc"`` token (RDC #789 Finding 6's
+    original ``"sddc" -> "sddc-manager"`` alias, added in G0.18-T2
+    #1355, was dropped). So an operator copying ``product`` out of this
+    listing into ``POST /api/v1/targets`` succeeds directly: ``"sddc"``
+    is a registered product token, no canonicalisation needed, and the
+    stored row carries ``"sddc"``. The round-trip closure for the
+    operator is end-to-end on one spelling.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -903,16 +908,21 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert harbor["operation_count"] == 0
     assert harbor["enabled_operation_count"] == 0
     assert harbor["state"] == "registered"
+    # G0.28-T6 (#1979): the authoring-mode kind reflects the registered
+    # class (HarborConnector is hand-coded ⇒ "typed"), but a registered
+    # row has no descriptor rows yet, so it is not dispatchable.
+    assert harbor["kind"] == "typed"
+    assert harbor["dispatchable"] is False
 
     assert "sddc-rest-9.0" in by_id
     sddc = by_id["sddc-rest-9.0"]
-    # The listing emits the parser-derived product ("sddc"), not the
-    # v2 registry's "sddc-manager" — see test docstring for rationale.
-    # G0.18-T2 (#1355): the value below is what an operator copies
-    # into POST /api/v1/targets; round-trip closure is proved by
-    # ``test_create_target_accepts_sddc_listing_alias`` in
-    # ``test_api_v1_targets.py`` (the alias bridges this listing
-    # token to the canonical "sddc-manager" before validation).
+    # The listing emits the parser-derived product ("sddc"), which since
+    # #1814 (Initiative #1810) also equals the v2 registry's product.
+    # The value below is what an operator copies into
+    # POST /api/v1/targets; round-trip closure is proved by
+    # ``test_create_target_accepts_sddc_short_token`` in
+    # ``test_api_v1_targets.py`` (``"sddc"`` validates directly, no
+    # alias needed).
     assert sddc["product"] == "sddc"
     assert sddc["impl_id"] == "sddc-rest"
     assert sddc["version"] == "9.0"
@@ -920,6 +930,115 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert sddc["enabled_operation_count"] == 0
     assert sddc["group_count"] == 0
     assert sddc["state"] == "registered"
+    assert sddc["kind"] == "typed"
+    assert sddc["dispatchable"] is False
+
+
+@pytest.fixture
+def _registered_profiled_connector() -> Iterator[None]:
+    """Register a ProfiledRestConnector for an ingested triple under test.
+
+    The autouse ``_isolate_global_registries`` conftest fixture snapshots
+    + restores the registry around the test, so this direct
+    ``register_connector_v2`` call is test-scoped.
+    """
+    from meho_backplane.connectors.profiled import ProfiledRestConnector
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    class _AcmeProfiled(ProfiledRestConnector):
+        product = "acme"
+        version = "1.0"
+        impl_id = "acme-rest"
+        supported_version_range = ">=1.0,<2.0"
+
+    register_connector_v2(product="acme", version="1.0", impl_id="acme-rest", cls=_AcmeProfiled)
+    yield
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_profiled_kind_gated_then_dispatchable(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """A profiled DB-backed connector reads profiled-but-unreviewed until an op is enabled.
+
+    G0.28-T6 (#1979). The list surface distinguishes a working profiled
+    connector from a dead bare shim via the additive ``kind`` /
+    ``dispatchable`` fields. Before any op is enabled the review gate
+    (#1971) is closed: ``kind="profiled-but-unreviewed"`` /
+    ``dispatchable=False``. Enabling an op clears the gate:
+    ``kind="profiled"`` / ``dispatchable=True``.
+    """
+    tenant_a = uuid.uuid4()
+
+    # Gate closed: ops staged + disabled.
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="staged",
+        op_is_enabled=False,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    assert item["state"] == "ingested"
+    assert item["kind"] == "profiled-but-unreviewed"
+    assert item["dispatchable"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_profiled_kind_dispatchable_when_enabled(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """An enabled op clears the review gate ⇒ kind="profiled" / dispatchable=True (#1979)."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="enabled",
+        op_is_enabled=True,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    assert item["kind"] == "profiled"
+    assert item["dispatchable"] is True
+
+
+@pytest.mark.asyncio
+async def test_review_payload_surfaces_authoring_kind(
+    client: TestClient,
+    _registered_profiled_connector: None,
+) -> None:
+    """``GET /{id}/review`` carries the same authoring-mode kind / dispatchable (#1979)."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        review_status="enabled",
+        op_is_enabled=True,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors/acme-rest-1.0/review", headers=_authed(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "profiled"
+    assert body["dispatchable"] is True
 
 
 @pytest.mark.asyncio
@@ -964,10 +1083,14 @@ def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
     """Register one v2 connector whose ``(product, version)`` is NOT in the catalog.
 
     Drives the not-in-catalog branch of :func:`_next_step_for_registered`.
-    Uses a deliberately synthetic ``("custom-vendor", "1.0")`` triple — no
+    Uses a deliberately synthetic ``("customvendor", "1.0")`` triple — no
     catalog entry exists under that pair (the catalog ships seven curated
-    products and ``custom-vendor`` is not one of them), so the hint must
-    fall through to the manual-mode rationale.
+    products and ``customvendor`` is not one of them), so the hint must
+    fall through to the manual-mode rationale. The triple is aligned
+    (``customvendor-rest-1.0`` parses back to ``customvendor``): since
+    #1816 promoted the registration round-trip check to a hard-fail, a
+    divergent ``(product, impl_id)`` can no longer be registered at all, so
+    the catalog-miss branch is exercised with a round-tripping product.
 
     Re-uses :class:`HarborConnector` as the placeholder class because it
     has a no-arg construct path and the test only exercises the listing —
@@ -980,11 +1103,11 @@ def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
     )
 
     existing = all_connectors_v2()
-    if ("custom-vendor", "1.0", "custom-rest") not in existing:
+    if ("customvendor", "1.0", "customvendor-rest") not in existing:
         register_connector_v2(
-            product="custom-vendor",
+            product="customvendor",
             version="1.0",
-            impl_id="custom-rest",
+            impl_id="customvendor-rest",
             cls=HarborConnector,
         )
     yield
@@ -1034,25 +1157,20 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
 ) -> None:
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
-    G0.18-T8 (#1361) / RDC #789 N8. The VCF-family rows
-    (``vmware/9.0``, ``sddc-manager/9.0``, ``nsx/9.0``) ship with
-    ``catalog_ingest: spec-only`` because their upstream URLs are
-    Broadcom Developer Portal HTML landing pages (vmware, sddc-manager)
-    or fqdn-templated appliance URLs (nsx) — neither shape can drive
-    ``meho connector ingest --catalog`` server-side. The previous hint
-    ("spec available in catalog; run ingest") sent operators into a
-    422; the refined hint points at the explicit-quadruple ``--spec``
-    form using the catalog's native triple so the verb still
-    copies-and-runs once the operator has the spec file in hand.
+    G0.18-T8 (#1361) / RDC #789 N8. ``nsx/9.0`` ships with
+    ``catalog_ingest: spec-only`` because its first upstream is an
+    fqdn-templated appliance URL (``<nsx-mgr-fqdn>``) and no MEHO-authored
+    spec ships for it — neither shape can drive ``meho connector ingest
+    --catalog`` server-side. The previous hint ("spec available in catalog;
+    run ingest") sent operators into a 422; the refined hint points at the
+    explicit-quadruple ``--spec`` form using the catalog's native triple so
+    the verb still copies-and-runs once the operator has the spec file in
+    hand.
 
-    SDDC is the load-bearing case: the listing emits the parser-derived
-    ``product="sddc"`` but the catalog's native triple is
-    ``("sddc-manager", "9.0", "sddc-rest")``; the hint uses the
-    catalog's spelling so the operator's ``--product`` flag matches the
-    registered class (canonical_product_token handles the
-    listing-vs-registry split at write-time via PRODUCT_ALIASES, but
-    the manual-mode ingest path takes the catalog's spelling
-    verbatim).
+    #1964 T2 (#1976) moved the two former HTML-portal offenders
+    (``vmware/9.0``, ``sddc/9.0``) off this branch: they are now
+    profile-backed shipped-spec rows (``catalog_ingest: supported``), so
+    NSX is the canonical remaining spec-only example here.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -1062,19 +1180,19 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     assert response.status_code == 200
     by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
 
-    sddc = by_id["sddc-rest-9.0"]
-    assert sddc["state"] == "registered"
-    assert sddc["next_step"] is not None
-    verb = sddc["next_step"]["verb"]
+    nsx = by_id["nsx-rest-9.0"]
+    assert nsx["state"] == "registered"
+    assert nsx["next_step"] is not None
+    verb = nsx["next_step"]["verb"]
     # The refined hint must NOT promise the broken ``--catalog`` path.
     assert "--catalog" not in verb
     # And must direct the operator at ``--spec`` with the catalog's
     # native triple (so the registered class resolves at ingest time).
-    assert "--product sddc-manager" in verb
+    assert "--product nsx" in verb
     assert "--version 9.0" in verb
-    assert "--impl sddc-rest" in verb
+    assert "--impl nsx-rest" in verb
     assert "--spec" in verb
-    rationale = sddc["next_step"]["rationale"]
+    rationale = nsx["next_step"]["rationale"]
     # Rationale names the reason so an operator (or LLM agent) knows
     # the catalog row isn't broken, it's just upstream-shape-bound.
     assert "HTML-portal" in rationale or "fqdn-templated" in rationale
@@ -1092,25 +1210,19 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     doesn't carry the registered connector, the rationale says so and
     points at manual-mode ``meho connector ingest`` with ``--spec``.
 
-    Uses a synthetic ``("custom-vendor", "1.0", "custom-rest")`` v2
-    registration with no catalog entry. The registry product
-    (``custom-vendor``) differs from the product the dispatcher derives
-    from the connector_id (``parse_connector_id("custom-rest-1.0") ->
-    "custom"``) — the same long↔short split shape the VCF family carries.
-    The hint must:
+    Uses a synthetic ``("customvendor", "1.0", "customvendor-rest")`` v2
+    registration with no catalog entry. The triple is aligned
+    (``parse_connector_id("customvendor-rest-1.0") -> "customvendor"``):
+    since #1816 promoted the registration round-trip check to a hard-fail,
+    a long↔short split registration (the shape the VCF family used to
+    carry) can no longer be registered at all, so the registry product and
+    the parser-derived listing token always agree. The hint must:
 
-    * point at ``meho connector ingest --product custom-vendor --version
-      1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
-      manual-mode invocation), emitting the **registry** ``--product``
-      (the spelling the connector class registers under) so the operator's
-      ingest finds the real class and runs a real version-coverage
-      pre-flight. Register-time row reconciliation persists the rows under
-      the parser-derived dispatch product (``custom``), so it still
-      round-trips to a *dispatchable* ingest — that reconciliation, not
-      switching the verb to the short product, is what closes the
-      claude-rdc-hetzner-dc#1136 false-success (the dispatchable round-trip
-      is pinned end-to-end in
-      ``test_operations_ingest_catalog.test_registered_next_step_verb_round_trips_to_dispatchable_ingest``);
+    * point at ``meho connector ingest --product customvendor --version
+      1.0 --impl customvendor-rest --spec <upstream-openapi-uri>`` (the
+      manual-mode invocation), emitting the registry ``--product`` so the
+      operator's ingest finds the real class and runs a real
+      version-coverage pre-flight;
     * carry a rationale that says the catalog has no entry so the
       operator knows they need to source the OpenAPI spec themselves;
     * name the hand-authored on-ramp (#1533 / ci-07) so a spec-less
@@ -1126,20 +1238,19 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     assert response.status_code == 200
     by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
 
-    custom = by_id["custom-rest-1.0"]
+    custom = by_id["customvendor-rest-1.0"]
     assert custom["state"] == "registered"
-    # The listing row advertises the parser-derived product.
-    assert custom["product"] == "custom"
+    # The listing row advertises the parser-derived product, which for an
+    # aligned registration equals the registry product.
+    assert custom["product"] == "customvendor"
     assert custom["next_step"] is not None
     verb = custom["next_step"]["verb"]
     assert "--catalog" not in verb
-    # The verb emits the registry product (so the operator's ingest finds
-    # the real class + runs a real version-coverage pre-flight); register-
-    # time reconciliation lands the rows dispatchably under the short
-    # product, so it still round-trips (claude-rdc-hetzner-dc#1136).
-    assert "--product custom-vendor " in verb
+    # The verb emits the registry product so the operator's ingest finds
+    # the real class + runs a real version-coverage pre-flight.
+    assert "--product customvendor " in verb
     assert "--version 1.0" in verb
-    assert "--impl custom-rest" in verb
+    assert "--impl customvendor-rest" in verb
     assert "--spec" in verb
     rationale = custom["next_step"]["rationale"]
     assert "not in catalog" in rationale
@@ -1387,10 +1498,10 @@ def _every_v2_connector_registered() -> Iterator[None]:
     entries: tuple[tuple[str, str, str, type], ...] = (
         ("bind9", "9.x", "bind9-ssh", Bind9Connector),
         ("harbor", "2.x", "harbor-rest", HarborConnector),
-        ("hetzner-robot", "2026.04", "hetzner-rest", HetznerRobotConnector),
+        ("hetzner", "2026.04", "hetzner-rest", HetznerRobotConnector),
         ("k8s", "1.x", "k8s", KubernetesConnector),
         ("nsx", "9.0", "nsx-rest", NsxConnector),
-        ("sddc-manager", "9.0", "sddc-rest", SddcManagerConnector),
+        ("sddc", "9.0", "sddc-rest", SddcManagerConnector),
         ("vault", "1.x", "vault", VaultConnector),
         ("vmware", "9.0", "vmware-rest", VmwareRestConnector),
     )
@@ -1419,29 +1530,22 @@ async def test_register_connector_v2_round_trip_lossless_for_every_entry(
         / typed registration, including a case where
         ``product != impl_id.split("-")[0]``.
 
-    The check is *operationally* strict: we don't require the parser
-    to recover the registry's friendly ``product`` (SDDC is the
-    canonical exception: registry ``product="sddc-manager"``, but the
-    dispatcher derives ``"sddc"`` from ``impl_id="sddc-rest"``). What
-    must hold is that:
+    The check is *operationally* strict: the parser must recover
+    ``(version, impl_id)`` losslessly — these are the natural-key
+    columns the dispatcher matches on. Since #1814 (Initiative #1810)
+    realigned the ``_PRODUCT_SPLITS`` family (SDDC was the last
+    historical ``product != impl_id.split("-")[0]`` case — registry
+    ``product="sddc-manager"`` vs derived ``"sddc"``), every connector's
+    registry ``product`` now equals its parser-derived product, so the
+    registry product, the parser-derived product, and the
+    ``endpoint_descriptor`` row product all agree and a DB-backed row
+    lookup succeeds for every connector.
 
-    * the parser recovers ``(version, impl_id)`` losslessly — these
-      are the natural-key columns the dispatcher matches on; and
-    * when the registry's ``product`` differs from the parser's
-      derived ``product``, the registry's ``product`` matches what
-      :func:`~meho_backplane.connectors.kubernetes.SDDC_PRODUCT`-style
-      constants write into ``endpoint_descriptor`` rows — i.e., the
-      dispatcher's parsed product matches the DB row product, so a
-      DB-backed row lookup succeeds.
-
-    Concretely: ``product != impl_id.split("-")[0]`` is allowed when
-    the v2-registry product is purely a friendly resolver-key label
-    and DB writes use the parser-derived product (the documented SDDC
-    convention). It is *not* allowed when the registry product would
-    also be the DB-row product, because then the dispatcher's parse
-    would miss every row. The class-side-only listing path
-    (``_class_side_only_items``) enforces this by emitting the
-    parser-derived ``product`` on each class-only row.
+    The test pins the impl_id-prefix convention
+    (``parsed_product == impl_id.split("-")[0]``) so a future
+    registration that reintroduces a divergence — registering under a
+    product the parser can't derive from the connector_id — is caught
+    here at unit-test time.
 
     This test exhaustively enumerates ``all_connectors_v2()`` and
     pins the property; new connectors added to the registry are
@@ -1454,12 +1558,14 @@ async def test_register_connector_v2_round_trip_lossless_for_every_entry(
     )
 
     registry = all_connectors_v2()
-    # Sanity-check the registry actually has the SDDC entry that
-    # exercises the product != impl_id.split("-")[0] case the
-    # acceptance criterion calls out explicitly.
-    assert ("sddc-manager", "9.0", "sddc-rest") in registry, (
-        "SDDC v2 registration missing — the test relies on it as the "
-        "canonical product != impl_id.split('-')[0] case"
+    # Sanity-check the registry actually has the SDDC entry. Since #1814
+    # (Initiative #1810) realigned it, SDDC registers under the short
+    # ``sddc`` token (``product == impl_id.split("-")[0]``) like every
+    # other connector — the historical ``product != derived`` exception
+    # is gone.
+    assert ("sddc", "9.0", "sddc-rest") in registry, (
+        "SDDC v2 registration missing — the round-trip property is "
+        "checked against every registered connector"
     )
 
     for (product, version, impl_id), _cls in registry.items():
@@ -1605,6 +1711,78 @@ async def test_get_review_ambiguous_scope_returns_409(
         None,
         str(operator_tenant),
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_review_prefer_tenant_returns_tenant_row(
+    client: TestClient,
+) -> None:
+    """#2029: ``GET /{id}/review?prefer=tenant`` resolves the tenant row (200).
+
+    Same ambiguous seed as the 409 test, but the ``prefer=tenant`` query
+    param targets the tenant-curated row directly — 200 with the tenant
+    payload (3 ops) rather than the 409.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "tenant"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] == str(operator_tenant)
+    assert body["total_op_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_review_prefer_builtin_returns_builtin_row(
+    client: TestClient,
+) -> None:
+    """#2029: ``GET /{id}/review?prefer=builtin`` resolves the built-in row (200)."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=5)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "builtin"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] is None
+    assert body["total_op_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_get_review_prefer_rejects_out_of_vocabulary_value(
+    client: TestClient,
+) -> None:
+    """#2029: an unknown ``prefer`` value is a 422 (the closed-set contract).
+
+    The selector is a closed ``Literal["tenant", "builtin"]``; FastAPI
+    rejects any other value at validation time, so the closed-set
+    guarantee holds at the wire.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=operator_tenant, group_count=1, ops_per_group=3)
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            params={"prefer": "global"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
 
 
 # ---------------------------------------------------------------------------
@@ -2445,7 +2623,7 @@ paths:
     assert "8.0" in detail["message"]
 
 
-def test_ingest_compatible_drift_succeeds(
+def test_ingest_compatible_version_drift_succeeds(
     client: TestClient,
     tmp_path: Any,
     stub_embedding_service: AsyncMock,
@@ -2454,7 +2632,9 @@ def test_ingest_compatible_drift_succeeds(
 
     The cross-check classifies this as ``compatible`` (same major,
     different minor) and proceeds — only the cross-major mismatches
-    raise 422.
+    raise 422. The product round-trips its connector_id
+    (``drift-9.1`` parses to ``drift``) so the #1817 boundary guard is a
+    no-op and the version cross-check is what's under test here.
     """
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(
@@ -2496,7 +2676,59 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "drift-test",
+                "product": "drift",
+                "version": "9.1",
+                "impl_id": "drift",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+
+
+def test_ingest_divergent_product_rejected_with_422(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A supplied product that does not round-trip its connector_id → 422.
+
+    G0.27 / T3 (#1817). ``--product drift-test --impl-id drift-impl``
+    renders ``drift-impl-9.1``, which the dispatcher parses to product
+    ``drift`` — so rows ingested under ``drift-test`` would be invisible
+    to every dispatch probe and the auto-shim would trip
+    ``register_connector_v2``'s round-trip hard-fail. The ingest route
+    rejects the divergence up front with a 422
+    ``product_impl_id_mismatch`` naming the supplied and derived products,
+    before any spec is fetched. This is the operator-facing contract
+    change that let the long↔short row-reconciliation helpers be retired:
+    a divergent ingest that returned 200 (and silently reconciled) now
+    fails loud.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '9.0.3'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-divergent.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "drift-test",  # diverges from the parser-derived "drift"
                 "version": "9.1",
                 "impl_id": "drift-impl",
                 "specs": [{"uri": spec_url}],
@@ -2504,7 +2736,14 @@ paths:
             },
             headers=_authed(token),
         )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["kind"] == "product_impl_id_mismatch"
+    assert detail["product"] == "drift-test"
+    assert detail["derived_product"] == "drift"
+    # The message names both spellings so the operator knows the fix.
+    assert "drift-test" in detail["message"]
+    assert "drift" in detail["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -2707,9 +2946,9 @@ class _RangedTestConnector(Connector):
     looks like what a real misconfigured ingest produces.
     """
 
-    product = "t9-vmware"
+    product = "t9vmware"
     version = "9.0"
-    impl_id = "t9-vmware-rest"
+    impl_id = "t9vmware-rest"
     supported_version_range = ">=8.5,<10.0"
     priority = 1
 
@@ -2738,15 +2977,15 @@ def _registered_ranged_connector() -> Iterator[None]:
     from meho_backplane.connectors.registry import register_connector_v2
 
     register_connector_v2(
-        product="t9-vmware",
+        product="t9vmware",
         version="9.0",
-        impl_id="t9-vmware-rest",
+        impl_id="t9vmware-rest",
         cls=_RangedTestConnector,
     )
     try:
         yield
     finally:
-        _registry_mod._REGISTRY_V2.pop(("t9-vmware", "9.0", "t9-vmware-rest"), None)
+        _registry_mod._REGISTRY_V2.pop(("t9vmware", "9.0", "t9vmware-rest"), None)
 
 
 def test_ingest_returns_422_when_version_outside_registered_class_range(
@@ -2787,9 +3026,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "async": False,
             },
@@ -2797,14 +3036,14 @@ paths:
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
-    assert detail["product"] == "t9-vmware"
+    assert detail["product"] == "t9vmware"
     assert detail["version"] == "7.0"
-    assert detail["impl_id"] == "t9-vmware-rest"
+    assert detail["impl_id"] == "t9vmware-rest"
     assert detail["registered_classes"] == [
         {
             "class_name": "_RangedTestConnector",
             "version": "9.0",
-            "impl_id": "t9-vmware-rest",
+            "impl_id": "t9vmware-rest",
             "supported_version_range": ">=8.5,<10.0",
         },
     ]
@@ -2852,9 +3091,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "async": False,
             },
@@ -2864,10 +3103,10 @@ paths:
     # The same exception the pre-flight raises for this triple + registered
     # class. ``candidates`` is ``(version, impl_id, class_name, range)``.
     expected_exc = UncoveredVersionLabel(
-        product="t9-vmware",
+        product="t9vmware",
         version="7.0",
-        impl_id="t9-vmware-rest",
-        candidates=[("9.0", "t9-vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
+        impl_id="t9vmware-rest",
+        candidates=[("9.0", "t9vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
     )
     assert response.json()["detail"] == build_uncovered_version_label_detail(expected_exc)
 
@@ -2905,9 +3144,9 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "t9-vmware",
+                "product": "t9vmware",
                 "version": "7.0",
-                "impl_id": "t9-vmware-rest",
+                "impl_id": "t9vmware-rest",
                 "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
@@ -2985,13 +3224,17 @@ paths:
 """,
     )
     catalog_spec_url = f"{_SPEC_BASE}/catalog-spec.yaml"
+    # Synthetic catalog entry whose product round-trips its connector_id
+    # (``vmwaret9-rest-9.0`` parses to ``vmwaret9``) so the #1817 ingest
+    # boundary guard is a no-op; the ``t9`` suffix keeps it distinct from
+    # the real ``vmware`` / ``vmware-rest`` registration.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "vmware-t9",
+                "product": "vmwaret9",
                 "version": "9.0",
-                "impl_id": "vmware-rest-t9",
+                "impl_id": "vmwaret9-rest",
                 "requires_connector_class": "VmwareRestConnector",
                 "upstream": (catalog_spec_url,),
             },
@@ -3009,7 +3252,7 @@ paths:
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "vmware-t9/9.0", "dry_run": True},
+            json={"catalog_entry": "vmwaret9/9.0", "dry_run": True},
             headers=_authed(token),
         )
     assert response.status_code == 200, response.text
@@ -3018,7 +3261,54 @@ paths:
     # The resolved triple round-trips into the connector_id the response
     # echoes (`<impl_id>-<version>`) so a REST client sees the resolved
     # identity without needing to re-derive it.
-    assert body["ingestion"]["connector_id"] == "vmware-rest-t9-9.0"
+    assert body["ingestion"]["connector_id"] == "vmwaret9-rest-9.0"
+
+
+def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1964 T1 #1975: a ``spec_resource`` row ingests with a null upstream.
+
+    The row carries no ``upstream`` (the on-ramp serves products whose
+    upstream the backend can't dereference) but names a packaged
+    ``spec_resource``. The route must load the spec bytes from package
+    data into ``SpecSource.content`` and ingest WITHOUT any HTTP fetch —
+    so the dry-run succeeds even though no respx mock is installed for an
+    upstream URL (there is none).
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "shippedt1",
+                "version": "1.0",
+                "impl_id": "shippedt1-rest",
+                # Profile-backed naming, but the route only needs the spec
+                # to ingest; class-presence is a boot-time validator concern.
+                "requires_connector_class": "ProfiledRestConnector_shippedt1",
+                "upstream": None,
+                "spec_resource": "_fixture_minimal.yaml",
+                "profile_resource": "_fixture_minimal.yaml",
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # No upstream mock — the shipped spec must be used inline; any
+        # fetch attempt would raise an unmocked-request error.
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "dry_run": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The _fixture_minimal.yaml spec carries exactly one operation.
+    assert body["ingestion"]["inserted_count"] == 1
+    assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
 
 
 def test_ingest_catalog_entry_unknown_returns_structured_422(
@@ -3252,13 +3542,16 @@ def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
     cross-referencing the byte stream.
     """
     portal_url = "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
+    # Synthetic entry whose product round-trips (``vmwaret1211-rest-9.0``
+    # parses to ``vmwaret1211``) so the test exercises the HTML-portal
+    # content-type guard, not the #1817 round-trip guard.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "vmware-t1211",
+                "product": "vmwaret1211",
                 "version": "9.0",
-                "impl_id": "vmware-rest-t1211",
+                "impl_id": "vmwaret1211-rest",
                 "requires_connector_class": "VmwareRestConnector",
                 "upstream": (portal_url,),
             },
@@ -3281,13 +3574,13 @@ def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "vmware-t1211/9.0", "async": False},
+            json={"catalog_entry": "vmwaret1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["detail"] == "catalog_entry_upstream_not_spec"
-    assert detail["catalog_entry"] == "vmware-t1211/9.0"
+    assert detail["catalog_entry"] == "vmwaret1211/9.0"
     assert detail["upstream_url"] == portal_url
     assert detail["content_type"] == "text/html; charset=utf-8"
     # T11 convention: the human-readable message names the values, the
@@ -3309,13 +3602,16 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
     detection logic by product.
     """
     portal_url = "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    # Synthetic entry whose product round-trips (``sddct1211-rest-9.0``
+    # parses to ``sddct1211``) so the HTML-portal guard is what's under
+    # test, not the #1817 round-trip guard.
     _patch_catalog(
         monkeypatch,
         entries=[
             {
-                "product": "sddc-manager-t1211",
+                "product": "sddct1211",
                 "version": "9.0",
-                "impl_id": "sddc-rest-t1211",
+                "impl_id": "sddct1211-rest",
                 "requires_connector_class": "SddcManagerConnector",
                 "upstream": (portal_url,),
             },
@@ -3333,13 +3629,13 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "sddc-manager-t1211/9.0", "async": False},
+            json={"catalog_entry": "sddct1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["detail"] == "catalog_entry_upstream_not_spec"
-    assert detail["catalog_entry"] == "sddc-manager-t1211/9.0"
+    assert detail["catalog_entry"] == "sddct1211/9.0"
     assert detail["upstream_url"] == portal_url
     assert detail["content_type"] == "text/html; charset=utf-8"
 
@@ -3371,9 +3667,13 @@ def test_ingest_explicit_quadruple_html_upstream_returns_422_without_catalog_fie
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "explicit-quad",
+                # Single-segment product == impl_id round-trips its
+                # connector_id (``explicitquad-1.0`` parses to
+                # ``explicitquad``) so the test hits the HTML-upstream
+                # guard, not the #1817 round-trip guard.
+                "product": "explicitquad",
                 "version": "1.0",
-                "impl_id": "explicit-quad",
+                "impl_id": "explicitquad",
                 "specs": [{"uri": portal_url}],
                 "dry_run": True,
             },
@@ -3387,53 +3687,59 @@ def test_ingest_explicit_quadruple_html_upstream_returns_422_without_catalog_fie
     assert detail["content_type"] == "text/html"
 
 
-def test_ingest_packaged_catalog_html_portal_entries_carry_warning_notes() -> None:
-    """G0.15-T2 (#1211) audit: every ``spec_info_version: null`` catalog
-    entry whose ``upstream`` would reach the fetch path carries the
-    "HTML-portal upstream; manual ingest required" warning in ``notes``.
+def test_ingest_packaged_catalog_no_broadcom_portal_fetch_entries_remain() -> None:
+    """G0.15-T2 (#1211) audit, revised by #1964 T2 (#1976).
 
-    Sweep over the packaged catalog confirms ``vmware/9.0`` and
-    ``sddc-manager/9.0`` -- the two confirmed offenders -- both carry
-    the warning mirroring the ``harbor/2.x`` Swagger-2.0 precedent. The
-    other ``spec_info_version: null`` entries are excluded by earlier
-    422 gates -- ``nsx/9.0`` via ``catalog_entry_templated_upstream``
-    (FQDN placeholder), the three typed connectors (``vault/1.x``,
-    ``k8s/1.x``, ``bind9/9.x``) via ``catalog_entry_typed_connector``
-    (``upstream: null``) -- so they never reach the fetch path the
-    HTML-portal guard sits on. Test exists so a future contributor
-    adding a third HTML-portal-style entry without the note tripping
-    catches the omission at PR-review time.
+    The original audit asserted ``vmware/9.0`` + ``sddc/9.0`` reached the
+    HTTP fetch path with a Broadcom Developer Portal HTML upstream and
+    therefore carried the ``catalog_entry_upstream_not_spec`` warning in
+    ``notes``. #1976 made both rows PROFILE-BACKED: they now carry
+    ``upstream: null`` (the MEHO-authored minimal spec ships as package
+    data) so they never reach the fetch-path HTML-portal guard at all.
+
+    The sweep is inverted accordingly: no packaged catalog row still
+    points its ``upstream`` at a directly-fetchable Broadcom Developer
+    Portal page (the only remaining Broadcom reference, ``nsx/9.0``, is
+    fqdn-templated and refused earlier by ``catalog_entry_templated_
+    upstream``). A future contributor re-adding a fetchable Broadcom-portal
+    upstream without a shipped spec trips here. Pairs with
+    ``test_shipped_vmware_sddc_rows_are_profile_backed`` in
+    ``test_operations_ingest_catalog.py`` which asserts the positive shape.
     """
     from meho_backplane.operations.ingest.catalog import load_catalog
 
     catalog = load_catalog()
 
-    # An entry reaches the HTTP fetch path only if every upstream URL
-    # is non-templated; entries with any FQDN-templated URL (NSX) are
-    # refused earlier by ``catalog_entry_templated_upstream`` (422)
-    # before ``_load_spec_bytes`` runs, so they never trigger the
-    # HTML-portal guard.
+    # An entry reaches the HTTP fetch path only if it has an upstream and
+    # every upstream URL is non-templated; entries with any FQDN-templated
+    # URL (NSX) are refused earlier by ``catalog_entry_templated_upstream``
+    # (422) before ``_load_spec_bytes`` runs.
     def _reaches_fetch_path(urls: tuple[str, ...]) -> bool:
         return all(("<" not in url and ">" not in url) for url in urls)
 
-    html_portal_entries = {
+    broadcom_fetch_entries = {
         (e.product, e.version)
         for e in catalog.entries
-        if e.spec_info_version is None
-        and e.upstream is not None
+        if e.upstream is not None
         and _reaches_fetch_path(e.upstream)
         and any(url.startswith("https://developer.broadcom.com/") for url in e.upstream)
     }
-    assert ("vmware", "9.0") in html_portal_entries
-    assert ("sddc-manager", "9.0") in html_portal_entries
-    for product, version in html_portal_entries:
-        entry = catalog.get(product, version)
+    assert broadcom_fetch_entries == set(), (
+        "a packaged catalog row points its upstream at a directly-fetchable "
+        "Broadcom Developer Portal page (which serves text/html, not raw "
+        f"OpenAPI): {broadcom_fetch_entries}. Ship a MEHO-authored minimal "
+        "spec via spec_resource (the #1976 on-ramp) instead of a fetchable "
+        "HTML-portal upstream."
+    )
+
+    # The former offenders are now profile-backed with a null upstream and
+    # the on-ramp note referencing T2 (#1976).
+    for product in ("vmware", "sddc"):
+        entry = catalog.get(product, "9.0")
         assert entry is not None
-        assert "catalog_entry_upstream_not_spec" in entry.notes, (
-            f"{product}/{version} upstream points at the Broadcom Developer "
-            f"Portal but notes don't reference the 422 error code -- mirror "
-            "the harbor/2.x Swagger-2.0 precedent."
-        )
+        assert entry.upstream is None
+        assert entry.spec_resource is not None
+        assert "#1976" in entry.notes
 
 
 def test_ingest_explicit_quadruple_still_works_regression(
@@ -3470,9 +3776,13 @@ paths:
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
-                "product": "test-quadruple",
+                # Product round-trips its connector_id
+                # (``testquad-impl-1.0`` parses to ``testquad``) so the
+                # #1817 boundary guard is a no-op and the regression under
+                # test is the explicit-quadruple shape's parse + dry-run.
+                "product": "testquad",
                 "version": "1.0",
-                "impl_id": "test-impl",
+                "impl_id": "testquad-impl",
                 "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
@@ -3673,9 +3983,9 @@ async def test_ingest_async_default_returns_202_with_job_handle(
             response = await ac.post(
                 "/api/v1/connectors/ingest",
                 json={
-                    "product": "stress-vmware",
+                    "product": "stressvmware",
                     "version": "9.0.0.0",
-                    "impl_id": "stress-vmware-rest",
+                    "impl_id": "stressvmware-rest",
                     "specs": [{"uri": spec_url}],
                     # Default is ``async=true``; the assertion below
                     # is what the issue's "must not crash the pod"
@@ -3818,9 +4128,13 @@ paths:
             response = await ac.post(
                 "/api/v1/connectors/ingest",
                 json={
-                    "product": "tenant-iso",
+                    # Product round-trips its connector_id
+                    # (``tenantiso-impl-1.0`` parses to ``tenantiso``) so
+                    # the #1817 boundary guard is a no-op; this test is
+                    # about cross-tenant job-poll isolation.
+                    "product": "tenantiso",
                     "version": "1.0",
-                    "impl_id": "tenant-iso-impl",
+                    "impl_id": "tenantiso-impl",
                     "specs": [{"uri": spec_url}],
                 },
                 headers=_authed(token_a),

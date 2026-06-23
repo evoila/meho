@@ -51,6 +51,12 @@ import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.adapters import HttpConnector
+from meho_backplane.connectors.profile import (
+    AuthSpec,
+    ExecutionProfile,
+    FingerprintSpec,
+    PaginationSpec,
+)
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
@@ -63,6 +69,7 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     result_connector_auth_failed,
 )
+from meho_backplane.operations.dispatcher import _profile_expiry_statuses
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -226,6 +233,7 @@ class _Http401Connector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_http_status_error(
             headers=self.response_headers,
@@ -239,7 +247,10 @@ class _Http401Connector(HttpConnector):
         path: str,
         *,
         operator: Operator,
+        verb: str = "POST",
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         raise _make_http_status_error(
             headers=self.response_headers,
@@ -280,6 +291,54 @@ class _Http440Connector(_Http401Connector):
     impl_id = "vcfops-rest-440"
     status_code: ClassVar[int] = 440
     response_body: ClassVar[dict[str, Any]] = {"message": "Login Time-out"}
+
+
+class _Http440DefaultProfileConnector(_Http440Connector):
+    """A profiled connector raising 440 whose profile declares only {401}.
+
+    #1973: the dispatcher classifies a *profiled* connector's auth failure
+    against its profile's ``expiry_statuses``, not the typed-connector
+    global. With the default {401}-only set, a 440 is NOT a recognised
+    expiry status, so it falls through to the generic ``connector_error``
+    -- the opposite of the typed :class:`_Http440Connector`, proving the
+    profile's declaration drives the arm.
+    """
+
+    impl_id = "vcfops-rest-440-default-profile"
+    profile: ClassVar[ExecutionProfile] = ExecutionProfile(
+        product="vcfops",
+        version="9",
+        auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
+        # expiry_statuses omitted -> default {401}.
+    )
+
+
+class _Http440VrliProfileConnector(_Http440Connector):
+    """A profiled connector raising 440 whose profile declares {401, 440}.
+
+    The vRLI shape expressed as a profile: 440 is a declared expiry status,
+    so the dispatcher siphons it into ``connector_auth_failed`` from the
+    profile's set -- the same outcome as the typed connector, but sourced
+    from the single profile declaration.
+    """
+
+    impl_id = "vcfops-rest-440-vrli-profile"
+    profile: ClassVar[ExecutionProfile] = ExecutionProfile(
+        product="vcfops",
+        version="9",
+        auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
+        expiry_statuses=frozenset({401, 440}),
+    )
 
 
 class _Http404Connector(_Http401Connector):
@@ -377,6 +436,25 @@ def test_is_auth_failed_status_excludes_non_auth_statuses() -> None:
     """Non-auth statuses (403/404/422/429/5xx) are not in the set."""
     for status in (200, 403, 404, 422, 429, 500, 502, 503):
         assert is_auth_failed_status(status) is False, status
+
+
+def test_is_auth_failed_status_profile_set_overrides_global() -> None:
+    """A profiled connector's declared set is authoritative for its dispatch (#1973)."""
+    # vRLI profile declares {401, 440} -> both classify as auth-failed.
+    vrli = frozenset({401, 440})
+    assert is_auth_failed_status(401, vrli) is True
+    assert is_auth_failed_status(440, vrli) is True
+    # The {401}-only default profile does NOT siphon 440 into auth-failed.
+    default = frozenset({401})
+    assert is_auth_failed_status(401, default) is True
+    assert is_auth_failed_status(440, default) is False
+
+
+def test_is_auth_failed_status_none_falls_back_to_global() -> None:
+    """A typed connector (no profile) keeps the unchanged {401, 440} global."""
+    assert is_auth_failed_status(401, None) is True
+    assert is_auth_failed_status(440, None) is True
+    assert is_auth_failed_status(404, None) is False
 
 
 # ---------------------------------------------------------------------------
@@ -726,3 +804,107 @@ async def test_dispatch_403_still_maps_to_connector_http_403(
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"
+
+
+# ---------------------------------------------------------------------------
+# Profile-declared expiry-status set (#1973): one source feeds the arm
+# ---------------------------------------------------------------------------
+
+
+def test_profile_expiry_statuses_reads_attached_profile() -> None:
+    """The dispatcher helper extracts the profile's declared set."""
+    assert _profile_expiry_statuses(_Http440VrliProfileConnector()) == frozenset({401, 440})
+    assert _profile_expiry_statuses(_Http440DefaultProfileConnector()) == frozenset({401})
+
+
+def test_profile_expiry_statuses_none_for_typed_connector() -> None:
+    """A typed connector (no profile attr) yields None -> the global fallback."""
+    assert _profile_expiry_statuses(_Http440Connector()) is None
+    assert _profile_expiry_statuses(None) is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_440_with_default_profile_falls_through(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#1973: a profiled connector with the default {401} set does NOT siphon 440.
+
+    The profile is the single source: its {401}-only declaration means a
+    440 is not a recognised expiry status for *this* connector, so it falls
+    through to the generic ``connector_error`` -- proving the profile, not
+    the typed-connector global, drives the dispatcher's auth-class arm.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-440-default-profile",
+        cls=_Http440DefaultProfileConnector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-440-default-profile",
+        op_id="GET:/api/v2/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-440-default-profile-9",
+        op_id="GET:/api/v2/events",
+        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert result.extras["error_code"] == "connector_error"
+    # The {401}-only profile did NOT reclassify 440 as the auth shape.
+    assert "connector_auth_failed" not in result.error
+
+
+@pytest.mark.asyncio
+async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#1973: a profiled connector declaring {401, 440} siphons 440 from one source.
+
+    The vRLI shape expressed as a profile reaches the same
+    ``connector_auth_failed`` outcome as the typed connector, but the status
+    set comes from the profile declaration -- the same one the session-retry
+    harness reads.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-440-vrli-profile",
+        cls=_Http440VrliProfileConnector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-440-vrli-profile",
+        op_id="GET:/api/v2/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-440-vrli-profile-9",
+        op_id="GET:/api/v2/events",
+        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_auth_failed:")
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["http_status"] == 440

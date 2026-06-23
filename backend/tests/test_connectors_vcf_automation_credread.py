@@ -85,9 +85,9 @@ _CANARY_TENANT_TOKEN = "vcfa-credread-tenant-token-canary"
 
 #: The connector triple ``vcfa-rest-9.0`` decodes to. ``parse_connector_id``
 #: pulls ``"vcfa"`` as the product slug; the connector class registers under
-#: the wider ``"vcf-automation"`` slug (same shape as sddc-manager / sddc).
+#: the wider ``"vcfa"`` slug (same shape as sddc-manager / sddc).
 _DESCRIPTOR_PRODUCT = "vcfa"
-_CONNECTOR_PRODUCT = "vcf-automation"
+_CONNECTOR_PRODUCT = "vcfa"
 _VERSION = "9.0"
 _IMPL_ID = "vcfa-rest"
 _CONNECTOR_ID = "vcfa-rest-9.0"
@@ -239,7 +239,7 @@ async def _seed_descriptors(session: AsyncSession, embedding: list[float]) -> No
 
     The descriptor rows use the ``"vcfa"`` product slug
     :func:`parse_connector_id` derives from ``"vcfa-rest-9.0"``; the
-    connector class registers under the wider ``"vcf-automation"`` slug
+    connector class registers under the wider ``"vcfa"`` slug
     (same dual-slug shape sddc-manager established).
     """
     now = datetime.now(UTC)

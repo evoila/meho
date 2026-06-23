@@ -293,3 +293,103 @@ def test_shim_dropped_when_multiple_hand_rolled_remain() -> None:
         ("nsx", "9.0", "nsx-rest"),
         ("nsx", "9.0", "nsx-soap"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# #1814 (Initiative #1810) — every realigned connector resolves through its
+# hand-coded class under the short token, never an auto-shim
+#
+# The family-wide analogue of the #1798 vRLI SEV-2 dispatch test
+# (``test_vrli_natural_product_token_dispatches_through_connector_not_shim``
+# in ``test_connectors_vcf_logs_e2e.py``). #1798 proved it for vRLI at the
+# e2e dispatch level; this pins the same resolution contract for all five
+# connectors #1814 realigned (plus vRLI as the established precedent) at
+# the resolver level — the layer where the SEV-2 actually lived (a shim
+# shadowing the hand-coded class under a divergent product token). Each
+# real class is registered under its short, post-#1814 triple alongside a
+# competing ``GenericRestConnector`` shim sharing the same
+# ``(product, version)`` label; the operator's short product token must
+# resolve the hand-coded class.
+# ---------------------------------------------------------------------------
+
+
+def _real_connector_classes() -> dict[str, type[Connector]]:
+    """Import the six hand-coded connectors keyed by their short product.
+
+    Imported call-locally so the module import stays light and the
+    autouse ``clear_registry`` fixture controls registry state.
+    """
+    from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
+    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
+    from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
+    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
+    from meho_backplane.connectors.vcf_logs import VcfLogsConnector
+    from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
+
+    return {
+        "sddc": SddcManagerConnector,
+        "vcfa": VcfAutomationConnector,
+        "fleet": VcfFleetConnector,
+        "vrops": VcfOperationsConnector,
+        "hetzner": HetznerRobotConnector,
+        "vrli": VcfLogsConnector,
+    }
+
+
+@pytest.mark.parametrize(
+    "short_product",
+    ["sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"],
+)
+def test_realigned_short_token_resolves_hand_coded_connector_not_shim(
+    short_product: str,
+) -> None:
+    """A target under the short product token resolves the hand-coded class.
+
+    Registers the real connector under its post-#1814 short triple — both
+    the versioned row and the ``(product, "", "")`` wildcard, mirroring
+    the connector's ``__init__`` — plus an auto-shim under the same
+    ``(product, version)`` with a sentinel ``impl_id`` (the exact
+    shim-shadow shape the v0.16.0 dogfood hit). The
+    ``hand_rolled_over_shim`` rung must drop the shim so the operator's
+    short token resolves the hand-coded connector, not the
+    ``auth_headers``-less ``GenericRestConnector``.
+    """
+    cls = _real_connector_classes()[short_product]
+    assert cls.product == short_product, (
+        f"{cls.__name__} should register under {short_product!r}, got {cls.product!r}"
+    )
+
+    register_connector_v2(
+        product=cls.product,
+        version=cls.version,
+        impl_id=cls.impl_id,
+        cls=cls,
+    )
+    # Wildcard row, exactly as each connector's __init__ registers it, so
+    # a version-unknown target still resolves (load-bearing for hetzner,
+    # whose supported_version_range is None).
+    register_connector_v2(product=cls.product, version="", impl_id="", cls=cls)
+
+    # A competing auto-shim under the same (product, version) label with a
+    # different impl_id — the shadow the realignment must out-resolve.
+    shim_created = ensure_connector_class_registered(
+        product=cls.product,
+        version=cls.version,
+        impl_id=f"{cls.impl_id}-probe",
+        base_url=None,
+    )
+    assert shim_created is True
+    shim_cls = all_connectors_v2()[(cls.product, cls.version, f"{cls.impl_id}-probe")]
+    assert issubclass(shim_cls, GenericRestConnector)
+
+    # Version-unknown target keyed only on the short product token — the
+    # natural operator token (what `meho connector list` emits and what an
+    # operator POSTs). The wildcard row matches and the rung drops the
+    # shim, leaving the hand-coded class.
+    target = _FakeTarget(product=short_product, fingerprint=None)
+    resolved = resolve_connector(target)
+    assert resolved is cls, (
+        f"product={short_product!r} must resolve {cls.__name__} (hand-coded), "
+        f"not the auto-shim; got {resolved.__name__}"
+    )
+    assert not issubclass(resolved, GenericRestConnector)

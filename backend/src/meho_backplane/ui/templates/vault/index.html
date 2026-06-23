@@ -1,0 +1,254 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Vault KV browser (Initiative #1942 G10.18, Task #1956 T1).
+
+  The read-only entry surface for the console's secrets browser: a
+  connector/target picker, a mount/path picker defaulted to the
+  operator's tenant prefix, and three HTMX swap regions (key list,
+  secret read, version history) that the controls populate.
+
+  connector_id shape: the dispatchable id is ``vault-1.x`` (the
+  ``<impl_id>-<version>`` id sourced from the ingested-connector list),
+  NEVER the bare product slug ``vault``. The picker option carries the
+  resolved id as its value so a re-version (``vault-2.x``) flows through
+  without a template edit; an empty ``connector_id`` (no vault connector
+  ingested) renders a hint instead of a dead-end form.
+
+  Tenant scope: the mount/path picker defaults to the operator's
+  ``secret`` mount + ``tenants/<tenant_id>`` path so the common case
+  never trips the default-on per-tenant guard.
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Vault &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold">
+        {{ icon("lock", class="size-5 opacity-70") }}
+        Vault
+      </h1>
+      <p class="text-sm opacity-70">
+        Browse the KV secret tree within your tenant scope: list keys,
+        read a secret's latest value, and view its version history.
+        Read-only.
+      </p>
+    </div>
+    {#- Status view (G10.18-T3 #1958): seal/health/mounts + auth-methods.
+        Shares the ``vault`` sidebar entry rather than adding a second
+        top-level nav surface. -#}
+    <a href="/ui/vault/status" class="btn btn-ghost btn-sm gap-1" data-vault-status-link>
+      {{ icon("shield-check", class="size-4") }}
+      Status
+    </a>
+  </header>
+
+  {% if not connector_id %}
+    {#- No vault connector ingested for this operator's visibility. Render
+        the hint, not a dead-end picker that 404s on every dispatch. -#}
+    <div role="alert" class="alert alert-warning" data-vault-error="no_vault_connector">
+      <div>
+        <h3 class="text-sm font-semibold">No Vault connector available</h3>
+        <p class="text-xs">
+          No ingested <code>vault</code> connector is visible to your
+          tenant. Ingest the Vault connector from the
+          <a href="/ui/connectors/registry" class="link">Connector Registry</a>
+          before browsing secrets.
+        </p>
+      </div>
+    </div>
+  {% else %}
+    {#- The KV browser form. All three controls share the mount/path/target
+        fields via ``hx-include`` and swap into their own regions, so an
+        operator can list, then read or inspect versions of one key without
+        re-typing the path. The form itself does not submit; each button
+        drives its own ``hx-get``. -#}
+    <form
+      class="grid gap-3 sm:grid-cols-[minmax(0,16rem)_minmax(0,12rem)_1fr]"
+      data-vault-browser
+      role="search"
+      aria-label="Browse Vault secrets"
+      onsubmit="return false"
+    >
+      <input type="hidden" name="connector_id" value="{{ connector_id }}" data-vault-connector-id />
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Target</span>
+        <input
+          type="text"
+          name="target"
+          value=""
+          placeholder="(optional) target name"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="Target name"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Mount</span>
+        <input
+          type="text"
+          name="mount"
+          value="{{ default_mount }}"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="KV mount"
+          autocomplete="off"
+        />
+      </label>
+
+      <label class="form-control">
+        <span class="label-text mb-1 text-xs opacity-70">Path</span>
+        <input
+          type="text"
+          name="path"
+          value="{{ default_path }}"
+          placeholder="tenants/&lt;tenant&gt;/&lt;target&gt;"
+          class="input input-bordered input-sm w-full font-mono"
+          aria-label="KV path"
+          autocomplete="off"
+        />
+      </label>
+
+      <div class="flex flex-wrap gap-2 sm:col-span-3">
+        <button
+          type="button"
+          class="btn btn-primary btn-sm gap-1"
+          hx-get="/ui/vault/list"
+          hx-target="#vault-keys-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-keys-region"
+        >
+          {{ icon("table", class="size-4") }}
+          List keys
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-sm gap-1"
+          hx-get="/ui/vault/read"
+          hx-target="#vault-secret-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-secret-region"
+        >
+          {{ icon("lock", class="size-4") }}
+          Read secret
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-sm gap-1"
+          hx-get="/ui/vault/versions"
+          hx-target="#vault-versions-region"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          hx-indicator="#vault-versions-region"
+        >
+          {{ icon("clock", class="size-4") }}
+          Versions
+        </button>
+      </div>
+    </form>
+
+    {#- Write actions (Task #1957 T2). Each button opens an unmissable
+        confirm modal (``hx-get`` into ``#vault-write-modal-container``; the
+        shared modal controller ``app/modal-dialogs.js`` auto-opens the
+        swapped-in ``<dialog class="modal">``). Put / Delete carry the
+        browser's current mount/path/target via ``hx-include`` so the confirm
+        modal prefills them; Move takes references (a separate connector), so
+        it carries no path inputs. The GET confirm routes are CSRF-free reads;
+        only the confirm POST inside each modal is CSRF-gated. -#}
+    <section aria-label="Write actions" class="space-y-2" data-vault-writes>
+      <h2 class="text-sm font-semibold opacity-80">Write</h2>
+      <div class="flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="btn btn-warning btn-sm gap-1"
+          hx-get="/ui/vault/put/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          data-vault-write-open="put"
+        >
+          {{ icon("key-round", class="size-4") }}
+          Write secret
+        </button>
+        <button
+          type="button"
+          class="btn btn-error btn-sm gap-1"
+          hx-get="/ui/vault/delete/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          hx-include="[data-vault-browser]"
+          data-vault-write-open="delete"
+        >
+          {{ icon("ban", class="size-4") }}
+          Delete versions
+        </button>
+        <button
+          type="button"
+          class="btn btn-error btn-sm gap-1"
+          hx-get="/ui/vault/move/confirm"
+          hx-target="#vault-write-modal-container"
+          hx-swap="innerHTML"
+          data-vault-write-open="move"
+        >
+          {{ icon("arrow-right", class="size-4") }}
+          Move secret
+        </button>
+      </div>
+      <p class="text-xs opacity-60">
+        Every write requires approval: confirming parks a request for a
+        reviewer in <a href="/ui/approvals" class="link">Approvals</a> rather
+        than executing immediately.
+      </p>
+    </section>
+
+    {#- Three independent swap regions. Each starts with an empty-state
+        prompt; the matching control swaps its partial in. They are
+        separate so reading a secret does not wipe the key list. -#}
+    <div class="grid gap-5 lg:grid-cols-2">
+      <section aria-label="Keys" class="space-y-2">
+        <h2 class="text-sm font-semibold opacity-80">Keys</h2>
+        <div id="vault-keys-region">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+            List a path to see its child keys.
+          </div>
+        </div>
+      </section>
+
+      <section aria-label="Secret" class="space-y-2">
+        <h2 class="text-sm font-semibold opacity-80">Secret</h2>
+        <div id="vault-secret-region">
+          <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+            Read a secret to reveal its values.
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section aria-label="Version history" class="space-y-2">
+      <h2 class="text-sm font-semibold opacity-80">Version history</h2>
+      <div id="vault-versions-region">
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+          Inspect a secret's version history.
+        </div>
+      </div>
+    </section>
+
+    {#- Stable write-modal container (Task #1957 T2) -- never replaced. The
+        put / delete / move confirm fragments swap their own
+        ``<dialog id="vault-write-modal" class="modal">`` into this via
+        ``hx-swap="innerHTML"``; the shared modal controller opens each via
+        ``showModal()`` and dismisses it on close/ESC/backdrop -- the same
+        container pattern the approvals + operations modals use. -#}
+    <div id="vault-write-modal-container"></div>
+  {% endif %}
+</section>
+{% endblock %}

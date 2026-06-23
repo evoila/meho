@@ -46,19 +46,27 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest.catalog import (
+    PROFILE_RESOURCE_PACKAGE,
+    SPEC_RESOURCE_PACKAGE,
     CatalogError,
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
     info_version_matches_compatibility,
     load_catalog,
+    load_profile_resource,
+    load_spec_resource,
     parse_catalog,
     validate_catalog_registry_coverage,
+    validate_shipped_artifacts,
 )
 
-# The eight catalog entries currently shipped. The seven v0.3.0
+# The nine catalog entries currently shipped. The seven v0.3.0
 # connectors plus ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API
 # entry that consumes the GitHubRestConnector class shipped by
-# G3.11-T1 #1221). The ``gh`` row's ``version`` field stores the
+# G3.11-T1 #1221) plus the ``_fixture/1.0`` profile-backed shipped-spec
+# mechanism row (#1964 T1 #1975 -- exercises the spec_resource /
+# profile_resource on-ramp + the boot-time dry-run-parse validator).
+# The ``gh`` row's ``version`` field stores the
 # digit-prefix ``"3"`` (G3.11-T8 #1242 reconciled the catalog with
 # the registry's parse-friendly form -- the dispatcher's
 # parse_connector_id pins version to ``^[0-9][A-Za-z0-9._]*$``);
@@ -66,7 +74,7 @@ from meho_backplane.operations.ingest.catalog import (
 # docs/cross-repo/github-connector.md.
 _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
-    ("sddc-manager", "9.0"),
+    ("sddc", "9.0"),
     ("harbor", "2.x"),
     # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
     # the catalog row tracks the VCF-9-aligned "9.0" line (NsxConnector
@@ -76,8 +84,18 @@ _EXPECTED_PRODUCT_VERSION = {
     ("vault", "1.x"),
     ("k8s", "1.x"),
     ("bind9", "9.x"),
+    # #1964 T1 #1975: profile-backed shipped-spec mechanism fixture.
+    ("_fixture", "1.0"),
 }
 _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
+# Products whose catalog row carries neither an ``upstream`` nor is a
+# hand-coded typed connector: the profile-backed shipped-spec rows whose
+# spec ships as package data via ``spec_resource``. The ``_fixture/1.0``
+# mechanism row landed with #1975; #1964 T2 (#1976) added the real
+# ``vmware/9.0`` + ``sddc/9.0`` rows whose Broadcom upstream the backend
+# can't dereference, so their MEHO-authored minimal specs + reviewed
+# ExecutionProfiles ship as package data instead of forcing a --spec upload.
+_SHIPPED_SPEC_PRODUCTS = {"_fixture", "vmware", "sddc"}
 
 
 @pytest.fixture(autouse=True)
@@ -125,9 +143,18 @@ def test_shipped_catalog_parses_cleanly() -> None:
 
 
 def test_shipped_catalog_typed_connectors_have_null_upstream() -> None:
-    """Typed connectors carry ``upstream: null``; generic ones carry URLs."""
+    """Typed connectors carry ``upstream: null``; generic ones carry URLs.
+
+    Profile-backed shipped-spec rows (#1975) are a third shape: null
+    ``upstream`` (the spec ships as package data, not fetched) but a
+    ``spec_resource`` instead of a hand-coded connector, so they're
+    exempt from both branches.
+    """
     for entry in load_catalog().entries:
-        if entry.product in _TYPED_PRODUCTS:
+        if entry.product in _SHIPPED_SPEC_PRODUCTS:
+            assert entry.upstream is None, f"{entry.product} ships its spec (null upstream)"
+            assert entry.spec_resource, f"{entry.product} needs a shipped spec_resource"
+        elif entry.product in _TYPED_PRODUCTS:
             assert entry.upstream is None, f"{entry.product} should be typed (null upstream)"
         else:
             assert entry.upstream, f"{entry.product} is generic and needs upstream URL(s)"
@@ -184,6 +211,13 @@ def test_every_requires_connector_class_is_registered(
     _registered_connectors: set[str],
 ) -> None:
     for entry in load_catalog().entries:
+        if entry.profile_resource is not None:
+            # Profile-backed row (#1975): requires_connector_class names a
+            # synthesised ProfiledRestConnector subclass materialised from
+            # the profile (T5 #1971), which need not pre-exist in the
+            # registry. The validator exempts these rows; the test mirrors
+            # that exemption.
+            continue
         assert entry.requires_connector_class in _registered_connectors
 
 
@@ -210,7 +244,13 @@ def test_catalog_product_field_matches_target_create_enum(
     """
     from meho_backplane.connectors.registry import registered_product_tokens
 
-    catalog_products = {entry.product for entry in load_catalog().entries}
+    # Profile-backed rows (#1975) name a product whose ProfiledRestConnector
+    # subclass is registered when the profile is materialised (T5 #1971),
+    # not at catalog-parse time, so their product need not yet be in the
+    # TargetCreate enum. Exempt them from the catalog-↔-enum alignment.
+    catalog_products = {
+        entry.product for entry in load_catalog().entries if entry.profile_resource is None
+    }
     enum_products = set(registered_product_tokens())
     missing = catalog_products - enum_products
     assert missing == set(), (
@@ -221,31 +261,28 @@ def test_catalog_product_field_matches_target_create_enum(
     )
 
 
-# Listing-emitted ``product`` tokens whose registry spelling does NOT
-# round-trip through :func:`canonical_product_token` today. Each entry
-# is a known split where the v2-registry ``product`` and the
-# parser-derived listing token differ AND no
-# :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` entry
-# bridges them yet. G0.18-T2 (#1355) reconciled the SDDC case
-# (``sddc`` -> ``sddc-manager``); G0.26-T4 (#1798) reconciled the vRLI
-# case by aligning the connector to ``product="vrli"`` (so ``vrli`` now
-# round-trips and is NOT listed here). The remaining four are adjacent
-# findings the structural test below surfaced, recorded here so the same
-# test still catches a *new* drift (a future connector that lands with
-# the same split shape) while the rest await the family realignment
-# tracked under Initiative #1810.
+# Listing-emitted ``product`` tokens whose registered v2 spelling does
+# NOT equal the parser-derived listing token. Each entry is a known split
+# where the v2-registry ``product`` and the token
+# :func:`parse_connector_id` derives from the connector_id differ.
 #
-# Each row is ``(listing_token, registry_product)``. Adding a token
-# here is an explicit acknowledgement of an operator-visible 422 on
-# ``POST /api/v1/targets`` with the listing spelling; removing one
-# requires either dropping the alias-or-rename or otherwise
-# reconciling the split.
-_KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {
-    "hetzner": "hetzner-robot",
-    "vcfa": "vcf-automation",
-    "fleet": "vcf-fleet",
-    "vrops": "vcf-operations",
-}
+# Now empty and structurally enforced so. G0.18-T2 (#1355) reconciled the
+# SDDC case via a write-time alias; G0.26-T4 (#1798) reconciled vRLI by
+# aligning the connector to ``product="vrli"``; #1814 (Initiative #1810)
+# realigned the last four (``hetzner``, ``vcfa``, ``fleet``, ``vrops``) to
+# their short, dispatch-canonical registry token and dropped the now-
+# redundant ``sddc`` alias; #1816 promoted the registration round-trip
+# check to a hard-fail and #1817 retired the write-time alias bridge
+# (``PRODUCT_ALIASES`` / ``canonical_product_token``) entirely. Every
+# shipped connector's listing token now *equals* its registered product —
+# there is no alias hop left — so the allowlist is empty and the
+# structural test below catches a *new* divergence directly.
+#
+# Each row is ``(listing_token, registry_product)``. Adding a token here
+# would acknowledge an operator-visible 422 on ``POST /api/v1/targets``
+# with the listing spelling; with the alias bridge gone the only fix for
+# a real split is to rename the connector registration so it round-trips.
+_KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {}
 
 
 def test_listing_product_round_trips_through_target_create_validator(
@@ -265,30 +302,27 @@ def test_listing_product_round_trips_through_target_create_validator(
     misses the operator-facing split: copying the listing token into
     a create still 422'd.
 
-    The bridge is
+    The bridge for that split was once
     :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` +
-    :func:`~meho_backplane.connectors.registry.canonical_product_token`.
-    This test asserts the round-trip structurally — every shipped
-    connector's listing token must canonicalise to a registered
-    product token, otherwise the operator's first POST fails. A
-    future connector whose listing-emitted product is neither
-    canonical nor an alias trips here at unit-test time, not on
-    the next dogfood cycle.
+    ``canonical_product_token``; #1814 (Initiative #1810) realigned the
+    connectors and #1817 retired the bridge, so the listing token must now
+    **equal** a registered product token directly. This test asserts the
+    round-trip structurally — every shipped connector's listing token must
+    be a registered product token, otherwise the operator's first POST
+    fails. A future connector whose listing-emitted product is not a
+    registered token trips here at unit-test time, not on the next dogfood
+    cycle.
 
-    Five existing connectors carry the same split shape SDDC did
-    pre-reconciliation (hetzner-robot, vcf-automation, vcf-fleet,
-    vcf-logs, vcf-operations); they are recorded in
-    :data:`_KNOWN_LISTING_PRODUCT_DRIFT` and excluded from the
-    assertion so the SDDC fix can ship without spilling into a
-    five-connector audit. The exclusion list IS the audit surface
-    — each entry is an acknowledged operator-visible 422 on the
-    listing spelling, awaiting its own follow-up task. The test
-    still catches a *new* drift outside that allowlist.
+    The five connectors that once carried the same split shape SDDC
+    did pre-reconciliation (hetzner-robot, vcf-automation, vcf-fleet,
+    vcf-logs, vcf-operations) have all been realigned to their short,
+    dispatch-canonical registry token (vcf-logs by #1798; the other
+    four by #1814 / Initiative #1810), so
+    :data:`_KNOWN_LISTING_PRODUCT_DRIFT` is now empty — every shipped
+    connector's listing token round-trips through the create validator.
+    The test still catches a *new* drift outside that (empty) allowlist.
     """
-    from meho_backplane.connectors.registry import (
-        canonical_product_token,
-        registered_product_tokens,
-    )
+    from meho_backplane.connectors.registry import registered_product_tokens
     from meho_backplane.operations._lookup import parse_connector_id
 
     enum_products = set(registered_product_tokens())
@@ -314,72 +348,22 @@ def test_listing_product_round_trips_through_target_create_validator(
             # round-trip check.
             continue
         if parsed_product in _KNOWN_LISTING_PRODUCT_DRIFT:
-            # Acknowledged adjacent finding — same split shape as
-            # the SDDC case but outside the scope of #1355. The
-            # allowlist entry asserts the operator-visible 422 is
-            # known and awaiting its own reconciliation task.
+            # Acknowledged adjacent finding — a split outside this
+            # task's scope. The allowlist entry asserts the
+            # operator-visible 422 is known and awaiting a rename task.
             continue
-        canonical = canonical_product_token(parsed_product)
-        if canonical not in enum_products:
+        if parsed_product not in enum_products:
             unreachable.append((connector_id, parsed_product))
     assert unreachable == [], (
-        f"connector(s) emit a listing ``product`` that neither "
-        f"matches a registered product token nor canonicalises to "
-        f"one via PRODUCT_ALIASES (and is not in the explicit "
+        f"connector(s) emit a listing ``product`` that does not match a "
+        f"registered product token (and is not in the explicit "
         f"_KNOWN_LISTING_PRODUCT_DRIFT allowlist): {unreachable!r}. "
         f"An operator copying this token into POST /api/v1/targets "
-        f"will hit a 422. Either rename the connector class so "
-        f"registry and parser agree, add a PRODUCT_ALIASES entry "
-        f"per docs/codebase/api-shape-conventions.md §3, or — if "
-        f"the split is intentional and the fix is scoped to a "
-        f"separate task — add a _KNOWN_LISTING_PRODUCT_DRIFT entry."
-    )
-
-
-def test_known_listing_product_drift_entries_still_drift(
-    _registered_connectors: set[str],
-) -> None:
-    """Every allowlist entry still represents a real split — and only one.
-
-    Two invariants:
-
-    * The listing token in :data:`_KNOWN_LISTING_PRODUCT_DRIFT`
-      really fails to round-trip today (otherwise the entry is
-      stale and should be deleted — the connector got fixed). A
-      stale allowlist erodes the structural-drift signal of the
-      sibling test above.
-    * The recorded registry spelling matches the live v2 registry
-      (otherwise a connector rename would invalidate the allowlist
-      without anyone noticing). Pinning both halves catches a
-      rename that "fixes" the drift in one direction without
-      removing the allowlist row.
-    """
-    from meho_backplane.connectors.registry import (
-        canonical_product_token,
-        registered_product_tokens,
-    )
-
-    enum_products = set(registered_product_tokens())
-    stale: list[str] = []
-    misrecorded: list[tuple[str, str, str]] = []
-    for listing_token, recorded_registry in _KNOWN_LISTING_PRODUCT_DRIFT.items():
-        canonical = canonical_product_token(listing_token)
-        if canonical in enum_products:
-            stale.append(listing_token)
-            continue
-        if recorded_registry not in enum_products:
-            misrecorded.append(
-                (listing_token, recorded_registry, "registry spelling not registered")
-            )
-    assert stale == [], (
-        f"_KNOWN_LISTING_PRODUCT_DRIFT has stale entries {stale!r} that "
-        "now round-trip — the underlying connector was reconciled. "
-        "Remove the allowlist row."
-    )
-    assert misrecorded == [], (
-        f"_KNOWN_LISTING_PRODUCT_DRIFT misrecords registry spellings: "
-        f"{misrecorded!r}. Update the allowlist value to the live "
-        "registry product."
+        f"will hit a 422. The write-time alias bridge was retired by "
+        f"#1817, so the fix is to rename the connector registration so "
+        f"registry and parser agree — or, if the split is intentional "
+        f"and scoped to a separate task, add a "
+        f"_KNOWN_LISTING_PRODUCT_DRIFT entry."
     )
 
 
@@ -395,6 +379,281 @@ def test_validate_catalog_registry_coverage_raises_on_unknown_class() -> None:
     )
     with pytest.raises(CatalogError, match="unregistered connector class"):
         validate_catalog_registry_coverage(bogus)
+
+
+# ---------------------------------------------------------------------------
+# (d) Shipped-spec / profile mechanism — #1964 T1 #1975
+#
+# A catalog row may carry a packaged spec_resource / profile_resource;
+# the catalog-driven ingest route loads the spec bytes inline (bypassing
+# an un-fetchable upstream), the validator exempts profile-backed rows
+# from the class-presence + triple checks, and every shipped artifact is
+# dry-run-parsed at startup (boot crashes on a malformed one).
+# ---------------------------------------------------------------------------
+
+
+def test_profile_backed_row_exempt_from_class_presence() -> None:
+    """A profile-backed row passes the validator with no registered class.
+
+    The synthesised ProfiledRestConnector subclass (T5 #1971) need not
+    exist when the boot-time validator runs, so a row carrying
+    ``profile_resource`` must NOT trip the unregistered-class assertion
+    even against an empty registry.
+    """
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof_1_0",
+                profile_resource="some_profile.yaml",
+            ),
+        ),
+    )
+    # Must not raise even though the class / triple are unregistered.
+    validate_catalog_registry_coverage(cat)
+
+
+def test_non_profile_row_still_enforces_class_presence() -> None:
+    """The exemption is profile-gated: a plain row still fails on a bogus class."""
+    cat = ConnectorSpecCatalog(
+        entries=(_entry(requires_connector_class="NoSuchConnector999"),),
+    )
+    with pytest.raises(CatalogError, match="unregistered connector class"):
+        validate_catalog_registry_coverage(cat)
+
+
+def test_resource_name_rejects_path_traversal() -> None:
+    """spec_resource / profile_resource must be a single safe segment."""
+    for bad in ("../escape.yaml", "sub/dir.yaml", "a\\b.yaml", "  "):
+        with pytest.raises(ValidationError):
+            _entry(spec_resource=bad)
+        with pytest.raises(ValidationError):
+            _entry(profile_resource=bad)
+
+
+def test_load_spec_resource_reads_shipped_fixture() -> None:
+    """The shipped fixture spec resolves to its package-data text."""
+    text = load_spec_resource("_fixture_minimal.yaml")
+    assert "openapi:" in text
+    assert "/things" in text
+
+
+def test_load_profile_resource_reads_shipped_fixture() -> None:
+    text = load_profile_resource("_fixture_minimal.yaml")
+    assert "scheme: basic" in text
+
+
+def test_load_spec_resource_missing_raises_catalog_error() -> None:
+    with pytest.raises(CatalogError, match="not found under"):
+        load_spec_resource("definitely_not_a_real_spec.yaml")
+
+
+def test_resource_packages_are_importable() -> None:
+    """The shipped resource packages (in-package data) exist and are addressable."""
+    from importlib.resources import files
+
+    assert files(SPEC_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
+    assert files(PROFILE_RESOURCE_PACKAGE).joinpath("_fixture_minimal.yaml").is_file()
+
+
+def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
+    """Every shipped spec/profile dry-run-parses cleanly at boot."""
+    validate_shipped_artifacts()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# (#1964 T2 #1976) The real vmware/sddc shipped specs + profiles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("product", "spec_resource", "profile_resource", "expected_scheme", "expected_ops"),
+    [
+        (
+            "vmware",
+            "vmware_rest_minimal.yaml",
+            "vmware_rest_minimal.yaml",
+            "session_login_basic",
+            9,
+        ),
+        ("sddc", "sddc_manager_minimal.yaml", "sddc_manager_minimal.yaml", "basic", 9),
+    ],
+)
+def test_shipped_vmware_sddc_rows_are_profile_backed(
+    product: str,
+    spec_resource: str,
+    profile_resource: str,
+    expected_scheme: str,
+    expected_ops: int,
+) -> None:
+    """The real vmware/sddc rows ship a spec + profile and retire the upstream.
+
+    #1964 T2 (#1976): each row carries a null ``upstream`` (the Broadcom
+    portal is HTML the backend can't dereference), names the MEHO-authored
+    ``spec_resource`` + ``profile_resource``, and advertises
+    ``catalog_ingest: supported`` because the forced-upload friction is gone.
+    """
+    entry = load_catalog().get(product, "9.0")
+    assert entry is not None
+    assert entry.upstream is None
+    assert entry.spec_resource == spec_resource
+    assert entry.profile_resource == profile_resource
+    assert entry.catalog_ingest == "supported"
+
+
+@pytest.mark.parametrize(
+    ("spec_resource", "expected_ops", "needle_path"),
+    [
+        ("vmware_rest_minimal.yaml", 9, "GET:/api/vcenter/vm"),
+        ("sddc_manager_minimal.yaml", 9, "GET:/v1/sddc-managers"),
+    ],
+)
+def test_shipped_vmware_sddc_specs_parse_with_the_ingest_parser(
+    spec_resource: str,
+    expected_ops: int,
+    needle_path: str,
+) -> None:
+    """Each shipped spec parses under the SAME parser the live ingest uses.
+
+    Asserts the boot-validator contract directly: OpenAPI 3.x, self-contained,
+    local-``$ref`` only, every op carrying a ``METHOD:path`` op_id.
+    """
+    from meho_backplane.operations.ingest.openapi import parse_openapi
+
+    content = load_spec_resource(spec_resource)
+    rows = parse_openapi(
+        f"spec:{spec_resource}",
+        spec_source=f"spec:{spec_resource}",
+        content=content,
+    )
+    assert len(rows) == expected_ops
+    assert all(row.method == "GET" for row in rows)
+    assert needle_path in {row.op_id for row in rows}
+
+
+@pytest.mark.parametrize(
+    ("profile_resource", "expected_scheme"),
+    [
+        ("vmware_rest_minimal.yaml", "session_login_basic"),
+        ("sddc_manager_minimal.yaml", "basic"),
+    ],
+)
+def test_shipped_vmware_sddc_profiles_validate_with_named_scheme(
+    profile_resource: str,
+    expected_scheme: str,
+) -> None:
+    """Each shipped profile validates against the closed named-auth catalog."""
+    import yaml
+
+    from meho_backplane.connectors.profile import (
+        ExecutionProfile,
+        validate_execution_profile,
+    )
+
+    raw = yaml.safe_load(load_profile_resource(profile_resource))
+    profile = ExecutionProfile.model_validate(raw)
+    validate_execution_profile(profile)  # must not raise
+    assert profile.auth.scheme == expected_scheme
+    # The declarative fingerprint version_key must be a literal top-level key
+    # (no dotted paths / array indexing — #1177); model_validate already
+    # enforced it, this is the regression anchor for the shipped artifact.
+    assert "." not in profile.fingerprint.version_key
+
+
+def test_shipped_vmware_sddc_resources_are_addressable() -> None:
+    """The real specs/profiles resolve as in-package wheel data (artifacts)."""
+    from importlib.resources import files
+
+    for name in ("vmware_rest_minimal.yaml", "sddc_manager_minimal.yaml"):
+        assert files(SPEC_RESOURCE_PACKAGE).joinpath(name).is_file()
+        assert files(PROFILE_RESOURCE_PACKAGE).joinpath(name).is_file()
+
+
+def test_validate_shipped_artifacts_crashes_on_missing_spec() -> None:
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                spec_resource="missing_spec.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="not found under"):
+        validate_shipped_artifacts(cat)
+
+
+def test_validate_shipped_artifacts_crashes_on_malformed_spec(
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shipped spec that parses as YAML but isn't a valid OpenAPI doc crashes boot.
+
+    Patches ``load_spec_resource`` to return a YAML document with no
+    ``paths`` key — well-formed YAML, invalid OpenAPI — and asserts the
+    boot guard surfaces it via the real ``parse_openapi`` (not a cheap
+    well-formedness check), wrapped in a ``CatalogError``.
+    """
+    import meho_backplane.operations.ingest.catalog as catalog_mod
+
+    monkeypatch.setattr(
+        catalog_mod,
+        "load_spec_resource",
+        lambda _name: "openapi: '3.1.0'\ninfo:\n  title: bad\n  version: '1.0'\n",
+    )
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                spec_resource="_fixture_minimal.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="failed dry-run parse"):
+        validate_shipped_artifacts(cat)
+
+
+def test_validate_shipped_artifacts_crashes_on_malformed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shipped profile naming a reserved/unknown auth scheme crashes boot."""
+    import meho_backplane.operations.ingest.catalog as catalog_mod
+
+    bad_profile = (
+        "product: prof\n"
+        "version: '1.0'\n"
+        "auth:\n"
+        "  scheme: not_a_real_scheme\n"
+        "  secret_fields: [token]\n"
+        "fingerprint:\n"
+        "  path: /v\n"
+        "  version_key: version\n"
+        "probe: delegate\n"
+        "pagination:\n"
+        "  strategy: none\n"
+        "  items_key: items\n"
+    )
+    monkeypatch.setattr(catalog_mod, "load_profile_resource", lambda _name: bad_profile)
+    cat = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="prof",
+                version="1.0",
+                impl_id="prof-rest",
+                requires_connector_class="ProfiledRestConnector_prof",
+                profile_resource="_fixture_minimal.yaml",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError, match="failed dry-run parse"):
+        validate_shipped_artifacts(cat)
 
 
 # ---------------------------------------------------------------------------
@@ -798,34 +1057,34 @@ def test_entry_rejects_unknown_catalog_ingest_value() -> None:
 
 
 def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
-    """vmware/9.0, sddc-manager/9.0, nsx/4.2 ship ``catalog_ingest: spec-only``.
+    """nsx/9.0 ships ``catalog_ingest: spec-only``; vmware/sddc no longer do.
 
-    G0.18-T8 (#1361, RDC #789 N8). All three upstreams fundamentally
-    cannot drive ``meho connector ingest --catalog`` server-side:
+    G0.18-T8 (#1361, RDC #789 N8) originally marked all three VCF-family
+    rows ``spec-only`` because none could drive ``meho connector ingest
+    --catalog`` server-side. #1964 T2 (#1976) changed that for two of them:
 
-    * ``vmware/9.0`` + ``sddc-manager/9.0`` — Broadcom Developer Portal
-      ``text/html`` landing pages; the route's existing
-      ``catalog_entry_upstream_not_spec`` 422 fires.
-    * ``nsx/9.0`` — first upstream is fqdn-templated
-      (``<nsx-mgr-fqdn>``); the route's
-      ``catalog_entry_templated_upstream`` 422 fires. (Row renumbered
-      from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
-
-    Marking these rows ``"spec-only"`` is what lets the listing emit
-    an honest ``--spec`` ``next_step`` hint instead of the previous
-    "spec available in catalog; run ingest" line that sent operators
-    into a 422.
+    * ``vmware/9.0`` + ``sddc/9.0`` — now PROFILE-BACKED. Their MEHO-
+      authored minimal specs ship as package data (``spec_resource``),
+      so catalog-driven ingest loads the bytes inline (no fetch, no
+      ``catalog_entry_upstream_not_spec`` 422) and the row advertises
+      ``catalog_ingest: supported``. The forced ``--spec`` upload friction
+      is gone.
+    * ``nsx/9.0`` — STILL ``spec-only``: its first upstream is
+      fqdn-templated (``<nsx-mgr-fqdn>``) and no shipped spec exists yet,
+      so the route's ``catalog_entry_templated_upstream`` 422 fires and
+      the listing emits the honest ``--spec`` ``next_step`` hint. (Row
+      renumbered from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
     """
-    spec_only_pairs = {("vmware", "9.0"), ("sddc-manager", "9.0"), ("nsx", "9.0")}
+    spec_only_pairs = {("nsx", "9.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: spec-only "
-                "because its upstream is HTML-portal or fqdn-templated"
+                "because its upstream is fqdn-templated and no spec ships yet"
             )
         else:
             assert entry.catalog_ingest == "supported", (
-                f"{entry.product}/{entry.version} should default to catalog_ingest: supported"
+                f"{entry.product}/{entry.version} should be catalog_ingest: supported"
             )
 
 
@@ -836,26 +1095,23 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
 
 @pytest.mark.asyncio
 async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
-    """The ``vcf-automation`` registered-row ``next_step.verb`` ingests dispatchably.
+    """The ``vcfa`` registered-row ``next_step.verb`` ingests dispatchably.
 
     The claude-rdc-hetzner-dc#1136 false-success was: an operator copying
     the verb ingested under a product the dispatcher never queried, so the
-    catalog kept reporting ``registered, 0 ops``. The fix is the
-    register-time row reconciliation (rows land under the parser-derived
-    dispatch product regardless of the supplied ``--product``), which lets
-    the verb keep the **registry** product so the operator's ingest also
-    finds the real connector class and runs a real version-coverage
-    pre-flight. This test pins the fix end-to-end against a still-split
-    connector (vRLI was aligned in G0.26-T4 #1798 and no longer splits;
-    ``vcf-automation`` carries the divergence until Initiative #1810):
+    catalog kept reporting ``registered, 0 ops``. #1814 (Initiative #1810)
+    closed the underlying split by realigning ``VcfAutomationConnector`` to
+    register under the short, dispatch-canonical ``product="vcfa"`` (vRLI
+    was aligned earlier by G0.26-T4 #1798), and #1817 retired the
+    register-time row reconciliation now that nothing diverges. This test
+    pins the verb round-trip end-to-end against the realigned connector:
 
-    1. The verb for the ``vcf-automation`` registered row emits the
-       **registry** ``--product`` (``vcf-automation``) — the spelling
-       ``VcfAutomationConnector`` registers under.
-    2. Ingesting under exactly that ``--product`` yields a connector the
-       dispatch/query surface resolves under the parser-derived key
-       (``connector_exists`` True): reconciliation makes the verb
-       round-trip to a *dispatchable* ingest.
+    1. The verb for the ``vcfa`` registered row emits the **registry**
+       ``--product`` (``vcfa``), which equals the parser-derived listing
+       product (it round-trips its connector_id).
+    2. Ingesting under exactly that ``--product`` persists rows under
+       ``vcfa`` and yields a connector the dispatch/query surface resolves
+       (``connector_exists`` True) — no reconciliation hop needed.
     """
     import re
     from unittest.mock import AsyncMock
@@ -876,7 +1132,7 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     _eager_import_connectors()
 
     item = _maybe_build_class_only_item(
-        registry_product="vcf-automation",
+        registry_product="vcfa",
         registry_version="9.0",
         registry_impl_id="vcfa-rest",
         db_triples=set(),
@@ -884,23 +1140,22 @@ async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() ->
     )
     assert item is not None
     assert item.state == "registered"
-    # The listing row still advertises the parser-derived product (the
-    # dispatch surface keys on it); the manual-mode verb, however, names
-    # the registry product so the operator's ingest finds the real class.
+    # Post-#1814 the registry product equals the parser-derived listing
+    # product — both are the short, dispatch-canonical ``vcfa``.
     assert item.product == "vcfa"
     assert item.next_step is not None
     verb = item.next_step.verb
     match = re.search(r"--product (\S+)", verb)
     assert match is not None, f"verb has no --product flag: {verb!r}"
     verb_product = match.group(1)
-    assert verb_product == "vcf-automation", (
+    assert verb_product == "vcfa", (
         f"next_step.verb emits --product {verb_product!r}; expected the "
-        f"registry product 'vcf-automation' so the operator's ingest finds "
-        f"the real VcfAutomationConnector class. Full verb: {verb!r}"
+        f"registry product 'vcfa' (the realigned, round-tripping token). "
+        f"Full verb: {verb!r}"
     )
 
-    # Round-trip: ingest under the verb's --product (the registry product)
-    # and assert the reconciled rows are dispatchable under the short key.
+    # Round-trip: ingest under the verb's --product and assert the rows
+    # persist under the dispatch-canonical key and dispatch.
     stub = AsyncMock()
     stub.encode_one.return_value = [0.25] * 384
     stub.encode.return_value = [[0.25] * 384]

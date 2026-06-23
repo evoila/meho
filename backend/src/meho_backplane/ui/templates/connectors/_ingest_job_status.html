@@ -1,0 +1,156 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Async ingest job-poll fragment (Initiative #1839 Task #1886 T2).
+  Modelled on ``agents/runs/_status_panel.html`` -- the "stop returning
+  the polling element" idiom (https://htmx.org/docs/#polling).
+
+  Rendered in two contexts:
+    * Seeded into the ingest modal's ``#ingest-result`` slot by the POST
+      submit handler when a real async ingest returned 202 + an
+      ``IngestJobHandle`` (status ``running``).
+    * Returned standalone by ``GET /ui/connectors/registry/ingest/jobs/
+      {job_id}`` on each poll tick. HTMX outerHTML-swaps it back into the
+      ``#ingest-job-<job_id>`` wrapper.
+
+  Polling contract: while ``status == "running"`` the wrapper carries
+  ``hx-get`` + ``hx-trigger="every Ns"`` + ``hx-swap="outerHTML"`` so HTMX
+  re-fetches the panel on a timer. On ANY terminal status (succeeded /
+  degraded / failed) -- AND on the ``job_lost`` 404 branch -- the wrapper
+  DROPS those directives, so the poll cycle ends naturally. The job_lost
+  branch is load-bearing: a process-local job evaporates on pod restart
+  (``jobs.py:20``), so a 404 must render "job lost, re-check the registry
+  list" and STOP -- never an infinite spinner.
+
+  Context contract:
+    * ``job_id``       -- str: the job UUID (drives the wrapper id +
+                          poll URL).
+    * ``job``          -- dict | None: the projected job status (status /
+                          product / version / impl_id / error /
+                          error_class / ingestion / grouping); ``None`` on
+                          the job_lost branch.
+    * ``job_lost``     -- bool: True when the in-process poll 404ed
+                          (process-local job gone); renders the terminal
+                          "re-check the registry list" panel, no poll.
+    * ``poll_interval_seconds`` -- int: the self-poll cadence.
+-#}
+{% from "_icons.html" import icon %}
+<div
+  id="ingest-job-{{ job_id }}"
+  class="space-y-3"
+  data-ingest-job
+  data-job-id="{{ job_id }}"
+  {% if not job_lost and job.status == "running" %}
+  hx-get="/ui/connectors/registry/ingest/jobs/{{ job_id }}"
+  hx-trigger="every {{ poll_interval_seconds }}s"
+  hx-swap="outerHTML"
+  {% endif %}
+>
+  {% if job_lost %}
+    {# Process-local job gone (pod restart) -- terminal, no poll. #}
+    <div role="alert" class="alert alert-warning items-start" data-job-lost>
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Ingest job lost</h4>
+        <p class="text-xs opacity-80">
+          This job is no longer tracked &mdash; the backend pod may have
+          restarted (ingest jobs are held in memory and do not survive a
+          restart). Re-check the
+          <a href="/ui/connectors/registry" class="link link-primary">registry
+          list</a> to see whether the connector landed; re-ingest if it did
+          not.
+        </p>
+      </div>
+    </div>
+  {% elif job.status == "running" %}
+    {# The 202-handle seed carries no triple (the IngestJobHandle has only
+       job_id/status/poll_url); a live poll does. Guard the triple so the
+       seed render is clean and the poll render names the connector. #}
+    <div role="status" class="alert items-center" data-job-running>
+      <span class="loading loading-spinner loading-sm"></span>
+      <span class="text-sm" aria-live="polite">
+        Ingesting
+        {% if job.product %}
+          <span class="font-mono">{{ job.product }}/{{ job.version }}/{{ job.impl_id }}</span>
+        {% endif %}
+        &mdash; running, refreshing every {{ poll_interval_seconds }}s&hellip;
+      </span>
+    </div>
+  {% elif job.status == "succeeded" %}
+    <div role="status" class="alert alert-success items-start" data-job-succeeded>
+      {{ icon("check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Ingest succeeded</h4>
+        <p class="text-xs opacity-80">
+          <span class="font-mono">{{ job.product }}/{{ job.version }}/{{ job.impl_id }}</span>
+          ingested. Review its grouped operations and enable it for dispatch
+          from the
+          <a href="/ui/connectors/registry" class="link link-primary">registry
+          list</a>.
+        </p>
+        {% if job.ingestion %}
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-success badge-sm">
+              {{ job.ingestion.inserted_count }} inserted
+            </span>
+            <span class="badge badge-ghost badge-sm">
+              {{ job.ingestion.updated_count }} updated
+            </span>
+            <span class="badge badge-ghost badge-sm">
+              {{ job.ingestion.skipped_count }} skipped
+            </span>
+            {% if job.grouping %}
+              <span class="badge badge-ghost badge-sm">
+                {{ job.grouping.groups_created }} groups
+              </span>
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  {% elif job.status == "degraded" %}
+    {# Terminal-but-not-green: the pipeline ran and counts landed, but
+       nothing dispatchable was produced (error_class
+       ``ingested_not_dispatchable``). Show BOTH the counts AND the reason
+       -- never a bare success. #}
+    <div role="alert" class="alert alert-warning items-start" data-job-degraded>
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Ingest degraded &mdash; nothing dispatchable landed</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          The pipeline ran for
+          <span class="font-mono">{{ job.product }}/{{ job.version }}/{{ job.impl_id }}</span>
+          but produced nothing the dispatcher can route
+          (<span class="font-mono">{{ job.error_class }}</span>):
+          {{ job.error }}
+        </p>
+        {% if job.ingestion %}
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <span class="badge badge-ghost badge-sm">
+              {{ job.ingestion.inserted_count }} inserted
+            </span>
+            <span class="badge badge-ghost badge-sm">
+              {{ job.ingestion.updated_count }} updated
+            </span>
+            <span class="badge badge-ghost badge-sm">
+              {{ job.ingestion.skipped_count }} skipped
+            </span>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    {# failed: the pipeline raised; error_class + error only. #}
+    <div role="alert" class="alert alert-error items-start" data-job-failed>
+      {{ icon("ban", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Ingest failed</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          <span class="font-mono">{{ job.error_class }}</span>:
+          {{ job.error }}
+        </p>
+      </div>
+    </div>
+  {% endif %}
+</div>

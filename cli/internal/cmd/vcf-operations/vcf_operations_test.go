@@ -633,8 +633,8 @@ func TestSearchSendsConnectorIDPreBaked(t *testing.T) {
 			if got := r.URL.Query().Get("connector_id"); got != "vrops-rest-9.0" {
 				t.Errorf("connector_id: got %q", got)
 			}
-			if got := r.URL.Query().Get("query"); got != "list resources" {
-				t.Errorf("query: got %q", got)
+			if got := r.URL.Query().Get("q"); got != "list resources" {
+				t.Errorf("q: got %q", got)
 			}
 			writeJSON(t, w, 200, searchResponse{
 				Hits: []searchHit{{OpID: "GET:/suite-api/api/resources", FusedScore: 1.0}},

@@ -14,8 +14,8 @@
   Alpine model:
     * Top-level fields: slug (new only), title, description, target_kind.
     * steps[]: the discriminated-union step tree, hydrated from
-      ``initial_steps_json`` (one blank step on a fresh new; the existing
-      steps on an edit). Add / remove / reorder mutate this array.
+      ``form_steps`` via ``| tojson`` (one blank step on a fresh new; the
+      existing steps on an edit). Add / remove / reorder mutate this array.
     * On submit, the whole step tree is JSON-serialised into the hidden
       ``steps`` form field so the union shape survives the round-trip; the
       params/expect JSON textareas are passed through as raw strings and
@@ -33,7 +33,8 @@
     mode              -- "new" | "edit"
     slug              -- str (locked on edit; the model's slug on new)
     title/description/target_kind -- str: prefilled top-level fields
-    initial_steps_json -- str: JSON array hydrating the Alpine ``steps`` model
+    form_steps        -- list[dict]: the step tree hydrating the Alpine
+                         ``steps`` model (rendered with ``| tojson``)
     submit_url        -- str: POST target (/ui/runbooks/new | .../{slug}/edit)
     submit_label      -- str: button label
     error_message     -- str | None: inline error banner copy
@@ -46,16 +47,35 @@
 {% block page_title %}{{ page_title }} &middot; MEHO Operator Console{% endblock %}
 
 {% block content %}
+{#-
+  XSS hardening (review precedent: PR #1044 single-quoted x-data)
+  --------------------------------------------------------------
+  Every value below is operator-authored text with no character
+  allowlist (the only schema validator is the ``${...}`` substitution
+  check). The ``x-data`` attribute uses SINGLE-quoted delimiters so the
+  ``| tojson`` output cannot break out: ``tojson`` escapes ``'`` to
+  ``'`` (never emitting a raw single quote) and escapes ``<`` /
+  ``>`` / ``&`` to their ``\uXXXX`` forms, so the host element's
+  attribute closes only on the author's own ``'`` and the entire
+  payload -- double quotes included -- stays inert inside the value.
+  ``initialSteps`` is the step tree rendered with ``| tojson`` over the
+  raw ``form_steps`` list, NOT the ``safe``-marked pre-serialised string
+  the old template used: the ``safe`` filter disables autoescape and
+  ``json.dumps`` leaves ``"`` raw, so a field containing ``"`` would
+  terminate a double-quoted attribute.
+  Mirrors the convention in ``broadcast/_feed.html``,
+  ``broadcast/_filter_bar.html``, and ``connectors/_recent_ops.html``.
+-#}
 <section
   class="space-y-4"
-  x-data="runbookEditor({
-    mode: '{{ mode }}',
-    initialSteps: {{ initial_steps_json | safe }},
+  x-data='runbookEditor({
+    mode: {{ mode | tojson }},
+    initialSteps: {{ form_steps | tojson }},
     slug: {{ slug | tojson }},
     title: {{ title | tojson }},
     description: {{ description | tojson }},
     targetKind: {{ target_kind | tojson }}
-  })"
+  })'
 >
   {# ---------- Header ---------- #}
   <header class="flex flex-wrap items-center justify-between gap-4">

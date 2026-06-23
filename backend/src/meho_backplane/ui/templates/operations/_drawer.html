@@ -1,0 +1,207 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operation detail drawer fragment (Initiative #1835 G10.9, Task #1879).
+
+  Swapped into ``#operations-drawer-container`` by a search-result row's
+  Detail button (``hx-get /ui/operations/descriptor/{descriptor_id}``).
+  Read-only: shows the resolved descriptor's operator-safe fields. The
+  shared ``app/modal-dialogs.js`` controller opens this ``<dialog>`` via
+  ``showModal()`` on swap and dismisses it on the close button / ESC /
+  backdrop.
+
+  Run button (Task #1881, T3)
+    The header carries a Run button that ``hx-get``s the run-confirm modal
+    (``operations/_run_modal.html``) into the SAME drawer container,
+    replacing this read-only drawer. The unmissable safety gate + the
+    CSRF-bound dispatch POST live in that modal; this button is just the
+    navigation into it. Run is in the operator capability set.
+
+  RBAC (the same-template-both-roles trap)
+    The ``llm_instructions`` block -- the per-op agent prompt -- renders
+    ONLY when ``is_tenant_admin`` is true. The route threads
+    ``llm_instructions`` into the context ONLY for a tenant_admin render,
+    so a plain operator's response body never carries the prompt text
+    (leaking it is a prompt-injection vector, api/v1/operations.py).
+
+  Preview panel (Task #1880, T2)
+    For an HTTP-ingested op (``previewable``) the drawer carries a
+    read-only **Preview** form: given a target + params it renders the
+    literal would-be HTTP request (``operations/_preview.html``) WITHOUT
+    dispatching. Preview is in the operator capability set -- no
+    tenant_admin step. The form is its own ``<form>`` carrying its OWN
+    ``hx-headers`` ``X-CSRF-Token`` (HTMX does not inherit ``hx-headers``
+    to children); the drawer GET minted the token + re-set the matching
+    ``meho_csrf`` cookie. The Preview button is labelled distinctly from
+    Run (T3) and reads as safe (no dispatch). A typed / composite op is
+    NOT previewable, so the form is hidden for those.
+
+  Context:
+    descriptor       -- OperationDescriptor: the full read shape
+    is_tenant_admin  -- bool: gate for the llm_instructions block
+    llm_instructions -- dict | None: present (and non-null) only for admins
+    connector_id     -- str: the dispatchable <impl_id>-<version> id, posted
+                        back by the preview form
+    previewable      -- bool: True for an HTTP-ingested op (preview offered)
+    csrf_token       -- str: minted double-submit token for the preview POST
+-#}
+{% from "_icons.html" import icon %}
+<dialog id="operations-drawer" class="modal" aria-label="Operation detail">
+  <div class="modal-box max-w-2xl">
+    <div class="flex items-start justify-between gap-4">
+      <div class="min-w-0">
+        <h3 class="truncate font-mono text-lg font-semibold" id="operations-drawer-title">
+          {{ descriptor.op_id }}
+        </h3>
+        {% if descriptor.summary %}
+          <p class="mt-0.5 text-sm opacity-70">{{ descriptor.summary }}</p>
+        {% endif %}
+      </div>
+      <div class="flex shrink-0 items-center gap-1">
+        {#- Run button (Task #1881, T3): swaps the run-confirm modal into the
+            same drawer container, replacing this read-only drawer. The
+            confirm gate (safety banner + CSRF-bound POST) lives in that
+            modal -- this is just the navigation into it, so no CSRF here. -#}
+        <button
+          type="button"
+          class="btn btn-primary btn-sm gap-1"
+          aria-label="Run operation"
+          data-action="open-run"
+          hx-get="/ui/operations/run/{{ descriptor.id }}"
+          hx-target="#operations-drawer-container"
+          hx-swap="innerHTML"
+        >
+          {{ icon("zap", class="size-4") }}
+          Run
+        </button>
+        <form method="dialog">
+          <button type="submit" class="btn btn-ghost btn-square btn-sm" aria-label="Close">
+            {{ icon("x", class="size-4") }}
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <div class="mt-4 space-y-4 text-sm">
+      {#- Policy gates: safety_level + requires_approval. -#}
+      <div class="flex flex-wrap items-center gap-2">
+        {% set safety = descriptor.safety_level %}
+        {% if safety == "dangerous" %}
+          <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ safety }}</span>
+        {% elif safety == "caution" %}
+          <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ safety }}</span>
+        {% else %}
+          <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ safety }}</span>
+        {% endif %}
+        {% if descriptor.requires_approval %}
+          <span class="badge badge-outline badge-sm" title="Requires approval">requires approval</span>
+        {% endif %}
+        {% if descriptor.group_key %}
+          <span class="badge badge-ghost badge-sm">group: {{ descriptor.group_key }}</span>
+        {% endif %}
+      </div>
+
+      {% if descriptor.description %}
+        <div>
+          <div class="meho-overline mb-1">Description</div>
+          <p class="opacity-80">{{ descriptor.description }}</p>
+        </div>
+      {% endif %}
+
+      {#- HTTP shape (operator-safe): method + path. -#}
+      {% if descriptor.method or descriptor.path %}
+        <div>
+          <div class="meho-overline mb-1">Request</div>
+          <p class="font-mono text-xs">
+            {% if descriptor.method %}<span class="font-semibold">{{ descriptor.method }}</span>{% endif %}
+            {% if descriptor.path %}<span>{{ descriptor.path }}</span>{% endif %}
+          </p>
+        </div>
+      {% endif %}
+
+      {#- Parameter schema (operator-safe): rendered as pretty JSON. -#}
+      <div>
+        <div class="meho-overline mb-1">Parameters</div>
+        {% if descriptor.parameter_schema %}
+          <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ descriptor.parameter_schema | tojson(indent=2) }}</code></pre>
+        {% else %}
+          <p class="text-xs opacity-60">No parameters.</p>
+        {% endif %}
+      </div>
+
+      {#- Preview panel (Task #1880): the read-only would-be-request action.
+          Offered only for an HTTP-ingested op (a typed/composite op has no
+          single literal HTTP request to preview). Its own <form> carries
+          the CSRF header echo -- HTMX does not inherit hx-headers to
+          children. Preview NEVER dispatches; the button is labelled
+          distinctly from Run (T3). -#}
+      {% if previewable %}
+        <div class="border-t border-base-300 pt-4">
+          <div class="meho-overline mb-2">Preview request</div>
+          <p class="mb-3 text-xs opacity-60">
+            Render the literal HTTP request meho would send for this
+            operation &mdash; method, path, query, and the redacted body
+            &mdash; <span class="font-semibold">without dispatching it</span>.
+            No request is sent and no audit row is written.
+          </p>
+          <form
+            class="space-y-3"
+            hx-post="/ui/operations/preview"
+            hx-target="#operations-preview-region"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-disabled-elt="find button"
+          >
+            <input type="hidden" name="connector_id" value="{{ connector_id }}" />
+            <input type="hidden" name="op_id" value="{{ descriptor.op_id }}" />
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs opacity-70">Target <span class="opacity-50">(name; leave blank for a target-less op)</span></span>
+              <input
+                type="text"
+                name="target"
+                maxlength="256"
+                class="input input-bordered input-sm w-full font-mono"
+                placeholder="e.g. rdc-vcenter"
+                aria-label="Target name"
+                autocomplete="off"
+              />
+            </label>
+            <label class="form-control">
+              <span class="label-text mb-1 text-xs opacity-70">Params <span class="opacity-50">(JSON object)</span></span>
+              <textarea
+                name="params"
+                rows="4"
+                maxlength="65536"
+                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                placeholder='{"path": "secret/data/app"}'
+                aria-label="Operation params as JSON"
+              ></textarea>
+            </label>
+            <button type="submit" class="btn btn-outline btn-sm gap-1" data-action="preview">
+              {{ icon("search", class="size-4") }}
+              Preview request
+              <span class="badge badge-ghost badge-xs">no dispatch</span>
+            </button>
+          </form>
+          {#- Swap target for the rendered preview fragment. Empty until the
+              operator submits the form. -#}
+          <div id="operations-preview-region" class="mt-3"></div>
+        </div>
+      {% endif %}
+
+      {#- llm_instructions: tenant_admin only. The block is absent entirely
+          for a plain operator -- the context does not carry the prompt for
+          a non-admin render, so the body never contains the prompt text. -#}
+      {% if is_tenant_admin and llm_instructions %}
+        <div data-llm-instructions="true">
+          <div class="meho-overline mb-1">Agent prompt (tenant_admin)</div>
+          <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs"><code>{{ llm_instructions | tojson(indent=2) }}</code></pre>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close">close</button>
+  </form>
+</dialog>

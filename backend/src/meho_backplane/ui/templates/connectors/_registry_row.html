@@ -1,0 +1,192 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  One connector-registry ``<tr>`` (Initiative #1839 Task #1885 T1).
+
+  Rendered in two contexts:
+    * As a per-row ``{% include %}`` from ``_registry_table.html`` on the
+      full-table render (``oob`` unset / false).
+    * As a standalone out-of-band fragment a per-row action handler
+      returns after a verb runs (``oob=true``): the ``hx-swap-oob`` on the
+      ``<tr>`` replaces the matching row by id without disturbing the rest
+      of the table. After a ``delete`` the row is gone from the service
+      read (``row`` is ``None``) so an empty OOB ``<tr>`` carrying only the
+      id removes the old row on swap.
+
+  Context contract:
+    * ``row``           -- dict | None: connector_id / product / version /
+                           impl_id / is_builtin / state / *_group_count /
+                           operation_count / enabled_operation_count / kind /
+                           dispatchable.
+    * ``connector_id``  -- str: the row id (always present; drives the
+                           ``<tr>`` id even when ``row`` is None on delete).
+    * ``is_tenant_admin`` -- bool: soft-hide the per-row action buttons.
+    * ``oob``           -- bool: stamp ``hx-swap-oob`` for the action swap.
+    * ``csrf_token``    -- str: minted double-submit token for the row's
+                           action ``hx-get``/``hx-headers``.
+-#}
+<tr
+  id="registry-row-{{ connector_id }}"
+  data-connector-id="{{ connector_id }}"
+  {% if oob %}hx-swap-oob="true"{% endif %}
+>
+  {%- if row is none -%}
+    {#- Deleted: an empty placeholder cell. The OOB swap replaces the old
+        row with this id-only stub, removing it from the operator's view;
+        a follow-up filter/sort re-render drops the stub entirely. -#}
+    <td colspan="7" class="hidden"></td>
+  {%- else -%}
+    <td class="font-mono text-sm">{{ row.connector_id }}</td>
+    <td>
+      <div class="flex flex-col">
+        <span>{{ row.product }}</span>
+        <span class="text-xs opacity-60">
+          {{ row.impl_id }} &middot; {{ row.version }}
+        </span>
+      </div>
+    </td>
+    <td>
+      {% if row.is_builtin %}
+        <span class="badge badge-neutral badge-sm" title="Global / built-in connector">
+          built-in
+        </span>
+      {% else %}
+        <span class="badge badge-outline badge-sm" title="Tenant-curated connector">
+          tenant
+        </span>
+      {% endif %}
+    </td>
+    <td>
+      {% if row.state == "ingested" %}
+        <span class="badge badge-success badge-sm" title="DB-backed; the dispatcher resolves operations against it">
+          ingested
+        </span>
+      {% else %}
+        <span class="badge badge-ghost badge-sm" title="Registered but no descriptor rows yet (not yet dispatchable)">
+          {{ row.state }}
+        </span>
+      {% endif %}
+    </td>
+    <td>
+      {#- Authoring-mode chip (#1980, fed by ConnectorListItem.kind / #1979).
+          Display-only: typed / profiled are dispatchable (the dispatcher
+          resolves operations against a hand-coded or profile-backed class);
+          ingested-shim is a bare non-dispatchable shim; profiled-but-unreviewed
+          is a profile-backed connector still awaiting review-gate clearance. -#}
+      {% if row.kind == "typed" %}
+        <span class="badge badge-primary badge-sm" title="Hand-coded connector class — dispatchable">
+          typed
+        </span>
+      {% elif row.kind == "profiled" %}
+        <span class="badge badge-info badge-sm" title="Profile-backed (ExecutionProfile) connector — dispatchable">
+          profiled
+        </span>
+      {% elif row.kind == "profiled-but-unreviewed" %}
+        <span class="badge badge-warning badge-sm" title="Profile-backed but not yet review-cleared — not yet dispatchable">
+          profiled (staged)
+        </span>
+      {% else %}
+        <span class="badge badge-ghost badge-sm" title="Bare ingested shim — not dispatchable until replaced">
+          ingested shim
+        </span>
+      {% endif %}
+    </td>
+    <td class="text-xs tabular-nums">
+      <div class="flex flex-col gap-0.5">
+        <span title="Groups by review status (staged / enabled / disabled)">
+          groups: {{ row.group_count }}
+          <span class="opacity-60">
+            ({{ row.staged_group_count }}s / {{ row.enabled_group_count }}e /
+            {{ row.disabled_group_count }}d)
+          </span>
+        </span>
+        <span title="Enabled (dispatchable) vs total operations">
+          ops: {{ row.enabled_operation_count }} / {{ row.operation_count }}
+        </span>
+      </div>
+    </td>
+    <td class="w-px whitespace-nowrap text-right">
+      {#- Review drawer entry point (Task #1887 T3). Operator-readable:
+          the drawer GET gates on ``operator`` and soft-hides the per-op
+          edit controls from non-admins, so the button shows for EVERY
+          operator (not just tenant_admin). It is a read (not CSRF-gated);
+          the drawer's own lazy group-body fetches + per-op edit forms
+          carry their own tokens. -#}
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        hx-get="/ui/connectors/registry/{{ row.connector_id }}/review"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Review operations of {{ row.connector_id }}"
+        data-review-open
+      >
+        Review
+      </button>
+      {% if is_tenant_admin %}
+        {#- Per-row action buttons -- tenant_admin only. The write routes
+            re-check the role server-side via ``resolve_operator_or_403``;
+            this hide is the UX affordance, not the gate. Each confirm
+            modal is HTML-loaded into the shared modal container; the row's
+            own result slot receives the OOB row-swap (success) or the
+            inline error panel (409 / 404). -#}
+        <div class="flex items-center justify-end gap-1" data-row-actions>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs"
+            hx-get="/ui/connectors/registry/{{ row.connector_id }}/enable"
+            hx-target="#connectors-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            aria-label="Enable {{ row.connector_id }}"
+          >
+            Enable
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs"
+            hx-get="/ui/connectors/registry/{{ row.connector_id }}/enable-reads"
+            hx-target="#connectors-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            aria-label="Enable reads for {{ row.connector_id }}"
+          >
+            Enable reads
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs"
+            hx-get="/ui/connectors/registry/{{ row.connector_id }}/disable"
+            hx-target="#connectors-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            aria-label="Disable {{ row.connector_id }}"
+          >
+            Disable
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs text-error"
+            hx-get="/ui/connectors/registry/{{ row.connector_id }}/delete"
+            hx-target="#connectors-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            aria-label="Delete {{ row.connector_id }}"
+          >
+            Delete
+          </button>
+        </div>
+      {% endif %}
+    </td>
+  {%- endif -%}
+</tr>
+{#- Per-row result slot. The confirm modal's verb posts here so a failed
+    action (409 / 404) renders the inline error panel against the row
+    without disturbing the table; a successful verb returns the OOB row
+    swap instead, leaving this slot empty. -#}
+{% if row is not none %}
+  <tr id="registry-result-{{ connector_id }}" {% if oob %}hx-swap-oob="true"{% endif %}>
+    <td colspan="7" class="p-0"></td>
+  </tr>
+{% endif %}

@@ -22,7 +22,7 @@ read-only ops are stored as `EndpointDescriptor` rows seeded from
 [`VRLI_CORE_OPS`](../../backend/src/meho_backplane/connectors/vcf_logs/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="vcf-logs", version="9.0", impl_id="vrli-rest")` registry
+`(product="vrli", version="9.0", impl_id="vrli-rest")` registry
 triple — the connector id `vrli-rest-9.0`. Auth is **session-token
 Bearer** (not HTTP Basic on every request): the connector POSTs
 credentials once to `/api/v2/sessions`, caches the returned `sessionId`
@@ -69,7 +69,7 @@ a separate data path and is **not** mirrored on the MCP surface
   (the default) and `ActiveDirectory`; `vIDM` is documented by the
   appliance but not supported in this release.
 - **A registered vRLI target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-vrli`). The target carries `product="vcf-logs"`,
+  (e.g. `--target rdc-vrli`). The target carries `product="vrli"`,
   `host` (the vRLI FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials), and
   `auth_model="shared_service_account"`.
@@ -118,7 +118,7 @@ verb in v0.2 — `import` is the CLI's only write path):
 # rdc-vrli.yaml
 targets:
   - name: rdc-vrli
-    product: vcf-logs
+    product: vrli
     host: vrli.rdc.evoila.io
     port: 443
     secret_ref: kv/data/vrli/rdc-vrli
@@ -149,8 +149,8 @@ exclusive — see the [per-target TLS-trust guide](../../deploy/values-examples/
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-vrli --json | jq '{product, version, reachable}'
-# expected: {"product": "vcf-logs", "version": "9.0", "reachable": true}
+meho targets probe rdc-vrli --json | jq '{product, version, reachable}'
+# expected: {"product": "vrli", "version": "9.0", "reachable": true}
 ```
 
 ## Quick-start
@@ -315,17 +315,24 @@ operator-only ergonomics over the same backend route.
 
 To retire `scripts/vcf-logs.sh` in favour of `meho vcf-logs ...`:
 
-1. **Register the target** (one-time per appliance):
+1. **Register the target** (one-time per appliance). `meho targets
+   import` takes a `targets.yaml` **file** (there is no `meho targets
+   create` verb in v0.5 — `import` is the CLI's only write path):
+
+   ```yaml
+   # rdc-vrli.yaml
+   targets:
+     - name: rdc-vrli
+       product: vrli
+       host: vrli.rdc.evoila.io
+       port: 443
+       secret_ref: kv/data/vrli/rdc-vrli
+       auth_model: shared_service_account
+   ```
 
    ```bash
-   meho targets import \
-     --name rdc-vrli \
-     --product vcf-logs \
-     --host vrli.rdc.evoila.io \
-     --port 443 \
-     --secret-ref kv/data/vrli/rdc-vrli \
-     --auth-model shared_service_account
-   meho targets probe --name rdc-vrli
+   meho targets import rdc-vrli.yaml   # add --update to PATCH an existing target
+   meho targets probe rdc-vrli
    ```
 
 2. **Ingest + enable the curated 7-op core** (one-time per appliance):
@@ -342,7 +349,7 @@ To retire `scripts/vcf-logs.sh` in favour of `meho vcf-logs ...`:
 
    | `scripts/vcf-logs.sh` invocation | `meho vcf-logs ...` equivalent |
    | --- | --- |
-   | `./scripts/vcf-logs.sh --probe` | `meho targets probe --name rdc-vrli` |
+   | `./scripts/vcf-logs.sh --probe` | `meho targets probe rdc-vrli` |
    | `./scripts/vcf-logs.sh --version` | `meho vcf-logs about --target rdc-vrli` |
    | `./scripts/vcf-logs.sh --query <expr> --range 1h` | `meho vcf-logs query "<expr>" --target rdc-vrli --time-range 1h` |
    | `./scripts/vcf-logs.sh --aggregate <expr> --range 24h` | `meho vcf-logs aggregated "<expr>" --target rdc-vrli --time-range 24h` |
@@ -383,9 +390,10 @@ appliance.
 ### `meho: connector error: VcfLogsConnector only supports auth_model='shared_service_account'`
 
 The target has `auth_model="per_user"` or `auth_model="impersonation"`.
-v0.5 ships `shared_service_account` only. Update the target via
-`meho targets import --auth-model shared_service_account` or
-file an issue if per-user is required for your workflow.
+v0.5 ships `shared_service_account` only. Set `auth_model:
+shared_service_account` in the target's `targets.yaml` entry and re-import
+with `meho targets import --update rdc-vrli.yaml`, or file an issue if
+per-user is required for your workflow.
 
 ### `meho: connector error: vrli credentials loader … returned a dict missing required key 'password'`
 
@@ -400,7 +408,7 @@ The dispatched op hit an unexpected response shape (empty body, HTML
 error page, etc.). Most often means an appliance proxy / WAF
 intercepted the call and returned non-JSON. Run with `--json` and
 inspect `extras` for the raw transport error. Re-check
-`meho targets probe --name <slug>` to confirm the appliance is
+`meho targets probe <slug>` to confirm the appliance is
 reachable on the expected path.
 
 ### Empty `vcf-logs query` result with `complete=false`

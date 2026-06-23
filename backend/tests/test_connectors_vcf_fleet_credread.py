@@ -65,7 +65,7 @@ _CANARY_PASSWORD = "p4ss-canary-must-not-leak-credread-fleet"
 
 #: The connector triple ``fleet-rest-9.0`` decodes to.
 _PRODUCT_DESCRIPTOR = "fleet"
-_PRODUCT_TARGET = "vcf-fleet"
+_PRODUCT_TARGET = "fleet"
 _VERSION = "9.0"
 _IMPL_ID = "fleet-rest"
 _CONNECTOR_ID = "fleet-rest-9.0"

@@ -44,14 +44,15 @@ Locked decisions:
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217 -- and the live `ready` verdict for the footer pill, read from `request.state.ui_ready` (stashed by the session middleware from `health.ui_readiness_verdict`, the stale-while-revalidate hot-path accessor that never sweeps probes on the request path); G10.7-T1 #1776. Context processors run *after* the route context and `update` over it, so the injected `ready` wins over any per-route literal. |
-| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real memory + connectors routes (G10.4-T1 #877 / G10.3-T1 #873), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), the real docs-corpus routes (`GET /ui/corpus` + `POST /ui/corpus/search` -- collection picker, default-if-one, + ask-the-corpus over the reused `search_docs` / `doc_collections` backends, G10.7-T1 #1777), the real runbooks routes (G10.6-T1 #1382), and the real approvals routes (`GET /ui/approvals/badge` + `GET /ui/approvals` panel + `GET /ui/approvals/{id}` detail modal + `POST .../approve` + `POST .../reject` -- the bell/badge + approve/deny modal over a session BFF that calls the `approval_queue` service in-process, G10.7-T3 #1778). All surfaces now ship real routers, so the stubs aggregate is empty; real routers are still included **before** the stubs so their concrete paths win the first-match-wins lookup (the literal `/ui/approvals/badge` is registered ahead of the `/ui/approvals/{request_id}` slug for the same reason). |
+| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real memory + connectors routes (G10.4-T1 #877 / G10.3-T1 #873), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), the real docs-corpus routes (`GET /ui/corpus` + `POST /ui/corpus/search` -- collection picker, default-if-one, + ask-the-corpus over the reused `search_docs` / `doc_collections` backends, G10.7-T1 #1777 -- plus the admin Collections lifecycle table `GET /ui/corpus/collections` + register modal `GET`/`POST /ui/corpus/collections/register`, rendered as a second tab on `/ui/corpus` rather than a 9th sidebar entry; the table lists the tenant's FULL registry NOT the entitlement-filtered search catalogue -- admins manage rows they may not personally hold `meho-docs:<key>` for -- and the register submit calls the in-process `create_doc_collection` service, catching `DocCollectionConflictError`->409 / `DocCollectionBackendTypeError`->422 explicitly since neither subclasses `ValueError`; the literal `/register` route registers ahead of the `/{collection_key}` param route, G10.10-T1 #1882 -- plus the per-collection **detail** + lifecycle surface `GET /ui/corpus/collections/{collection_key}` + `POST .../{collection_key}/probe` + `GET`/`POST .../{collection_key}/disable` + `POST .../{collection_key}/enable`: the detail page renders the full `DocCollection` read shape via `project_doc_collection` (the server-side-only `backend{type, ref}` rendered ONLY for a `tenant_admin` via `resolve_role_probe`, never the `ref` value for a plain operator), the re-probe calls the in-process `probe_collection` inside the route's `get_session` transaction and swaps the readiness card `#collection-readiness-card` on success / a `CorpusUnavailable`->503 alert leaving the row status unchanged (success-only write-back) / a `DocCollectionStateError`->409 alert, the slow-probe button carries `hx-disabled-elt`+`hx-indicator`, and enable/disable call the in-process `set_collection_enabled` (idempotent no-op, `DocCollectionStateError`->`409 invalid_collection_transition` legible alert) with disable fronted by an availability-destructive confirm modal and enable a plain button; the action sub-routes' extra literal segment + the literal `/register` route (included before this detail router) keep the bare `{collection_key}` GET from binding a literal as a key, G10.10-T2 #1883), the real runbooks routes (G10.6-T1 #1382), and the real approvals routes (`GET /ui/approvals/badge` + `GET /ui/approvals` panel + `GET /ui/approvals/{id}` detail modal + `POST .../approve` + `POST .../reject` -- the bell/badge + approve/deny modal over a session BFF that calls the `approval_queue` service in-process, G10.7-T3 #1778), and the real scheduler routes (`GET /ui/scheduler` list + `GET /ui/scheduler/{id}` detail + `GET`/`POST /ui/scheduler/create` create modal + live `POST /ui/scheduler/validate-cron` cron preview + `GET`/`POST /ui/scheduler/{id}/cancel` terminal-confirm cancel -- the trigger control plane over a session BFF that calls `SchedulerAdminService` in-process; reads `operator`, writes `tenant_admin`, cancel fronted by a strong native-`<dialog>` confirm since it is terminal, G10.8-T6 #1826), the real agents routes (`/ui/agents` definitions list + detail + tenant_admin CRUD, G10.8-T1 #1825), the real agent-runs routes (`GET /ui/agents/runs` cross-agent run list + `GET /ui/agents/runs/{handle}` per-run detail/poll, operator-read, G10.8-T3 #1830), the real conventions routes (`GET /ui/conventions` kind-tabbed (operational / workflow / reference) summary table + an **always-on preamble token-budget banner** that surfaces the otherwise-silent overflow drop -- estimated/`DEFAULT_MAX_PREAMBLE_TOKENS` token math + every `dropped_slug` rendered in red with "agents never see this rule" copy, reflecting the full operational set regardless of the active kind tab -- + `GET /ui/conventions/{slug}` full-body detail rendered through the sanitised `render_markdown`; operator-read, calling the shared in-process `ConventionsService` (`list_conventions` / `get_convention`) so the budget arithmetic + `priority DESC, created_at ASC` ordering match the REST surface and T4's MCP preamble packer exactly; the literal `/ui/conventions` list route registers ahead of `/ui/conventions/{slug}` so T2's static-prefix write routes (`/create` + `/preview`) drop in without binding a literal as a slug, G10.12-T1 #1895), and the real operations launcher routes (`GET /ui/operations` picker + group browse + `GET /ui/operations/search` debounced hybrid search + `GET /ui/operations/descriptor/{id}` read-only detail drawer + `POST /ui/operations/preview` -- the in-drawer read-only request **preview** that renders the literal would-be HTTP request (`method` / `resolved_path` / `query` / `redacted_body`) for an HTTP-ingested op WITHOUT dispatching it, CSRF double-submit gated, calling `preview_operation` in-process; the in-envelope `status="error"`/`"unavailable"` faults render inline at HTTP 200 while the meta-tool's missing-target-name `ValueError` maps to an inline 400 -- `GET /ui/operations/run/{id}` + `POST /ui/operations/call` -- the confirm-gated **run** action (G10.9-T3 #1881): the run-confirm modal renders an unmissable `safety_level` / `requires_approval` banner over the target / params / optional `work_ref` inputs, and the CSRF-bound confirm POST calls `call_operation` in-process and renders the `OperationResult` envelope inline (`ok` shows the result or, on out-of-band spill, the `ResultHandle` metadata rather than a blob; `error`/`denied` shows `extras.error_code`; **`awaiting_approval`** shows the parked-request banner with `extras["approval_request_id"]` and a deep-link to `/ui/approvals/{id}` so a governed write is never a silent success). Run is operator-tier; the policy gate (not RBAC) escalates a `requires_approval` op to `awaiting_approval` -- a session BFF over the `list_operation_groups` / `search_operations` / `describe_descriptor` / `preview_operation` / `call_operation` meta-tools called in-process; operator-read for browse/preview/run (no `tenant_admin` step), with the per-op `llm_instructions` prompt rendered only for `tenant_admin`, G10.9-T1 #1879 / T2 #1880 / T3 #1881), and the real Vault KV-browser routes (`GET /ui/vault` full-page browser + `GET /ui/vault/list` + `GET /ui/vault/read` + `GET /ui/vault/versions` -- the read-only secrets console, its own `vault` sidebar entry ("Vault"): a connector/target picker + a mount/path picker DEFAULTED to the operator's tenant prefix (`secret` mount + `tenants/<tenant_id>` path) so the default-on per-tenant guard's common case never trips, plus three independent HTMX swap regions. All four routes are GET (no CSRF gate -- the write surfaces T2/T3 add are the POSTs) and `require_ui_session`-gated; each dispatches one vault KV op IN-PROCESS via `call_operation` -- the SAME BFF pattern `/ui/operations` uses, because the Bearer-gated `POST /api/v1/operations/call` cannot be authed by a session cookie. The connector_id is `vault-1.x` (the `<impl_id>-<version>` id), sourced from `list_ingested_connectors` (`state == "ingested"`, vault product) NOT a hard-coded literal that drifts on a re-version; the bare slug `vault` is never emitted (it 404s through `parse_connector_id`), and a deploy with no ingested vault connector renders a "no Vault connector" hint, not a dead-end form. `list` renders child key NAMES only (Vault never returns values through the list endpoint), handling the set-shaped JSONFlux spill (`handle is not None`) as handle metadata + an out-of-band note rather than a huge blob -- mirroring the operations launcher's handle branch. `read` is the one deliberate, scoped un-redaction: the secret values reach the browser reveal-on-click (Alpine `x-data` toggle) + copy-without-logging (`navigator.clipboard` reads the in-memory value, no network/log round trip), but the BFF route logs ONLY op-id / status / handle-presence, NEVER the envelope `result` -- the dispatcher's audit/broadcast path already redacts the connector boundary (`vault.kv.read` is `credential_read`, aggregate-only on the feed; the audit row's visible `payload` carries op-id/params_hash/result_status, value-free, while the verbatim `raw_payload` is the redaction engine's re-derivation source governed by `redaction_manifest`). `versions` renders per-version metadata (created / deleted / destroyed), never values. A path outside `secret/tenants/{tenant_id}/` raises `VaultTenantScopeError` before any Vault round-trip; the dispatcher wraps it as `status="error"` with `extras.exception_class == "VaultTenantScopeError"`, rendered as a clear "outside your tenant scope" message, not a raw 403 envelope nor a 4xx (the structured fault rides on a 200). Read-only operator-tier; the literal `list`/`read`/`versions` segments register before any future `{param}` route on the router, G10.18-T1 #1956) -- plus the Vault **status** view (`GET /ui/vault/status` seal/health/mounts panel + `GET /ui/vault/auth` auth-methods glance): the read-only diagnostics surface of the secrets console, reached from the KV browser's header "Status" link (it SHARES the `vault` sidebar entry, NOT a second top-level nav surface). `status` is content-negotiated on `HX-Request` (the same `_is_htmx` discipline the operations launcher uses): a normal navigation renders the full page (`extends base.html`, `active_surface="vault"`) with the seal/health/mounts panel server-rendered inline (populated on first paint, not blank-then-fetch) + an auth region that auto-loads its partial on `load`; an HTMX fetch (the Refresh button) renders only the `_status.html` partial. It dispatches three `vault.sys.*` reads -- `vault.sys.seal_status` (seal state + unseal progress t-of-n), `vault.sys.health` (reachable/sealed/serving + version, sharing the readiness-probe classifier), and `vault.sys.mounts.list` (the enabled secret backends) -- CONCURRENTLY via `asyncio.gather`, so one slow/unreachable read degrades a single card (via the shared `vault_envelope_error` macro) without blanking the panel; the mounts card additionally handles the set-shaped JSONFlux spill (`handle is not None`) as handle metadata, not a blob. `auth` dispatches `vault.sys.auth.list` and renders the enabled auth-method mount-paths ('token/', 'userpass/', ...) + their types -- method NAMES and config metadata ONLY, never a credential (the endpoint returns no values), with the same handle branch. Both routes dispatch IN-PROCESS via `call_operation` (the same BFF pattern as T1 / `/ui/operations`, reusing T1's `_resolve_operator` / `_vault_connector_id` helpers so the surfaces share one identity + connector-id + redaction code path); the `connector_id` is `vault-1.x` sourced from `list_ingested_connectors` (NEVER the bare slug `vault`, which 404s through `parse_connector_id`), and a deploy with no ingested vault connector renders a "no Vault connector" hint, not a dead panel. The four `vault.sys.*` reads are `safety_level="safe"`/operator-tier, so both GETs are `require_ui_session`-only (no `TenantRole` dependency, no tenant_admin step) and need no CSRF gate (reads only); the route module logs only op-id/connector-id/status/handle-presence, never the envelope `result` (the same redaction discipline T1 holds -- defence in depth, since these sys reads carry no secret payload). The literal `status`/`auth` segments are distinct from the T1 `list`/`read`/`versions` literals and the bare `/ui/vault` index, and `build_vault_status_router` is included immediately after `build_vault_router` (ahead of the stubs aggregate); there is no `{param}` route on the vault surface, so the first-match-wins lookup is unambiguous, G10.18-T3 #1958), and the real connector-**registry** routes (`GET /ui/connectors/registry` role-scoped list -- DISTINCT from the `/ui/connectors` **targets** list: it lists the ingested/typed/composite connectors via the in-process `list_ingested_connectors` (operator-scoped visibility: built-ins + the caller's tenant, never cross-tenant), with a `?status=staged|enabled|disabled|all` enum filter (the `all` sentinel, never `value=""`, since the `ConnectorStatusFilter` enum 422s out-of-range) + a `?product=` exact-match dropdown computed in the handler from the returned rows + a `?kind=typed|ingested-shim|profiled|profiled-but-unreviewed|all` authoring-mode enum filter (`_KindFilter`, `all` sentinel never `value=""`, narrowed in-process since `kind` is not a `list_ingested_connectors` argument) feeding a per-row **kind chip** projected from `ConnectorListItem.kind`/`dispatchable` (#1979) -- typed/profiled = dispatchable, ingested-shim = bare non-dispatchable shim, profiled-but-unreviewed = profile-backed-but-not-review-cleared (display-only, #1980); surfaced as its own `connectors-registry` sidebar entry ("Connector Registry") -- plus the confirm-gated per-row actions `POST /ui/connectors/registry/{connector_id}/enable|disable|enable-reads` + `DELETE /ui/connectors/registry/{connector_id}` which call the shipped REST `enable_endpoint`/`disable_endpoint`/`enable_reads_endpoint`/`delete_endpoint` in-process (the `forms_router` pattern -- UI + REST share one validation + state-machine + audit path); read = `operator` via `resolve_role_probe` (soft-hide of the write affordances), writes = `tenant_admin` via `resolve_operator_or_403`; every loosening verb (enable / enable-reads / disable) is fronted by a confirm modal naming the projected blast radius and delete is type-to-confirm surfacing the `enabled_operations_deleted` advisory; a `409 connector_scope_ambiguous` (the `candidates[]` envelope) or `InvalidStateTransitionError` `409` from the in-process handler renders an inline error panel against the row rather than a 5xx, and a successful verb re-renders the affected row via `hx-swap-oob` (a delete returns an empty OOB stub that removes the row); `{connector_id}` is the slash-free `<impl_id>-<version>` string so a plain `{connector_id}` param suffices (no `:path` converter), G10.13-T1 #1885) -- plus the connector-**ingest** modal + async job-poll (`GET`/`POST /ui/connectors/registry/ingest` + `GET /ui/connectors/registry/ingest/jobs/{job_id}`): the tenant_admin-only Ingest on-ramp (soft-hidden from operators) that parses a vendor OpenAPI spec into the registry from the web. The modal offers two mutually-exclusive `IngestRequest` shapes -- **catalog** (a dropdown read in-process from `catalog_endpoint`, each option marked **ships local spec/profile -- no upload** + `data-ships-local` when the `ConnectorSpecEntry` carries a MEHO-authored `spec_resource`/`profile_resource` shipped as package data, #1975/#1976/#1980, so a `--catalog` ingest of that row is self-contained) and **explicit quadruple** (`product`/`version`/`impl_id` + one-or-more `https://` `specs[].uri` rows; inline byte upload stays CLI-only) -- with a Dry-run toggle; the submit builds exactly one shape (a handler pre-check renders a friendly inline error rather than the raw `catalog_entry_conflict`/underspecified 422) and calls `ingest_endpoint` **in-process** (the `forms_router` pattern, never the Bearer route), branching on the response: a dry-run renders the sync parse counts and writes nothing, a real ingest kicks the async job and seeds a self-polling `_ingest_job_status.html` fragment. The poll route calls `get_ingest_job_endpoint` in-process and self-polls via `hx-trigger="every Ns"` while `running`, dropping the directive on a terminal status (the htmx "stop returning the polling element" idiom, modelled on `agents/runs/_status_panel.html`); a `degraded` job shows the counts **and** the `ingested_not_dispatchable` reason (never a bare success), and a **404 after a pod restart** (jobs are process-local) renders a "job lost -- re-check the registry list" panel that **stops polling** rather than spinning forever. The catalog-resolution 422s (with `available_entries[]`), the explicit-shape 422s, the 400 spec-parse family, and `503 LlmClientUnavailable` all render as actionable inline panels via the T1 shape-generic `_registry_error.html` renderer; all three routes are `tenant_admin`-gated via `resolve_operator_or_403`, the submit is CSRF double-submit gated, and the route registration lives in `ingest_router.py` (the `forms.py`/`forms_router.py` render-vs-routes split), G10.13-T2 #1886) -- plus the connector-**review** drawer (`GET /ui/connectors/registry/{connector_id}/review` + `.../review/groups/{group_key}` + `PATCH .../operations/{op_id:path}`): the per-op curation surface the registry row's "Review" button (operator-readable) opens. The drawer GET calls `get_review_endpoint` in-process (operator-read) and renders the `ConnectorReviewPayload` as a **collapsed per-group `<details>` accordion** (name / `review_status` / `op_count`), the drawer header carrying an authoring-mode **kind badge** projected from `ConnectorReviewPayload.kind`/`dispatchable` (#1979/#1971) that badges a profiled-but-unreviewed connector distinctly ("profiled -- staged", #1980; display-only) -- the **big-payload guard**: a thousands-op connector does NOT render its per-op rows on first paint, each group body lazy-loads via `hx-get=".../review/groups/{group_key}"` on the `<details>` `toggle` event (`hx-trigger="toggle once"`). The group-body GET renders one group's ops; each op row carries inline controls (`safety_level` select / `requires_approval` + `is_enabled` toggles / `custom_description` field) that `PATCH .../operations/{op_id:path}` and re-render just that row (`hx-swap="outerHTML"`), calling `edit_op_endpoint` in-process (the `forms_router` pattern, never the Bearer route). The **`{op_id:path}` converter is load-bearing** -- the natural key `f"{method}:{path}"` (e.g. `GET:/api/vcenter/cluster`) contains slashes, so it round-trips intact; it is the ONLY `:path` param in the connectors surface (`connector_id` / `group_key` are slash-free plain params). An `is_enabled=true` edit returning the `unreplaced_auto_shim` advisory renders it inline on the row (the edit still landed -- warnings never block); every loosening edit (enable / drop approval / relax safety) is confirm-gated (`hx-confirm`) while tightening edits apply directly. Read = `operator` via `resolve_role_probe` (per-op edit controls soft-hidden from non-admins, read-only badges shown instead), the PATCH = `tenant_admin` via `resolve_operator_or_403` + CSRF double-submit gated; a `409 connector_scope_ambiguous` (the `candidates[]` envelope) / `404` / `400` renders the shared `_registry_error.html` inline panel, not a 5xx; the render-vs-routes split lives in `review_drawer.py` / `review_router.py`, G10.13-T3 #1887), and the real audit-query forensic console routes (`GET /ui/audit` filter form + first result page + `GET /ui/audit/results` filter-submit + forward-cursor "Load more" fragment -- the entry surface over unbounded `audit_log` history, surfaced as its own `audit` sidebar entry ("Audit"): a filter form (target / principal / op_id glob / op_class dropdown / result_status / `since`/`until` duration text / work_ref) over the in-process `audit_query.query_audit` substrate, dispatched with `tenant_id` from the validated session only (never a query param) so a foreign-tenant row can never surface; reuses the broadcast `OP_CLASS_BADGE_CLASSES`/`OP_CLASS_FILTER_OPTIONS` palette so audit rows colour-code identically to live-feed rows -- no duplicated colour map. Forward-only pager: the substrate cursor is forward-only (`AuditQueryResult.next_cursor`), so "Load more" threads the opaque `next_cursor` (distinct from the approvals surface's offset+over-fetch-one pager) and re-renders the pager OOB to advance it; there is no back button (paging back is re-run from page 1). Error mapping mirrors the REST route, never 5xx-ing on operator input: `InvalidCursorError`->reset to page 1 (treat a tampered/expired cursor as "start over"), `DurationParseError`->inline `since`/`until` field error, `UnsupportedFilterError`->inline error. One-click pivots per row: who-touched (a `target`-bound query) + by-work-ref (a `work_ref`-bound query), plus a **replay** deep-link to the T3 `/ui/audit/sessions/{session_id}/replay` surface that is `TENANT_ADMIN`-only (the replay route is `tenant_admin`-gated #1844) -- rendered enabled only via the `runbooks/routes.py` `_resolve_role` fail-soft role lift, disabled-with-tooltip for a plain operator; the literal `/ui/audit/results` route registers ahead of the `/ui/audit` page route (and any future `{param}` route T2/T3 add) so the literal segment is never bound as a slug; operator-read, G10.15-T1 #1944 -- plus the row **detail drawer** + **my-recent** quick view (`GET /ui/audit/show/{audit_id}` drawer fragment + `GET /ui/audit/my-recent`): the drawer resolves one row in-process tenant-scoped (the shared `fetch_audit_row`, a missing/cross-tenant id -> the `_drawer_not_found.html` fragment at **404**, never 403/200 -- the non-leakage posture the REST `show` route holds) and reuses the broadcast `ui.routes.broadcast.aggregate_gate` (`AGGREGATE_ONLY_OP_CLASSES` + `is_aggregate_only`, the SAME `{credential_read, credential_mint, audit_query}` set the broadcast event drawer enforces -- the gate was lifted into the shared `aggregate_gate` module so there is NO second copy of the op-class set; a sensitive op or a `broadcast_detail_effective="aggregate"` row renders the 🔒 placeholder and NO payload, otherwise strips `INTERNAL_PAYLOAD_KEYS` and renders the request payload), and surfaces lineage deep-links (a `TENANT_ADMIN`-gated replay link to the T3 `/ui/audit/sessions/{id}/replay` surface -- disabled-with-tooltip for an operator via the `_resolve_role` fail-soft lift -- and a parent-row deep-link that re-opens the drawer on `parent_audit_id`). The page route accepts a `?audit_id=` deep-link that pre-renders the drawer into the `#audit-drawer` slot (a bad id degrades to "no open drawer", never a page 404), and every result/my-recent row carries a "details" affordance that `hx-get`s the drawer. `my-recent` binds `principal=session.operator_sub` (OPERATOR-self-scoped: a peer operator's rows are never reachable) over a fixed 24h window, rendered through the SAME `_results_rows.html` partial so each row opens the drawer; the literal `/ui/audit/my-recent` registers BEFORE `/ui/audit/show/{audit_id}` so it is never bound as an `audit_id` slug, G10.15-T2 #1945) -- plus the **session replay tree** (`GET /ui/audit/sessions/{session_id}/replay`): the `TENANT_ADMIN`-gated forensic surface that reconstructs one agent session's chronological parent/child lineage as a nested tree. Replaying an arbitrary session reconstructs another principal's full trace, so it is the ONE audit surface that is admin-only on read (matching the REST replay route's `_require_tenant_admin` gate #1844 + the MCP `meho.audit.replay` posture): the role is lifted via the same fail-soft `_resolve_role`, and a `read_only`/`operator` (or any failed lift) renders the `_replay_forbidden.html` fragment at **403** ("session replay is a tenant-admin forensic action"), never the tree. The tree is built **in-process** reusing the SAME count-first 413 guard the REST route runs -- the backend `_count_session_rows` runs a cheap tenant-scoped `count(*)` over the session anchor BEFORE any tree is built, and only when the count is within the backend `_REPLAY_ROW_CAP` (imported from `api/v1/audit.py`, single-sourced -- NOT a duplicate `10000` literal) does `audit_query.replay_session` materialize the `ReplayNode` forest. **Over-cap fallback**: when the count exceeds the cap the recursive build is skipped entirely and `_replay_over_cap.html` renders the over-cap notice + a one-click pivot to the T1 flat query pre-filtered by `agent_session_id` (`/ui/audit?agent_session_id=<id>` -- the same redirect the CLI turns the 413 into), never an enormous tree. The forest renders via `_replay_tree.html` (Jinja `{% for ... recursive %}` over `depth`+`children`); each node reuses the T1/T2 row look (the broadcast op_class badge palette) and its "details" affordance `hx-get`s the **T2 drawer** (`/ui/audit/show/{id}` into `#audit-drawer`), so the per-node aggregate-only 🔒 gate applies on click (a `credential_read`/`audit_query` node never leaks its payload). An unknown/foreign/empty session renders the empty state (`root=[]`), **never a 404** (the non-leakage posture). `tenant_id` derives from the validated session only; the distinct `/ui/audit/sessions/` prefix + the trailing literal `/replay` segment make `{session_id}` the second path segment so it can never bind as a `show/{audit_id}` slug or shadow `my-recent`, G10.15-T3 #1946), and the real account surface routes (`GET /ui/account` operator-tier whoami page + `POST /ui/account/sessions/revoke-others` + `POST /ui/account/sessions/{session_id}/revoke` -- the self-service identity + active-session surface reached from the sidebar account chip, NOT a sidebar entry: the page renders `operator_sub` + the `session_tenant` chip shape + the **live** `tenant_role` lifted through the connectors `_lift_operator` JWT re-verify path (so a same-session demotion shows; fail-soft to `unknown` on a JWKS hiccup, never 5xx) + the current session `expires_at`, plus the caller's own active-session list (`list_active_sessions`) with a "This device" badge on the current row. Both revokes are operator-tier and own-scoped: the single revoke loads the target `web_session` and asserts `operator_sub` AND `tenant_id` match the validated session BEFORE calling the ownership-blind `revoke_session` (a foreign/cross-tenant/missing/malformed id collapses to 404 so another operator's session id is never confirmed), and `revoke-others` (`revoke_other_sessions`) spares the current session. Self-revoke of the current session returns an `HX-Redirect` to `/ui/auth/login` (the self-logout footgun -- the "This device" confirm modal carries an explicit warning); the literal `/ui/account/sessions/revoke-others` registers BEFORE the parametrised `/ui/account/sessions/{session_id}/revoke` so the literal segment is never bound as a `session_id`; CSRF double-submit gated, G10.11-T1 #1892). All surfaces now ship real routers, so the stubs aggregate is empty; real routers are still included **before** the stubs so their concrete paths win the first-match-wins lookup (the literal `/ui/approvals/badge` is registered ahead of the `/ui/approvals/{request_id}` slug for the same reason; the scheduler router registers its literal `/ui/scheduler/create` + `/ui/scheduler/validate-cron` ahead of the `/ui/scheduler/{trigger_id}` detail slug; the agent-runs router is included ahead of the agents router so `/ui/agents/runs` is not captured by `/ui/agents/{name}`; the connector-registry list + per-row action routers are included ahead of the connectors detail router so the literal `/ui/connectors/registry` is not captured as `/ui/connectors/{name}`, and the connector-ingest router is included ahead of BOTH the per-row action router (so the literal `/ui/connectors/registry/ingest` is not captured as `/ui/connectors/registry/{connector_id}`) and the detail router (so it is not captured as `/ui/connectors/{name}`); the connector-review router is likewise included ahead of the detail router so its `/ui/connectors/registry/{connector_id}/review*` + `/operations/{op_id:path}` routes are not captured as `/ui/connectors/{name}` (each carries a literal segment after `{connector_id}` so it is unambiguous against the `.../{connector_id}/enable` action siblings, and the per-op route is further `PATCH`-method-distinct); the operations launcher's `{param}` routes sit under the distinct `/ui/operations/descriptor/` + `/ui/operations/run/` prefixes so the literal `/ui/operations/search` never binds as a descriptor id, and the literal `/ui/operations/preview` + `/ui/operations/call` are `POST`s so they cannot collide with the GET slug routes). |
+| `meho_backplane.ui.query_filters` | Shared empty-string→`None` coercion for HTMX filter `<select>` query params (#1963). The list-view filter selects render an "All" `<option value="">`; HTMX submits that empty value verbatim, which fails a `Literal[...] \| None` / `StrEnum \| None` `Query` and 422s — and HTMX won't swap a 4xx, so the filter silently no-ops. `EMPTY_STR_TO_NONE` (a `pydantic.BeforeValidator`) maps `""→None` **before** the literal/enum check, so "All"/cleared returns 200 unfiltered while an out-of-vocabulary value (`?status=bogus`) still 422s. Apply it as `status: Annotated[_Filter \| None, EMPTY_STR_TO_NONE, Query()] = None` — the `Query()` MUST live **inside** `Annotated` (not as the `= Query(default=None)` default): with `from __future__ import annotations` in force across the route modules, FastAPI only recovers the `BeforeValidator` from a stringised annotation when `Query()` is an `Annotated` member. Wired on the runbook-runs / runbook-catalog / scheduler / agent-runs list filters. The alternative encoding — an in-vocabulary `all` sentinel enum member (`value="all"`, never `value=""`), as the connector-registry `ConnectorStatusFilter` uses — sidesteps the same trap without this validator. `str \| None` filter params don't need it (empty string is a valid `str`). |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
-| `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
+| `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. `list_active_sessions(operator_sub, tenant_id)` returns the caller's own live sessions (own `operator_sub` + `tenant_id`, `revoked_at IS NULL`, `expires_at > now()`, ordered `last_seen_at DESC`) as token-free `ActiveSessionRow` projections (the Fernet ciphertext columns are never read for a metadata listing) and `revoke_other_sessions(operator_sub, tenant_id, keep_session_id)` soft-deletes every own active session except the current one -- both back the Account surface (G10.11-T1 #1892) and take their `(operator_sub, tenant_id)` from the validated session context, never a form field. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. `require_ui_admin` (the write-route RBAC gate) loads + verifies the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). |
-| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies (`require_ui_admin` today); the dashboard-feed fix (#1696) needed no new caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads Valkey directly under `require_ui_session` and never presents the access token. |
+| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin`, plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no privileges" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard-feed fix (#1696) needed no caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads Valkey directly under `require_ui_session` and never presents the access token. |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts exactly `401 session_expired` on `/ui/*`: HTML requests (`Accept: text/html`) get `302 /ui/auth/login?return_to=<path>` + `meho_session` cookie clear; non-HTML callers keep the JSON body (cookie cleared too). Every other HTTPException delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes are untouched. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
@@ -224,6 +225,33 @@ on that id) are byte-identical before and after a rotation, so
 already-rendered pages and their forms keep working -- the
 cookie-rotation desync class #1706 diagnosed cannot occur here.
 
+Client-side session-expiry safety net (#122): the server-side handler
+above only converts a `401 session_expired` to a login redirect when the
+request carries `Accept: text/html` (a full-page navigation). A
+background htmx XHR (the approvals badge poll, a form submit) sends
+`Accept: */*`, so it gets the JSON 401 body instead -- and htmx 2.0.9's
+default `responseHandling` classifies `[45]..` as
+`{swap: false, error: true}`, so that 401 is a silent no-op: the target
+container stays empty and the operator faces a dead control. The
+app-shell script `static/src/app/session-expiry.js` closes that gap with
+a single global `htmx:beforeOnLoad` listener on `<body>` (loaded from
+`_head_assets.html` after `htmx.min.js`). htmx fires `htmx:beforeOnLoad`
+for every response before any swap or redirect-header handling, and
+`preventDefault()` there aborts htmx's entire response processing for
+that request. The handler acts **only** on `xhr.status === 401`: it
+cancels the dead swap and reveals a fixed top banner ("Your session
+expired -- please sign in again") with a link to
+`/ui/auth/login?return_to=<encoded current path>` (matching the server
+handler's `quote(full_path, safe="")` contract, accepted by the login
+route's `_safe_return_to`). Every other status -- a `2xx` swap, a `422`
+form-validation re-render, a `403` CSRF error a form's
+`hx-on::response-error` handles -- returns early and flows through
+untouched, so legitimate non-auth responses are never hijacked. The
+banner is created once and reused, so a burst of failing background
+polls cannot stack duplicates. This is the client-side recovery path
+(Axis B); the refresh seam above reduces how *often* a 401 occurs
+(Axis A).
+
 Logout: revoke the row, clear the cookie, 302 to Keycloak's
 `end_session_endpoint` with `client_id` + `post_logout_redirect_uri`
 pointing back to `/ui/auth/login`. The IdP-side hop is best-effort
@@ -343,6 +371,17 @@ conditionally on `session_tenant is not none` and falls through
 session still produces a readable chip (the `web_session.tenant_id`
 FK is intentionally soft; the chassis logs
 `ui_session_tenant_row_missing` and serves the page).
+
+The processor also exposes `session_operator_sub` (the signed-in
+operator's Keycloak `sub`, or `None` outside a session). The sidebar
+account chip (`base.html`) used to be the hardcoded literal
+"OP / Operator"; it now renders the real `sub` (a two-char avatar +
+the truncated `sub`) with an Account menu item linking to
+`/ui/account`, and a comment slot for a future tenant selector
+(G10.11-T1 #1892). The chip deliberately does **not** show the role
+-- labelling it would cost a fresh JWT verify on every page render;
+the live role is shown on `/ui/account` instead, where the route pays
+that verify once.
 
 The middleware itself
 ([`UISessionMiddleware`](../../backend/src/meho_backplane/ui/auth/middleware.py))
@@ -1026,6 +1065,28 @@ sibling `value="{{ op_id_filter }}"` is in an autoescaped attribute
 and parse the response to assert no handler grafts onto an `x-data`
 element.
 
+**The runbook editor island (G2.x #100, Goal #87 security review).** The
+runbook authoring editor (`runbooks/editor.html`) was the lone
+data-bearing `x-data` that never received the PR #1044 hardening: it
+interpolated `initialSteps: {{ initial_steps_json | safe }}` (the `safe`
+filter disables autoescape entirely, and the upstream `json.dumps` leaves
+`"` raw) plus `| tojson` scalars (`slug` / `title` / `description` /
+`target_kind`) inside a **double-quoted** `x-data="…"`. Any runbook field
+(`OperationCallStep`/`ManualStep` `title`/`body`, `RunbookTemplateBody`
+`title`/`description`) containing a `"` broke out — a stored XSS on
+`GET /ui/runbooks/{slug}/edit` and a reflected XSS on the
+`POST /ui/runbooks/new` 422 re-render, both in an authenticated
+`tenant_admin`'s session. The fix is the canonical one: single-quote the
+attribute (`x-data='runbookEditor({…})'`) and render the step tree with
+`{{ form_steps | tojson }}` over the raw list (`build_editor_context` no
+longer `json.dumps`-es it), so every field — `"` bytes included — stays
+inert inside the value. This was the last `| safe` in an HTML-attribute
+context under `ui/templates/`; the single-quoted `x-data` + `| tojson`
+pair is now the canonical UI output-encoding rule for any template
+binding untrusted data into Alpine. Regression coverage lives in
+`test_ui_runbooks_editor.py` (stored + reflected paths), reusing the
+`_assert_no_xss_breakout` parser harness from `test_ui_broadcast_filters.py`.
+
 ### Cross-tenant isolation
 
 The page carries no tenant data beyond the operator's own identity; live
@@ -1106,6 +1167,61 @@ the template.
 | `topology/_table_rows.html` | `<tbody>` fragment swapped in by HTMX on a sort / filter change. Idempotent shape — re-rendered standalone on an HTMX request or included from the full page on a browser nav. |
 | `topology/_drawer.html` | Drawer fragment with node properties (id, kind, name, target_id, first_seen, last_seen, discovered_by, raw JSON), outgoing + incoming edges, recent operations on the node's target (empty for inner graph nodes with no `target_id`), and the "Show dependents" link handing off to T2/T3's graph view. |
 | `topology/_drawer_not_found.html` | 404 drawer fragment for an unknown / cross-tenant node id. Same outer `aside#node-drawer` shape so the HTMX `outerHTML` swap remains semantically consistent. |
+
+### Curated-edge writes (Task #1953)
+
+Initiative [#1941](https://github.com/evoila/meho/issues/1941) (G10.17),
+Task #1953 (T1) layers the curated-edge **annotate / unannotate** write
+verbs onto the read-only drawer. The console face is an **in-process BFF**:
+the `/api/v1/topology/edges` routes are Bearer-gated, so a session-cookie
+browser cannot auth them; instead `meho_backplane.ui.routes.topology.edges`
+adds `/ui/topology/edges*` sub-routes that are `require_ui_session` +
+CSRF-gated and call the `meho_backplane.topology.annotate` **service**
+(`annotate_edge` / `unannotate_edge`) directly — the same pattern the
+approvals / connectors surfaces use. No new `/api/v1` route or service
+function is introduced.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/topology/edges/annotate` | Annotate-modal fragment. Mints + sets a fresh `meho_csrf` cookie so the POST carries a valid double-submit token. The literal `edges` / `annotate` segments register **before** `detail.py`'s `node/{node_id}` param route (first-match-wins). `tenant_admin`-gated. |
+| `POST` | `/ui/topology/edges` | Annotate a curated edge in-process. Builds two `NodeRef(name, kind)` endpoints (never posts a raw `from` JSON key — `from` is a Python keyword) and calls `annotate_edge`. Renders the created edge inline + fires `HX-Trigger: meho:topology-edge-changed`. CSRF + `tenant_admin`. |
+| `DELETE` | `/ui/topology/edges/{edge_id}` | Hard-delete a curated edge (confirm-gated via `hx-confirm`). Calls `unannotate_edge`; on success swaps the row out + fires the graph-refresh trigger. CSRF + `tenant_admin`. |
+
+**RBAC tier split.** Curated-edge writes are `tenant_admin` at the REST
+layer; the BFF mirrors this two ways. The drawer (`_drawer.html`)
+**soft-hides** the annotate / per-edge-remove controls behind
+`is_tenant_admin` (projected via `connectors.operator.resolve_role_probe`,
+fail-soft); every write route additionally **hard-403s** a non-admin via
+`_require_topology_admin` (mirrors `connectors.operator.resolve_operator_or_403`,
+reusing the promoted `lift_operator_from_session` JWT-revalidation helper).
+The same template serving both roles is the regression trap — the
+soft-hidden button is UX only; a forged POST still 403s.
+
+**Recoverable typed errors.** The service raises HTTP-agnostic `ValueError`
+subclasses; the BFF maps each to a re-rendered fragment (mirroring the REST
+status codes) rather than a dead 5xx:
+
+* `AmbiguousNodeError` → re-render the annotate modal (`_annotate_modal.html`)
+  with the candidate `kinds` listed (409) so the operator re-submits with a
+  disambiguating `kind`.
+* `NodeNotFoundError` (404) / `InvalidEdgeKindError` (422) → re-render the
+  modal with a typed banner.
+* `AutoEdgeDeletionError` → re-render `_edge_remove_error.html` with the
+  recoverable "this is an auto edge; annotate over it first" banner (409,
+  the §3 auto-edge no-op rule of Initiative #364). Auto edges resurrect on
+  the next refresh, so a naive DELETE retry would confuse the operator.
+
+**Graph reflects the write.** The annotate / unannotate responses fire
+`HX-Trigger: meho:topology-edge-changed`; `_graph_data_island.html`'s
+wrapper listens via `hx-trigger="… , meho:topology-edge-changed from:body"`
+and re-pulls the graph JSON, so a just-written / removed edge shows without
+a hard reload (in addition to the existing 30s poll).
+
+**OpenAPI snapshot.** `/ui/*` routes DO register into the snapshot, so the
+three new `/ui/topology/edges*` paths land in `cli/api/openapi.json` +
+`cli/internal/api/client.gen.go` (regenerated via `cd cli && make
+snapshot-openapi && make generate`; the "CLI API snapshot freshness" CI
+lane enforces it).
 
 ### HTMX wiring
 
@@ -2176,6 +2292,367 @@ a 500.
 * `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
 * `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
 
+## Agents surface (G10.8-T1 #1825)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824) (G10.8
+Agents console). The console surface over the G11.1 agent-definition
+layer (`api/v1/agents.py`, `agents/service.py`, `agents/schemas.py`).
+Task #1825 stands up `/ui/agents` as a **top-level sidebar surface** and
+the anchor scaffold subsequent agent-console Tasks hang off (run console
+T2 #1829, run history T3 #1830, principals T4 #1831, grants T5 #1832).
+
+`meho_backplane.ui.routes.agents` ships:
+
+- `GET /ui/agents` — the per-tenant agent-definitions list. One handler
+  serves both shapes (branch on `HX-Request`): the full `agents/index.html`
+  page on a browser nav, the `agents/_cards.html` fragment on a re-render
+  swap. One DaisyUI card per definition: name → detail link, `model_tier`
+  badge, `enabled` pill, `identity_ref`, `turn_budget`, tool count,
+  created-by, updated-at, and a **first-line-only** system-prompt summary.
+  The sensitive `system_prompt` / `toolset` are never dumped here — only
+  summarised — mirroring the audit trail keeping them out (`api/v1/agents.py`).
+- `GET /ui/agents/{name}` — the per-agent detail page (or HTMX body
+  fragment). Renders the full `AgentDefinitionRead`: metadata header, the
+  read-only `system_prompt` in a monospace block, and `toolset` /
+  `output_schema` as collapsible pretty-printed JSON. A non-existent /
+  cross-tenant name → 404 (the service returns `None` for both — the
+  existence-leak collapse the REST surface holds). A "Recent runs →" link
+  in the breadcrumb row points at the runs list (T3 #1830); the Run entry
+  point (T2) lands here once that Task ships.
+- `POST/GET /ui/agents/create`, `GET/PATCH /ui/agents/{name}` (edit),
+  `POST /ui/agents/{name}/toggle` (enable/disable), `GET/POST
+  /ui/agents/{name}/delete` — the write surface, **tenant_admin only**.
+
+### RBAC posture
+
+The role split mirrors the connectors surface (`connectors/operator.py`):
+
+- **Read** (`resolve_role_probe`) — fails *soft*: a JWT-validation hiccup
+  projects to a "no privileges" probe rather than 5xx-ing the page. The
+  probe's `is_tenant_admin` flag is the *UX hint* that hides the create /
+  edit / toggle / delete affordances from operators who can't use them.
+- **Write** (`resolve_operator_or_403`) — the *hard* gate: lifts the full
+  `Operator` from the BFF session, re-validates the access token through
+  the chassis JWT chain, and raises 403 for any non-`tenant_admin` caller.
+  A crafted POST/PATCH that bypasses the hidden affordance still hits the
+  403; the template hiding is never the security boundary.
+
+The write handlers delegate to `AgentDefinitionService` **in-process**
+(the same pattern the memory surface uses for `MemoryService`) rather than
+to the REST routes, because the service is RBAC-free by design (the caller
+gates the role) — so the UI write and the REST write share one validation
++ identity-ref-check + persist code path, and the 403 gate lives on the
+UI route deps.
+
+### Create / edit error surfacing
+
+Both modals are HTMX-injected native `<dialog class="modal">` fragments
+opened by the shared app-shell controller (`app/modal-dialogs.js`) on
+`htmx:afterSwap` (#1803). The submit handler builds an
+`AgentDefinitionCreate` / `AgentDefinitionUpdate` and persists via the
+service; failures re-render the **same modal inline** (not a generic
+error page) with per-field messages and the operator's typed values
+echoed back:
+
+- Pydantic `ValidationError` (e.g. `turn_budget` outside 1..1000) → 422
+  with the field error under the offending input.
+- `AgentDefinitionExistsError` (duplicate `(tenant, name)`) → 409 with a
+  `name` field error.
+- `AgentIdentityRefInvalidError` (unknown / revoked / cross-tenant
+  `identity_ref`) → 422 with an `identity_ref` field error.
+
+The `identity_ref` field is **free-text** for this scaffold; the picker
+over registered non-revoked principals (from `api/v1/agent_principals.py`)
+is T4 (#1832). Until it lands, the free-text field with inline 422
+surfacing is the accepted shape per the #1825 issue body.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` — thin FastAPI
+  route wrappers (path / method / dependency wiring); the static-prefix
+  `/ui/agents/create` route registers before `/ui/agents/{name}`.
+* `backend/src/meho_backplane/ui/routes/agents/views.py` — read renders
+  (list + detail) + the row projections (system-prompt summary, tool
+  count, pretty-printed JSON).
+* `backend/src/meho_backplane/ui/routes/agents/forms.py` — write renders
+  (create / edit / delete modal) + submit handlers (create / edit /
+  toggle / delete), with the 409 / 422 inline error mapping.
+* `backend/src/meho_backplane/ui/routes/agents/operator.py` — the role
+  lift: `resolve_role_probe` (soft, read) + `resolve_operator_or_403`
+  (hard tenant_admin gate, write).
+* `backend/src/meho_backplane/ui/templates/agents/index.html`,
+  `_cards.html`, `detail.html`, `_detail_body.html`,
+  `_agent_form_fields.html`, `_create_modal.html`, `_edit_modal.html`,
+  `_delete_modal.html` — the surface templates.
+* Nav + dashboard wiring: the `('agents', '/ui/agents', 'bot', 'Agents')`
+  entry in `base.html`'s `nav_surfaces`, the `bot` icon in `_icons.html`,
+  and the Agents tile in `dashboard.py`'s `_SURFACE_TILES`.
+
+This surface ships no `api/v1` schema, but its `/ui/*` routes still
+register into the app's route table, so the CLI OpenAPI snapshot
+(`cli/api/openapi.json`) and the generated Go client
+(`cli/internal/api/client.gen.go`) gain the new paths — re-snapshot +
+re-generate (`cd cli && make snapshot-openapi && make generate`) when
+adding or changing any `/ui/*` route, or the "CLI API snapshot freshness"
+CI lane fails.
+
+## Agent-runs surface (G10.8-T3 #1830)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824). The
+read-only console face of the agent run-history read path
+(`api/v1/agent_runs.py` — `GET /api/v1/agents/runs` +
+`GET /api/v1/agents/runs/{handle}`): before this Task an operator could
+see run history / poll a run's durable status only from the CLI / REST.
+Hung off the `/ui/agents` scaffold (#1825) as a **Runs sub-tab** rather
+than a new sidebar entry (`active_surface` stays `agents`); a
+Definitions/Runs tab strip on the index + detail pages switches between
+the two agents surfaces, and the agent detail page carries a
+"Recent runs →" link.
+
+`meho_backplane.ui.routes.agents.runs` ships:
+
+- `GET /ui/agents/runs` — the cross-agent run list, newest-first. One
+  handler serves both shapes (branch on `HX-Request`): the full
+  `agents/runs/list.html` page on a browser nav, the
+  `agents/runs/_table_rows.html` `<tbody>` fragment on a filter swap.
+  Filters: `status` (the runtime `AgentRunStatus` `StrEnum` used directly
+  as the `Query` type — an out-of-enum value 422s) + `work_ref` (exact
+  match). Both ride `hx-push-url` so the filtered view is bookmarkable.
+  Columns: run-id prefix, status pill, trigger provenance, model +
+  provider + tier, turns, work_ref chip, relative created, duration.
+  An `awaiting_approval` row deep-links to `/ui/approvals` (T7).
+- `GET /ui/agents/runs/{handle}` — the per-run detail. The status panel
+  (`agents/runs/_status_panel.html`) **polls after the fact** (not the
+  live SSE run console — that is the sibling #1829): while the run is
+  non-terminal it carries `hx-get` + `hx-trigger="every Ns"` so HTMX
+  re-fetches it on a timer; once the run is terminal (`succeeded` /
+  `failed` / `cancelled`) the panel drops those directives so the
+  load-poll cycle ends naturally (the
+  [HTMX "stop returning the polling element"](https://htmx.org/docs/#polling)
+  pattern — no JS, no `286`-response plumbing). Renders status, turns,
+  provider + model, the pretty-printed `output` JSON, or the `error`
+  reason on a failed run. A cross-tenant / absent handle → 404; a
+  non-UUID handle → 422.
+
+### RBAC posture + tenant scoping
+
+Reads are **operator** (Initiative #1824: reads operator, writes
+tenant_admin — there are no writes on this surface). The two reads call
+the in-process `AgentInvoker` (`list_runs` / `poll`) — the same read path
+the Bearer REST routes use — because a browser carrying only the BFF
+session cookie cannot authenticate the Bearer route. The invoker takes a
+full `Operator` and tenant-scopes every query on `operator.tenant_id`, so
+`ui/routes/agents/runs/operator.py`'s `resolve_run_reader` synthesises a
+tenant-scoped `OPERATOR` from the BFF session context (the no-JWT-round-
+trip read path the memory surface's `build_read_operator` established,
+#877) — sound because the chassis session middleware already
+authenticated the request and tenant isolation is the invoker's job. A
+cross-tenant run is invisible on the list and 404 on the detail. The
+surface never exposes `system_prompt` / `toolset` / approval params — the
+invoker's summary + poll projections carry none of them.
+
+### Agent ↔ run correlation gap
+
+`AgentRunSummary` carries no `agent_definition_id` back-link (a documented
+substrate gap — same one the scheduler detail's "Recent fires" panel
+handles), so the runs list cannot filter by a specific agent. The agent
+detail page's "Recent runs →" link therefore lands on the unfiltered
+cross-agent list (filterable there by `status` / `work_ref`) rather than
+fabricating an agent filter the read path cannot serve. The only
+correlation key across triggers and runs is `work_ref`.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/runs/list_view.py` — the
+  list handler (full page + `<tbody>` fragment).
+* `backend/src/meho_backplane/ui/routes/agents/runs/detail.py` — the
+  detail handler (full page + self-polling status-panel fragment).
+* `backend/src/meho_backplane/ui/routes/agents/runs/views.py` — the
+  row-to-view projections + status-badge map + UTC coercion +
+  terminal-status predicate (shared by both handlers).
+* `backend/src/meho_backplane/ui/routes/agents/runs/operator.py` — the
+  read-path `Operator` lift + the re-exported role probe.
+* `backend/src/meho_backplane/ui/templates/agents/runs/list.html`,
+  `_table_rows.html`, `detail.html`, `_status_panel.html`.
+
+The `build_runs_router()` aggregate is included in `ui/routes/__init__`'s
+`build_router()` **before** `build_agents_router()` so the literal
+`/ui/agents/runs` + `/ui/agents/runs/{handle}` routes win the
+first-match-wins lookup against the definition surface's
+`/ui/agents/{name}` (which would otherwise bind `"runs"` as a name). Like
+every `/ui/*` surface this changes the CLI OpenAPI snapshot — re-snapshot
++ re-generate when touching it.
+
+## Agent principals surface (G10.8-T4 #1831)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824). The
+agent-identity inventory and the **Keycloak kill switch**, hung off the
+T1 agents scaffold as the `/ui/agents/principals` sub-surface. The console
+over the G11.2 agent-principal lifecycle (`api/v1/agent_principals.py`,
+`auth/agent_principals.py`, `auth/keycloak_admin.py`). Registered inside
+`build_agents_router` **before** the `/ui/agents/{name}` read route so the
+literal `principals` segment is not swallowed as an agent `{name}` (the
+same first-match discipline `/ui/agents/create` follows).
+
+`meho_backplane.ui.routes.agents.principals_*` ships:
+
+- `GET /ui/agents/principals` — the per-tenant principals list (operator).
+  One handler serves both shapes (branch on `HX-Request`): the full
+  `agents/principals/index.html` page on a browser nav, the
+  `agents/principals/_table.html` fragment on the `include_revoked` toggle
+  swap. One row per principal: name, `keycloak_client_id`, a revoked /
+  active pill, `owner_sub`, `created_by_sub`, `created_at`. The internal
+  `keycloak_internal_id` is never surfaced. The `include_revoked` toggle
+  flips the service query so revoked rows join the inventory for audit.
+- `GET/POST /ui/agents/principals/register` — register a new principal
+  (**tenant_admin**). An upstream side-effecting op: the service creates a
+  Keycloak client + writes its generated credential to Vault before the DB
+  row lands. Failures re-render the modal inline (not a generic error):
+  empty / bad-character `name` → 422 `name` field error; duplicate
+  `(tenant, name)` → 409 `name` field error; **Keycloak unconfigured →
+  503** banner carrying the gold-standard `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL`
+  three-clause text; other Keycloak API failure → 502 `keycloak_admin_error`
+  banner; Vault credential-write failure → 502 `scheduler_vault_write_error`
+  banner. The actionable backend detail is rendered verbatim, never
+  flattened to "something went wrong".
+- `GET/POST /ui/agents/principals/{name}/revoke` — revoke = the **Keycloak
+  kill switch** (**tenant_admin**): disables the Keycloak client, which
+  blocks all new token grants for the identity (tokens already minted stay
+  valid until their `exp`). It is terminal — there is no un-revoke. Because
+  a too-easy kill switch is a footgun (#1831 risk note), the confirm modal
+  demands a **type-to-confirm of the principal name**: an inline Alpine
+  `x-data` gate keeps the destructive submit `:disabled` until the typed
+  value equals the name, and the handler **re-checks the typed value
+  server-side** (a crafted POST cannot skip the confirm — a mismatch
+  re-renders the modal with a 422 banner and makes no service call). 404
+  on an absent / cross-tenant / already-revoked name; Keycloak
+  unconfigured / API failures render the same 503 / 502 actionable banners
+  as register.
+
+RBAC + service-delegation + CSRF posture is identical to the
+agent-definition surface: `resolve_role_probe` (soft, read) +
+`resolve_operator_or_403` (hard tenant_admin gate, write) from
+`agents/operator.py`; the write handlers call `AgentPrincipalService`
+**in-process** (the same path the REST routes + the `meho agent-principal`
+CLI use); `POST` is CSRF-double-submit-gated by the chassis
+`CSRFMiddleware`, with each modal render re-minting + re-setting the
+`meho_csrf` cookie.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/principals_views.py` — the
+  read render (`render_principals_index`) + the row projection +
+  `validate_principal_name` + `fetch_principal_or_404`.
+* `backend/src/meho_backplane/ui/routes/agents/principals_forms.py` — the
+  register + revoke modal renders + submit handlers, with the 503 / 502 /
+  422 / 409 inline error mapping and the server-side type-to-confirm check.
+* `backend/src/meho_backplane/ui/routes/agents/routes.py` —
+  `_register_principals_routes`, wired into `build_agents_router` before
+  the `/ui/agents/{name}` read route.
+* `backend/src/meho_backplane/ui/templates/agents/principals/index.html`,
+  `_table.html`, `_register_modal.html`, `_revoke_modal.html` — the
+  surface templates. The principals surface keeps `active_surface="agents"`
+  (it is a sub-surface; the sidebar highlights Agents) and is reached via a
+  "Principals" link on the agents list header.
+
+## Agent grants surface (G10.8-T5 #1832)
+
+Initiative [#1824](https://github.com/evoila/meho/issues/1824) (G10.8
+Agents console). The console surface over the G11.2 agent permission-grant
+layer (`api/v1/agent_grants.py`, `agents/grants.py`,
+`agents/grant_schemas.py`). Task #1832 layers `/ui/agents/grants` onto the
+agents console (`/ui/agents`, #1825) as a **tenant_admin-only** governance
+surface: which principal may run which op pattern with which verdict.
+
+### RBAC — the whole surface is tenant_admin, reads included
+
+Unlike the agent-definitions surface (where an `operator` can read and only
+writes are admin-gated), **every** grants route — list, detail, create,
+elevate, revoke — is `tenant_admin`. A grant listing reveals the tenant's
+least-privilege posture, so it is governance data, not operator data. This
+mirrors the REST surface (`api/v1/agent_grants.py`), whose every route
+carries `require_role(TenantRole.TENANT_ADMIN)`. The gate is
+`resolve_grants_admin_or_403` (`ui/routes/agents/grants/operator.py`),
+which reuses the shared operator lift the agents console ships
+(`ui/routes/agents/operator.py::_lift_operator`) and wires it onto the read
+paths too; a non-admin caller gets a 403 the page cannot bypass. The
+agents list links to `/ui/agents/grants` only for admins (a non-admin would
+403 the route).
+
+### Routes
+
+`meho_backplane.ui.routes.agents.grants` ships:
+
+- `GET /ui/agents/grants` — the per-tenant grants table (or the HTMX
+  `_rows.html` tbody fragment on a filter swap). Filters: `principal_sub`
+  (exact match) + `include_expired` (off by default, so expired elevations
+  are hidden). The verdict renders as a colour-coded badge whose colour AND
+  label both derive from the same verdict string
+  (`views.verdict_badge_class`): `auto-execute` = `badge-success`,
+  `needs-approval` = `badge-warning`, `deny` = `badge-error` — so a `deny`
+  grant can never read as an allow. The expiry column distinguishes a
+  permanent grant from a time-bounded elevation that auto-expires at T.
+- `GET /ui/agents/grants/{grant_id}` — the per-grant detail page (or HTMX
+  body fragment). An absent / malformed / cross-tenant id renders 404
+  (existence-leak avoidance, mirroring the REST 404 collapse).
+- `GET/POST /ui/agents/grants/create` — create a permanent or time-bounded
+  grant. The `verdict` `<select>` defaults to the conservative `deny`. A
+  Pydantic `ValidationError` or a service `GrantValidationError` (past /
+  naive `expires_at`, bad `target_scope` UUID, duplicate grant) re-renders
+  the modal inline with the matching field error + 422.
+- `GET/POST /ui/agents/grants/elevate` — create a time-bounded elevation;
+  `expires_at` is **required** (the `AgentElevationCreate` schema makes the
+  field non-optional, so an omitted value surfaces as the inline
+  `expires_at` field error).
+- `GET/POST /ui/agents/grants/{grant_id}/revoke` — revoke a grant. Revoke
+  is destructive (it drops the principal's explicit permission), so a
+  native-`<dialog>` confirm gates the submit. 204 + `HX-Redirect` on
+  success; 404 on an absent / cross-tenant id.
+
+All writes go through the chassis CSRF double-submit (`CSRFMiddleware` gates
+every non-safe method under `/ui/`; each modal re-mints + re-sets the
+`meho_csrf` cookie and echoes the matching `X-CSRF-Token` header). The
+writes call `AgentGrantService` in-process so the UI and REST surfaces share
+one validation + persist code path.
+
+The `principal_sub` field is free-text for now (the picker over registered
+principals is T4 #1831; until it lands a free-text field is the accepted
+shape — the same precedent #1825 set for `identity_ref`). The grant service
+does not validate `principal_sub` against registered principals, so a grant
+may be issued ahead of a principal's first login — the UI mirrors that
+backend contract.
+
+### Routing order
+
+`build_agent_grants_router()` is mounted **before** `build_agents_router()`
+in `build_router()` so the literal `/ui/agents/grants` wins the
+first-match-wins lookup against the agents surface's `/ui/agents/{name}`
+(which would otherwise bind `name="grants"`). Inside the grants router the
+literal `create` / `elevate` routes register before the `{grant_id}` detail
+route for the same reason.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/agents/grants/routes.py` — thin
+  FastAPI handlers + the load-bearing registration order.
+* `.../grants/views.py` — read renders (table + detail), row projections,
+  the verdict-badge colour mapping, and the `grant_id` parse-or-404.
+* `.../grants/forms.py` — write renders (create / elevate / revoke modals)
+  + submit handlers; maps `GrantValidationError` messages to the offending
+  field for inline surfacing.
+* `.../grants/operator.py` — the all-paths `tenant_admin` gate.
+* `backend/src/meho_backplane/ui/templates/agents/grants/index.html`,
+  `_rows.html`, `detail.html`, `_detail_body.html`,
+  `_grant_form_fields.html`, `_create_modal.html`, `_elevate_modal.html`,
+  `_revoke_modal.html` — the surface templates.
+
+Unlike the agent-definitions surface's doc note above, the `/ui/*` routes
+**do** appear in the CLI OpenAPI snapshot (`cli/api/openapi.json`) — the
+FastAPI app the snapshot is generated from mounts the UI router, so a new
+`/ui/agents/grants*` path lands in the snapshot and the typed Go client.
+`cd cli && make snapshot-openapi && make generate` regenerates both after a
+route change.
+
 ## Runbooks surface (G10.6)
 
 Initiative [#1381](https://github.com/evoila/meho/issues/1381) (G10.6
@@ -2206,20 +2683,40 @@ the stubs aggregate, first-match-wins).
 | `POST` | `/ui/runbooks/{slug}/edit` | `require_ui_admin` | (T2 #1383) Edit-in-place (draft) / fork-on-edit (published → new draft), mirroring REST `PATCH`. The detail page surfaces how many runs are still pinned to the source version (the fork leaves them bound) via `count_in_flight_runs`. |
 | `POST` | `/ui/runbooks/{slug}/publish` | `require_ui_admin` | (T3 #1384) Promote `(slug, version)` draft → published (mirrors REST publish: 200 idempotent / 400 not-draft / 404). The body carries the integer `version` (the slug is the URL's job) so a stale catalog row acts on the version it was rendered against, not the latest. |
 | `POST` | `/ui/runbooks/{slug}/deprecate` | `require_ui_admin` | (T3 #1384) Retire `(slug, version)` published → deprecated (200 idempotent / 400 not-published / 404). Same version-in-body posture as publish. |
+| `GET` | `/ui/runbooks/runs` | `require_ui_session` | (G10.11-T1 #1884) Runs list — the "Runs" sub-tab. Role-scoped + **service-enforced**: an `OPERATOR` only ever sees their own runs (the service forces `assignee=caller_sub` even on a forged `?assignee=`); a `TENANT_ADMIN` sees every tenant run and may filter by `assignee`. `status` (`in_progress` / `completed` / `abandoned`, a closed `Literal`) + admin-only `assignee` filters. `HX-Request: true` returns only the `runbooks/_runs_list.html` fragment. Each row links to the run driver. |
+| `GET` | `/ui/runbooks/runs/start` | `require_ui_session` | (G10.11-T1 #1884) HTMX start-run modal fragment. Pre-populates a `<datalist>` of the tenant's published template slugs (free text still allowed). Registered **before** `/ui/runbooks/runs/{run_id}` so the literal `start` segment is not swallowed by the `{run_id}` param route. CSRF re-mint + cookie refresh on render. |
+| `POST` | `/ui/runbooks/runs` | `require_ui_session` | (G10.11-T1 #1884) Start handler. Operator floor (the service auto-assigns the caller). Success → 204 + `HX-Redirect: /ui/runbooks/runs/{run_id}` (drops the operator into the driver). The typed start errors (`DeprecatedTemplateError` / `TemplateNotFoundError` / `MissingParamsError`) map to an inline modal `alert-error` (HTTP 200 fragment, not 500); a non-object `params` JSON → 422. |
+| `GET` | `/ui/runbooks/runs/{run_id}` | `require_ui_session` | (G10.11-T2 #1893) Run **driver** page. Calls the opacity-safe `RunbookRunService.get_current_step` (the SAME single-step `CurrentStepResponse` projection `start_run` / `next_step` return — never `template.steps`) + `get_run_assignee`. Renders run coordinates + `position` ("step n of total") + the **single current** `StepBody` (Markdown body via the shared KB renderer). `RunNotFoundError` → 404 page. **Advance** shown ONLY when `session.operator_sub == assigned_to`; **Reassign** shown ONLY for a `tenant_admin` (soft probe). |
+| `POST` | `/ui/runbooks/runs/{run_id}/next` | `require_ui_session` | (G10.11-T2 #1893) Advance one step. Calls `next_step`; re-renders the step fragment from the returned `CurrentStepResponse` (or the completed banner on `RunCompletedResponse`). The assignee gate is **service-enforced, fail-closed**: a non-assignee (INCLUDING a `TENANT_ADMIN`) gets `NotRunAssigneeError` → an inline "reassigned away from you" message at HTTP 200 (never a 500). A `confirm` answered `no`/`escalate` → step `failed` → `PreviousStepFailedError` → a dead-end banner (Advance hidden, only Abort forward). |
+| `POST` | `/ui/runbooks/runs/{run_id}/abort` | `require_ui_session` | (G10.11-T2 #1893) Abort with a **required** non-empty reason (`AbortRunRequest.reason` is `min_length=1`, persisted to the abort audit row). Empty reason guarded client-side (HTMX `required`) AND handled server-side (a tampered empty reason → inline alert, not 500) so the audit guarantee holds. `caller_is_admin = probe.is_tenant_admin` (service allows `{assignee, tenant_admin}`). Success → the abandoned banner. |
+| `POST` | `/ui/runbooks/runs/{run_id}/reassign` | `require_ui_admin` | (G10.11-T2 #1893) Transfer ownership. **`require_ui_admin` hard gate** — an `OPERATOR` gets 403 at the dependency, before the body / service runs (the service itself does no role check; the gate is the sole authority). After the flip, the prior assignee's open page shows "reassigned away from you" on their next Advance. |
 
 **Route ordering.** The literal `list` / `new` / `preview` / `publish` /
-`deprecate` segments are registered **before** `/ui/runbooks/{slug}` in
-`build_runbooks_router()` so FastAPI's first-match-wins routing does not
-bind them to the slug path parameter.
+`deprecate` / `runs` / `runs/start` segments are registered **before**
+`/ui/runbooks/{slug}` in `build_runbooks_router()` so FastAPI's
+first-match-wins routing does not bind them to the slug path parameter. The
+run-surface ordering is load-bearing in two places: `register_runs_routes`
+(T1) registers the literal `/ui/runbooks/runs/start` **before**
+`register_driver_routes` (T2) registers the `/ui/runbooks/runs/{run_id}`
+param route, so `start` is not bound as a `run_id`; and both run-surface
+registrations precede the `/ui/runbooks/{slug}` catch-all so `runs` is not
+bound as a `slug`. The factory's call order is therefore: editor →
+lifecycle → runs (T1) → driver (T2) → `{slug}`. A grep-proof test
+(`test_route_ordering_start_before_run_id_before_slug` in
+`test_ui_runbook_driver_opacity.py`) asserts the index ordering by building
+the router.
 
 ### Module layout
 
 * `backend/src/meho_backplane/ui/routes/runbooks/__init__.py` — exports the `build_runbooks_router` factory the umbrella `build_router()` mounts.
-* `backend/src/meho_backplane/ui/routes/runbooks/routes.py` — the read surface (T1). The catalog + filter-fragment + opacity-floor detail handlers, the `_resolve_role` / `_is_admin` role-lift helpers, and the factory itself (which calls `register_editor_routes` + `register_lifecycle_routes` before the `{slug}` catch-all).
+* `backend/src/meho_backplane/ui/routes/runbooks/routes.py` — the read surface (T1). The catalog + filter-fragment + opacity-floor detail handlers, the `_resolve_role` / `_is_admin` role-lift helpers, and the factory itself (which calls `register_editor_routes` → `register_lifecycle_routes` → `register_runs_routes` → `register_driver_routes` before the `{slug}` catch-all).
 * `backend/src/meho_backplane/ui/routes/runbooks/editor.py` — the authoring form (de)serialisation + service calls (T2): `build_editor_context`, `handle_editor_submit`, `template_to_form_steps`, the CSRF cookie helper.
 * `backend/src/meho_backplane/ui/routes/runbooks/editor_routes.py` — thin FastAPI wiring for the T2 editor routes (`require_ui_admin`-gated). Split from `editor.py` so neither file crosses the code-quality size gate.
 * `backend/src/meho_backplane/ui/routes/runbooks/lifecycle.py` — the T3 publish / deprecate handler bodies + route wiring (`require_ui_admin`-gated). Maps the typed service errors (`TemplateNotDraftError` / `TemplateNotPublishedError`) to inline DaisyUI alerts, a missing version to 404, and a tampered `version` field to 422.
-* `backend/src/meho_backplane/ui/templates/runbooks/` — `index.html` (catalog page), `_list.html` (filter fragment), `detail.html` + `_detail_actions.html` (detail page + lifecycle action row), `editor.html` + `_step_fields.html` + `_editor_preview.html` (authoring editor), `_row_alert.html` (catalog row-action alert slot).
+* `backend/src/meho_backplane/ui/routes/runbooks/runs.py` — the run-surface list + start modal + start handler (G10.11-T1 #1884), `register_runs_routes`. A pure UI/BFF build over `RunbookRunService` (`list_runs` / `start_run`); operator-floor reads with the visibility split service-enforced.
+* `backend/src/meho_backplane/ui/routes/runbooks/driver.py` — the run-driver route wiring + action orchestration (G10.11-T2 #1893), `register_driver_routes`. Maps each service / engine outcome to an operator-facing fragment (`NotRunAssigneeError` → "reassigned away" inline; `PreviousStepFailedError` → dead-end banner; terminal / verify `ValueError`s → inline alert). The reassign route declares the `require_ui_admin` hard gate.
+* `backend/src/meho_backplane/ui/routes/runbooks/driver_render.py` — the T2 driver's Jinja render primitives (`StepView`, `step_view`, `render_driver_page`, `render_not_found`, `render_step_fragment`) + the CSRF mint/cookie-refresh. Split from `driver.py` so neither file crosses the code-quality size gate. **Opacity**: every render surfaces only the one current step — there is no `template.steps` loop here.
+* `backend/src/meho_backplane/ui/templates/runbooks/` — `index.html` (catalog page), `_list.html` (filter fragment), `detail.html` + `_detail_actions.html` (detail page + lifecycle action row), `editor.html` + `_step_fields.html` + `_editor_preview.html` (authoring editor), `_row_alert.html` (catalog row-action alert slot), `runs.html` + `_runs_list.html` + `_start_modal.html` + `_tabs.html` (T1 runs list + start modal + Templates/Runs sub-tab nav), `run_driver.html` + `_run_step.html` + `run_not_found.html` (T2 driver page + single-current-step fragment + 404 page).
 
 ### RBAC gating (`require_ui_session` vs `require_ui_admin`)
 
@@ -2300,3 +2797,256 @@ surface uses.
 * `backend/tests/test_ui_runbooks_lifecycle.py` — the T3 lifecycle controls: admin publish / deprecate flips status + swaps the OOB badge, operator forged POST → 403, missing-CSRF → 403, the typed-400 inline alerts (publishing a non-draft, deprecating a non-published version), idempotent re-actions, the catalog-row vs detail-page fragment branch, version-in-body targeting.
 * `backend/tests/test_ui_runbooks_acceptance.py` — the **cross-cutting** end-to-end acceptance (T4 #1385): one test exercises the surface as a whole against a single app instance — operator browse (catalog + filters) → operator opacity-floor restricted-detail (not a raw 403) → `tenant_admin` author (draft) → publish → deprecate round-trip with status transitions read back through the read surface → operator blocked (403) from author / publish / deprecate → sidebar link + dashboard tile render. A companion test pins the post-completion operator crossing the floor (completed run → full steps).
 * `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).
+
+## Retrieval diagnostics surface (G10.14-T1 #1888)
+
+`meho_backplane.ui.routes.retrieval` ships the **anchor** surface for the
+retrieval diagnostics & quality console at `/ui/retrieval` (Initiative #1840).
+It is the operator-console face of the in-process hybrid retriever
+(`meho_backplane.retrieval.retriever.retrieve`) the `POST /api/v1/retrieve`
+route fronts: diagnosing "is retrieval returning what I expect?" previously
+meant a Python REPL inside the cluster or a `curl` against the REST endpoint.
+
+The anchor task stands up the page scaffold (the sidebar entry, the tab strip,
+the page chrome) + its default **Diagnostics** tab. Sibling tasks nest into the
+same page as additional client-side tab panels: T2 fills the **Usage Analytics**
++ **Eval Quality** tabs, T3 the **Retire Checklist** tab — all rendered as
+placeholders by this task so the chrome reads as a real tabbed surface from day
+one.
+
+### Routes
+
+* `GET /ui/retrieval` — the page. Renders the tabbed shell (a client-side
+  Alpine `x-data="{ tab: 'diagnostics' }"` toggle; the Diagnostics tab is the
+  default-active panel, the other three render a "lands in a follow-up task"
+  placeholder) with the Diagnostics query form (a `query` textarea, optional
+  `source` / `kind` text inputs, a `limit` selector over `(5, 10, 20, 50)`) and
+  an empty `#retrieval-diagnostics-results` region. Mints a CSRF token + sets
+  the `meho_csrf` cookie, passes `active_surface="retrieval"` for the sidebar
+  highlight.
+* `POST /ui/retrieval/diagnostics` — the HTMX fragment. Reconstructs the
+  session operator, binds the privacy `audit_*` contextvars, runs the in-process
+  `retrieve` service, and swaps `retrieval/_diagnostics_results.html` (one card
+  per hit) into `#retrieval-diagnostics-results`. An empty hit list renders a
+  "no matches" state.
+
+### Mirroring the docs-corpus console
+
+The surface is a near-line-for-line mirror of `ui/routes/corpus/routes.py` (the
+convention authority): the `_resolve_operator` seam (`load_fresh_session` +
+`verify_access_token_with_refresh`) reconstructs the full `Operator` from the
+BFF session (the `UISessionContext` carries only `operator_sub` / `tenant_id`,
+not the `sub` the per-principal predicate needs); the `_set_csrf_cookie` +
+`_resolve_diagnostics_csrf` pair implements the same reuse-live-token
+double-submit pattern (the fragment swaps only the results region and leaves the
+form in place, so it reuses the live cookie token rather than rotating a fresh
+one out from under the un-swapped form — the #1754 desync class); the
+`build_retrieval_router()` factory + module-level `Depends(require_ui_session)`
+closure follow the chassis convention. Like corpus, it routes **through the
+in-process service**, not a self-HTTP call, keeping the audit binding in-process
+and avoiding a network hop — there is no new `/api/v1` endpoint.
+
+### Per-signal RRF breakdown (the load-bearing render)
+
+Each `RetrievalHit` carries the full per-signal breakdown the substrate already
+computes: `fused_score` (the RRF score the hits are sorted by), `bm25_score` /
+`cosine_score` (`float | None`), and `bm25_rank` / `cosine_rank`
+(`int | None`). A `None` rank means the document was **absent** from that
+signal's top-`CANDIDATE_LIMIT` (50) candidate list. The diagnostics fragment
+renders each hit's breakdown as a 2-row table (BM25 + Cosine); a `None` rank
+renders the explicit `absent from this signal's top-50` marker, **not** a blank
+cell, so an operator can tell "scored 0 in that signal" apart from "never
+appeared in that signal". `query_duration_ms` is shown in the result heading.
+
+### Audit / privacy binding (load-bearing)
+
+The handler reproduces the `POST /api/v1/retrieve` audit binding before calling
+`retrieve`: it binds `audit_query_hash` (the SHA-256 hex digest of the raw query
+via the same `_compute_query_hash` encoding contract — **never** the raw query),
+`audit_source`, `audit_kind` up-front and `audit_hit_count` after, so the
+in-process `audit_log` row carries the privacy-preserving query trace even on a
+mid-retrieval exception. The raw query and filter values are deliberately
+ephemeral.
+
+### Tenant scoping + RBAC
+
+`operator` role minimum (the whole surface sits behind `require_ui_session`,
+**not** `require_ui_admin`, matching the OPERATOR floor the REST route carries).
+Diagnostics is **own-tenant only**: tenant identity is derived from the
+reconstructed operator's `tenant_id` and the per-principal isolation predicate
+is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
+(that is the sibling T3 concern). The surface is read-only, so no confirm gates.
+
+### Route ordering (two levels, both load-bearing)
+
+* `build_router()` includes `build_retrieval_router()` alongside the other
+  surface routers and **before** `build_stubs_router()` — the stubs router owns
+  the catch-all `/ui/{slug}`, so a surface registered after it loses the
+  first-match-wins lookup.
+* Inside `build_retrieval_router`, the literal `POST /ui/retrieval/diagnostics`
+  is registered ahead of any `{param}` route (a NOTE comment pins the invariant
+  mirroring `corpus/routes.py`). The T2/T3 tabs are client-side panels on the
+  one page, so no per-tab param route exists today, but the ordering is pinned
+  for when one lands.
+
+### Tests
+
+* `backend/tests/test_ui_retrieval.py` — auth boundary (unauthenticated GET →
+  login redirect, POST → 302/403), page render (Diagnostics tab active + empty
+  results region + sidebar link + CSRF cookie/token), the per-signal breakdown
+  (fused score + both signals' score/rank, and the explicit absent marker for a
+  `None` rank), the no-matches state, the operator/tenant/filter forwarding
+  (own-tenant `principal_sub`), the audit binding (query hash bound, raw query
+  absent from every bound payload), CSRF (403 on missing header, live-cookie
+  reuse without rotation, 401 propagation on a dead session), and the route
+  ordering (retrieval include before stubs; literal diagnostics before any param
+  route) + dashboard tile.
+
+## Vault console — confirm-gated writes (G10.18-T2 #1957)
+
+The mutating verbs over the T1 (#1956) read-only KV browser:
+confirm-gated `vault.kv.put` (CAS-aware), `vault.kv.delete` (soft-delete
+specific versions), and `secret.move` (references-not-values). These are the
+highest-blast-radius actions the Vault console gains — every one is
+`requires_approval=True`, so the gate is unmissable and the result render
+surfaces the approval handoff rather than a silent success. BFF + template
+assembly over the existing dispatcher; no new backend route, op, or
+meta-tool.
+
+### Module placement (separate from T1)
+
+The write routes live in `ui/routes/vault/writes.py`
+(`build_vault_writes_router`), a **separate module** from T1's
+`ui/routes/vault/routes.py` (`build_vault_router`, the read-only GET
+browser), so the read / write surfaces — and the parallel T3 status view
+(#1958) — evolve without serial-merge collisions on one shared file. The
+write module **reuses** T1's `_resolve_operator` / `_vault_connector_id` /
+`_default_path` (imported from `routes.py`) rather than re-deriving them, so
+the load-bearing connector-id-shape invariant lives in one place. Both
+routers are included ahead of the stubs aggregate in
+`ui.routes.build_router` (`build_vault_router()` then
+`build_vault_writes_router()`).
+
+### Routes
+
+* `GET /ui/vault/{put,delete,move}/confirm` — the unmissable
+  destructive-confirm modal fragments, modelled on the operations Run modal
+  (`operations/_run_modal.html`). Each renders a prominent `safety_level` /
+  `requires_approval` banner (`put` = `caution`, `delete` / `move` =
+  `dangerous`; all three `requires_approval`), the op-specific inputs, and a
+  confirm button carrying its **own** `hx-headers` CSRF echo (HTMX does not
+  inherit `hx-headers` to children). The GET mints a fresh CSRF token and
+  re-sets the `meho_csrf` cookie (`set_csrf_cookie`) so the double-submit
+  pair lines up after the HTMX swap rotated it (the #1693 / #1754
+  cookie-desync class). The confirm button carries `hx-disabled-elt` so a
+  high-impact write cannot be double-fired. Templates:
+  `vault/_confirm_{put,delete,move}.html`.
+* `POST /ui/vault/put` — dispatch `vault.kv.put` (`connector_id="vault-1.x"`,
+  target + `{mount, path, data, cas?}`). The `cas` Check-And-Set guard rides
+  in `params` **only when the operator set the field** (mirrors the CLI's
+  `Changed("cas")` rule: a blank field is "flag absent" → write
+  unconditionally, an explicit `cas=0` → write only if absent). The `data`
+  JSON is parsed server-side; malformed input is an inline 400 form error,
+  not a 422.
+* `POST /ui/vault/delete` — dispatch `vault.kv.delete` with the
+  comma-separated `versions` parsed into a non-empty list of positive ints.
+* `POST /ui/vault/move` — dispatch `secret.move` against the **separate**
+  `secret-broker-1.x` connector with the schema's `from` / `to` references
+  (+ optional `reason`). **Value-free**: no value input exists, no value
+  reaches the dispatched params, and the render surfaces only the
+  `{status, value_sha256, length}` confirmation — the no-`--value` invariant
+  the CLI keeps.
+
+### Two connector ids (load-bearing)
+
+`vault.kv.put` / `vault.kv.delete` dispatch `vault-1.x`; `secret.move`
+dispatches `secret-broker-1.x` — a **different** connector. Both
+`<impl_id>-<version>` ids are sourced from `list_ingested_connectors`
+(`state == "ingested"`, filtering `product == "vault"` vs
+`product == "secret"`) so a re-version flows through without a literal edit;
+the bare slugs `vault` / `secret` are never emitted (they 404 through
+`parse_connector_id`). `secret-broker` is a typed-op-only synthetic
+connector (no `register_connector_v2`), so the dispatcher resolves it from
+the registered `secret.move` op alone; the listing reports it ingested off
+its DB-backed `operation_group` / `endpoint_descriptor` rows.
+
+### CSRF (writes are gated; T1 reads are not)
+
+T1's four GET reads are CSRF-free (the middleware only guards
+state-changing methods). The write POSTs are gated by the `ui/csrf.py`
+double-submit middleware, which verifies the `X-CSRF-Token` header (or
+`csrf_token` form field) against the `meho_csrf` cookie HMAC **before** the
+route runs — so a POST without the token is a 403 the route never sees. The
+confirm GET mints + re-sets the cookie so the swapped-in confirm button's
+`hx-headers` echo matches.
+
+### awaiting_approval (the silent-success trap)
+
+`call_operation` always returns a structured `OperationResult` envelope;
+errors land inside it, not as HTTP 4xx. Because every write op is
+`requires_approval=True`, a human OPERATOR running one is routed to the
+approval queue (G11.7-T1 #1401), so the **common** return is
+`status="awaiting_approval"` with `extras["approval_request_id"]`. The
+shared result fragment (`vault/_write_result.html`) surfaces it as a banner
++ a deep-link into `/ui/approvals/{approval_request_id}` (the surface #1778
+shipped, `hx-get` into `#meho-approvals-modal-container`), so the operator
+never thinks the write silently no-op'd. The fragment's other branches:
+the value-free `secret.move` `ok` render (status / value_sha256 / length
+only); the put / delete `ok` render (a plain success, no secret value); the
+`error` / `denied` render via the shared `vault/_envelope_error.html` macro
+(which carries the `VaultTenantScopeError` "outside your tenant scope"
+friendly message — surfaced when an approved write re-dispatches against an
+out-of-scope path — and the generic `extras.error_code`); and the inline
+400 form-error / no-connector-hint branches.
+
+### RBAC (operator tier; the gate is policy, not role)
+
+The write verbs are OPERATOR-tier (like the operations Run surface) — there
+is **no** `tenant_admin` hard-403 on the write POST. Safety is enforced by
+the confirm modal + the dispatcher's `policy_gate` → approval queue, not by
+`TenantRole`; a role gate here would contradict the backend gate and the
+operations console. Tenant scoping derives from `operator.tenant_id` only
+(the session), never a form field. The tenant-scope guard
+(`connectors/vault/tenant_scope.py`, default-on since v0.15.0 #1725) runs
+**inside the connector handler**, so it trips on the executed (post-approval
+re-dispatch) path, not on the initial parked dispatch.
+
+### Redaction (top-sensitivity surface)
+
+No secret value reaches a server log, audit row, telemetry frame, or
+request-preview body. `vault.kv.put`'s `data` object is operator-supplied
+secret material; the BFF logs only op-id / connector-id / status /
+approval-id (`ui_vault_write_dispatch`), never the `params` or the envelope
+`result`. `secret.move` is value-free by the connector's own contract; the
+UI keeps that invariant by never offering a value field (a smuggled `value`
+form field is dropped — the dispatched params carry only `from` / `to` /
+`reason`).
+
+### Entry points + route ordering
+
+The T1 `vault/index.html` gains an additive "Write" action bar (Write /
+Delete / Move buttons that `hx-get` the confirm modals into a stable
+`#vault-write-modal-container`; the shared `app/modal-dialogs.js` controller
+auto-opens the swapped-in `<dialog class="modal">` via `showModal()`). Put /
+Delete carry the browser's current mount/path/target via `hx-include` so the
+confirm modal prefills them; Move takes references (a separate connector), so
+no path inputs. The literal `put` / `delete` / `move` (+ `…/confirm`)
+segments register before any `{param}` route on the shared `/ui/vault`
+router (first-match-wins); they are POST / distinct-literal routes, so they
+cannot collide with T1's GET slug routes regardless, but the ordering
+discipline is pinned.
+
+### Tests
+
+* `backend/tests/test_ui_vault_writes.py` — the confirm modals' safety
+  banners + CSRF re-mint + value-free move form (no value/secret/data input);
+  the `awaiting_approval` render (banner + `/ui/approvals` deep-link) end-to-
+  end through the real policy gate for put + move; the CSRF gate (403 without
+  the token, 200 with it); route ordering (`put/confirm` → confirm handler);
+  the CAS rule (carried only when set, blank ≠ `cas=0`); the `secret.move`
+  value-free contract (dispatches `secret-broker-1.x` with refs only, a
+  smuggled `value` field dropped, render carries only status/value_sha256/
+  length); RBAC (a plain operator runs all three writes, no `tenant_admin`
+  403); the `VaultTenantScopeError` friendly-message render branch; inline
+  400 form errors for malformed `data` / empty `versions` / missing
+  `from`/`to`; and the session gate.

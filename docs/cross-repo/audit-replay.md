@@ -59,6 +59,8 @@ The session id is the `Mcp-Session-Id` header the MCP client established on its 
 meho audit replay <session-id> [--json] [--max-depth N] [--backplane <url>]
 ```
 
+> **RBAC: `tenant_admin` required (#1843).** Replaying an *arbitrary* `<session-id>` reconstructs another principal's full session trace — the same privileged forensic act that the MCP [`meho.audit.replay`](#mehoauditreplay-tenant_admin-cross-session) tool gates at `tenant_admin`. The REST route (and so this CLI verb) therefore also requires `tenant_admin`: a `read_only` or `operator` JWT gets `403`. This keeps the REST/CLI surface no more permissive than MCP. The flat query verbs (`meho audit query` / `who-touched` / `by-work-ref` / `my-recent` / `show`) stay at `operator` — and an operator can still replay *their own* session via the MCP `query_audit` `shape="tree"` path. (The 403 is orthogonal to the cross-tenant boundary below, which is always enforced from the JWT.)
+
 `<session-id>` is required and must be a UUID — the CLI validates it client-side before any network call, so a typo returns `replay requires a valid UUID <session-id>; "<value>" is not a UUID` immediately rather than after a round-trip.
 
 ### The ASCII tree
@@ -278,7 +280,7 @@ Replay is tenant-scoped exactly like every other audit surface — there is **no
 - A `session_id` that belongs to another tenant — or one that does not exist — yields `root=[]` / `row_count=0`, **never a 404**. A foreign session is indistinguishable from an empty one, so existence never leaks across tenants (the same non-leakage posture `meho audit show` takes for cross-tenant audit ids).
 - The `tenant_id` in the echoed envelope is a confirmation of the boundary the replay ran under, not a value the caller chose.
 
-To replay another tenant's session you need an operator JWT for that tenant — there is no cross-tenant capability.
+To replay another tenant's session you need a `tenant_admin` JWT for that tenant (#1843) — there is no cross-tenant capability, and replay is `tenant_admin`-gated on every surface (REST/CLI and the MCP `meho.audit.replay` tool alike).
 
 ### The 10000-row cap
 

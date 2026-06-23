@@ -96,6 +96,7 @@ def _make_target(
     tenant_id: str = "00000000-0000-0000-0000-000000000000",
     verify_tls: bool = True,
     tls_ca_pin: str | None = None,
+    tls_server_name: str | None = None,
 ) -> Any:
     """Return a minimal duck-typed Target stub.
 
@@ -106,6 +107,8 @@ def _make_target(
     default-secure model value (T1 #1780) — and ``tls_ca_pin`` to ``None``
     (no pin, T5 #1784), so the pool-key suffix and the no-``verify=``
     construction path match a verifying, unpinned target.
+    ``tls_server_name`` defaults to ``None`` (#2002) — no SNI / cert-verify
+    override, so the dispatch derives the verification name from ``host``.
     """
     return types.SimpleNamespace(
         name=name,
@@ -116,6 +119,7 @@ def _make_target(
         auth_model="impersonation",
         verify_tls=verify_tls,
         tls_ca_pin=tls_ca_pin,
+        tls_server_name=tls_server_name,
     )
 
 
@@ -222,6 +226,227 @@ async def test_auth_headers_forwarded() -> None:
     assert route.called
     sent_headers = route.calls[0].request.headers
     assert sent_headers["authorization"] == "Bearer my-jwt"
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
+# tls_server_name — SNI / cert-verify host decoupled from Host (#2002)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tls_server_name_threads_sni_extension_on_get() -> None:
+    """A target with ``tls_server_name`` set dispatches the SNI override.
+
+    Acceptance criterion (#2002): the dispatched request carries
+    ``extensions["sni_hostname"] == tls_server_name`` (the TLS SNI +
+    cert-CN/SAN verification name) while ``url.host`` — and therefore the
+    connect address and the wire ``Host:`` header — stays the routed
+    ``host`` (the IP a cert-CN-pinning appliance accepts). This is the
+    decoupling that lets ``verify_tls=true`` survive a deliberate
+    ``Host``≠cert-CN mismatch (``httpcore`` resolves
+    ``server_hostname = request.extensions["sni_hostname"]``).
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="10.0.0.5", tls_server_name="vrli.corp.example")
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        route = mock.get("/api/v2/version").respond(200, json={"version": "9.0"})
+        await conn._get_json(target, "/api/v2/version", operator=_make_operator("t"))
+
+    assert route.called
+    req = route.calls[0].request
+    # SNI / cert-verify name = the override.
+    assert req.extensions["sni_hostname"] == "vrli.corp.example"
+    # Connect address + Host header = the routed IP, NOT the SNI name.
+    assert req.url.host == "10.0.0.5"
+    assert req.headers["host"] == "10.0.0.5"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tls_server_name_threads_sni_extension_on_post() -> None:
+    """``_post_json`` threads the SNI override on non-idempotent verbs too."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="10.0.0.5", tls_server_name="vrli.corp.example")
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        route = mock.post("/api/v2/sessions").respond(200, json={"ok": True})
+        await conn._post_json(
+            target,
+            "/api/v2/sessions",
+            operator=_make_operator("t"),
+            json={"provider": "Local"},
+        )
+
+    assert route.called
+    req = route.calls[0].request
+    assert req.extensions["sni_hostname"] == "vrli.corp.example"
+    assert req.url.host == "10.0.0.5"
+    assert req.headers["host"] == "10.0.0.5"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_no_tls_server_name_omits_sni_extension() -> None:
+    """Default ``tls_server_name=None`` dispatches byte-identically to today.
+
+    No ``sni_hostname`` extension is set, so ``httpcore`` derives the SNI /
+    verification name from ``base_url`` (``url.host``) exactly as before
+    the override existed — the additive-default-secure contract.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="vcenter.example.com")  # tls_server_name=None
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/items").respond(200, json={"items": []})
+        await conn._get_json(target, "/api/items", operator=_make_operator("t"))
+
+    assert route.called
+    req = route.calls[0].request
+    assert "sni_hostname" not in req.extensions
+    assert req.url.host == "vcenter.example.com"
+    await conn.aclose()
+
+
+def test_request_extensions_helper_maps_override_and_default() -> None:
+    """``_request_extensions`` returns the SNI dict when set, ``{}`` otherwise."""
+    conn = _ConcreteHttpConnector()
+    assert conn._request_extensions(_make_target(tls_server_name="cn.example")) == {
+        "sni_hostname": "cn.example"
+    }
+    assert conn._request_extensions(_make_target()) == {}
+    # Empty string is treated as "no override" (falsy), like the API
+    # boundary's nullable-string clear semantics.
+    assert conn._request_extensions(_make_target(tls_server_name="")) == {}
+
+
+# ---------------------------------------------------------------------------
+# _post_json — verb honoring, form-encoded body, header merge (#1968)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_post_json_honors_actual_verb(verb: str) -> None:
+    """_post_json sends the request with the *actual* non-idempotent verb.
+
+    Regression for #1968: the seam previously hardcoded ``POST``, so an
+    ingested ``PUT``/``PATCH``/``DELETE`` was silently downgraded.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.request(verb, "/api/widget/1").respond(200, json={"ok": True})
+        result = await conn._post_json(
+            target,
+            "/api/widget/1",
+            operator=_make_operator("tok"),
+            verb=verb,
+            json={"field": "v"},
+        )
+
+    assert result == {"ok": True}
+    assert route.called
+    assert route.calls[0].request.method == verb
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_form_encoded_body() -> None:
+    """_post_json with data= sends an application/x-www-form-urlencoded body.
+
+    Covers the OAuth2 token-grant + vRLI/nsx session-login shapes (#1968).
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/oauth/token").respond(200, json={"access_token": "t"})
+        result = await conn._post_json(
+            target,
+            "/oauth/token",
+            operator=_make_operator("tok"),
+            data={"grant_type": "client_credentials", "scope": "read"},
+        )
+
+    assert result == {"access_token": "t"}
+    sent = route.calls[0].request
+    assert sent.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert sent.content == b"grant_type=client_credentials&scope=read"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_extra_headers_merged() -> None:
+    """_post_json merges extra_headers onto auth_headers; per-call value wins."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/api/widget").respond(201, json={"id": 1})
+        await conn._post_json(
+            target,
+            "/api/widget",
+            operator=_make_operator("my-jwt"),
+            json={"name": "w"},
+            extra_headers={"X-Idempotency-Key": "abc", "Authorization": "Bearer override"},
+        )
+
+    sent = route.calls[0].request.headers
+    assert sent["x-idempotency-key"] == "abc"
+    # extra_headers wins on a key clash with auth_headers.
+    assert sent["authorization"] == "Bearer override"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["GET", "HEAD", "OPTIONS", "get"])
+async def test_post_json_rejects_idempotent_verb(verb: str) -> None:
+    """_post_json refuses idempotent verbs — they belong on the retried path."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+    with pytest.raises(ValueError, match="non-idempotent"):
+        await conn._post_json(target, "/api/x", operator=_make_operator("t"), verb=verb)
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_rejects_json_and_data_together() -> None:
+    """_post_json refuses a json= and data= body in the same call."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+    with pytest.raises(ValueError, match="not both"):
+        await conn._post_json(
+            target,
+            "/api/x",
+            operator=_make_operator("t"),
+            json={"a": 1},
+            data={"b": 2},
+        )
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_extra_headers_merged() -> None:
+    """_request_json forwards extra_headers (header-located params on a GET)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/items").respond(200, json={"items": []})
+        await conn._request_json(
+            target,
+            "GET",
+            "/api/items",
+            operator=_make_operator("my-jwt"),
+            extra_headers={"X-Tenant": "acme"},
+        )
+
+    sent = route.calls[0].request.headers
+    assert sent["x-tenant"] == "acme"
+    assert sent["authorization"] == "Bearer my-jwt"
     await conn.aclose()
 
 

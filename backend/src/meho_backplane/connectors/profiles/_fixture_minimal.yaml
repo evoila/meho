@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal valid ExecutionProfile shipped as package data so the
+# profile_resource on-ramp (#1964 T1 #1975) has a real artifact to
+# exercise end to end: the `_fixture/1.0` catalog row points its
+# profile_resource at this file, and the boot-time validator parses it
+# with ExecutionProfile.model_validate + validate_execution_profile (the
+# same boot guard the live registrar uses). `basic` is a NAMED auth
+# scheme; `none` pagination matches a single-shot read connector. T2
+# (#1976) authors the real per-product profiles.
+product: _fixture
+version: "1.0"
+auth:
+  scheme: basic
+  secret_fields:
+    - username
+    - password
+fingerprint:
+  path: /things
+  authenticated: true
+  version_key: version
+  version_splitter: none
+probe: delegate
+pagination:
+  strategy: none
+  items_key: things

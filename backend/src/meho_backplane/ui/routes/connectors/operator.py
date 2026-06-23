@@ -48,15 +48,17 @@ from dataclasses import dataclass
 import structlog
 from fastapi import HTTPException, Request, status
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 
 __all__ = [
     "OperatorRoleProbe",
+    "lift_operator_from_session",
     "resolve_operator_or_403",
     "resolve_role_probe",
 ]
@@ -89,28 +91,6 @@ def _probe_from_operator(operator: Operator) -> OperatorRoleProbe:
     )
 
 
-async def _load_access_token_or_401(session_ctx: UISessionContext) -> str:
-    """Load the encrypted session row, return the decrypted access token.
-
-    The session middleware already validated the cookie before this
-    helper runs; if the row vanished in the gap (revoked / expired
-    while the request was in-flight), raise 401 so the operator's
-    browser knows to re-authenticate. Mirrors the same shape
-    :func:`~meho_backplane.ui.routes.memory.operator._load_session_or_401`
-    uses.
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session_ctx.session_id)
-    if decrypted is None:
-        _log.info("ui_connectors_session_gone", session_id=str(session_ctx.session_id))
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="ui_session_required",
-        )
-    return decrypted.access_token
-
-
 def _assert_identity_matches(operator: Operator, session_ctx: UISessionContext) -> None:
     """Reject a token whose sub / tenant_id diverges from the session row.
 
@@ -132,21 +112,50 @@ def _assert_identity_matches(operator: Operator, session_ctx: UISessionContext) 
         )
 
 
-async def _lift_operator(session_ctx: UISessionContext) -> Operator:
+async def lift_operator_from_session(session_ctx: UISessionContext) -> Operator:
     """Lift the full :class:`Operator` from the BFF session row.
 
     Common helper for the read-only role probe and the write-gating
-    403 dependency. The JWT chain caches the JWKS in process so the
-    round-trip is local-only after the first hit.
+    403 dependency. Loads the session and presents its access token to
+    the chassis JWT chain through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token serves the
+    surface (including the topology write gates that reuse this helper)
+    instead of 401-ing mid-session. The JWT chain caches the JWKS in
+    process so the round-trip is local-only after the first hit.
+
+    Public so sibling console surfaces that need the same
+    JWT-revalidated operator (e.g. the topology curated-edge write gate,
+    Task #1953) reuse one identity-assertion path rather than
+    re-implementing the load + verify + identity-match chain.
+
+    Raises :class:`fastapi.HTTPException` 401 when the session was
+    revoked / expired in the gap since the middleware check, or when
+    the refresh attempt itself fails (``session_expired`` -- the BFF
+    error handler maps it to a login redirect for HTML requests).
     """
-    access_token = await _load_access_token_or_401(session_ctx)
+    decrypted = await load_fresh_session(session_ctx.session_id)
+    if decrypted is None:
+        _log.info("ui_connectors_session_gone", session_id=str(session_ctx.session_id))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="ui_session_required",
+        )
     settings = get_settings()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
     _assert_identity_matches(operator, session_ctx)
     return operator
+
+
+#: Backwards-compatible private alias. The helper was introduced as
+#: ``_lift_operator`` (used by the two dependencies below); promoting it to
+#: the public name keeps both internal call sites working without churning
+#: this module's own references.
+_lift_operator = lift_operator_from_session
 
 
 async def resolve_role_probe(

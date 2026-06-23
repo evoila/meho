@@ -216,18 +216,26 @@ def test_upgrade_is_idempotent(
     the sibling 0038 / 0011 tests use. The second pass finds no
     ``vcf-logs`` rows, so the already-``vrli`` row keeps its
     post-first-migration ``updated_at`` (no second bump).
+
+    Both passes pin the target to ``0046`` (not ``head``) so future
+    non-idempotent schema migrations cannot leak into the stamp-back
+    replay: ``command.stamp`` only rewrites alembic's version table — it
+    does not run downgrade SQL — so any column a later migration adds on
+    the first upgrade is still physically present, and replaying its
+    non-idempotent DDL through ``head`` would fail (e.g. 0050's
+    ``add_column("targets", "tls_server_name")`` → "duplicate column").
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "0045")
 
     row_id = _insert_target(sync_url, name="vrli-prod", product="vcf-logs")
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0046")
     _product_after_first, updated_after_first = _read_row(sync_url, row_id)
 
     # Stamp back and replay upgrade() against the reconciled DB.
     command.stamp(cfg, "0045")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0046")
 
     product_after_second, updated_after_second = _read_row(sync_url, row_id)
     assert product_after_second == "vrli"

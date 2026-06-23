@@ -49,7 +49,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import get_settings
@@ -136,12 +136,26 @@ class CorpusChunk(BaseModel):
     for downstream callers regardless of which wire dialect the corpus
     speaks. ``populate_by_name=True`` keeps the internal name usable when
     constructing the model directly in tests.
+
+    ``document_id`` is modelled ``str | None`` (#2004). The contract names
+    the field ``document_id`` — MEHO.Knowledge speaks that exact key, so
+    there is no second wire name to alias (the #1732 fix aliased the three
+    fields that *did* drift; ``document_id`` is not one of them). What it
+    can be is **absent**: MEHO.Knowledge returns ``document_id: ""`` when a
+    chunk has no owning-document concept. ``document_id`` is only ever read
+    as a *citation-label fallback* (``title -> document_id -> filename ->
+    URL`` in :func:`~meho_backplane.docs_search.citation_links._label_for`)
+    and is never used to resolve or ground a citation, so a blank value is
+    not a contract breach — but carrying it as a required ``""`` is a lie.
+    The validator below normalises blank-after-strip to ``None`` so the
+    absence is honestly typed and the label chain skips a cleanly-``None``
+    rung rather than a misleading empty string.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
     chunk_id: str
-    document_id: str
+    document_id: str | None = None
     content: str = Field(validation_alias=AliasChoices("content", "text"))
     source_url: str | None = Field(
         default=None,
@@ -149,6 +163,21 @@ class CorpusChunk(BaseModel):
     )
     score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("document_id", mode="before")
+    @classmethod
+    def _blank_document_id_to_none(cls, value: object) -> object:
+        """Normalise a blank ``document_id`` to ``None`` (#2004).
+
+        MEHO.Knowledge returns ``document_id: ""`` for a chunk with no
+        owning-document concept. A required ``""`` would validate but lie;
+        ``Optional`` alone keeps the empty string. Mapping blank-after-strip
+        to ``None`` here makes the absence honest, so the citation-label
+        fallback skips a cleanly-``None`` rung.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class CorpusSearchResponse(BaseModel):

@@ -438,9 +438,13 @@ def build_editor_context(
 ) -> dict[str, object]:
     """Assemble the Jinja context the ``runbooks/editor.html`` template needs.
 
-    ``form_steps`` is JSON-serialised into ``initial_steps_json`` so the
+    ``form_steps`` is passed through as a raw list and the template renders
+    it with ``| tojson`` inside a single-quoted ``x-data`` attribute, so the
     Alpine model can hydrate from the server-rendered prefill (an edit
-    pre-loads the existing steps; a fresh ``new`` seeds one blank step). The
+    pre-loads the existing steps; a fresh ``new`` seeds one blank step)
+    without any field value being able to break out of the attribute. The
+    list is not pre-serialised here: ``json.dumps`` leaves ``"`` raw, which
+    would have terminated the old double-quoted ``| safe`` attribute. The
     post target + submit verb differ by ``mode`` so a single template serves
     both the draft-create and edit-in-place flows.
     """
@@ -450,7 +454,7 @@ def build_editor_context(
         "title": title,
         "description": description,
         "target_kind": target_kind,
-        "initial_steps_json": json.dumps(form_steps),
+        "form_steps": form_steps,
         "submit_url": "/ui/runbooks/new" if mode == "new" else f"/ui/runbooks/{slug}/edit",
         "submit_label": "Create draft" if mode == "new" else "Save changes",
         "error_message": error_message,

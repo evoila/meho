@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# ExecutionProfile for the `vmware/9.0` profile-backed catalog row
+# (#1964 T2 #1976). Pairs with operations/ingest/specs/vmware_rest_minimal.yaml.
+#
+# AUTH. `session_login_basic` — the vCenter-shaped session scheme (#2025):
+# POST /api/session with HTTP Basic credentials and no body, read the raw
+# JSON-string token out of the response body, then send it on downstream
+# requests in the `vmware-api-session-id` header. This is the modern
+# vSphere Automation API flow the typed VmwareRestConnector establishes
+# (SESSION_PATH_MODERN). No DSL: the scheme names a vetted session-harness
+# extractor (#1970); the profile carries only the secret-field names. The
+# profiled path now mirrors the typed connector's modern→legacy fallback
+# (#2031): on an HTTP 404 from /api/session it retries the legacy
+# /rest/com/vmware/cis/session, and the winning login path selects the
+# per-endpoint /api↔/rest op mount + teardown. The fallback is a vetted
+# scheme-level constant, not a profile field — still no DSL.
+#
+# FINGERPRINT. `/api/about` returns a top-level `version` string, satisfying
+# the FingerprintSpec literal-top-level-key constraint (#1177); it is the
+# exact endpoint VmwareRestConnector.fingerprint reads. version_splitter
+# `none` — vCenter returns a clean version string.
+#
+# PROBE. `delegate` — one fingerprint round-trip covers reachability +
+# auth-challenge, the same posture the typed connector takes.
+#
+# PAGINATION. `none` — the curated vCenter inventory read ops are single-shot
+# and return bare JSON arrays (no envelope key); `items_key` `value` is the
+# conventional literal placeholder for an unwrapped single-shot read.
+#
+# Validated at boot by validate_shipped_artifacts (ExecutionProfile.model_
+# validate + validate_execution_profile).
+product: vmware
+version: "9.0"
+auth:
+  scheme: session_login_basic
+  secret_fields:
+    - username
+    - password
+fingerprint:
+  path: /api/about
+  authenticated: true
+  version_key: version
+  version_splitter: none
+probe: delegate
+pagination:
+  strategy: none
+  items_key: value

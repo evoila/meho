@@ -74,7 +74,10 @@
      ``/ui/broadcast/history`` GET the first time the tab is shown). The
      live feed stays mounted under the hidden pane so its SSE
      subscription is not torn down when the operator peeks at history. -#}
-  <div x-data="{ tab: 'live' }">
+  <div
+    x-data="{ tab: 'live' }"
+    x-on:broadcast-show-overrides.window="tab = 'overrides'"
+  >
     <div role="tablist" class="tabs tabs-bordered">
       <button
         type="button"
@@ -95,6 +98,16 @@
         :aria-selected="(tab === 'history').toString()"
       >
         Last 24h
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        :class="tab === 'overrides' ? 'tab-active' : ''"
+        x-on:click="tab = 'overrides'"
+        :aria-selected="(tab === 'overrides').toString()"
+      >
+        Overrides
       </button>
     </div>
 
@@ -132,6 +145,27 @@
           >
             <div class="px-3 py-10 text-center text-sm opacity-70">
               Loading the last 24 hours…
+            </div>
+          </div>
+        </div>
+
+        {# ---------- Overrides pane (Task #1891) ----------
+           tenant_admin per-tenant suppression rules. Lazy-loads
+           ``/ui/broadcast/overrides`` the first time the pane becomes
+           visible (``hx-trigger="intersect once"``), exactly like the
+           history pane. The fragment is tenant_admin-gated server-side:
+           a non-admin operator gets the gated empty state, never the
+           rules. -#}
+        <div x-show="tab === 'overrides'">
+          <div
+            id="broadcast-overrides"
+            hx-get="/ui/broadcast/overrides"
+            hx-trigger="intersect once"
+            hx-swap="innerHTML"
+            class="rounded-box border border-base-300 bg-base-100 p-3"
+          >
+            <div class="px-3 py-10 text-center text-sm opacity-70">
+              Loading suppression rules…
             </div>
           </div>
         </div>

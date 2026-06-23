@@ -99,6 +99,10 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests.test_ui_broadcast_filters import (
+    _XSS_OP_ID,
+    _assert_no_xss_breakout,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -806,3 +810,119 @@ def test_editor_preview_operator_forbidden() -> None:
 
     assert response.status_code == 403, response.text
     assert "<strong>" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# XSS hardening — attribute-breakout via runbook fields (Task #100)
+# ---------------------------------------------------------------------------
+#
+# The editor binds operator-authored runbook fields into an Alpine
+# ``x-data`` attribute. PR #1044 established the safe convention
+# (single-quoted ``x-data`` + ``| tojson``) and the runbook editor was the
+# lone data-bearing island that never received it: it interpolated
+# ``initial_steps_json | safe`` and ``| tojson`` scalars inside a
+# *double-quoted* attribute, so a ``"`` in any field terminated the
+# attribute and grafted attacker markup onto the host element (stored XSS on
+# the edit page, reflected XSS on the create / 422 re-render path).
+#
+# Both tests reuse the parser-grounded harness from
+# :mod:`backend.tests.test_ui_broadcast_filters` (``_XSS_OP_ID`` +
+# ``_assert_no_xss_breakout``): they feed the rendered HTML through a stdlib
+# ``HTMLParser`` and assert no ``onfocus`` / ``autofocus`` / ``onerror``
+# leaks as a parsed attribute and that the marker stays inside an ``x-data``
+# value. They FAIL against the pre-fix double-quoted ``| safe`` template and
+# PASS after the single-quote + ``| tojson`` fix.
+
+
+def _xss_payload_body() -> RunbookTemplateBody:
+    """A valid one-step body whose step + template titles carry the payload.
+
+    ``_XSS_OP_ID`` contains every HTML metacharacter the hardening must
+    neutralise but no ``${...}`` substitution, so it passes the template's
+    only field-level validator (the substitution allowlist) and is stored
+    verbatim -- exactly the stored-XSS precondition the fix must defang on
+    re-render.
+    """
+    return RunbookTemplateBody(
+        title=_XSS_OP_ID,
+        description="Stored payload regression.",
+        target_kind="k8s-node",
+        steps=[
+            ManualStep(
+                id="drain",
+                title=_XSS_OP_ID,
+                body="Run the drain command.",
+                type="manual",
+                verify=ConfirmVerify(type="confirm", prompt="Node drained?"),
+            ),
+        ],
+    )
+
+
+def test_editor_edit_stored_xss_payload_cannot_break_out_of_x_data() -> None:
+    """A stored runbook field with a breakout payload stays inert on the edit page.
+
+    Regression for the stored-XSS finding (Task #100). The seeded template's
+    ``title`` and step ``title`` carry ``_XSS_OP_ID``; ``GET .../edit``
+    re-renders them into the Alpine ``x-data`` config. Fails on the pre-fix
+    double-quoted ``| safe`` template (the ``"`` bytes terminate the
+    attribute and the parser surfaces ``onfocus`` / ``autofocus`` /
+    ``onerror`` as live attributes); passes once single-quoted + ``| tojson``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="xss-runbook", body=_xss_payload_body())
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/xss-runbook/edit")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    _assert_no_xss_breakout(response.text)
+
+
+def test_editor_new_reflected_xss_payload_cannot_break_out_of_x_data() -> None:
+    """A reflected breakout payload in ``title`` stays inert on the 422 re-render.
+
+    Regression for the reflected-XSS finding (Task #100). The POST carries
+    ``_XSS_OP_ID`` in ``title`` plus a structurally invalid step id, so the
+    server rejects the body (422) and re-renders the editor with the entered
+    ``title`` reflected into the Alpine ``x-data`` config. Same parser-
+    grounded breakout check as the stored path.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+
+    # A dotted step id is illegal -> server 422 re-render, preserving title.
+    bad_steps = (
+        '[{"id":"bad.id","title":"Prep","body":"x","type":"manual",'
+        '"op_id":"","params":"{}",'
+        '"verify":{"type":"confirm","prompt":"ok?","op_id":"","params":"{}","expect":"{}"}}]'
+    )
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/new",
+            data={
+                "slug": "reflected-xss",
+                "title": _XSS_OP_ID,
+                "description": "Reflected payload regression.",
+                "target_kind": "",
+                "steps": bad_steps,
+            },
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 422, response.text
+    _assert_no_xss_breakout(response.text)

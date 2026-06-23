@@ -161,16 +161,17 @@ func printCatalogTable(w io.Writer, c *api.CatalogListResponse, registered map[s
 		return
 	}
 	fmt.Fprintf(w, "%d catalog entr%s\n", len(c.Catalog), pluralY(len(c.Catalog)))
-	fmt.Fprintf(w, "%-22s %-13s %-24s %-4s %-9s %s\n",
-		"product/version", "impl_id", "connector_class", "reg", "spec_ver", "notes",
+	fmt.Fprintf(w, "%-22s %-13s %-24s %-4s %-9s %-9s %s\n",
+		"product/version", "impl_id", "connector_class", "reg", "spec_ver", "ships", "notes",
 	)
 	for _, e := range c.Catalog {
-		fmt.Fprintf(w, "%-22s %-13s %-24s %-4s %-9s %s\n",
+		fmt.Fprintf(w, "%-22s %-13s %-24s %-4s %-9s %-9s %s\n",
 			truncate(e.Product+"/"+e.Version, 22),
 			truncate(e.ImplId, 13),
 			truncate(e.RequiresConnectorClass, 24),
 			registeredLabel(registered, e),
 			truncate(specVersionLabel(e), 9),
+			shippedResourceLabel(e),
 			truncate(strDerefAny(e.Notes), 60),
 		)
 	}
@@ -196,6 +197,41 @@ func specVersionLabel(e api.ConnectorSpecEntry) string {
 		return *e.SpecInfoVersion
 	}
 	return "-"
+}
+
+// shippedResourceLabel renders the `ships` column: whether the entry
+// ships a MEHO-authored OpenAPI spec and/or ExecutionProfile as
+// package data, so catalog-driven ingest fills the bytes locally
+// instead of fetching from `upstream` / requiring an upload. The two
+// resource fields are independent (#1975), so all four combinations
+// are distinguished:
+//
+//	spec+prof  ships both a local spec and a profile
+//	spec       ships a local spec only (fetch/author the profile)
+//	prof       ships a local profile only
+//	-          ships neither (the upstream-fetch / upload on-ramp)
+func shippedResourceLabel(e api.ConnectorSpecEntry) string {
+	spec := nonBlank(e.SpecResource)
+	prof := nonBlank(e.ProfileResource)
+	switch {
+	case spec && prof:
+		return "spec+prof"
+	case spec:
+		return "spec"
+	case prof:
+		return "prof"
+	default:
+		return "-"
+	}
+}
+
+// nonBlank reports whether an optional string field is present and not
+// empty. The catalog `spec_resource`/`profile_resource` fields are
+// `Optional[str]` defaulting to null; the backend rejects blank values
+// at validation, but the CLI treats nil and "" identically to stay
+// robust to either shape.
+func nonBlank(s *string) bool {
+	return s != nil && *s != ""
 }
 
 // strDerefAny returns the pointee or empty when nil. Used for the

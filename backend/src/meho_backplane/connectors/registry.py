@@ -40,46 +40,20 @@ import structlog
 from meho_backplane.connectors.base import Connector
 
 __all__ = [
-    "PRODUCT_ALIASES",
     "_eager_import_connectors",
     "all_connectors",
     "all_connectors_v2",
-    "canonical_product_token",
     "clear_registry",
     "deregister_connector_v2",
     "get_connector",
     "list_connector_impls",
+    "product_impl_id_round_trips",
     "register_connector",
     "register_connector_v2",
     "registered_product_tokens",
 ]
 
 _log = structlog.get_logger(__name__)
-
-# Product-token aliases — non-canonical spellings the operator-facing
-# write surfaces accept and normalise to the registry's canonical
-# product token. G0.18-T2 (#1355, RDC #789 Finding 6; closes #1312
-# acceptance B). One entry per concept that is spelled two ways across
-# MEHO's surfaces:
-#
-# * ``"sddc" -> "sddc-manager"`` — the connector listing emits
-#   ``product="sddc"`` (the value
-#   :func:`~meho_backplane.operations._lookup.parse_connector_id`
-#   derives from ``"sddc-rest-9.0"``, load-bearing for the #773
-#   connector_id round-trip contract), while the v2 registry, the
-#   spec catalog, and the ``TargetCreate`` validator all use
-#   ``"sddc-manager"``. The alias makes the listed token
-#   accept-equivalent at ``POST /api/v1/targets`` so an operator who
-#   copies ``product`` straight out of ``meho connector list`` into a
-#   target create no longer hits a 422; the value is normalised to the
-#   canonical ``"sddc-manager"`` before storage and resolution.
-#
-# The map is keyed by the non-canonical token and valued by the
-# canonical registry token. A canonical token is never an alias key
-# (so :func:`canonical_product_token` is idempotent).
-PRODUCT_ALIASES: dict[str, str] = {
-    "sddc": "sddc-manager",
-}
 
 # v1 single-product registry — shipped in G0.2-T2 (#241). Stays as the
 # authoritative table for the pre-G0.6 dispatch path; v2 is the layer
@@ -150,7 +124,10 @@ def register_connector_v2(
 
     Raises :exc:`TypeError` when ``cls`` is not a :class:`Connector` subclass.
     Raises :exc:`RuntimeError` on duplicate registration of the same
-    three-tuple key.
+    three-tuple key, and (G0.27 / T2 #1816) when the declared ``product``
+    does not round-trip through :func:`parse_connector_id` for the
+    ``impl_id`` / ``version`` — see
+    :func:`_assert_product_impl_id_round_trips`.
 
     Does **not** write to the v1 registry. v2-only registrations are
     invisible to :func:`get_connector` (which keys on product alone);
@@ -169,7 +146,7 @@ def register_connector_v2(
             f"connector already registered for v2 key {key!r}: "
             f"existing={_REGISTRY_V2[key].__name__}, attempted={cls.__name__}"
         )
-    _warn_if_product_impl_id_diverges(product=product, version=version, impl_id=impl_id, cls=cls)
+    _assert_product_impl_id_round_trips(product=product, version=version, impl_id=impl_id, cls=cls)
     _REGISTRY_V2[key] = cls
     _log.info(
         "connector_registered_v2",
@@ -180,18 +157,19 @@ def register_connector_v2(
     )
 
 
-def _warn_if_product_impl_id_diverges(
+def _assert_product_impl_id_round_trips(
     *,
     product: str,
     version: str,
     impl_id: str,
     cls: type[Connector],
 ) -> None:
-    """Log a WARN when ``product`` does not round-trip through the connector_id.
+    """Raise when ``product`` does not round-trip through the connector_id.
 
-    G0.26-T4 (#1798). The dispatch / discovery surface never sees a
-    connector's registration triple directly: it receives a
-    ``connector_id`` string and recovers the product via
+    G0.26-T4 (#1798) introduced this as a structured WARN; G0.27 / T2
+    (#1816) promotes it to a **hard fail**. The dispatch / discovery
+    surface never sees a connector's registration triple directly: it
+    receives a ``connector_id`` string and recovers the product via
     :func:`~meho_backplane.operations._lookup.parse_connector_id`, which
     derives it from the first hyphen-segment of ``impl_id``
     (``"vrli-rest" -> "vrli"``). When a connector registers a ``product``
@@ -201,56 +179,107 @@ def _warn_if_product_impl_id_diverges(
     mismatch that shadowed :class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`
     behind an auto-shim in the v0.16.0 dogfood.
 
-    This is **advisory only** — it logs and returns; it never raises. A
-    boot-time raise would crash :func:`_eager_import_connectors` for the
-    five sanctioned ``_PRODUCT_SPLITS`` legacy connectors
+    The five formerly-divergent ``_PRODUCT_SPLITS`` legacy connectors
     (``sddc-manager`` / ``vcf-automation`` / ``vcf-fleet`` /
-    ``vcf-operations`` / ``hetzner-robot``), every one of which carries a
-    deliberate long↔short divergence bridged by ``dispatch_product`` /
-    migration 0038 / ``PRODUCT_ALIASES``. Realigning that family and
-    promoting this check to a hard-fail is **Initiative #1810**'s job;
-    until then those five WARN on every boot, pointing operators at the
-    tracking Initiative.
+    ``vcf-operations`` / ``hetzner-robot``) were realigned to their
+    short, dispatch-canonical product token by #1814 (Initiative
+    #1810), so — together with vRLI (#1798) — every shipped connector
+    now round-trips. With nothing left to violate the invariant the
+    check can fail closed: a divergent registration is a deploy-time
+    bug (a new connector mis-declaring ``product``, or an ``impl_id``
+    typo), so it raises :exc:`RuntimeError` and crashes
+    :func:`_eager_import_connectors` at boot rather than letting the
+    mismatch silently shadow the connector behind an auto-shim. There
+    is no allowlist — every shipped connector is expected to round-trip,
+    and a future divergence must be fixed at the registration, not
+    sanctioned here.
 
-    The wildcard / v1-compat row ``(product, "", "")`` is skipped: an
+    The wildcard / v1-compat row ``(product, "", "")`` is exempt: an
     empty ``version`` / ``impl_id`` renders a parser-incompatible
     ``connector_id`` (``"-"``) that has no derived product to compare,
     and the padding row is a resolver-internal detail, never an
     operator-addressable connector.
+
+    Scope of the check — only **lossless** connector_ids: the invariant
+    is about the *product* segment, and it is only meaningful when
+    :func:`~meho_backplane.operations._lookup.parse_connector_id` can
+    actually recover the triple. The parser's version segment must be
+    digit-leading (``vmware-rest-9.0`` -> ``("vmware", "9.0",
+    "vmware-rest")``); a non-numeric version label (``vmware-rest-rest``,
+    a synthetic discriminator some impls register under) doesn't match,
+    so the parser falls back to ``(connector_id, "", "")`` — it didn't
+    derive a *different product*, it failed to parse at all. In that case
+    there is no dispatch-canonical product to compare against (the
+    resolver matches such a connector on its ``supported_version_range``,
+    not on a parsed connector_id), so the check skips rather than firing
+    spuriously. It raises only when the parse round-trips losslessly
+    (same ``version`` + ``impl_id`` back out) and the recovered product
+    still disagrees — exactly the ``_PRODUCT_SPLITS`` shadow shape.
 
     ``parse_connector_id`` is imported call-locally to keep the
     ``connectors.registry`` -> ``operations._lookup`` edge off module
     import time — ``_lookup`` already imports :func:`all_connectors_v2`
     from this module, so a module-level import here would close a cycle.
     """
-    if not version or not impl_id:
+    if product_impl_id_round_trips(product=product, version=version, impl_id=impl_id):
         return
     from meho_backplane.operations._lookup import parse_connector_id
 
     connector_id = f"{impl_id}-{version}"
     derived_product = parse_connector_id(connector_id)[0]
-    if derived_product == product:
-        return
-    _log.warning(
-        "connector_product_impl_id_divergence",
-        product=product,
-        version=version,
-        impl_id=impl_id,
-        cls=cls.__name__,
-        derived_product=derived_product,
-        connector_id=connector_id,
-        message=(
-            f"connector {cls.__name__} registers product={product!r} but "
-            f"connector_id {connector_id!r} parses to product "
-            f"{derived_product!r}; an operator target with "
-            f"product={derived_product!r} (the dispatch-canonical token "
-            f"the connector listing emits) resolves a different namespace "
-            f"than this registration. Align product to {derived_product!r} "
-            f"or rename impl_id so it derives {product!r}. Family "
-            f"realignment + promotion of this check to a hard error is "
-            f"tracked under Initiative #1810."
-        ),
+    raise RuntimeError(
+        f"connector {cls.__name__} registers product={product!r} but "
+        f"connector_id {connector_id!r} parses to product "
+        f"{derived_product!r}; an operator target with "
+        f"product={derived_product!r} (the dispatch-canonical token "
+        f"the connector listing emits) resolves a different namespace "
+        f"than this registration. Align product to {derived_product!r} "
+        f"or rename impl_id so it derives {product!r}."
     )
+
+
+def product_impl_id_round_trips(*, product: str, version: str, impl_id: str) -> bool:
+    """Return whether ``product`` survives the connector_id parse round-trip.
+
+    The non-raising predicate behind the product↔impl_id invariant
+    (G0.27 / T2 #1816). :func:`_assert_product_impl_id_round_trips` raises
+    on it at registration; the ingest pipeline service
+    (:meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`)
+    raises :class:`~meho_backplane.operations.ingest.ProductImplIdMismatch`
+    on a ``False`` at the one chokepoint every entry point (REST / MCP /
+    CLI) traverses, so a divergent ingest is rejected before any DB write
+    rather than scaffolding a non-dispatchable shim — the REST route maps
+    that to a 422 and the MCP tool to a ``-32602`` (G0.27 / T3 #1817).
+    One parse rule, two enforcement points.
+
+    Returns ``True`` (the round-trip holds, nothing to enforce) when:
+
+    * ``version`` or ``impl_id`` is empty — the wildcard / v1-compat
+      ``(product, "", "")`` shape renders a parser-incompatible
+      ``connector_id`` (``"-"``) with no derived product to compare, and
+      it is a resolver-internal padding row, never an operator-addressable
+      connector.
+    * the parse is **lossy** — a connector_id whose version label is not
+      digit-leading (``vmware-rest-rest``) parses back to
+      ``(connector_id, "", "")``, losing ``version`` / ``impl_id``. There
+      is no meaningfully-derived product to compare; the resolver matches
+      such a connector on its ``supported_version_range``, not on a parsed
+      connector_id.
+    * the parse is lossless and the recovered product equals ``product``.
+
+    Returns ``False`` only when the parse round-trips losslessly (same
+    ``version`` + ``impl_id`` back out) and the recovered product still
+    disagrees — the product-namespace shadow shape.
+    """
+    if not version or not impl_id:
+        return True
+    from meho_backplane.operations._lookup import parse_connector_id
+
+    connector_id = f"{impl_id}-{version}"
+    derived_product, derived_version, derived_impl_id = parse_connector_id(connector_id)
+    if derived_version != version or derived_impl_id != impl_id:
+        return True
+    return derived_product == product
 
 
 def deregister_connector_v2(
@@ -366,33 +395,6 @@ def registered_product_tokens() -> set[str]:
     PR description).
     """
     return {product for (product, _version, _impl_id) in _REGISTRY_V2 if product}
-
-
-def canonical_product_token(product: str) -> str:
-    """Normalise a product token to its canonical registry spelling.
-
-    G0.18-T2 (#1355, RDC #789 Finding 6; closes #1312 acceptance B).
-    Maps a non-canonical product spelling — one the connector listing
-    or an operator may legitimately type — to the canonical token the
-    v2 registry, the spec catalog, and the ``TargetCreate`` validator
-    all agree on, using :data:`PRODUCT_ALIASES`. A token that is not an
-    alias key (including every canonical token) is returned verbatim,
-    so the function is idempotent: ``canonical_product_token(
-    canonical_product_token(x)) == canonical_product_token(x)``.
-
-    This is the single reconciliation point for the ``sddc`` /
-    ``sddc-manager`` split RDC #789 Finding 6 re-flagged: the listing
-    emits ``product="sddc"`` (load-bearing for the #773 connector_id
-    round-trip contract) while the registry / validator use
-    ``"sddc-manager"``. Operator-facing write paths
-    (:func:`~meho_backplane.api.v1.targets.create_target`,
-    :func:`~meho_backplane.api.v1.targets.update_target`) canonicalise
-    the incoming token through here before validating against
-    :func:`registered_product_tokens` and before storing the row, so a
-    value copied straight out of ``meho connector list`` is
-    accept-equivalent at ``POST /api/v1/targets``.
-    """
-    return PRODUCT_ALIASES.get(product, product)
 
 
 def _eager_import_connectors() -> None:

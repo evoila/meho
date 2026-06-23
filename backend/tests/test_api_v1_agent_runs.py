@@ -46,8 +46,9 @@ from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, Tenant
+from meho_backplane.db.models import AgentDefinition, AgentRunStatus, AgentRunTrigger, Tenant
 from meho_backplane.main import app
+from meho_backplane.operations.agent_run import create_run
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -534,3 +535,124 @@ async def test_rest_sse_returns_429_pre_stream_when_budget_exceeded(
     assert isinstance(body["detail"], dict), body
     assert body["detail"]["error"] == "budget_exceeded"
     assert "global kill switch" in body["detail"]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# #1828 -- operator run-cancel route contract
+# ---------------------------------------------------------------------------
+#
+# POST /api/v1/agents/runs/{handle}/cancel wraps the shared ``cancel_run``
+# service path. The matrix below pins the four boundary shapes: 200 (a
+# non-terminal run lands ``cancelled``), 404 (unknown / cross-tenant
+# handle), 409 (already-terminal run -- including the complete-then-cancel
+# race), and 403 (a ``read_only`` operator rejected by the role gate).
+
+
+async def _seed_run(
+    *,
+    tenant_id: UUID = _TENANT_A,
+    status: AgentRunStatus = AgentRunStatus.RUNNING,
+) -> UUID:
+    """Insert an ``agent_run`` row in *tenant_id* forced to *status*.
+
+    Returns the run id. The status is written directly (not through the
+    transition guard) so the test can position a row at any state -- the
+    cancel route's behaviour is what's under test, not the state machine.
+    """
+    await _seed_tenants()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await create_run(
+            session,
+            tenant_id=tenant_id,
+            identity_sub="op-user",
+            trigger=AgentRunTrigger.DIRECT,
+            model_tier="standard",
+        )
+        run.status = status.value
+        await session.flush()
+        run_id = run.id
+        await session.commit()
+    return run_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_cancels_non_terminal_run(client: TestClient) -> None:
+    """POST /runs/{handle}/cancel transitions a running run to cancelled (200)."""
+    run_id = await _seed_run(status=AgentRunStatus.RUNNING)
+    _install_invoker()
+    key = make_rsa_keypair("kid-cancel-ok")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/agents/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["run_id"] == str(run_id)
+    assert body["status"] == "cancelled"
+    assert body["ended_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_unknown_handle_is_404(client: TestClient) -> None:
+    """Cancelling an unknown handle returns 404 agent_run_not_found."""
+    await _seed_tenants()
+    _install_invoker()
+    key = make_rsa_keypair("kid-cancel-404")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agents/runs/00000000-0000-0000-0000-000000000000/cancel",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "agent_run_not_found"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_cross_tenant_handle_is_404(client: TestClient) -> None:
+    """Tenant B cannot cancel tenant A's run (404, no existence leak)."""
+    run_id = await _seed_run(tenant_id=_TENANT_A, status=AgentRunStatus.RUNNING)
+    _install_invoker()
+    key = make_rsa_keypair("kid-cancel-xtenant")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/agents/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {_token(key, sub='op-b', tenant_id=_TENANT_B)}"},
+        )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "agent_run_not_found"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_already_terminal_is_409(client: TestClient) -> None:
+    """Cancelling an already-succeeded run returns 409 (race-safe, not 500)."""
+    run_id = await _seed_run(status=AgentRunStatus.SUCCEEDED)
+    _install_invoker()
+    key = make_rsa_keypair("kid-cancel-409")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/agents/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "agent_run_not_cancellable"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_read_only_rejected(client: TestClient) -> None:
+    """A read_only operator is rejected (403) by the route's role gate."""
+    run_id = await _seed_run(status=AgentRunStatus.RUNNING)
+    _install_invoker()
+    key = make_rsa_keypair("kid-cancel-ro")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/agents/runs/{run_id}/cancel",
+            headers={"Authorization": f"Bearer {_token(key, role=TenantRole.READ_ONLY)}"},
+        )
+    assert resp.status_code == 403, resp.text

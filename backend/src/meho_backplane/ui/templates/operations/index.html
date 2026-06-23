@@ -1,0 +1,114 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Operations launcher (Initiative #1835 G10.9, Task #1879).
+
+  The read-only entry surface for the console's first execution path:
+  a connector picker, an operation-group browse + hybrid free-text
+  search, and (via the per-row drawer link) an operation detail drawer.
+
+  Content negotiation: ``GET /ui/operations`` returns THIS page on a
+  normal navigation; the picker change + the search box re-fetch with
+  ``HX-Request: true`` and get only the ``operations/_results.html``
+  fragment swapped into ``#operations-results``.
+
+  connector_id shape: every picker ``<option value>`` is the
+  ``<impl_id>-<version>`` id the meta-tools expect (e.g. ``vault-1.x``),
+  NEVER the bare product slug (``vault``) -- the options come from the
+  connector listing, whose ids round-trip through the dispatcher (#773).
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Operations &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Operations</h1>
+      <p class="text-sm opacity-70">
+        Pick a connector, browse its operation groups, and search for a
+        runnable operation across the catalog.
+      </p>
+    </div>
+  </header>
+
+  {#- Connector picker + search box. The picker re-fetches the results
+      region on change; the search box debounces keystrokes and pushes the
+      query into the URL so a search is shareable. Both target the same
+      ``#operations-results`` swap region. -#}
+  <form
+    class="grid gap-3 sm:grid-cols-[minmax(0,18rem)_1fr]"
+    hx-get="/ui/operations/search"
+    hx-target="#operations-results"
+    hx-swap="innerHTML"
+    hx-push-url="true"
+    role="search"
+    aria-label="Find an operation"
+  >
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Connector</span>
+      <select
+        name="connector_id"
+        class="select select-bordered select-sm w-full font-mono"
+        aria-label="Connector"
+        hx-get="/ui/operations/search"
+        hx-target="#operations-results"
+        hx-swap="innerHTML"
+        hx-trigger="change"
+        hx-push-url="true"
+      >
+        <option value="">Select a connector…</option>
+        {% for connector in connectors %}
+          <option
+            value="{{ connector.connector_id }}"
+            {% if connector.connector_id == connector_id %}selected{% endif %}
+          >{{ connector.connector_id }} ({{ connector.enabled_operation_count }} ops)</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Search operations</span>
+      <div class="relative">
+        <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center opacity-50">
+          {{ icon("search", class="size-4") }}
+        </span>
+        <input
+          type="search"
+          name="q"
+          value="{{ query }}"
+          placeholder="e.g. read secret, list pods, rotate token"
+          class="input input-bordered input-sm w-full pl-9"
+          aria-label="Search operations"
+          autocomplete="off"
+          hx-get="/ui/operations/search"
+          hx-target="#operations-results"
+          hx-swap="innerHTML"
+          hx-trigger="keyup changed delay:300ms"
+          hx-include="[name='connector_id']"
+          hx-push-url="true"
+        />
+      </div>
+    </label>
+  </form>
+
+  {#- Results region: group browse (empty query) or ranked search hits.
+      Seeded server-side for a shared search URL / hard refresh; the
+      picker + search box swap it thereafter. -#}
+  <div id="operations-results">
+    {% include "operations/_results.html" %}
+  </div>
+
+  {#- Stable drawer container -- lives OUTSIDE ``#operations-results`` so a
+      search/picker swap never wipes an open drawer. Each result row's
+      Detail button ``hx-get``s the drawer fragment into this container
+      (the same stable-container pattern the approvals modal uses). The
+      shared ``app/modal-dialogs.js`` controller opens the swapped-in
+      ``<dialog>`` via ``showModal()`` and dismisses it on close/ESC. -#}
+  <div id="operations-drawer-container"></div>
+</section>
+{% endblock %}

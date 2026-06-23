@@ -19,7 +19,8 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final, Protocol
 from uuid import UUID
 
@@ -44,15 +45,19 @@ __all__ = [
     "GroupAssignment",
     "GroupProposal",
     "LlmClient",
+    "LlmJsonResult",
+    "StructuredJsonLlmClient",
     "build_connector_id",
     "chunk_sequence",
     "expected_llm_call_count",
+    "extract_json_object",
     "load_existing_groups",
     "load_unassigned_ops",
     "parse_assignment_response",
     "parse_proposal_response",
     "render_assign_ops_prompt",
     "render_propose_groups_prompt",
+    "strip_code_fences",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -147,6 +152,75 @@ class LlmClient(Protocol):
         max_output_tokens: int,
     ) -> str:
         """Return the LLM's raw text response."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class LlmJsonResult:
+    """A raw model response plus the metadata a JSON-parsing caller needs.
+
+    The grouping pass is content with a bare string (:class:`LlmClient`),
+    but the ``ask_docs`` answer legs (synthesis, expand) need the
+    ``stop_reason`` too: a ``"max_tokens"`` stop is a *truncation* fault
+    distinct from a framing/parse fault, and surfacing it lets the caller
+    log the model's reason and split the error sub-cause instead of folding
+    a cutoff into a generic "non-JSON" parse failure.
+
+    Attributes
+    ----------
+    text:
+        The concatenated text of the response's text blocks (identical to
+        what :meth:`LlmClient.generate_json` returns).
+    stop_reason:
+        The Messages-API ``stop_reason`` (e.g. ``"end_turn"`` on a
+        complete response, ``"max_tokens"`` on an output-token cutoff), or
+        ``None`` when the SDK did not report one.
+    """
+
+    text: str
+    stop_reason: str | None
+
+
+class StructuredJsonLlmClient(Protocol):
+    """A :class:`LlmClient` that can also force + return structured JSON.
+
+    A superset of the grouping :class:`LlmClient` seam, used by the
+    ``ask_docs`` answer legs that need (a) machine-enforced JSON via the
+    Messages-API structured-output config rather than prompt discipline
+    alone, and (b) the ``stop_reason`` carried back so a truncated response
+    is diagnosable. The production adapter
+    (:class:`~meho_backplane.operations.ingest.anthropic_client.AnthropicMessagesLlmClient`)
+    satisfies both protocols; tests inject a deterministic stub that does
+    the same.
+    """
+
+    async def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        """Return the LLM's raw text response (grouping-compatible)."""
+        ...
+
+    async def generate_structured_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        response_format: Mapping[str, object] | None = None,
+    ) -> LlmJsonResult:
+        """Return the raw text + ``stop_reason``, optionally forcing a JSON schema.
+
+        ``response_format``, when given, is the Messages-API
+        ``output_config.format`` value
+        (``{"type": "json_schema", "schema": {...}}``) that constrains the
+        model to emit JSON matching the schema. When ``None`` the call is
+        an unconstrained completion — byte-for-byte the same request as
+        :meth:`generate_json`, only returning the richer result shape.
+        """
         ...
 
 
@@ -306,6 +380,25 @@ def strip_code_fences(raw: str) -> str:
     if match is None:
         return raw.strip()
     return match.group(1).strip()
+
+
+def extract_json_object(raw: str) -> str:
+    """Best-effort isolate a single JSON object from a framed response.
+
+    Strips a surrounding ```json``` fence via :func:`strip_code_fences`,
+    then, if a prose preamble still wraps the object, slices from the first
+    ``{`` to the last ``}``. The caller still runs :func:`json.loads`, so a
+    genuinely non-JSON response fails — this only peels off the two framing
+    faults (fence + preamble) a model adds around otherwise-valid JSON. One
+    shared parse-tolerance path for the ``ask_docs`` synthesis + expand legs
+    (#1999) so the two cannot drift.
+    """
+    cleaned = strip_code_fences(raw)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
 
 
 def parse_proposal_response(raw_output: str) -> list[GroupProposal]:

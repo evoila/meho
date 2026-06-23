@@ -1,0 +1,54 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Topology **refresh result** fragment (Initiative #1941 Task #1954).
+  Swapped into the refresh-result slot after a synchronous
+  ``POST /ui/topology/refresh/{target_name}``. The route blocks on the
+  connector probe and returns this inline (there is NO async job surface),
+  so the panel models it as a long-running HTMX submit: the trigger button
+  is ``hx-disabled-elt``-disabled + a spinner shows during dispatch, then
+  this fragment swaps in.
+
+  Renders all SIX disjoint reconcile counts — added/updated/removed for both
+  nodes and edges — plus ``duration_ms``. When the reconcile changed the
+  graph the POST response also carries ``HX-Trigger:
+  meho:topology-edge-changed`` so an open graph view re-pulls.
+-#}
+<div
+  data-test="refresh-result"
+  data-target-name="{{ target_name }}"
+  class="alert alert-success flex-col items-start gap-1 text-sm"
+  role="status"
+>
+  <p class="font-semibold">
+    Refreshed <span class="font-mono">{{ target_name }}</span>
+    <span class="text-xs opacity-70">({{ '%.0f' | format(result.duration_ms) }} ms)</span>
+  </p>
+  <dl class="grid grid-cols-3 gap-x-4 gap-y-1 text-xs">
+    <div>
+      <dt class="opacity-70">added nodes</dt>
+      <dd class="font-mono" data-test="refresh-added-nodes">{{ result.added_nodes }}</dd>
+    </div>
+    <div>
+      <dt class="opacity-70">updated nodes</dt>
+      <dd class="font-mono" data-test="refresh-updated-nodes">{{ result.updated_nodes }}</dd>
+    </div>
+    <div>
+      <dt class="opacity-70">removed nodes</dt>
+      <dd class="font-mono" data-test="refresh-removed-nodes">{{ result.removed_nodes }}</dd>
+    </div>
+    <div>
+      <dt class="opacity-70">added edges</dt>
+      <dd class="font-mono" data-test="refresh-added-edges">{{ result.added_edges }}</dd>
+    </div>
+    <div>
+      <dt class="opacity-70">updated edges</dt>
+      <dd class="font-mono" data-test="refresh-updated-edges">{{ result.updated_edges }}</dd>
+    </div>
+    <div>
+      <dt class="opacity-70">removed edges</dt>
+      <dd class="font-mono" data-test="refresh-removed-edges">{{ result.removed_edges }}</dd>
+    </div>
+  </dl>
+</div>

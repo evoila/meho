@@ -162,6 +162,109 @@ single write path into `endpoint_descriptor` for ingested rows; T3
 groups them; T4 gates dispatchability behind operator review; T6
 exposes the whole thing over HTTP with tenant_admin / operator RBAC.
 
+### Shipped-spec / profile on-ramp (#1964 T1 #1975)
+
+A catalog row may carry two optional fields naming MEHO-authored
+package data instead of relying on a fetchable `upstream`:
+
+* `spec_resource` — a `.yaml` / `.json` file under
+  `meho_backplane.operations.ingest.specs` (constant
+  `SPEC_RESOURCE_PACKAGE` in `catalog.py`).
+* `profile_resource` — an `ExecutionProfile` document under
+  `meho_backplane.connectors.profiles` (`PROFILE_RESOURCE_PACKAGE`).
+
+Both resolve via `importlib.resources.files(...).joinpath(name)` — the
+same wheel-and-source-portable shape `load_catalog()` uses for the
+catalog YAML. The field validator pins each value to a single path
+segment (no `/`, `\`, or `..`) so a resource name can't escape its
+package root.
+
+**Why:** `vmware/9.0` and `sddc/9.0` have an `upstream` the backend
+can't dereference (HTML developer portal / fqdn-templated appliance
+URL) — the `catalog_entry_upstream_not_spec` /
+`catalog_entry_templated_upstream` 422s above. The on-ramp ships a
+MEHO-authored spec as package data so catalog-driven ingest works
+end to end without an operator hand-fetch.
+
+**Route behaviour** (`_catalog_entry_specs` in `connectors_ingest.py`):
+when a row carries `spec_resource`, the route reads the bytes via
+`load_spec_resource()` and builds a single
+`SpecSource(uri="spec:<resource>", content=<bytes>)`. Because
+`content` is set, the ingest pipeline uses the bytes verbatim
+(size-capped) and skips the fetch + https/SSRF guard entirely — the
+bytes are trusted MEHO package data, not a remote URL. A
+`spec_resource` row is exempt from `_reject_unusable_entry`'s
+typed-/templated-upstream 422s for the same reason (the whole point is
+to serve products whose `upstream` is un-fetchable).
+
+**Validator exemption:** a row carrying `profile_resource` is a
+profile-backed row whose `requires_connector_class` names a synthesised
+`ProfiledRestConnector` subclass materialised from the reviewed profile
+(T5 #1971) — it need not pre-exist in the v2 registry when the
+boot-time `validate_catalog_registry_coverage()` runs. Both the
+class-presence (axis 1) and triple-registration (axis 2) checks skip
+profile-backed rows.
+
+**Boot-time dry-run parse:** `validate_shipped_artifacts()` (the fourth
+boot guard in `main.py`, after the catalog parse, registry-coverage
+check, and per-profile scheme load) walks every row and parses each
+shipped artifact with the **same** parser the live path uses —
+`parse_openapi(...)` for a spec, `ExecutionProfile.model_validate(...)`
++ `validate_execution_profile(...)` for a profile. A malformed shipped
+artifact raises `CatalogError` and crashes the lifespan (CI's app-boot
+smoke fails) rather than 500-ing the first `--catalog` ingest that
+touches the row. Parsing a spec with the real parser — not a cheap
+YAML well-formedness check — is deliberate: a spec that decodes but has
+no `paths`, a wrong OpenAPI version, or an unsupported `$ref` is
+exactly the "ships fine, fails at ingest" bug this guard catches.
+
+**Packaging:** the two resource dirs live inside the package tree
+under `src/meho_backplane/`, so hatch's `packages` glob already
+collects their data files into the wheel (same as the packaged
+`catalog.yaml` and the `.j2` grouping prompts). `backend/pyproject.toml`
+lists them in `[tool.hatch.build.targets.wheel].artifacts` to make the
+non-`.py` inclusion explicit; they are NOT in `force-include` (that
+table is for trees *outside* the package, like `backend/alembic` —
+re-including an in-package path there is a duplicate-archive build
+error).
+
+T1 (#1975) ships the mechanism plus a `_fixture/1.0` profile-backed
+row pointing at `_fixture_minimal.yaml` in each resource package, so
+the boot validator and the catalog-driven ingest path are exercised
+end to end.
+
+T2 (#1976) authored the real artifacts:
+
+* `vmware/9.0` → `specs/vmware_rest_minimal.yaml` (9 vCenter inventory
+  read ops under `/api`) + `profiles/vmware_rest_minimal.yaml`
+  (`session_login` auth, `/api/about` fingerprint).
+* `sddc/9.0` → `specs/sddc_manager_minimal.yaml` (9 SDDC Manager
+  inventory + lifecycle read ops under `/v1`) +
+  `profiles/sddc_manager_minimal.yaml` (`basic` auth,
+  `/v1/releases/system` fingerprint).
+
+Both are minimal, self-contained, `$ref`-local OpenAPI 3.0 documents
+carrying the SPDX `Apache-2.0` header — only the read ops MEHO surfaces,
+vendor-neutral descriptions, the vendor's verbatim path/param/field
+names (which the dispatcher must use). The rows flip from
+`catalog_ingest: spec-only` to `supported` and drop their `upstream`
+(now provenance pointers in `notes`), so `meho connector ingest
+--catalog vmware/9.0` / `sddc/9.0` works without a forced `--spec`
+upload. The named auth schemes match `docs/codebase/
+connector-auth-coverage.md`; the typed `VmwareRestConnector` /
+`SddcManagerConnector` still own runtime dispatch. The full vendor
+specs stay the `upstream` provenance pointers for a full-surface
+re-ingest off the appliance.
+
+Known limitation: the `session_login` named extractor (#1970) is
+currently hardcoded to the vRLI login shape (`POST /api/v2/sessions`,
+JSON body, `sessionId` → Bearer), which differs from vCenter's
+`POST /api/session` (Basic, `vmware-api-session-id` header). The
+vmware profile ingests and passes the boot validator, but full profiled
+*dispatch* parity for vCenter needs the session extractor to grow a
+vCenter variant — owned by the profiled-dispatch wiring
+(#1971/#1972), not this data task.
+
 ### T3 (LLM grouping) at a glance
 
 `run_llm_grouping()` opens its own transaction and runs:
@@ -412,6 +515,139 @@ Two operator-facing surfaces flag an unreplaced shim:
   the flag is still set (a shim-backed op may be pre-enabled ahead
   of its subclass landing), and resolver misses/ties fail soft to
   "no warning" rather than blocking the write.
+
+### `ProfiledRestConnector` + the tri-state `shim_kind` predicate (G0.28-T1 #1967)
+
+`ProfiledRestConnector` (`connectors/profiled.py`) is the **sibling** of
+`GenericRestConnector` — an `HttpConnector` subclass, **not** a
+`GenericRestConnector` subclass — that a reviewed declarative
+`ExecutionProfile` plugs into to make an ingested REST connector
+dispatchable (Initiative #1965; the profile schema/machinery land in
+T3–T7). T1 ships the class + the classification only; its `auth_headers`
+/ `fingerprint` / `probe` / `execute` raise `NotImplementedError` until
+the profile machinery is wired.
+
+The gate that makes this possible is the **tri-state dispatchability
+classifier** that replaces the binary `issubclass(GenericRestConnector)`
+predicate. Each connector class advertises a `_shim_kind`
+(`connectors/base.py`), read everywhere via the `shim_kind()` helper —
+never `issubclass`:
+
+| `shim_kind` | Class | Dispatchable? | Resolver tier |
+|---|---|---|---|
+| `"none"` | hand-coded (default) | yes | highest — a bespoke class always wins |
+| `"profiled"` | `ProfiledRestConnector` | yes (once profiled) | middle — beats a bare shim, loses to a hand-coded class |
+| `"bare"` | `GenericRestConnector` auto-shim | no (`auth_headers` raises) | lowest — demoted whenever any dispatchable candidate exists |
+
+`"profiled"` is its own tier (not folded into `"none"`) because a
+profiled connector carries a bounded `supported_version_range` derived
+from the ingested spec that can be *narrower* than a hand-coded class's
+broad range. Were it classified identically to a hand-coded class, the
+resolver's most-specific-version-match step would let a profiled
+connector out-specific — and so shadow — a bespoke connector for the same
+`(product, version)`, reinstating the #1750/#1798 product-shadowing
+footgun. The resolver's tier-demotion rung
+(`_demote_lower_dispatch_tiers`, `connectors/resolver.py`) runs *before*
+the specificity step and keeps `none > profiled > bare`, so a hand-coded
+class always wins regardless of version-range span or `priority`.
+
+The six former binary-predicate sites all read `shim_kind` now:
+`resolver._demote_lower_dispatch_tiers` (tri-state ladder),
+`dispatcher` (`is_auto_shim` = `shim_kind == "bare"` so only a bare shim
+yields `cause='unreplaced_auto_shim'`; a profiled connector that raises
+gets the generic `unsupported_feature`), `handrolled_class_for_impl_id`
+and `sibling_handrolled_impl_id` (defer to / name any *dispatchable*
+class, `shim_kind != "bare"`), `resolved_auto_shim_class` (warns only on
+a `"bare"` resolve), and `delete_connector._auto_shim_keys_for_triple`
+(auto-deregisters only `"bare"` shims; a profiled connector's
+registration lifecycle is owned by the profile-stamping path, T5 #1971).
+The `register_connector_v2` product↔impl_id round-trip hard-fail is
+class-agnostic, so it still rejects a divergent profiled registration.
+
+### Profile review-gate interlock (G0.28-T5 #1971)
+
+Stamping an `ExecutionProfile` makes a connector **dispatchable** but must
+never **auto-enable** dispatch — that property is security-load-bearing.
+`ReviewService.record_profile_stamp(connector_id, *, tenant_id,
+connector_class)` (`ingest/service.py`) is the stamp seam:
+
+- It registers the `ProfiledRestConnector` (carrying the vetted profile)
+  under the connector's `(product, version, impl_id)` v2 key, making it
+  the resolved class for dispatch.
+- It does **not** touch any op's `is_enabled` or any group's
+  `review_status`. Every ingested op stays `is_enabled=False` /
+  `review_status='staged'` exactly as ingested.
+- It writes one `meho.connector.profile_stamp` (`OP_PROFILE_STAMP`) audit
+  row on the **first** stamp; a re-stamp of an already-registered triple
+  is idempotent (returns `False`, no duplicate row). Passing a non-profiled
+  class (`shim_kind != "profiled"`) raises `TypeError`.
+
+The interlock that blocks dispatch is the same one that blocks a staged
+bare-shim op: `lookup_descriptor` (`operations/_lookup.py`) hard-filters
+`is_enabled = TRUE`, so a staged op is invisible to dispatch regardless of
+whether its connector is a bare shim, a profiled connector, or a
+hand-coded class. Registering a profiled connector changes *what class
+dispatch would resolve to*; it changes *nothing* about which ops are
+callable. An operator clears the gate per-op via `edit_op(..., is_enabled=
+True)` (or connector-wide via `enable_connector`), exactly as for any
+ingested connector.
+
+`edit_op`'s enable-time advisory (`enable_time_auto_shim_warnings`) is
+tri-state to match: a `"bare"` resolve still yields the
+`unreplaced_auto_shim` dead-end advisory; a `"profiled"` resolve yields a
+`profiled_but_unreviewed` advisory (`EditOpWarning.code`) confirming the
+enable — not the stamp — is what cleared the review gate and made the op
+callable. Both advisories decorate a write that already landed; neither
+blocks it.
+
+### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
+
+The enable-time advisory above surfaces the connector tier only at the
+moment an op is enabled. The list and review **read** surfaces carry the
+same classification as a standing field so an operator (or the operator
+console / CLI) can tell a working profiled connector from a dead bare
+shim without enabling anything.
+
+`resolve_authoring_kind(*, product, version, enabled_operation_count)`
+(`ingest/connector_registration.py`) replays the production resolver for
+the row's `(product, version)` line — the same tie-break ladder dispatch
+and the enable-time probes run — and projects the resolved class's
+`shim_kind` tier, crossed with the review-gate state, onto a wire
+vocabulary returned as `(kind, dispatchable)`:
+
+| `shim_kind` | gate | `kind` | `dispatchable` |
+|---|---|---|---|
+| `"none"` | n/a | `typed` | `True` |
+| `"bare"` (or resolver miss) | n/a | `ingested-shim` | `False` |
+| `"profiled"` | cleared (`enabled_operation_count > 0`) | `profiled` | `True` |
+| `"profiled"` | closed (zero enabled ops) | `profiled-but-unreviewed` | `False` |
+
+The four values land on two surfaces as **additive** fields — the
+existing dispatch-resolution `state` Literal (`ingested` / `registered`)
+is left unchanged, because `state` answers "do descriptor rows exist"
+while `kind` answers "what backs the connector and can it execute", and
+the two move independently:
+
+- `ConnectorListItem` (`ingest/api_schemas.py`), populated in
+  `list_connectors.py`. DB-backed `state="ingested"` rows derive
+  `kind` / `dispatchable` from the resolver replay; class-side
+  `state="registered"` rows derive `kind` from the registered class but
+  pin `dispatchable=False` (no descriptor rows ⇒ the dispatcher can't
+  resolve a call yet).
+- `ConnectorReviewPayload` (`ingest/payload.py`), populated in
+  `ReviewService._render_payload`; `enabled_operation_count` is computed
+  from the rendered ops.
+
+The list route (`GET /api/v1/connectors`) is untyped (returns a bare
+`dict` for per-row UUID serialisation), so the Go CLI's hand-maintained
+`listEntry` struct (`cli/internal/cmd/connector/list.go`) mirrors the two
+new keys; the review route is typed, so its CLI render reads the
+oapi-codegen'd fields. Both surfaces flag a non-dispatchable connector
+with a trailing `*` marker in the human table.
+
+The per-scheme **auth** detail of the `ExecutionProfile` is deliberately
+**not** surfaced on the review payload yet — deferred until #1969 freezes
+that schema (secret-handling sensitivity).
 
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
@@ -755,73 +991,73 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
   `<p>` is the **registry** product (the spelling the connector class
-  registers under, e.g. `sddc-manager`), not the parser-derived short one.
-  Rationale calls out the missing catalog entry so the operator knows
-  they need to source the OpenAPI spec themselves. Manual mode is the
-  same path G0.7-T5 already supports for one-off / not-yet-curated specs
-  (see `ingest.go`'s mode dispatch). The registry product is the right
-  spelling because the ingest write path keys two safety steps on the
-  supplied `--product` — `check_version_covered_by_registered_class`
-  (the version-coverage pre-flight) and `ensure_connector_class_registered`
-  — so the registry product is what lets them find the real
-  `SddcManagerConnector`; the short `sddc` would miss it, synthesise a
-  redundant `AutoShim_sddc_*`, and make the coverage pre-flight vacuous.
-  Register-time row reconciliation then persists the rows under the
-  dispatch product regardless (see "Product-slug reconciliation" below),
-  so the verb still round-trips to a dispatchable ingest. (Emitting the
-  registry product while the row advertised `product="sddc"` *was* the
-  claude-rdc-hetzner-dc#1136 false-success **before** that reconciliation
-  existed — the reconciliation is what closes it, not switching the verb
-  to the short product.)
+  registers under, e.g. `sddc`). Rationale calls out the missing catalog
+  entry so the operator knows they need to source the OpenAPI spec
+  themselves. Manual mode is the same path G0.7-T5 already supports for
+  one-off / not-yet-curated specs (see `ingest.go`'s mode dispatch). The
+  registry product is the right spelling because the ingest write path
+  keys two safety steps on the supplied `--product` —
+  `check_version_covered_by_registered_class` (the version-coverage
+  pre-flight) and `ensure_connector_class_registered` — so it must find
+  the real `SddcManagerConnector`. Post-#1814 the registry product
+  *equals* the parser-derived product (the family was realigned to short,
+  dispatch-canonical tokens), so the emitted `--product` round-trips its
+  connector_id and the ingest is dispatchable directly — no register-time
+  reconciliation. (Before #1814 the registry product was a long token
+  like `sddc-manager` while rows reconciled down to `sddc`; #1817 retired
+  that bridge once the family realigned. A divergent `--product` is now
+  rejected at the ingest boundary with a `422`; see "Product identity at
+  the ingest boundary" below.)
 
-The **catalog lookup** uses the **registry's** `(product, version)`,
-not the parser-derived shortening. The SDDC case is canonical: the
-catalog stores `product="sddc-manager"`, the listing emits
-`product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
-because that is what `meho connector ingest --catalog ...` resolves
-against. Looking up the parsed product would always miss for SDDC. Both
-the catalog-hit and catalog-miss branches emit a registry-side
-`--product` (the catalog-native triple, or the registry product) so the
-operator's ingest matches the registered class; register-time row
-reconciliation is what keeps the resulting connector dispatchable.
+The **catalog lookup** uses the **registry's** `(product, version)`.
+Post-#1814 that equals the parser-derived product for every connector
+(the catalog stores `product="sddc"` and the listing emits `"sddc"`),
+so `--catalog sddc/9.0` resolves cleanly and the operator's ingest
+matches the registered class and dispatches without any reconciliation.
 
-#### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
+#### Product identity at the ingest boundary (claude-rdc-hetzner-dc#1136, Initiative #1810)
 
-The remaining VCF-family connectors register their class under a *long*
-product (`SddcManagerConnector.product = "sddc-manager"`) while the
-dispatch/query surface derives a *short* product from the connector_id
-(`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the registry and
-dispatch spellings diverge. The five splits are
+The dispatch/query surface derives the product from the connector_id
+(`parse_connector_id("sddc-rest-9.0") -> "sddc"`), so the only product
+spelling that dispatches is the one the connector_id round-trips to.
+Historically the VCF family registered under a *long* product
+(`SddcManagerConnector.product = "sddc-manager"`) that diverged from
+that derived spelling, so an ingest under the long product landed rows
+the dispatcher never queried — the listing's round-trip integrity gate
+dropped them and the catalog reported `registered, 0 ops` even though
+the rows existed. The six historical splits were
 `hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
-`vcf-fleet/fleet`, `vcf-operations/vrops`. vRLI (`vrli-rest`) used to
-be a sixth split (`vcf-logs/vrli`); #1798 realigned it to a single
-canonical `product="vrli"` so it round-trips without reconciliation,
-and realigning the remaining five is deferred to Initiative #1810.
+`vcf-fleet/fleet`, `vcf-operations/vrops`, and `vcf-logs/vrli`.
 
-A manual `--spec` ingest persists `endpoint_descriptor` /
-`operation_group` rows keyed on the **operator-supplied** product, but
-the dispatch/query surface (`connector_exists` /
-`search_operations` / `list_operation_groups`) keys on the short,
-parser-derived product. Ingesting under the long product therefore
-landed rows the dispatcher never queried — the listing's round-trip
-integrity gate dropped them and the catalog reported
-`registered, 0 ops` even though the rows existed.
+That divergence is now **closed at the source**, not bridged:
 
-`register_ingested_operations` reconciles this: it normalises the row
-product to the dispatch-canonical spelling
-(`_reconciled_row_product` → `dispatch_product` in
-`operations/_lookup.py`) before persisting descriptors, and the
-pipeline's grouping pass keys on the same spelling so descriptors and
-groups agree. The version-coverage pre-flight and the auto-shim
-registration deliberately stay on the **supplied** (registry) product
-so the coverage check finds the real `SddcManagerConnector` class and no
-redundant shim is synthesised. For aligned connectors
-(`vmware`/`vmware-rest`) the normalisation is a no-op. Regression
+- #1798 realigned vRLI and #1814 (Initiative #1810) realigned the other
+  five so every connector registers under its short, dispatch-canonical
+  product directly.
+- #1816 promoted `register_connector_v2`'s product↔impl_id round-trip
+  check to a hard-fail, so a connector can no longer register under a
+  divergent product at all.
+- #1817 added a round-trip guard at the ingest route boundary
+  (`_assert_product_round_trips` in `api/v1/connectors_ingest.py`) that
+  rejects a supplied product not equal to the connector_id's
+  parser-derived product with a `422 product_impl_id_mismatch`, before
+  any spec is fetched or row written. With divergent ingests rejected
+  up front, the old register-time row reconciliation
+  (`_reconciled_row_product` / `dispatch_product`) became dead and was
+  retired: `register_ingested_operations` now persists rows under the
+  supplied product verbatim, and the grouping pass keys on the same
+  spelling.
+
+So the supplied product is the dispatch-canonical product on every
+accepted ingest — descriptors, groups, the auto-shim, and the
+version-coverage pre-flight all key on one spelling. Regression
 coverage:
-`tests/test_operations_register_ingested.py::test_ingest_under_registry_product_persists_dispatchable_rows`
-(parametrised over all five splits) and
-`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`
-(the verb round-trip).
+`tests/test_operations_register_ingested.py::test_aligned_product_ingest_persists_supplied_product`,
+`::test_divergent_product_ingest_trips_registration_hard_fail` (the
+backstop), the boundary 422 in
+`tests/test_api_v1_connectors_ingest.py::test_ingest_divergent_product_rejected_with_422`,
+and the verb round-trip in
+`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`.
 
 #### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
 
@@ -1430,8 +1666,9 @@ Both delegate to `ReviewService.delete_connector`
   `state="registered"` listing row instead.
 * **Zero-op stubs are registry-only deletes.** No rows anywhere + a
   matching auto-shim → pop + audit + 204. The registry match uses the
-  parsed-natural-key round-trip, so the VCF-family long↔short product
-  splits resolve (`sddc` rows ↔ `sddc-manager`-registered shim).
+  parsed-natural-key round-trip; post-#1814 every connector (and its
+  auto-shim) registers under the short, dispatch-canonical product, so
+  the rows and the shim share one spelling (`sddc` rows ↔ `sddc` shim).
 * **404 conflation.** Unknown id, cross-tenant probe, rows visible
   only under a scope the caller did not name, and repeat deletes all
   return the same 404 the other connector routes use.

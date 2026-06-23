@@ -26,12 +26,25 @@
     re-set the matching ``meho_csrf`` cookie on the same response, so the
     double-submit pair lines up after the modal swap rotated it.
 
+  Decided rows render read-only (#1827)
+    When the request has already been decided (``status != "pending"``) the
+    modal shows a decision banner ("Approved by X at T" / "Rejected by X at
+    T" / "Expired at T") and the Approve/Deny actions are NOT rendered --
+    there is nothing to act on. Only a pending row offers the decision
+    forms. This is what lets the history view's "View" button reuse the
+    same modal for a closed request. An expired row has a null ``decided_at``
+    (it was closed by timeout, not a decision), so the "at T" falls back to
+    ``expires_at`` for that branch.
+
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
-                             proposed_effect / created_at
+                             principal_act / proposed_effect / status /
+                             reviewed_by / work_ref / created_at /
+                             decided_at / expires_at
     self_approval_blocked -- bool: disable the Approve button
     self_approval_setting -- str: the break-glass env-var name to name in the label
     operator_sub          -- str: the reviewing operator's subject
+    status_pill_class     -- dict[str, str]: status -> DaisyUI badge modifier
     csrf_token            -- str: minted double-submit token
     error_status          -- int | None: a failed-decision HTTP status
     error_message         -- str | None: a failed-decision human detail
@@ -60,6 +73,38 @@
         <div>
           <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
           <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if request.status != "pending" %}
+      {# Decided row (#1827): a read-only banner naming the outcome + who/when.
+         Approve/Deny are not rendered below -- there is nothing to act on. #}
+      {% if request.status == "approved" %}
+        {% set decision_alert = "alert-success" %}
+        {% set decision_verb = "Approved" %}
+      {% elif request.status == "rejected" %}
+        {% set decision_alert = "alert-error" %}
+        {% set decision_verb = "Rejected" %}
+      {% else %}
+        {% set decision_alert = "alert-info" %}
+        {% set decision_verb = "Expired" %}
+      {% endif %}
+      {# An expired row is closed by timeout, not a decision: it carries
+         ``expires_at`` and a null ``decided_at``, so fall back to the
+         expiry deadline for the "Expired at T" timestamp (#1827 m1). #}
+      {% set decision_ts = request.expires_at if request.status == "expired" else request.decided_at %}
+      <div class="alert {{ decision_alert }} mt-4" role="status" aria-live="polite">
+        <div>
+          <h4 class="font-semibold">
+            {{ decision_verb }}
+            {% if request.reviewed_by %}by <span class="font-mono">{{ request.reviewed_by }}</span>{% endif %}
+          </h4>
+          {% if decision_ts %}
+            <p class="text-sm opacity-90">
+              <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
+            </p>
+          {% endif %}
         </div>
       </div>
     {% endif %}
@@ -93,7 +138,7 @@
       <pre class="mt-1 max-h-48 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap" aria-label="Proposed effect">{{ request.proposed_effect | tojson(indent=2) }}</pre>
     </div>
 
-    {% if self_approval_blocked %}
+    {% if request.status == "pending" and self_approval_blocked %}
       <p class="mt-3 text-xs text-base-content/55" role="note">
         You requested this action, so you cannot approve it
         (requester and approver must differ). Another operator must approve,
@@ -102,6 +147,8 @@
       </p>
     {% endif %}
 
+    {% if request.status == "pending" %}
+    {# Decision forms only for a pending row -- a decided row is read-only. #}
     <div class="modal-action mt-5 items-end gap-2">
       <label class="form-control mr-auto w-full max-w-xs">
         <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
@@ -154,6 +201,7 @@
         </button>
       </form>
     </div>
+    {% endif %}
   </div>
   <form method="dialog" class="modal-backdrop">
     <button type="button" onclick="document.getElementById('meho-approvals-modal').close()">close</button>

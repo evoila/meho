@@ -155,16 +155,133 @@ async def test_k8s_apply_preview_none_without_connector() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_builder_op_yields_none() -> None:
-    """An op without a registered builder parks with no preview."""
+async def test_no_builder_credential_class_op_yields_none() -> None:
+    """A credential-class op with no builder still parks with no preview.
+
+    Since #1856 a no-builder op gets the generic params-echo default, but
+    the credential-class suppression runs *first*: ``vault.kv.put`` is
+    ``credential_write``, so it collapses to the identifier-only default
+    (caller fallback) rather than echoing its (secret-bearing) params.
+    """
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="vault.kv.put"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"path": "secret/data/x"},
+        params={"path": "secret/data/x", "data": {"k": "v"}},
     )
     assert await build_proposed_effect(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_no_builder_op_echoes_params() -> None:
+    """A non-credential op with no builder echoes its params (#1856).
+
+    Every approval-gated op gets param-level legibility for free: the
+    requested params land under a ``params_echo`` envelope key (distinct
+    from a computed ``preview``) tagged with the op's sensitivity class.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={"realm": "master", "displayName": "Master Realm", "enabled": True},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect == {
+        "op_class": "write",
+        "params_echo": {
+            "realm": "master",
+            "displayName": "Master Realm",
+            "enabled": True,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_builder_op_empty_params_yields_none() -> None:
+    """Empty params collapse to the identifier-only default (no echo).
+
+    An empty params dict carries no more legibility than the bare
+    identifier default, so the generic echo declines (returns ``None``)
+    rather than storing an empty ``params_echo``.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.realm.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={},
+    )
+    assert await build_proposed_effect(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
+    """The generic echo scrubs secret-by-name params (#1856 redaction).
+
+    The connector-boundary engine matches secret *value* shapes but walks
+    a params Mapping key-by-key without inspecting the key, so a
+    structured ``{"password": "hunter2"}`` would otherwise echo verbatim.
+    The key-name scrub closes that gap -- recursively, including nested
+    dicts and lists -- while leaving non-secret params legible.
+    """
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={
+            "username": "alice",
+            "password": "hunter2",
+            "client_secret": "s3cr3t",
+            "profile": {"email": "alice@example.com", "token": "raw-token-value"},
+            "credentials": [{"type": "password", "value": "nested-secret"}],
+        },
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    echo = effect["params_echo"]
+    # Non-secret params stay legible.
+    assert echo["username"] == "alice"
+    assert echo["profile"]["email"] == "alice@example.com"
+    # Secret-by-name params are masked, including nested keys + the whole
+    # ``credentials`` subtree.
+    assert echo["password"] == "***REDACTED***"
+    assert echo["client_secret"] == "***REDACTED***"
+    assert echo["profile"]["token"] == "***REDACTED***"
+    assert echo["credentials"] == "***REDACTED***"
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secret_value_shapes() -> None:
+    """The generic echo runs the connector-boundary value-shape scrub too.
+
+    A JWT in an *un*-credential-named param (so the key-name scrub misses
+    it) is still caught by the connector-boundary redaction engine -- the
+    same pipeline the response path and the dispatch-request preview use.
+    """
+    # Built by concatenation so the literal never forms a single
+    # high-entropy token the secret scanner flags (it is a fake fixture).
+    jwt = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghij"
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.user.update"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        connector_id="keycloak-1.x",
+        params={"username": "alice", "note": jwt},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    echo = effect["params_echo"]
+    assert echo["username"] == "alice"
+    # The raw JWT never lands verbatim in the durable row.
+    assert jwt not in str(echo["note"])
 
 
 @pytest.mark.asyncio
@@ -240,22 +357,16 @@ async def test_builder_failure_reason_is_truncated_and_message_less_safe() -> No
 
 
 @pytest.mark.asyncio
-async def test_credential_class_op_preview_suppressed() -> None:
-    """A credential-class op never stores a raw preview (redaction-safe).
+async def test_credential_class_op_generic_echo_suppressed() -> None:
+    """A credential-class op with NO bespoke builder gets no generic echo.
 
-    Even with a registered builder, an op classifying as a credential
-    class (here ``k8s.secret.create`` → ``credential_write``) is
-    suppressed before the builder runs -- the durable approval row must
-    not carry secret material.
+    The generic params-echo default (#1856) can only do generic key-name /
+    value-shape redaction and is not trusted to scrub a connector-specific
+    secret shape, so an op classifying credential-class (here
+    ``k8s.secret.create`` → ``credential_write``) with no registered
+    builder collapses to the identifier-only default -- the durable
+    approval row must not carry secret material.
     """
-    builder_ran = False
-
-    async def _leaky(_ctx: PreviewContext) -> dict[str, Any] | None:
-        nonlocal builder_ran
-        builder_ran = True
-        return {"secret_value": "super-secret"}
-
-    register_preview_builder("k8s.secret.create", _leaky)
     ctx = PreviewContext(
         descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
         connector_instance=None,
@@ -264,7 +375,42 @@ async def test_credential_class_op_preview_suppressed() -> None:
         params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
     )
     assert await build_proposed_effect(ctx) is None
-    assert builder_ran is False, "sensitive-class gate must run before the builder"
+
+
+@pytest.mark.asyncio
+async def test_credential_class_op_bespoke_builder_runs() -> None:
+    """A *bespoke* builder runs even for a credential-class op (#1857).
+
+    Unlike the generic echo, a registered builder is trusted to own its
+    own field discipline (the keycloak user-create preview scrubs the
+    inline password before returning), so the credential-class
+    suppression does not apply to it -- the same trust model the
+    permission-preflight hook relies on. The builder's output is wrapped
+    in the ``{op_class, preview}`` envelope.
+    """
+    builder_ran = False
+
+    async def _scrubbed(_ctx: PreviewContext) -> dict[str, Any] | None:
+        nonlocal builder_ran
+        builder_ran = True
+        # A real builder returns a scrubbed view; the test stand-in echoes
+        # only non-secret identity so the contract is "builder ran + result
+        # surfaced", not "result blindly trusted".
+        return {"username": "svc-meho", "password": "***REDACTED***"}
+
+    register_preview_builder("k8s.secret.create", _scrubbed)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.secret.create"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"name": "creds", "namespace": "ns", "string_data": {"k": "v"}},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert builder_ran is True, "a bespoke builder must run for a credential-class op"
+    assert effect is not None
+    assert effect["op_class"] == "credential_write"
+    assert effect["preview"] == {"username": "svc-meho", "password": "***REDACTED***"}
 
 
 # ---------------------------------------------------------------------------

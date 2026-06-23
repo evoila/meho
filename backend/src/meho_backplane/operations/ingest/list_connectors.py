@@ -61,9 +61,13 @@ lookup with no in-product hint). ``state="ingested"`` rows omit it
 (``next_step=None``) because the dispatcher already resolves them.
 
 The catalog lookup uses the v2-registry's ``(product, version)``,
-not the parser-derived shortening, because the catalog stores SDDC
-under ``product="sddc-manager"`` while the listing emits
-``product="sddc"``. See :func:`_next_step_for_registered`.
+which since #1814 (Initiative #1810) realigned the ``_PRODUCT_SPLITS``
+family equals the parser-derived listing token for every shipped
+connector (the catalog rows were realigned to match — SDDC moved from
+``product="sddc-manager"`` to ``product="sddc"``). The registry product
+remains the right lookup key on principle: it is the catalog's join
+axis and would re-diverge from the listing token if a future connector
+reintroduced a split. See :func:`_next_step_for_registered`.
 """
 
 from __future__ import annotations
@@ -92,6 +96,7 @@ from meho_backplane.operations.ingest.catalog import (
     ConnectorSpecCatalog,
     load_catalog,
 )
+from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
 
 __all__ = ["list_ingested_connectors", "next_step_for_registered_connector"]
 
@@ -132,15 +137,16 @@ def next_step_for_registered_connector(
 
     *(product, version, impl_id)* is the triple
     :func:`parse_connector_id` derived from the caller's ``connector_id`` —
-    the same parsed shape the listing emits. The catalog lookup, however,
-    is keyed on the *registry* product (SDDC registers under
-    ``"sddc-manager"`` while the listing emits ``"sddc"``), so this helper
-    re-finds the matching v2-registry entry by the same lossless
+    the same parsed shape the listing emits. The catalog lookup is keyed
+    on the *registry* product, which since #1814 (Initiative #1810)
+    equals the parser-derived token for every shipped connector; this
+    helper re-finds the matching v2-registry entry by the same lossless
     round-trip the listing uses and feeds the registry triple to
-    :func:`_next_step_for_registered`. Returns ``None`` when no registry
-    entry round-trips to the parsed triple (the connector is genuinely
-    unknown, not merely un-ingested) so the caller can fall through to the
-    unknown-connector path.
+    :func:`_next_step_for_registered` (keying on the registry product
+    stays correct should a future connector reintroduce a split).
+    Returns ``None`` when no registry entry round-trips to the parsed
+    triple (the connector is genuinely unknown, not merely un-ingested)
+    so the caller can fall through to the unknown-connector path.
     """
     catalog = _load_catalog_or_none()
     for reg_product, reg_version, reg_impl_id in sorted(all_connectors_v2().keys()):
@@ -172,33 +178,28 @@ def _next_step_for_registered(
     """Build the ``next_step`` hint for a ``state="registered"`` row.
 
     Looks up the registry's ``(product, version)`` in the connector-spec
-    catalog (#743) — the right lookup key, since the catalog stores
-    ``product="sddc-manager"`` while the listing emits the parser-derived
-    ``"sddc"``, and ``("sddc", "9.0")`` would always miss for SDDC.
+    catalog (#743) — the right lookup key, the catalog's join axis. Since
+    #1814 (Initiative #1810) realigned the ``_PRODUCT_SPLITS`` family
+    (and the catalog rows with it), the registry product equals the
+    parser-derived listing token for every shipped connector, so the
+    lookup hits cleanly (e.g. ``("sddc", "9.0")`` now matches the
+    realigned SDDC catalog row).
 
     The **catalog-miss** verb emits ``registry_product`` — the spelling
-    the connector class actually registers under (``vcf-automation`` for
-    ``VcfAutomationConnector``, not the parser-derived ``vcfa``; this
-    matters only for the still-split family — vRLI / ``vrli-rest`` was
-    aligned to ``product="vrli"`` in G0.26-T4 #1798 and round-trips). Two
-    halves of the ingest write path are keyed on the **supplied**
-    ``--product``: ``check_version_covered_by_registered_class`` (the
-    version-coverage pre-flight) and ``ensure_connector_class_registered``.
-    Handing the operator the registry product is what lets both find the
-    real ``VcfAutomationConnector`` — emitting the short ``vcfa`` instead
-    would miss it, synthesise a redundant ``AutoShim_vcfa_*`` under the
-    wrong key, and make the coverage pre-flight vacuous (an out-of-range
-    ``--version`` would no longer be caught). The register-time row
-    reconciliation (``register_ingested_operations`` →
-    ``_reconciled_row_product``) then persists the rows under the
-    parser-derived dispatch product (``vcfa``) regardless, so the verb
-    still round-trips to a *dispatchable* connector — keying the
-    pre-flight and class lookup on ``registry_product`` is therefore both
-    correct and dispatchable. (Emitting ``vcf-automation`` while the row
-    carried ``product="vcfa"`` *was* the claude-rdc-hetzner-dc#1136
-    false-success before that reconciliation existed; the reconciliation
-    is what closes it, not switching the verb to the short product.) The
-    catalog-hit branches keep ``entry.product``.
+    the connector class registers under. Two halves of the ingest write
+    path are keyed on the **supplied** ``--product``:
+    ``check_version_covered_by_registered_class`` (the version-coverage
+    pre-flight) and ``ensure_connector_class_registered``. Handing the
+    operator the registry product is what lets both find the real
+    connector class and run a real coverage pre-flight. With the family
+    realigned the registry product is already the short, dispatch-
+    canonical token, so the verb round-trips to a dispatchable connector
+    directly. (Historically — before #1814 — the registry product was a
+    long token like ``vcf-automation`` while ingest reconciled rows down
+    to the short ``vcfa`` before persisting; #1814 realigned the family
+    and #1817 retired the reconciliation, so the registry product is now
+    the only spelling in play.) The catalog-hit branches keep
+    ``entry.product``.
 
     Three branches: **supported** catalog hit → ``--catalog`` verb;
     **spec-only** catalog hit → manual ``--spec`` verb on the catalog's
@@ -532,6 +533,12 @@ async def _emit_db_backed_rows(
         ):
             continue
         op_counts = op_counts_by_connector.get(key, {})
+        enabled_op_count = op_counts.get("enabled", 0)
+        kind, dispatchable = resolve_authoring_kind(
+            product=product,
+            version=version,
+            enabled_operation_count=enabled_op_count,
+        )
         items.append(
             ConnectorListItem(
                 connector_id=connector_id,
@@ -544,8 +551,10 @@ async def _emit_db_backed_rows(
                 enabled_group_count=row["enabled"],
                 disabled_group_count=row["disabled"],
                 operation_count=op_counts.get("total", 0),
-                enabled_operation_count=op_counts.get("enabled", 0),
+                enabled_operation_count=enabled_op_count,
                 state="ingested",
+                kind=kind,
+                dispatchable=dispatchable,
             ),
         )
     return items
@@ -679,6 +688,20 @@ def _maybe_build_class_only_item(
         # == parsed product) and the SDDC case (registry product
         # "sddc-manager" vs parsed "sddc").
         return None
+    # The authoring-mode ``kind`` still reflects what class backs the
+    # registration (e.g. a registered hand-coded class reads "typed"),
+    # but ``dispatchable`` is forced ``False`` regardless: a
+    # ``state="registered"`` row has no descriptor rows, so the
+    # dispatcher cannot resolve a call against it yet (#773) — the
+    # operator must ingest / register ops first. Resolver-replay
+    # against the registered class's ``(product, version)`` is what
+    # gives the kind; the gate has not been cleared (zero enabled ops),
+    # so a profiled registration reads "profiled-but-unreviewed".
+    kind, _resolved_dispatchable = resolve_authoring_kind(
+        product=parsed_product,
+        version=parsed_version,
+        enabled_operation_count=0,
+    )
     return ConnectorListItem(
         connector_id=connector_id,
         product=parsed_product,
@@ -692,6 +715,8 @@ def _maybe_build_class_only_item(
         operation_count=0,
         enabled_operation_count=0,
         state="registered",
+        kind=kind,
+        dispatchable=False,
         next_step=_next_step_for_registered(
             # Lookup against the registry triple (the catalog's native
             # key) rather than the parsed one — for SDDC the registry

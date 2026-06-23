@@ -33,10 +33,24 @@ contextvars the chassis middleware lifts into the row.
 
 from __future__ import annotations
 
+from meho_backplane.docs_search.answer_errors import (
+    ANSWER_ERROR_DETAIL,
+    LEG_CORPUS,
+    LEG_EXPAND,
+    LEG_MODEL,
+    LEG_SYNTHESIS,
+    AskDocsAnswerError,
+    classify_answer_error,
+)
 from meho_backplane.docs_search.backends import (
     SearchBackend,
     resolve_backend,
     resolve_backend_or_label,
+)
+from meho_backplane.docs_search.citation_links import (
+    CitationLink,
+    citation_link_payload,
+    resolve_citation_link,
 )
 from meho_backplane.docs_search.collection_access import (
     CollectionAccessError,
@@ -49,10 +63,16 @@ from meho_backplane.docs_search.collection_access import (
     resolve_entitled_ready_collection,
     resolve_entitled_ready_collections,
 )
+from meho_backplane.docs_search.expansion import (
+    MAX_QUERY_VARIANTS,
+    DocsQueryExpansionError,
+    expand_docs_query,
+)
 from meho_backplane.docs_search.fanout import (
     CollectionScope,
     ConflictingCollectionScopeError,
     parse_collection_scope,
+    retrieve_multi_query,
     rrf_merge,
     search_docs_fanout,
 )
@@ -72,7 +92,15 @@ from meho_backplane.docs_search.synthesis import (
 )
 
 __all__ = [
+    "ANSWER_ERROR_DETAIL",
+    "LEG_CORPUS",
+    "LEG_EXPAND",
+    "LEG_MODEL",
+    "LEG_SYNTHESIS",
+    "MAX_QUERY_VARIANTS",
     "NO_GROUNDED_ANSWER",
+    "AskDocsAnswerError",
+    "CitationLink",
     "CollectionAccessError",
     "CollectionDisabledError",
     "CollectionForbiddenError",
@@ -81,6 +109,7 @@ __all__ = [
     "ConflictingCollectionScopeError",
     "DocsAnswer",
     "DocsChunk",
+    "DocsQueryExpansionError",
     "DocsScope",
     "DocsSearchResult",
     "DocsSynthesisError",
@@ -89,12 +118,17 @@ __all__ = [
     "SearchBackend",
     "UnknownCollectionError",
     "build_docs_scope",
+    "citation_link_payload",
+    "classify_answer_error",
     "collection_capability_key",
+    "expand_docs_query",
     "parse_collection_scope",
     "resolve_backend",
     "resolve_backend_or_label",
+    "resolve_citation_link",
     "resolve_entitled_ready_collection",
     "resolve_entitled_ready_collections",
+    "retrieve_multi_query",
     "rrf_merge",
     "search_docs",
     "search_docs_fanout",

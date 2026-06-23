@@ -39,15 +39,15 @@ extracts from ``ROBOT_CONNECTOR_ID = "hetzner-rest-2026.04"``:
 ``impl_id = "hetzner-rest"``; ``product = impl_id[:first_dash] =
 "hetzner"``.
 
-**Distinct from :attr:`HetznerRobotConnector.product` (``"hetzner-robot"``)**
-— same discrepancy the SDDC Manager case documents
-(``SddcManagerConnector.product="sddc-manager"`` but rows carry
-``product="sddc"``). The ``OperationGroup`` and ``EndpointDescriptor``
-rows use ``product="hetzner"`` so the :class:`ReviewService` scope
-lookup (which calls ``parse_connector_id``) finds them. The connector
-class's ``product="hetzner-robot"`` governs v2 registry lookup
-(``(product, version, impl_id)`` triple) and is unrelated to the
-row-level product key.
+Since #1814 (Initiative #1810) this equals
+:attr:`HetznerRobotConnector.product` (``"hetzner"``) — the connector
+registers under the short, dispatch-canonical token. The ``OperationGroup``
+and ``EndpointDescriptor`` rows use ``product="hetzner"`` so the
+:class:`ReviewService` scope lookup (which calls ``parse_connector_id``)
+finds them, and the connector class's ``product="hetzner"`` governs the v2
+registry lookup (``(product, version, impl_id)`` triple) under the same
+token — the row-level product key and the registry key now agree. Same
+short token the SDDC Manager precedent uses (``"sddc"``).
 
 The 10 ops (paths cross-checked against the Hetzner Robot Webservice API
 at https://robot.hetzner.com/doc/webservice/en.html):
@@ -144,13 +144,14 @@ _log = structlog.get_logger(__name__)
 #: extracts from ``"hetzner-rest-2026.04"`` (first hyphen-segment of
 #: impl_id ``"hetzner-rest"``).
 #:
-#: **Distinct from :attr:`HetznerRobotConnector.product` (``"hetzner-robot"``).**
+#: Since #1814 (Initiative #1810) this equals
+#: :attr:`HetznerRobotConnector.product` (``"hetzner"``).
 #: ``parse_connector_id("hetzner-rest-2026.04")`` → ``impl_id="hetzner-rest"``,
 #: then ``product = impl_id[:first_dash] = "hetzner"``. The ``OperationGroup``
-#: and ``EndpointDescriptor`` rows store ``product="hetzner"``; the connector
-#: class's ``product="hetzner-robot"`` governs v2 registry lookup only.
-#: This mirrors the SDDC Manager case (``SddcManagerConnector.product=
-#: "sddc-manager"`` but rows carry ``product="sddc"``).
+#: and ``EndpointDescriptor`` rows store ``product="hetzner"`` and the
+#: connector class registers under ``product="hetzner"`` — both agree on the
+#: short, dispatch-canonical token the SDDC Manager precedent uses
+#: (``"sddc"``).
 ROBOT_PRODUCT: Final[str] = "hetzner"
 ROBOT_VERSION: Final[str] = "2026.04"
 ROBOT_IMPL_ID: Final[str] = "hetzner-rest"

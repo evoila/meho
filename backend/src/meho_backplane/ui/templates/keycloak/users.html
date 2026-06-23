@@ -1,0 +1,221 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Keycloak console -- user management (Initiative #1943, Task #1960).
+
+  The realm's human-user list plus the three high-blast write affordances
+  (create / reset-password / role-assign), all dispatched in-process through
+  ``call_operation`` against the PINNED ``connector_id="keycloak-admin-26.x"``
+  (never the bare ``keycloak`` slug).
+
+  RBAC: the list itself is OPERATOR-tier (``keycloak.user.list`` is
+  ``safety_level="safe"``). The three write affordances are surfaced ONLY to
+  a tenant_admin (``is_tenant_admin``); a plain operator never sees them
+  (soft-hide). The write POSTs are hard-gated server-side
+  (``_resolve_admin_or_403``) -- the soft-hide is a UX hint, not the
+  authority.
+
+  Secret handling: credential material is redacted from every row by the
+  connector; this render projects named fields only -- the raw
+  ``OperationResult`` envelope is NEVER dumped into the page.
+
+  Context keys: ``connector_id``, ``targets``, ``active_target``,
+  ``username_filter``, ``users``, ``error``, ``is_tenant_admin`` (see
+  ``keycloak/routes.py``).
+-#}
+{% extends "base.html" %}
+
+{% from "_icons.html" import icon %}
+
+{% block page_title %}Keycloak users &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-5" data-surface="keycloak-users">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Keycloak users</h1>
+      <p class="text-sm opacity-70">
+        List, create, reset passwords, and assign realm roles for the managed
+        realm's users. Credential material is redacted.
+      </p>
+    </div>
+    <a href="/ui/keycloak{% if active_target %}?target={{ active_target | urlencode }}{% endif %}"
+       class="btn btn-ghost btn-sm gap-1">
+      {{ icon("arrow-right", class="size-4") }}
+      Realm browser
+    </a>
+  </header>
+
+  {#- Target picker + optional username filter. The connector is fixed; the
+      operator picks WHICH Keycloak deployment + an optional username filter.
+      Options are tenant-scoped server-side. -#}
+  <form
+    class="grid gap-3 sm:grid-cols-[minmax(0,22rem)_minmax(0,18rem)_auto]"
+    hx-get="/ui/keycloak/users"
+    hx-target="body"
+    hx-push-url="true"
+  >
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Keycloak target</span>
+      <select
+        name="target"
+        class="select select-bordered select-sm w-full font-mono"
+        aria-label="Keycloak target"
+        hx-get="/ui/keycloak/users"
+        hx-target="body"
+        hx-trigger="change"
+        hx-push-url="true"
+      >
+        <option value="">Select a target…</option>
+        {% for t in targets %}
+          <option
+            value="{{ t.name }}"
+            {% if t.name == active_target %}selected{% endif %}
+          >{{ t.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="form-control">
+      <span class="label-text mb-1 text-xs opacity-70">Username filter</span>
+      <input
+        type="text"
+        name="username"
+        maxlength="512"
+        value="{{ username_filter }}"
+        class="input input-bordered input-sm w-full font-mono"
+        placeholder="operator-a"
+        aria-label="Username filter"
+        autocomplete="off"
+      />
+    </label>
+    <div class="flex items-end">
+      <button type="submit" class="btn btn-sm btn-primary gap-1">
+        {{ icon("search", class="size-4") }}
+        Filter
+      </button>
+    </div>
+  </form>
+
+  {% if not targets %}
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+      No Keycloak targets registered for this tenant.
+    </div>
+  {% elif not active_target %}
+    <div class="rounded-box border border-base-300 bg-base-100 px-4 py-8 text-center text-sm opacity-60">
+      Select a Keycloak target to list its users.
+    </div>
+  {% else %}
+    {% if is_tenant_admin %}
+      <div class="flex justify-end">
+        <button
+          type="button"
+          class="btn btn-sm btn-primary gap-1"
+          data-keycloak-user-create
+          hx-get="/ui/keycloak/users/create?target={{ active_target | urlencode }}"
+          hx-target="#keycloak-user-modal-container"
+          hx-swap="innerHTML"
+        >
+          {{ icon("user", class="size-4") }}
+          Create user
+        </button>
+      </div>
+    {% endif %}
+
+    {% if error %}
+      <div role="alert" class="alert alert-warning" data-keycloak-error>
+        <div>
+          <h3 class="text-sm font-semibold">Could not list users</h3>
+          <p class="text-xs">
+            Dispatch against <code>{{ active_target }}</code> failed:
+            <code>{{ error }}</code>
+          </p>
+        </div>
+      </div>
+    {% endif %}
+
+    <section aria-label="Users" data-keycloak-users>
+      <h2 class="mb-2 text-sm font-semibold opacity-80">
+        Users <span class="text-xs opacity-60">({{ users | length }})</span>
+      </h2>
+      {% if users %}
+        <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Enabled</th>
+                <th>Email verified</th>
+                {% if is_tenant_admin %}<th class="text-right">Actions</th>{% endif %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for user in users %}
+                <tr data-user-row data-user-uuid="{{ user.get('id') | default('', true) }}">
+                  <td class="font-mono">{{ user.get("username") | default("—", true) }}</td>
+                  <td class="text-xs opacity-70">{{ user.get("email") | default("—", true) }}</td>
+                  <td>
+                    {% if user.get("enabled") %}
+                      <span class="badge badge-success badge-xs">yes</span>
+                    {% else %}
+                      <span class="badge badge-ghost badge-xs">no</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if user.get("emailVerified") %}
+                      <span class="badge badge-ghost badge-xs">yes</span>
+                    {% else %}
+                      <span class="badge badge-ghost badge-xs">no</span>
+                    {% endif %}
+                  </td>
+                  {% if is_tenant_admin %}
+                    <td class="text-right">
+                      {% if user.get("id") %}
+                        {%- set uid = user.get("id") -%}
+                        <div class="flex justify-end gap-1">
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-xs"
+                            data-keycloak-reset-password
+                            hx-get="/ui/keycloak/users/{{ uid }}/reset-password?target={{ active_target | urlencode }}"
+                            hx-target="#keycloak-user-modal-container"
+                            hx-swap="innerHTML"
+                          >
+                            {{ icon("key-round", class="size-3.5") }}
+                            Reset password
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-xs"
+                            data-keycloak-role-assign
+                            hx-get="/ui/keycloak/users/{{ uid }}/roles/assign?target={{ active_target | urlencode }}"
+                            hx-target="#keycloak-user-modal-container"
+                            hx-swap="innerHTML"
+                          >
+                            {{ icon("shield-check", class="size-3.5") }}
+                            Assign roles
+                          </button>
+                        </div>
+                      {% endif %}
+                    </td>
+                  {% endif %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="rounded-box border border-base-300 bg-base-100 px-4 py-6 text-center text-sm opacity-60">
+          No users in this realm{% if username_filter %} matching <code>{{ username_filter }}</code>{% endif %}.
+        </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {#- Stable modal container -- each write affordance ``hx-get``s its
+      confirm modal here; the modal's confirm POST swaps the result fragment
+      into its own in-modal result region. -#}
+  <div id="keycloak-user-modal-container"></div>
+</section>
+{% endblock %}

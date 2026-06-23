@@ -1,0 +1,38 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connector-registry table-rows fragment (Initiative #1839 Task #1885 T1).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``registry.html`` on the initial
+      full-page render.
+    * As a standalone fragment ``GET /ui/connectors/registry`` returns when
+      the ``HX-Request`` header is set (status / product filter change).
+      HTMX outerHTML-swaps it into the existing ``#registry-table-body``.
+
+  Context contract:
+    * ``rows``            -- list[dict]: one per visible connector (see
+                            ``_registry_row.html`` for the per-row shape).
+    * ``is_tenant_admin`` -- bool: soft-hide the per-row action buttons.
+    * ``csrf_token``      -- str: minted double-submit token for the rows.
+-#}
+<tbody id="registry-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      {% with connector_id = row.connector_id,
+              oob = false,
+              is_tenant_admin = is_tenant_admin,
+              csrf_token = csrf_token %}
+        {% include "connectors/_registry_row.html" %}
+      {% endwith %}
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+        No connectors match the current filter. Ingest a vendor spec to
+        populate the registry.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

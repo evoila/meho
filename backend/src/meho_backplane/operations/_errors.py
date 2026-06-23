@@ -814,31 +814,52 @@ def result_connector_http_422(
 
 
 #: The non-2xx statuses the dispatcher classifies as an auth/session
-#: failure rather than the generic ``connector_error``. ``401`` is the
-#: load-bearing, connector-agnostic case: the hand-coded session
-#: connectors (NSX, vcf_logs, vmware_rest, ...) already retry once on a
-#: 401 internally (``_get_json_with_session_retry``), so a 401 that
-#: reaches the dispatcher means re-login *also* failed -- the credential
-#: is missing / invalid / expired in Vault, or the target's
-#: ``auth_model`` is wrong. ``440`` is vRLI's own session-expiry status
-#: (the literal code the operator saw flattened to ``connector_error
-#: (440)`` on the #1798 dispatch); the team opted to recognise it here so
-#: the appliance status that surfaced the gap maps to the same actionable
-#: class. Every other non-2xx (404, 5xx, 429, ...) is deliberately
-#: excluded and falls through to ``connector_error`` unchanged -- 429
-#: (rate-limit) is a separate deliberate follow-up, not an auth failure.
+#: failure rather than the generic ``connector_error`` **for a typed
+#: (hand-coded) connector**. ``401`` is the load-bearing, connector-
+#: agnostic case: the hand-coded session connectors (NSX, vcf_logs,
+#: vmware_rest, ...) already retry once on a 401 internally
+#: (``_get_json_with_session_retry``), so a 401 that reaches the dispatcher
+#: means re-login *also* failed -- the credential is missing / invalid /
+#: expired in Vault, or the target's ``auth_model`` is wrong. ``440`` is
+#: vRLI's own session-expiry status (the literal code the operator saw
+#: flattened to ``connector_error (440)`` on the #1798 dispatch); the team
+#: opted to recognise it here so the appliance status that surfaced the gap
+#: maps to the same actionable class. Every other non-2xx (404, 5xx, 429,
+#: ...) is deliberately excluded and falls through to ``connector_error``
+#: unchanged -- 429 (rate-limit) is a separate deliberate follow-up, not an
+#: auth failure.
+#:
+#: This global is the fallback used for typed connectors, which carry no
+#: :class:`~meho_backplane.connectors.profile.ExecutionProfile`. A
+#: *profiled* connector instead declares its expiry-status set once on its
+#: profile (``ExecutionProfile.expiry_statuses``, default ``{401}``; vRLI
+#: ``{401, 440}``) -- the single source #1973 unifies across the session
+#: harness and this arm -- and the dispatcher threads that set into
+#: :func:`is_auth_failed_status` via ``expiry_statuses``. Typed-connector
+#: classification is therefore unchanged.
 _AUTH_FAILED_STATUSES: frozenset[int] = frozenset({401, 440})
 
 
-def is_auth_failed_status(status_code: int) -> bool:
+def is_auth_failed_status(
+    status_code: int,
+    expiry_statuses: frozenset[int] | None = None,
+) -> bool:
     """Whether *status_code* is one the dispatcher treats as an auth failure.
 
-    The single source of truth for the recognised set
-    (:data:`_AUTH_FAILED_STATUSES`) so the dispatcher's narrowing arm and
-    this module agree on which statuses siphon into
+    The single source of truth for the recognised set so the dispatcher's
+    narrowing arm and this module agree on which statuses siphon into
     :func:`result_connector_auth_failed`.
+
+    *expiry_statuses* is the profile-declared set for a profiled connector
+    (``ExecutionProfile.expiry_statuses``); when supplied it is the
+    authoritative set for that dispatch, so the profile's declaration feeds
+    this classification arm and the session-retry harness from one source
+    (#1973). When ``None`` -- every typed (hand-coded) connector, which has
+    no profile -- the module global :data:`_AUTH_FAILED_STATUSES` is used,
+    leaving typed-connector classification unchanged.
     """
-    return status_code in _AUTH_FAILED_STATUSES
+    recognised = _AUTH_FAILED_STATUSES if expiry_statuses is None else expiry_statuses
+    return status_code in recognised
 
 
 def result_connector_auth_failed(
@@ -896,13 +917,14 @@ def result_connector_auth_failed(
     summary = (
         f"connector_auth_failed: the upstream returned an auth/session "
         f"failure (HTTP {status_code}) for {host}. The connector reached the "
-        f"host but its credential was rejected -- for the session connectors "
-        f"this is a re-login failure (they already retry once on a 401), so "
-        f"the credential is most likely missing, invalid, or expired in "
-        f"Vault, or the target's auth_model is wrong. Verify the target's "
-        f"Vault credential and its auth_model against what the connector "
-        f"expects, then retry. See docs/architecture/connector-auth.md for "
-        f"the connector auth contract and "
+        f"host but its credential or session was rejected. The session "
+        f"connectors re-login once on a session-expiry status (401 or vRLI's "
+        f"440) on their session-retry path, so when this reaches the "
+        f"dispatcher the credential is most likely missing, invalid, or "
+        f"expired in Vault, or the target's auth_model is wrong. Verify the "
+        f"target's Vault credential and its auth_model against what the "
+        f"connector expects, then retry. See docs/architecture/connector-auth.md "
+        f"for the connector auth contract and "
         f"docs/codebase/error-message-shape.md for the dispatch error "
         f"convention."
     )

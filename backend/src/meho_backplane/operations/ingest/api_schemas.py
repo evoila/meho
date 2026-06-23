@@ -427,6 +427,51 @@ class IngestResponse(BaseModel):
 ConnectorState = Literal["ingested", "registered"]
 
 
+#: Operator-facing authoring-mode discriminator for a connector row.
+#:
+#: G0.28-T6 (#1979). Orthogonal to :data:`ConnectorState` (the
+#: dispatch-resolution lifecycle): ``state`` answers "do descriptor rows
+#: exist for this connector_id", ``kind`` answers "what kind of connector
+#: backs it and can it actually authenticate + execute". The two are
+#: surfaced side by side rather than collapsed because they move
+#: independently -- a ``state="ingested"`` row can be any of the four
+#: kinds depending on which connector class the resolver lands on.
+#:
+#: Projected from the v2 resolver's
+#: :data:`~meho_backplane.connectors.base.ShimKind` tier for the row's
+#: ``(product, version)`` line (the same resolver replay the enable-time
+#: advisories run, G0.28-T5 #1971) crossed with the review-gate state:
+#:
+#: * ``"typed"`` -- the resolver lands on a hand-coded
+#:   :class:`~meho_backplane.connectors.base.Connector` subclass
+#:   (``shim_kind == "none"``). Fully dispatchable.
+#: * ``"ingested-shim"`` -- the resolver lands on a bare
+#:   :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+#:   auto-shim (``shim_kind == "bare"``), or no connector class resolves
+#:   at all. Non-dispatchable: its ``auth_headers`` / ``execute`` raise
+#:   :class:`NotImplementedError` (``connector_unsupported`` /
+#:   ``cause='unreplaced_auto_shim'``). The dead end #1627 surfaces.
+#: * ``"profiled"`` -- the resolver lands on a
+#:   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+#:   (``shim_kind == "profiled"``) backed by a reviewed
+#:   :class:`~meho_backplane.connectors.schemas.ExecutionProfile`, and the
+#:   review gate has been cleared (at least one op is enabled).
+#:   Dispatchable.
+#: * ``"profiled-but-unreviewed"`` -- the resolver lands on a
+#:   :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+#:   but no op has been enabled yet. Stamping the profile made the
+#:   connector dispatchable in principle, but the review gate (#1971) is
+#:   still closed -- nothing dispatches until the operator enables an op.
+#:   The sub-state #1971 previously surfaced only as an enable-time
+#:   warning is now visible on the list / review surfaces.
+ConnectorAuthoringKind = Literal[
+    "typed",
+    "ingested-shim",
+    "profiled",
+    "profiled-but-unreviewed",
+]
+
+
 class NextStep(BaseModel):
     """Self-describing in-product hint pointing at the verb that closes the workflow.
 
@@ -521,6 +566,21 @@ class ConnectorListItem(BaseModel):
     the manual-mode flags. Defaults to ``None`` so existing
     construction call sites (tests, MCP fakes) continue to compile
     without explicit assignment.
+
+    ``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator —
+    typed / ingested-shim / profiled / profiled-but-unreviewed — an
+    **additive** sibling to ``state`` (which is deliberately left
+    unchanged: it is the documented dispatch-resolution state machine
+    with its own consumers). ``dispatchable`` is the boolean roll-up of
+    the same projection: ``True`` for ``typed`` and ``profiled``,
+    ``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.
+    Together they let the operator console / CLI distinguish a working
+    profiled connector from a dead bare shim, which neither ``state``
+    nor the count fields could express. Both default to the bare-shim
+    reading (``kind="ingested-shim"``, ``dispatchable=False``) so
+    existing construction call sites (tests, MCP fakes) keep working;
+    the listing always sets them explicitly. See
+    :data:`ConnectorAuthoringKind`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -538,6 +598,8 @@ class ConnectorListItem(BaseModel):
     enabled_operation_count: int
     state: ConnectorState = "ingested"
     next_step: NextStep | None = None
+    kind: ConnectorAuthoringKind = "ingested-shim"
+    dispatchable: bool = False
 
 
 class ConnectorListResponse(BaseModel):
@@ -619,34 +681,47 @@ class EditOpWarning(BaseModel):
     """One advisory attached to an ``edit_op`` write (G0.23-T4 #1630).
 
     Emitted when the edit is legal and **was applied**, but the
-    operator should know it leads somewhere unpleasant. The only
-    producer today is the enable-time auto-shim probe:
-    ``is_enabled=True`` on an op whose resolved connector is the
-    unconfigured ingest auto-shim
-    (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
-    — dispatch is then guaranteed to fail with the
-    ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
-    structured error (G0.23-T1 #1627), so this warning surfaces the
-    dead end at enable time instead of one dispatch later.
+    operator should know something about what they just enabled. Two
+    producers, both keyed off the enable-time resolver probe that
+    classifies the connector ``is_enabled=True`` would dispatch through
+    (G0.28-T5 #1971 split the original single ``unreplaced_auto_shim``
+    code into a tri-state vocabulary mirroring
+    :data:`~meho_backplane.connectors.base.ShimKind`):
+
+    * ``unreplaced_auto_shim`` — the resolved connector is the
+      unconfigured bare ingest auto-shim
+      (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`,
+      ``shim_kind == "bare"``). Dispatch is then guaranteed to fail with
+      the ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+      structured error (G0.23-T1 #1627). The remediation is to write the
+      per-product Connector subclass; re-ingesting will not replace it.
+    * ``profiled_but_unreviewed`` — the resolved connector is a
+      :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+      (``shim_kind == "profiled"``). A profiled connector IS
+      dispatchable, so this is not a dead end — but stamping its
+      :class:`ExecutionProfile` deliberately did not auto-enable
+      dispatch (the review gate is the load-bearing interlock, #1971),
+      and this ``is_enabled=True`` write is the operator clearing that
+      gate. The advisory confirms that the enable — not the stamp — is
+      what made the op callable, so the operator owns the decision.
 
     ``code`` reuses the dispatch-time cause vocabulary verbatim
-    (``unreplaced_auto_shim``) so an operator — or an SDK — can
-    correlate the proactive warning with the reactive dispatch error
-    without a translation table. Declared as a one-member ``Literal``
-    so the OpenAPI schema names the vocabulary; future advisory codes
-    extend the union (an additive, client-compatible change).
+    (``unreplaced_auto_shim``) for the bare case so an operator — or an
+    SDK — can correlate the proactive warning with the reactive
+    dispatch error without a translation table. The ``Literal`` union is
+    extended additively (client-compatible) as new tiers gain advisories.
 
-    ``connector_class`` carries the resolved shim class's name
-    (``AutoShim_<product>_<version>_<impl_id>``) — the same key the
-    dispatch error's ``extras`` payload uses. ``message`` is the
-    operator-facing prose: what was applied, why dispatch will still
-    fail, and the remediation imperative (register the per-product
-    subclass; re-ingesting will not replace the shim).
+    ``connector_class`` carries the resolved connector class's name
+    (``AutoShim_<product>_<version>_<impl_id>`` for a bare shim; the
+    profiled subclass's ``__name__`` for the profiled case) — the same
+    key the dispatch error's ``extras`` payload uses. ``message`` is the
+    operator-facing prose: what was applied and the relevant remediation
+    or confirmation.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    code: Literal["unreplaced_auto_shim"]
+    code: Literal["unreplaced_auto_shim", "profiled_but_unreviewed"]
     connector_class: str
     message: str
 

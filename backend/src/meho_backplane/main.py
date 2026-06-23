@@ -67,6 +67,7 @@ from meho_backplane.api.v1.agent_principals import (
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
+from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.broadcast_overrides import (
@@ -130,6 +131,7 @@ from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
     validate_catalog_registry_coverage,
+    validate_shipped_artifacts,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
@@ -291,6 +293,9 @@ async def _run_lifespan_shutdown() -> None:
         log.exception("dispose_broadcast_blocking_client_failed")
 
 
+# code-quality-allow: linear boot-step sequence at the 100-line limit;
+# #1975 adds one ordered guard whose extraction would obscure the
+# documented startup order.
 async def _run_lifespan_startup() -> None:
     """Eager init phase of the lifespan: probes, pools, registrars, model.
 
@@ -352,6 +357,9 @@ async def _run_lifespan_startup() -> None:
     # ``version: "3"``) would have crashed the lifespan instead of
     # shipping silently.
     validate_catalog_registry_coverage()
+    # Shipped spec/profile dry-run parse (#1964 T1 #1975): a malformed
+    # packaged spec_resource / profile_resource crashes boot. See the fn.
+    validate_shipped_artifacts()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)
@@ -650,6 +658,19 @@ app.include_router(api_v1_retrieve_retire_router)
 # `audit_op_class` contextvar overrides. The MCP tool (T4) and CLI verb
 # (T5) reuse the same `docs_search.search_docs` service this route fronts.
 app.include_router(api_v1_search_docs_router)
+# G4.6-T2 (#1917) — grounded, cited answer at `POST /api/v1/ask_docs` (the
+# corpus grounded-answer pipeline, Initiative #1912). The synthesis sibling
+# of `search_docs`: same operator role + per-collection `meho-docs:<key>`
+# entitlement + readiness gate (403 / 409 / 422 mirror `search_docs`),
+# single-collection only (no `collections` fan-out), runs the #1916
+# expand→retrieve-per-variant→RRF→synthesize pipeline in-process and returns
+# `{answer, citations[]}` with #1919-resolved citation links. The #1918
+# per-leg structured error model maps onto 502 (`synthesis_malformed`) / 503
+# (`expand_failed` / `corpus_unavailable` / `model_unavailable`) — the SAME
+# `{detail, leg, cause, message}` envelope the MCP `ask_docs` tool returns on
+# `error.data`. Binds the central audit row under the canonical
+# `meho.docs.ask` op_id + `read` class.
+app.include_router(api_v1_ask_docs_router)
 # G4.6-T6 (#1555) — doc-collection readiness probe + lifecycle. Tenant-
 # admin-gated probe (success-only write-back of liveness onto the row,
 # mirroring probe_target → Target.fingerprint) + enable/disable

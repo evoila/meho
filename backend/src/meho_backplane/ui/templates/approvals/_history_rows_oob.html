@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Approvals "Load more" append response (G10.8-T #1827).
+
+  Returned by ``GET /ui/approvals/list?partial=rows`` — the offset-append
+  fetch the "Load more" button issues. It is deliberately NOT the full
+  ``_history.html`` console (tabs + filter + a nested
+  ``#approvals-history-rows`` + pager): appending that whole block into the
+  rows ``<ul>`` with ``hx-swap="beforeend"`` would nest a second console and
+  duplicate every ``id`` (the original defect).
+
+  Instead this emits exactly two things:
+
+    1. The bare ``<li>`` rows for the requested page, which HTMX appends to
+       the existing ``#approvals-history-rows`` list (the button's own
+       ``beforeend`` target).
+    2. An out-of-band re-render of the pager (``hx-swap-oob`` via
+       ``_history_pager.html``) so the "Load more" button's URL advances to
+       the NEXT ``next_offset`` (or collapses to "No more requests" on the
+       last page). HTMX processes ``hx-swap-oob`` elements out of band
+       regardless of the primary target, so the pager updates even though
+       the primary swap targets the rows list.
+
+  No ``params`` / ``params_hash`` are projected onto these rows.
+
+  Context variables: the same history context the route builds (see
+  ``_history.html``).
+-#}
+{% include "approvals/_history_rows.html" %}
+{% with oob = True %}{% include "approvals/_history_pager.html" %}{% endwith %}

@@ -24,23 +24,27 @@ modules — the single-source discipline #407 called out for the
 from __future__ import annotations
 
 import json
-from typing import Any, Final
+from typing import Any, Final, Literal, NoReturn, cast
 from uuid import UUID
 
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
+    AmbiguousConnectorScopeError,
     InvalidSchemaError,
     InvalidSpecError,
     LlmOutputInvalid,
     OpIdCollision,
+    ProductImplIdMismatch,
     UncoveredVersionLabel,
     UnsupportedSpecError,
     UpstreamNotSpecError,
     VersionMismatchError,
+    build_connector_scope_ambiguous_detail,
     build_invalid_schema_detail,
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -79,6 +83,40 @@ _TENANT_ID_PROPERTY: Final[dict[str, Any]] = {
         "tenant requests are rejected."
     ),
 }
+
+
+#: Optional closed-set scope selector shared by the two scope-resolving
+#: read/write tools (``review`` / ``enable_reads``). Disambiguates a
+#: ``connector_id`` that maps to BOTH a tenant-curated row and a built-in
+#: row (G0.26-T? #2029): ``"tenant"`` targets the operator's tenant row,
+#: ``"builtin"`` the built-in scope. Omitted → the #1801 fail-loud
+#: ``-32602`` ambiguity error. The built-in scope keeps its
+#: ``tenant_admin`` gate, re-checked in the service resolver.
+_PREFER_PROPERTY: Final[dict[str, Any]] = {
+    "type": ["string", "null"],
+    "enum": ["tenant", "builtin", None],
+    "description": (
+        "Disambiguate a connector_id that resolves to BOTH a "
+        "tenant-curated row and a built-in (tenant_id IS NULL) row. "
+        "'tenant' targets the operator's tenant row; 'builtin' the "
+        "built-in scope (tenant_admin only). Omit for the default "
+        "fail-loud ambiguous-scope error carrying the candidate list."
+    ),
+}
+
+
+def _coerce_prefer(raw: Any) -> Literal["tenant", "builtin"] | None:
+    """Narrow the ``prefer`` selector from JSON-RPC to the service Literal.
+
+    The JSON-Schema-validated value is always ``"tenant"`` /
+    ``"builtin"`` / ``None`` (the ``enum`` in :data:`_PREFER_PROPERTY`
+    constrains it before this handler runs), so the :func:`cast` is
+    sound — it documents that the schema validator, not this helper,
+    owns the value-space check, the same trust ``_list_handler`` places
+    in its validated ``status`` literal. Keeps the handler symmetric
+    with :func:`_coerce_tenant_id`.
+    """
+    return cast("Literal['tenant', 'builtin'] | None", raw)
 
 
 def _coerce_tenant_id(raw: Any) -> UUID | None:
@@ -123,7 +161,11 @@ def _model_dump_json_safe(model: Any) -> dict[str, Any]:
 #: :mod:`meho_backplane.mcp.tools.connector_ingest` and the dispatch table
 #: can't fall out of sync — adding a sibling means touching both.
 #: ``VersionMismatchError`` / ``UncoveredVersionLabel`` are the #777
-#: originals; the remaining six complete the pattern (#1534).
+#: originals; the next six complete the pattern (#1534);
+#: ``ProductImplIdMismatch`` joins them (#1817) — when the round-trip
+#: guard moved into ``IngestionPipelineService.ingest`` so the MCP path
+#: fails closed too, surfacing the divergence as a structured ``-32602``
+#: rather than a silent persist (it never reached this tool before).
 SPEC_ERROR_TYPES: Final = (
     VersionMismatchError,
     UncoveredVersionLabel,
@@ -133,6 +175,7 @@ SPEC_ERROR_TYPES: Final = (
     InvalidSpecError,
     OpIdCollision,
     LlmOutputInvalid,
+    ProductImplIdMismatch,
 )
 
 
@@ -178,6 +221,36 @@ def raise_invalid_params_for_spec_error(exc: Exception) -> None:
         data = build_op_id_collision_detail(exc)
     elif isinstance(exc, LlmOutputInvalid):
         data = build_llm_output_invalid_detail(exc)
+    elif isinstance(exc, ProductImplIdMismatch):
+        data = build_product_impl_id_mismatch_detail(exc)
     else:  # pragma: no cover — defensive; caller funnels only SPEC_ERROR_TYPES
         raise exc
     raise McpInvalidParamsError(str(exc), data=data) from exc
+
+
+def raise_invalid_params_for_ambiguous_scope(
+    exc: AmbiguousConnectorScopeError,
+) -> NoReturn:
+    """Map :class:`AmbiguousConnectorScopeError` onto :class:`McpInvalidParamsError`.
+
+    The two scope-resolving curation tools (``meho.connector.review`` /
+    ``meho.connector.enable_reads``) raise this when one ``connector_id``
+    maps to **both** a tenant-curated row and a built-in row, so the
+    shared resolver cannot pick one without guessing (G0.26-T1 #1801).
+    The REST siblings already render it as a structured ``409 Conflict``
+    via :func:`build_connector_scope_ambiguous_detail`; without this the
+    MCP path falls through the dispatcher's generic ``except Exception``
+    and surfaces as a bare ``-32603 "internal error:
+    AmbiguousConnectorScopeError"`` with the candidate list discarded —
+    the same MCP↔REST asymmetry the spec-error siblings closed (#777 /
+    #1534). MCP's only structured handler-error channel is
+    ``-32602``/:class:`McpInvalidParamsError`, so the wire code differs
+    from REST's 409 while the ``data`` envelope is identical (one builder,
+    shared with the route), letting an agent read ``error.data.candidates``
+    and re-issue with the disambiguating ``tenant_id`` (the operator's own
+    UUID, or ``null`` for the built-in scope).
+    """
+    raise McpInvalidParamsError(
+        str(exc),
+        data=build_connector_scope_ambiguous_detail(exc),
+    ) from exc

@@ -96,32 +96,30 @@ this is a Harbor API guarantee, not a MEHO filter.
 ### `targets.yaml` entry (greenfield)
 
 ```yaml
-# targets.yaml excerpt — Harbor product entry (G3.5-T10 #622)
-- name: prod-harbor
-  product: harbor
-  host: harbor.rdc.evoila.io
-  port: 443
-  secret_ref: kv/data/harbor/prod-harbor
-  auth_model: shared_service_account
-  notes: "RDC production Harbor 2.11 registry"
+# prod-harbor.yaml — Harbor product entry (G3.5-T10 #622)
+targets:
+  - name: prod-harbor
+    product: harbor
+    host: harbor.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/harbor/prod-harbor
+    auth_model: shared_service_account
+    notes: "RDC production Harbor 2.11 registry"
 ```
 
 ### CLI import
 
+`meho targets import` takes a `targets.yaml` **file** (there is no `meho
+targets create` verb in v0.2 — `import` is the CLI's only write path):
+
 ```bash
-meho targets import \
-  --name prod-harbor \
-  --product harbor \
-  --host harbor.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/harbor/prod-harbor \
-  --auth-model shared_service_account
+meho targets import prod-harbor.yaml   # add --update to PATCH an existing target
 ```
 
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name prod-harbor --json | jq '{product, version, reachable}'
+meho targets probe prod-harbor --json | jq '{product, version, reachable}'
 # expected: {"product": "harbor", "version": "v2.11.0", "reachable": true}
 ```
 

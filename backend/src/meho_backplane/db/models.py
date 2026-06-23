@@ -175,6 +175,18 @@ Schema decisions for :class:`Target`:
   exclusive with it (enforced at the API layer). Added by migration
   ``0045``; nullable, so the add-column is safe on a populated table
   with no backfill. The dispatch path that consumes it lands in #1784.
+* ``tls_server_name`` — Text, nullable. Per-target TLS SNI /
+  certificate-verification hostname, decoupled from ``host`` (the TCP
+  connect address + wire ``Host:`` header). ``NULL`` (the default)
+  means "derive the SNI / verify name from ``host`` as today". When
+  set, dispatch keeps ``base_url=https://<host>`` (connect + ``Host`` =
+  IP) and threads ``extensions={"sni_hostname": <name>}`` so the cert
+  is verified against the override name -- letting an operator keep
+  ``verify_tls=true`` + a cert-CN-pinned FQDN while sending
+  ``Host: <IP>`` (the config a cert-CN-pinning appliance accepts).
+  Orthogonal to ``verify_tls`` / ``tls_ca_pin`` (no mutual exclusion).
+  Added by migration ``0050``; nullable, so the add-column is safe on a
+  populated table. The dispatch path that consumes it lands in #2002.
 * ``extras`` — JSON NOT NULL DEFAULT ``{}``. JSONB on PostgreSQL
   (binary, GIN-friendly), generic JSON on SQLite. Escape hatch for
   per-product structured data without DDL changes.
@@ -922,6 +934,26 @@ class Target(Base):
     # unpinned). The dispatch path that consumes it lives in
     # :mod:`meho_backplane.connectors.adapters.http`.
     tls_ca_pin: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-target TLS SNI / certificate-verification hostname, decoupled
+    # from ``host`` (the TCP connect address + wire ``Host:`` header).
+    # ``NULL`` (the default) means "derive the SNI / verify name from
+    # ``host`` as today", so existing rows keep their behaviour
+    # byte-identical. When set, dispatch keeps ``base_url=https://<host>``
+    # (connect + ``Host`` = the IP a cert-CN-pinning appliance accepts)
+    # and threads ``request(..., extensions={"sni_hostname": <name>})``
+    # so httpcore drives ``server_hostname`` from the override -- the TLS
+    # handshake offers it as SNI and verifies the presented cert's
+    # CN/SAN against it. This lets an operator keep ``verify_tls=true``
+    # (and optionally ``tls_ca_pin``) while routing ``Host: <IP>``,
+    # instead of dropping to the insecure ``verify_tls=false`` to dodge a
+    # hostname mismatch (#2002). Orthogonal to ``verify_tls`` /
+    # ``tls_ca_pin`` -- it moves the verification *name*, not the trust
+    # material or the verify on/off switch -- so there is no mutually
+    # exclusive combination to reject. Added by migration ``0050``;
+    # nullable, so the add-column is safe on a populated table with no
+    # backfill. The dispatch path that consumes it lives in
+    # :mod:`meho_backplane.connectors.adapters.http`.
+    tls_server_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     extras: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,

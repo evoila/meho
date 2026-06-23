@@ -311,14 +311,35 @@ The per-op preview is opt-in via a builder registry in
   operator + target + params.
 - At the park point, `dispatcher._handle_needs_approval` resolves the
   connector instance (same path the execute branch uses) and calls
-  `build_proposed_effect`. The result — wrapped as
-  `{op_class, preview}` — is passed to `create_pending_request` as
-  `proposed_effect`; `None` falls back to the identifier-only default.
+  `build_proposed_effect`. A bespoke builder's result — wrapped as
+  `{op_class, preview}` — becomes the base envelope; an op with no bespoke
+  builder gets the **generic params-echo default**
+  (`{op_class, params_echo}`, see invariant 1); when the builder declines
+  (returns `None`) the dispatcher's `_build_proposed_effect` seam
+  substitutes the identifier-only base. Onto whichever base it has, the
+  seam stamps the catalog `descriptor.safety_level` (#1855) before handing
+  the envelope to `create_pending_request` as `proposed_effect` (see
+  "Catalog `safety_level` on every envelope" below). `_build_proposed_effect`
+  returns `None` — and the caller stores its own bare identifier-only
+  default — only when connector resolution / hook execution itself raises.
 
 Three invariants make the hook safe to wire on the park path:
 
-1. **Opt-in / no regression.** An op with no registered builder yields
-   `None` and parks exactly as before.
+1. **Generic echo default, opt-in bespoke builder (#1856); safety_level
+   on every envelope (#1855).** An op *without* a registered builder no
+   longer yields `None` — it gets a **generic params-echo default**: the
+   requested params are echoed under a `params_echo` envelope key (distinct
+   from a computed `preview`), redaction-safe (see invariant 3), so every
+   approval-gated op (keycloak, nsx, sddc, vcfa, …) gets param-level
+   legibility for free instead of showing the approver only `{op_id,
+   connector_id, target_id}`. A registered builder still wins (no
+   double-echo). The identifier-only default is reached only when the op is
+   credential-class *and has no bespoke builder* (the generic echo is
+   suppressed — see invariant 3), its params are empty, or a registered
+   builder declines. Independently, the dispatcher seam layers the catalog
+   `safety_level` on top of whichever base it has (below), so the parked
+   row always names its severity — the durable row is no longer
+   byte-identical to the pre-#1855 identifier-only default.
 2. **Fail-soft, never silent.** A builder that raises (a dry-run that
    hits the API and errors, a preview listing read that can't execute)
    never blocks the park — the safety-relevant action always proceeds.
@@ -334,11 +355,28 @@ Three invariants make the hook safe to wire on the park path:
    the hook.
 3. **Redaction-safe.** `build_proposed_effect` classifies the op via
    `classify_op` (the same single-sourced sensitivity classification used
-   for broadcast/audit redaction, #1401) and **suppresses** the preview
-   for any credential class (`credential_read` / `credential_mint` /
-   `credential_write`) before the builder even runs — a durable row
-   never carries secret material. Builders are themselves expected to
-   return identity-only summaries.
+   for broadcast/audit redaction, #1401) and **suppresses the generic
+   params-echo default** for any credential class (`credential_read` /
+   `credential_mint` / `credential_write`) — the generic echo can only do
+   generic key-name / value-shape redaction and is not trusted to scrub a
+   connector-specific secret shape, so a credential-class op with no
+   bespoke builder collapses to the identifier-only default. A **bespoke
+   builder is the deliberate exception (#1857)**: like the
+   permission-preflight hook, it is trusted to own its own field
+   discipline and runs even for a credential-class op (e.g. the keycloak
+   user-create preview scrubs the inline password via the connector's own
+   `redact_secret_fields` before returning). Builders are themselves
+   expected to return identity-only / scrubbed summaries. The generic
+   params-echo default (#1856) scrubs the echoed params with **two**
+   passes that reuse the existing redaction discipline:
+   `_scrub_secret_param_keys` masks values keyed by a well-known
+   credential name (`password` / `client_secret` / `token` / … —
+   recursively, since the connector-boundary engine walks Mappings
+   key-by-key without inspecting the *key*), then
+   `apply_connector_boundary_redaction` (the same per-`(connector_id,
+   tenant, op)` pipeline the response path and the dispatch-request
+   preview run) catches secret *value* shapes (JWTs, bearer tokens,
+   kubeconfig blobs, labelled `key=value` strings in a single leaf).
 
 The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
@@ -360,13 +398,53 @@ the same read-only listing helpers the handlers use — `{..., resolved,
 total_resolved}` with the list capped — and the single-entity
 composites echo their params; see
 [`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
-approval previews". Further connectors register their own builders as
-needed.
+approval previews". The Keycloak write ops register bespoke builders in
+`connectors/keycloak/ops_write_preview.py` (#1857): `keycloak.realm.create`
+populates `{resource, realm, representation}`, `keycloak.user.create`
+populates `{resource, username, realm, representation}` (the inline
+password scrubbed to `***REDACTED***` via the connector's own
+`redact_secret_fields` — and it runs *despite* `keycloak.user.create`
+classifying as `credential_write`, the bespoke-builder exception to
+invariant 3). `redact_secret_fields` covers the Keycloak representation
+secret fields *and* the generic credential key spellings (notably
+`password`, case-insensitively), so the bespoke builders are at least as
+strict as the generic echo they bypass — a
+`RealmRepresentation.smtpServer.password` (or any `password`-keyed field
+in an `additionalProperties` representation) never reaches the durable
+row. `keycloak.role_mapping.assign` populates
+`{resource, username, id, realm, granted_roles}` (the granted realm role
+names). Further connectors register their own builders as needed.
+
+## Catalog `safety_level` on every envelope (#1855)
+
+The per-op preview hook is opt-in, so before #1855 a parked op with no
+registered builder carried only `{op_id, connector_id, target_id}` — a
+reviewer could not tell a `dangerous` op (e.g. `keycloak.realm.create`)
+from a `caution` op (e.g. `keycloak.user.create`) on the row alone.
+
+`dispatcher._build_proposed_effect` now stamps the catalog
+`descriptor.safety_level` onto **every** parked op's `proposed_effect`,
+alongside `op_class` / `preview` (and `permission_preflight` when that
+hook fired). The value (`safe` / `caution` / `dangerous`) is read
+straight off the operation descriptor — op-identity metadata, never
+recomputed — so the severity on the durable row is exactly what the
+catalog declares.
+
+It is layered at the **dispatcher seam**, not inside the per-op
+`build_proposed_effect` builder, so it rides three bases uniformly: the
+built `{op_class, preview}` envelope, the identifier-only default for
+no-builder / declined ops, and the `preview_unavailable` fail-soft
+marker. The `op_class` / `preview` / marker envelope built by
+`build_proposed_effect` itself is unchanged; `safety_level` is added on
+top. The only path that does **not** carry it is the bare identifier
+default the caller stores when `_build_proposed_effect` returns `None`
+(connector-resolution / hook fault) — that degraded path is unchanged.
 
 ## Permission preflight hook (#1504)
 
-The `proposed_effect` *preview* above is suppressed for credential-class
-ops — but a credential write (`vault.kv.put`) is precisely the op most
+The generic `proposed_effect` *preview* above is suppressed for
+credential-class ops without a bespoke builder — but a credential write
+(`vault.kv.put`) is precisely the op most
 likely to be **denied** by Vault *after* a human spends a four-eyes
 review approving it (the `meho-mcp` role grants `read` but no
 `create`/`update` on the write path). To surface that at park time
@@ -386,10 +464,11 @@ A permission preflight is distinct from a preview:
 
 At the park point, `dispatcher._build_proposed_effect` runs **both**
 hooks and merges them: the preview (or the identifier-only default when
-there is no preview) is the base, and the preflight result is attached
-under `proposed_effect["permission_preflight"]`. Both are opt-in and
-fail-soft — a preflight that raises degrades to no banner; the park
-always proceeds.
+there is no preview) is the base, the preflight result is attached
+under `proposed_effect["permission_preflight"]` when it fired, and the
+catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
+opt-in and fail-soft — a preflight that raises degrades to no banner;
+the park always proceeds.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -441,6 +520,43 @@ tools from non-admins in `tools/list`, and the dispatcher re-checks
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
 verbs that hit the REST surface via the generated typed client.
+
+### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
+
+A session-BFF surface (cookie session + CSRF double-submit, not the
+Bearer REST routes — a browser carrying only the BFF cookie cannot auth
+those). Every read + decision derives `tenant_id` from the validated
+`UISessionContext` only, and calls the `approval_queue` service
+in-process (same in-process-audit binding the REST routes get).
+
+| Verb | Path | Purpose |
+|---|---|---|
+| `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
+| `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
+| `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). |
+| `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
+| `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
+
+The console is **read-only over substrate that already exists** — it adds
+no new service call, no `api/v1` Bearer route, no CLI verb, and no
+migration. It does, however, register its `/ui/*` routes into the FastAPI
+OpenAPI document (the UI routers are not `include_in_schema=False`), so a
+new or changed `/ui/approvals*` route — e.g. the `partial=rows` query the
+"Load more" pager added — DOES enter `cli/api/openapi.json` and the
+generated client. Re-snapshot the OpenAPI doc (`cd cli && make
+snapshot-openapi && make generate`) whenever a `/ui/approvals*` route is
+added or its signature changes, or the "CLI API snapshot freshness" check
+goes red. The internal `params` / `params_hash`
+columns are **never** projected onto any UI view, the badge, or a
+broadcast frame: the `render.project_request_to_view` projection omits
+them by construction. Live updates ride the app-shell bell's body-wide
+`meho:approval-bump` / `meho:approval-decided` events — the history list
+re-fetches its active tab on them, so a decision made elsewhere drops out
+of the open Pending tab without a reload. The decision **reason** lives on
+the `audit_log` decision row, not the `ApprovalRequest` row, so the
+history view shows who/when (`reviewed_by` / `decided_at`) but not the
+free-text reason (an `audit_log` read deferred to a follow-up).
 
 ## Broadcast events (T5)
 

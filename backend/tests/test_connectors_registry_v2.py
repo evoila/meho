@@ -15,7 +15,6 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-import structlog.testing
 
 from meho_backplane.connectors import (
     Connector,
@@ -28,37 +27,7 @@ from meho_backplane.connectors import (
     register_connector,
     register_connector_v2,
 )
-from meho_backplane.connectors import registry as registry_module
 from meho_backplane.connectors.registry import clear_registry, registered_product_tokens
-
-
-def _private_log_capture(
-    monkeypatch: pytest.MonkeyPatch,
-) -> structlog.testing.LogCapture:
-    """Bind an xdist-safe private LogCapture onto ``registry._log``.
-
-    Mirrors the pattern in :mod:`tests.test_connector_registration` (#1254):
-    :func:`structlog.testing.capture_logs` swaps the *global* processor
-    list, which a concurrent :func:`structlog.configure` (lifespan boot /
-    observability fixtures) can race so the divergence WARN lands on the
-    real (cached) logger's stdout chain instead of the capture list. The
-    private-logger pattern is process-local, contextvar-free, and
-    auto-restored on teardown.
-    """
-    capture = structlog.testing.LogCapture()
-    private_log = structlog.wrap_logger(
-        structlog.PrintLogger(),
-        processors=[capture],
-    )
-    monkeypatch.setattr(registry_module, "_log", private_log)
-    return capture
-
-
-def _divergence_events(
-    capture: structlog.testing.LogCapture,
-) -> list[dict[str, Any]]:
-    return [e for e in capture.entries if e.get("event") == "connector_product_impl_id_divergence"]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -248,58 +217,57 @@ def test_register_v2_keyword_only_arguments() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Product↔impl_id round-trip invariant — G0.26-T4 (#1798)
+# Product↔impl_id round-trip invariant — G0.26-T4 (#1798), hard-fail G0.27/T2 (#1816)
 #
-# register_connector_v2 logs a WARN (never raises) when the declared
-# product does not equal the product parse_connector_id derives from the
-# connector_id. The check must NOT crash _eager_import_connectors, so the
-# five sanctioned _PRODUCT_SPLITS legacy connectors WARN at boot rather
-# than fail (their realignment is Initiative #1810). After the vRLI
-# alignment, vRLI no longer warns.
+# register_connector_v2 RAISES (RuntimeError) when the declared product
+# does not equal the product parse_connector_id derives from the
+# connector_id. #1798 introduced this as an advisory WARN (it could not
+# raise while the five _PRODUCT_SPLITS connectors still diverged at boot);
+# #1814 (Initiative #1810) realigned those five to their short token (and
+# #1798 realigned vRLI), so nothing diverges anymore and #1816 promotes
+# the check to a hard-fail: a future divergent registration crashes
+# _eager_import_connectors at boot instead of silently shadowing the
+# connector behind an auto-shim. There is no allowlist.
 # ---------------------------------------------------------------------------
 
 
-def test_register_v2_warns_on_divergent_product(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A registration whose product != parser-derived product emits a WARN.
+def test_register_v2_raises_on_divergent_product() -> None:
+    """A registration whose product != parser-derived product RAISES.
 
     ``product="vcf-logs"`` with ``impl_id="vrli-rest"`` parses to
     ``"vrli"`` — the historical split shape that shadowed VcfLogsConnector
-    behind an auto-shim. The WARN names both spellings and points at the
-    follow-up Initiative; the registration still succeeds (advisory, not
-    a hard fail).
+    behind an auto-shim. Post-#1816 this is a hard fail: register_connector_v2
+    raises RuntimeError naming the connector, the declared product, and the
+    parser-derived product, and the divergent triple is NOT registered.
     """
-    capture = _private_log_capture(monkeypatch)
+    with pytest.raises(RuntimeError) as exc_info:
+        register_connector_v2(
+            product="vcf-logs",
+            version="9.0",
+            impl_id="vrli-rest",
+            cls=_FakeConnector,
+        )
 
-    register_connector_v2(
-        product="vcf-logs",
-        version="9.0",
-        impl_id="vrli-rest",
-        cls=_FakeConnector,
-    )
+    msg = str(exc_info.value)
+    # The message names the connector class and both product spellings, and
+    # gives the actionable remediation.
+    assert "_FakeConnector" in msg
+    assert "vcf-logs" in msg
+    assert "vrli" in msg
+    assert "Align product" in msg
 
-    # The registration succeeded despite the divergence.
-    assert ("vcf-logs", "9.0", "vrli-rest") in all_connectors_v2()
-
-    divergence = _divergence_events(capture)
-    assert len(divergence) == 1, f"expected exactly one divergence WARN; got {capture.entries!r}"
-    entry = divergence[0]
-    assert entry["log_level"] == "warning"
-    assert entry["product"] == "vcf-logs"
-    assert entry["derived_product"] == "vrli"
-    assert entry["impl_id"] == "vrli-rest"
-    # The message points operators at the family-realignment Initiative.
-    assert "#1810" in entry["message"]
+    # The divergent registration was rejected — nothing landed in the table.
+    assert ("vcf-logs", "9.0", "vrli-rest") not in all_connectors_v2()
 
 
-def test_register_v2_silent_on_aligned_product(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A registration whose product round-trips parse_connector_id emits no WARN.
+def test_register_v2_aligned_product_registers_without_raising() -> None:
+    """A registration whose product round-trips parse_connector_id is accepted.
 
     ``product="vmware"`` with ``impl_id="vmware-rest"`` parses back to
     ``"vmware"`` — the aligned shape (and the shape vRLI now takes under
-    ``product="vrli"`` / ``impl_id="vrli-rest"``). No divergence event.
+    ``product="vrli"`` / ``impl_id="vrli-rest"``). No raise; the triple
+    registers.
     """
-    capture = _private_log_capture(monkeypatch)
-
     register_connector_v2(
         product="vmware",
         version="9.0",
@@ -307,15 +275,11 @@ def test_register_v2_silent_on_aligned_product(monkeypatch: pytest.MonkeyPatch) 
         cls=_FakeConnector,
     )
 
-    assert _divergence_events(capture) == []
+    assert ("vmware", "9.0", "vmware-rest") in all_connectors_v2()
 
 
-def test_register_v2_silent_on_aligned_single_segment_product(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A single-segment impl_id (``vault`` / ``vault``) round-trips and is silent."""
-    capture = _private_log_capture(monkeypatch)
-
+def test_register_v2_aligned_single_segment_product_registers_without_raising() -> None:
+    """A single-segment impl_id (``vault`` / ``vault``) round-trips and is accepted."""
     register_connector_v2(
         product="vault",
         version="1.x",
@@ -323,19 +287,18 @@ def test_register_v2_silent_on_aligned_single_segment_product(
         cls=_FakeConnector,
     )
 
-    assert _divergence_events(capture) == []
+    assert ("vault", "1.x", "vault") in all_connectors_v2()
 
 
-def test_register_v2_wildcard_row_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``(product, "", "")`` wildcard / v1-compat row never warns.
+def test_register_v2_wildcard_row_is_exempt() -> None:
+    """The ``(product, "", "")`` wildcard / v1-compat row never raises.
 
     An empty version/impl_id renders a parser-incompatible connector_id
     with no derived product to compare; the check skips it so the dual
     registration pattern (versioned + wildcard) some connectors use does
-    not emit a spurious divergence on the wildcard leg.
+    not fail closed on the wildcard leg — even when the wildcard product
+    would diverge from a hypothetical parse.
     """
-    capture = _private_log_capture(monkeypatch)
-
     register_connector_v2(
         product="vcf-logs",
         version="",
@@ -343,19 +306,17 @@ def test_register_v2_wildcard_row_is_silent(monkeypatch: pytest.MonkeyPatch) -> 
         cls=_FakeConnector,
     )
 
-    assert _divergence_events(capture) == []
+    assert ("vcf-logs", "", "") in all_connectors_v2()
 
 
-def test_register_v2_vrli_alignment_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real VcfLogsConnector, aligned to product=\"vrli\", no longer warns.
+def test_register_v2_vrli_alignment_does_not_raise() -> None:
+    """The real VcfLogsConnector, aligned to product=\"vrli\", registers cleanly.
 
     Direct regression pin for the vRLI half of #1798: registering the
-    shipped connector under its (now canonical) triple must be silent,
-    proving the divergence the WARN catches is gone for vRLI.
+    shipped connector under its (now canonical) triple must not raise,
+    proving the divergence the hard-fail catches is gone for vRLI.
     """
     from meho_backplane.connectors.vcf_logs import VcfLogsConnector
-
-    capture = _private_log_capture(monkeypatch)
 
     register_connector_v2(
         product=VcfLogsConnector.product,
@@ -365,22 +326,24 @@ def test_register_v2_vrli_alignment_is_silent(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert VcfLogsConnector.product == "vrli"
-    assert _divergence_events(capture) == []
+    assert (VcfLogsConnector.product, VcfLogsConnector.version, VcfLogsConnector.impl_id) in (
+        all_connectors_v2()
+    )
 
 
-def test_sanctioned_splits_warn_but_register_without_crashing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The five sanctioned _PRODUCT_SPLITS connectors WARN yet still register.
+def test_realigned_splits_register_without_raising() -> None:
+    """The five formerly-split connectors now register WITHOUT raising.
 
-    The relaxed criterion: the invariant must NOT raise, otherwise the
-    live-validated sanctioned splits (sddc-manager / vcf-automation /
-    vcf-fleet / vcf-operations / hetzner-robot) would fail at
-    ``register_connector_v2`` → :func:`_eager_import_connectors` →
-    regress five shipped connectors at boot. Each real split class is
-    registered here under its real triple inside a log capture: every one
-    WARNs, none raises, and every one lands in the registry. vRLI, now
-    aligned to ``product="vrli"``, does **not** warn.
+    #1814 (Initiative #1810) realigned sddc-manager → ``sddc``,
+    vcf-automation → ``vcfa``, vcf-fleet → ``fleet``, vcf-operations →
+    ``vrops`` and hetzner-robot → ``hetzner``, so each connector's
+    declared ``product`` now equals the token ``parse_connector_id``
+    derives from its ``impl_id``/``version``. Registering each real class
+    under its real triple must therefore NOT trip the hard-fail —
+    together with vRLI (#1798) the whole hand-coded family round-trips.
+    (Before #1814 these five diverged; under #1816's hard-fail a single
+    surviving divergence would crash this registration, so this test
+    doubles as the proof the realignment is complete.)
 
     Registering the real classes directly (rather than calling
     :func:`_eager_import_connectors`, which is a ``sys.modules``-cached
@@ -394,7 +357,7 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
     from meho_backplane.connectors.vcf_logs import VcfLogsConnector
     from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 
-    split_classes = [
+    realigned_classes = [
         SddcManagerConnector,
         VcfAutomationConnector,
         VcfFleetConnector,
@@ -402,10 +365,23 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
         HetznerRobotConnector,
     ]
 
-    capture = _private_log_capture(monkeypatch)
+    # The short, dispatch-canonical tokens #1814 realigned each class to.
+    expected_products = {
+        "SddcManagerConnector": "sddc",
+        "VcfAutomationConnector": "vcfa",
+        "VcfFleetConnector": "fleet",
+        "VcfOperationsConnector": "vrops",
+        "HetznerRobotConnector": "hetzner",
+    }
+    for cls in realigned_classes:
+        assert cls.product == expected_products[cls.__name__], (
+            f"{cls.__name__} should register under {expected_products[cls.__name__]!r}, "
+            f"got {cls.product!r}"
+        )
 
-    for cls in (*split_classes, VcfLogsConnector):
-        # Must not raise — WARN-not-fail is the whole contract.
+    # The hard-fail raises on any divergence, so a clean pass through the
+    # whole family is the assertion: every class round-trips.
+    for cls in (*realigned_classes, VcfLogsConnector):
         register_connector_v2(
             product=cls.product,
             version=cls.version,
@@ -413,24 +389,75 @@ def test_sanctioned_splits_warn_but_register_without_crashing(
             cls=cls,
         )
 
-    # Every class registered despite any divergence WARN.
+    # Every class registered.
     snapshot = all_connectors_v2()
-    for cls in (*split_classes, VcfLogsConnector):
+    for cls in (*realigned_classes, VcfLogsConnector):
         assert snapshot[(cls.product, cls.version, cls.impl_id)] is cls
-
-    divergent_products = {e["product"] for e in _divergence_events(capture)}
-    # The five sanctioned legacy splits warn; vRLI (now product="vrli")
-    # does not.
-    assert divergent_products == {
-        "sddc-manager",
-        "vcf-automation",
-        "vcf-fleet",
-        "vcf-operations",
-        "hetzner-robot",
-    }, f"unexpected divergence set: {divergent_products!r}"
     assert VcfLogsConnector.product == "vrli"
-    assert "vcf-logs" not in divergent_products
-    assert "vrli" not in divergent_products
+
+
+def test_eager_import_connectors_boots_clean_with_all_connectors_aligned() -> None:
+    """Every shipped connector self-registers via _eager_import_connectors without raising.
+
+    The acceptance pin for the hard-fail: importing every
+    ``connectors/<product>/`` subpackage (each of which calls
+    ``register_connector`` / ``register_connector_v2`` at module
+    top-level) — the same path the chassis lifespan runs at boot — must
+    complete without tripping the product↔impl_id hard-fail. With #1814 +
+    #1798 having realigned the whole family, none diverges; if ANY
+    connector still did, this would raise :exc:`RuntimeError`, which is
+    exactly the early-warning the promotion buys.
+
+    Runs in a **fresh subprocess** rather than evicting + re-importing the
+    connector subpackages in-process. The re-import re-executes every
+    connector module body, which re-populates module-level aggregate
+    registries that live *outside* the connector subpackages — notably the
+    composite preview-builder maps (``vmware_rest``'s
+    ``_WRITE_PREVIEW_BUILDERS`` and the central ``_PREVIEW_BUILDERS``,
+    argocd's equivalents, …) — with FRESH function objects. An in-process
+    re-import therefore leaks those fresh builders into whichever connector
+    preview test xdist later schedules on the same worker, breaking its
+    ``builder is registered`` identity assertion (observed as the vmware
+    ``_vm_create_preview`` and argocd ``park_*`` preview flakes —
+    scheduling-dependent in which victim fires). A subprocess has its own
+    interpreter, so this one-time re-execution cannot mutate the worker's
+    globals at all — the boot path is exercised in true isolation, exactly
+    once, the way the chassis lifespan runs it.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    # A divergent connector trips _assert_product_impl_id_round_trips at its
+    # module-level registration -> RuntimeError -> non-zero exit in the child.
+    script = textwrap.dedent(
+        """
+        from meho_backplane.connectors.registry import (
+            _eager_import_connectors,
+            registered_product_tokens,
+        )
+
+        _eager_import_connectors()
+
+        tokens = registered_product_tokens()
+        assert tokens, "expected connectors to self-register at import"
+        required = {"sddc", "vcfa", "fleet", "vrops", "hetzner", "vrli"}
+        missing = required - tokens
+        assert not missing, f"canonical split-family tokens missing: {sorted(missing)}"
+        print("BOOT_CLEAN_OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0 and "BOOT_CLEAN_OK" in result.stdout, (
+        "eager import of all shipped connectors did not boot clean "
+        f"(exit={result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +538,7 @@ def test_all_connectors_v2_returns_copy() -> None:
 
 
 def test_sddc_manager_connector_registered_under_v2_triple() -> None:
-    """SddcManagerConnector package registers under (sddc-manager, 9.0, sddc-rest) at import.
+    """SddcManagerConnector package registers under (sddc, 9.0, sddc-rest) at import.
 
     Uses :func:`_ensure_registered_v2` so the test passes whether the
     connector package was imported (and self-registered) before
@@ -523,7 +550,7 @@ def test_sddc_manager_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(SddcManagerConnector)
     snapshot = all_connectors_v2()
-    key = ("sddc-manager", "9.0", "sddc-rest")
+    key = ("sddc", "9.0", "sddc-rest")
     assert key in snapshot
     assert snapshot[key] is SddcManagerConnector
 
@@ -567,7 +594,7 @@ def test_argocd_connector_registered_under_v2_triple_and_wildcard() -> None:
 
 
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
-    """VcfAutomationConnector package registers under (vcf-automation, 9.0, vcfa-rest).
+    """VcfAutomationConnector package registers under (vcfa, 9.0, vcfa-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor
     tests above.
@@ -576,13 +603,13 @@ def test_vcf_automation_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfAutomationConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-automation", "9.0", "vcfa-rest")
+    key = ("vcfa", "9.0", "vcfa-rest")
     assert key in snapshot
     assert snapshot[key] is VcfAutomationConnector
 
 
 def test_vcf_operations_connector_registered_under_v2_triple() -> None:
-    """VcfOperationsConnector package registers under (vcf-operations, 9.0, vrops-rest).
+    """VcfOperationsConnector package registers under (vrops, 9.0, vrops-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
@@ -591,7 +618,7 @@ def test_vcf_operations_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfOperationsConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-operations", "9.0", "vrops-rest")
+    key = ("vrops", "9.0", "vrops-rest")
     assert key in snapshot
     assert snapshot[key] is VcfOperationsConnector
 
@@ -615,7 +642,7 @@ def test_vcf_logs_connector_registered_under_v2_triple() -> None:
 
 
 def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
-    """VcfFleetConnector package registers under (vcf-fleet, 9.0, fleet-rest).
+    """VcfFleetConnector package registers under (fleet, 9.0, fleet-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
@@ -624,7 +651,7 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(VcfFleetConnector)
     snapshot = all_connectors_v2()
-    key = ("vcf-fleet", "9.0", "fleet-rest")
+    key = ("fleet", "9.0", "fleet-rest")
     assert key in snapshot
     assert snapshot[key] is VcfFleetConnector
 
@@ -660,7 +687,7 @@ def test_pfsense_connector_registered_under_v2_triple() -> None:
 
 
 def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
-    """HetznerRobotConnector package registers under (hetzner-robot, 2026.04, hetzner-rest).
+    """HetznerRobotConnector package registers under (hetzner, 2026.04, hetzner-rest).
 
     Same idempotent-registration pattern as the SDDC Manager / Harbor
     tests above.
@@ -669,7 +696,7 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
 
     _ensure_registered_v2(HetznerRobotConnector)
     snapshot = all_connectors_v2()
-    key = ("hetzner-robot", "2026.04", "hetzner-rest")
+    key = ("hetzner", "2026.04", "hetzner-rest")
     assert key in snapshot
     assert snapshot[key] is HetznerRobotConnector
 
@@ -800,53 +827,3 @@ def test_registered_product_tokens_returns_fresh_set_each_call() -> None:
     snapshot = registered_product_tokens()
     snapshot.add("phantom")
     assert "phantom" not in registered_product_tokens()
-
-
-# ---------------------------------------------------------------------------
-# G0.18-T2 (#1355) PRODUCT_ALIASES + canonical_product_token
-#
-# Unit-level coverage of the alias bridge (mapping, identity,
-# pass-through, idempotency, key-vs-value disjointness) lives in the
-# sibling :mod:`test_connectors_registry` so it sits next to the v1
-# registry tests that share the import. The check below is the only
-# v2-specific assertion: that no alias key collides with a *live v2-
-# registered* product token. The v1 sibling test pins the alias
-# map's keys vs values; this one pins the alias keys vs the actually
-# imported v2 registry, which catches a future SDDC-style connector
-# that registers under ``product="sddc"`` without dropping the alias
-# first.
-# ---------------------------------------------------------------------------
-
-
-def test_product_aliases_keys_are_disjoint_from_live_v2_registry() -> None:
-    """No PRODUCT_ALIASES key is also a live v2-registered product token.
-
-    Invariant that keeps :func:`canonical_product_token` idempotent
-    against the imported registry, not just the static alias map:
-    if ``"x"`` is both an alias key and a registered product, then
-    ``canonical_product_token("x")`` returns the mapped value while
-    a registered ``"x"`` is also a legal canonical token — two
-    spellings the validator accepts under different paths, which is
-    exactly the split the bridge is supposed to prevent. The check
-    eager-imports every connector package so the live (lifespan-
-    populated) registry is what's compared, not the
-    snapshot-restored test-only state. A future connector
-    registering under an alias key (e.g. someone adding a real
-    ``product="sddc"`` connector without first dropping the alias)
-    trips here at unit-test time.
-    """
-    from meho_backplane.connectors.registry import (
-        PRODUCT_ALIASES,
-        _eager_import_connectors,
-    )
-
-    _eager_import_connectors()
-    canonical = registered_product_tokens()
-    overlap = canonical & set(PRODUCT_ALIASES.keys())
-    assert overlap == set(), (
-        f"PRODUCT_ALIASES keys {overlap!r} are also registered product "
-        "tokens; an alias key must never also be a canonical spelling, "
-        "otherwise canonical_product_token loses idempotency. "
-        "Remove the alias or rename the conflicting connector "
-        "registration."
-    )

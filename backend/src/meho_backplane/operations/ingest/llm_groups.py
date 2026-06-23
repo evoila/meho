@@ -84,15 +84,19 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     PROPOSE_GROUPS_SYSTEM_PROMPT,
     GroupProposal,
     LlmClient,
+    LlmJsonResult,
+    StructuredJsonLlmClient,
     build_connector_id,
     chunk_sequence,
     expected_llm_call_count,
+    extract_json_object,
     load_existing_groups,
     load_unassigned_ops,
     parse_assignment_response,
     parse_proposal_response,
     render_assign_ops_prompt,
     render_propose_groups_prompt,
+    strip_code_fences,
 )
 
 __all__ = [
@@ -103,10 +107,14 @@ __all__ = [
     "GroupingConfig",
     "GroupingResult",
     "LlmClient",
+    "LlmJsonResult",
+    "StructuredJsonLlmClient",
     "expected_llm_call_count",
+    "extract_json_object",
     "render_assign_ops_prompt",
     "render_propose_groups_prompt",
     "run_llm_grouping",
+    "strip_code_fences",
 ]
 
 _log = structlog.get_logger(__name__)

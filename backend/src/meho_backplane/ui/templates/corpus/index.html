@@ -53,6 +53,10 @@
     </div>
   </header>
 
+  {# ---------- Tab strip: Search | Collections (#1882) ---------- #}
+  {% set active_tab = "search" %}
+  {% include "corpus/_tabs.html" %}
+
   {# ---------- Collection picker + query form ---------- #}
   <div class="card bg-base-100 border-base-300 border shadow-sm">
     <div class="card-body py-4">
@@ -111,9 +115,47 @@
               required
             />
           </label>
+          {# ---------- Mode toggle: Retrieve (search_docs) vs Ask (ask_docs) ----------
+             #1917: the surface offers two modes over the same query. "Retrieve"
+             (the default, original #1777 behaviour) returns the ranked cited
+             chunks via search_docs; "Ask" composes a grounded, cited ANSWER via
+             the ask_docs pipeline (and fails open to chunks on a synthesis
+             failure). A radio group rides the form, so the selected ``mode`` is
+             submitted with the query; the backend defaults to "search" for any
+             unrecognised value. ``aria-label`` on the fieldset names the choice
+             for assistive tech. #}
+          <fieldset class="form-control" aria-label="Result mode">
+            <div class="label">
+              <span class="label-text">Mode</span>
+            </div>
+            <div class="join" role="radiogroup" aria-label="Result mode">
+              <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">
+                <input
+                  type="radio"
+                  name="mode"
+                  value="search"
+                  class="sr-only"
+                  {% if mode != "ask" %}checked{% endif %}
+                  aria-label="Retrieve cited chunks"
+                />
+                Retrieve
+              </label>
+              <label class="btn btn-sm join-item gap-1 has-[:checked]:btn-primary">
+                <input
+                  type="radio"
+                  name="mode"
+                  value="ask"
+                  class="sr-only"
+                  {% if mode == "ask" %}checked{% endif %}
+                  aria-label="Ask for a grounded answer"
+                />
+                Ask
+              </label>
+            </div>
+          </fieldset>
           <button type="submit" class="btn btn-primary gap-1" aria-label="Search the corpus">
             {{ icon("search") }}
-            Search
+            Go
           </button>
         </form>
       {% elif entitlement_diagnostic %}
@@ -148,14 +190,29 @@
       {% else %}
         {# No entitled collections AND none visible at all -- the tenant is
            genuinely unprovisioned for any docs corpus. Distinct from the
-           diagnosable missing-capability case above and from a zero-results
-           search. #}
-        <div class="text-center py-8">
+           diagnosable missing-capability case above (which keeps its own
+           "Ask an administrator to grant" copy unchanged) and from a
+           zero-results search. T2 (#1883) repoints this unprovisioned arm at
+           the in-console register flow for a tenant_admin (who can register a
+           collection right here) rather than the old "ask an administrator"
+           dead end. #}
+        <div class="text-center py-8 space-y-3">
           <p class="text-lg opacity-60">No doc collections available</p>
-          <p class="text-sm opacity-40">
-            This tenant is not entitled to any docs corpus yet. Ask an
-            administrator to register and entitle a collection.
-          </p>
+          {% if is_tenant_admin %}
+            <p class="text-sm opacity-50">
+              This tenant has no doc collections registered yet. Register one
+              from the Collections tab to provision the docs corpus.
+            </p>
+            <a href="/ui/corpus/collections" class="btn btn-primary btn-sm">
+              Register a collection
+            </a>
+          {% else %}
+            <p class="text-sm opacity-40">
+              This tenant has no doc collections registered yet. A tenant
+              administrator can register one from the
+              <a href="/ui/corpus/collections" class="link link-hover">Collections tab</a>.
+            </p>
+          {% endif %}
         </div>
       {% endif %}
     </div>

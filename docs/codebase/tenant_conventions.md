@@ -89,16 +89,53 @@ module is the only writer.
 Same module. Write-once, read-mostly. T3's `meho conventions history
 <slug>` verb is the only consumer in v0.2.
 
+## Service layer (G10.12-T0 #1894)
+
+The CRUD + budget + history + pre-allocated-audit-id logic that was
+originally inline in the route handlers now lives in
+[`ConventionsService`](../../backend/src/meho_backplane/conventions/service.py).
+The HTTP routes are a thin shell: they bind the audit contextvars,
+delegate to the service, and map the service's typed error vocabulary
+to status codes. The split exists so the in-process operator-console
+BFF (G10.12 T1/T2 #1838) can reuse the same budget gate, history-row
+pairing, and audit-id seam without copying the handlers or routing a
+Bearer-API call back through itself.
+
+Two design points:
+
+- **Session is threaded in, not opened.** Every method takes an
+  explicit `session: AsyncSession`. The REST handler passes its
+  request-scoped `get_session` dependency (so the audit middleware's
+  pre-allocated-id soft-FK and the post-write read-your-own-writes
+  preamble preview share one transaction); the BFF passes its own
+  in-process session. (Contrast `MemoryService`, which opens its own
+  session via the sessionmaker.) `budget_status` accepts the param
+  for signature parity but the assembler it calls opens its own
+  session -- the budget read is a committed-state snapshot.
+- **Error vocabulary, not `HTTPException`.** The service raises
+  `ConventionNotFoundError` (route: 404), `ConventionConflictError`
+  (route: 409), and `OverBudgetError` (route: 422). The route maps
+  each to the wire status it already produced; the BFF maps the same
+  errors to HTMX partials. The error classes + the pure helpers
+  (budget gate, set-vs-null PATCH resolution, conventions-band slice)
+  live in
+  [`conventions/_internal.py`](../../backend/src/meho_backplane/conventions/_internal.py).
+
+The wire behaviour (status codes, response bodies, audit rows,
+history rows) is identical to the pre-extraction inline
+implementation -- the existing REST test module passes unchanged.
+
 ## Control flow
 
-T2 (this task) ships the **6 HTTP routes** + Pydantic schemas. T1
+T2 (#314) ships the **6 HTTP routes** + Pydantic schemas; G10.12-T0
+(#1894) moved their bodies behind `ConventionsService` (above). T1
 shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 
 1. **POST /api/v1/conventions** (T2 #314) -- `tenant_admin` role
    required. Inserts one row into `tenant_conventions` and one row
    into `tenant_convention_history` (with `body_before=NULL`) inside
    the same transaction. The audit middleware writes its own row
-   into `audit_log`; the route handler pre-allocates the audit row's
+   into `audit_log`; the service pre-allocates the audit row's
    uuid via
    [`bind_preallocated_audit_id`](../../backend/src/meho_backplane/audit.py)
    so the middleware reuses it, and the history row's `audit_id`
@@ -308,7 +345,7 @@ All three commit or roll back together: the convention mutation +
 history row land in the same `session.begin()` block opened by
 `get_session`; the audit row commits in the same response cycle
 via the middleware. The history row's `audit_id` soft-FK
-references the audit row by exact-match uuid -- the route handler
+references the audit row by exact-match uuid -- `ConventionsService`
 pre-allocates the uuid via `bind_preallocated_audit_id` and the
 middleware honors the contextvar instead of minting its own. G8's
 audit-query path joins `tenant_convention_history` on `audit_log`
@@ -468,7 +505,7 @@ sub-document to the response when the convention is
 `preamble_status` is `null` on `GET /{slug}` (the aggregate budget
 signal lives on the list response's `budget_status`) and `null` for
 writes against `workflow` / `reference` kinds (those don't enter
-the preamble). The route handler resolves inclusion via
+the preamble). `ConventionsService` resolves inclusion via
 `assemble_preamble_detailed(tenant_id, operator.sub, session=session)`
 -- the same session the write committed through, so the pack
 reflects the post-write state without an extra commit round-trip.

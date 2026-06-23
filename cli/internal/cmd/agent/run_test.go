@@ -170,6 +170,99 @@ func TestRunStatusNotFoundRendersError(t *testing.T) {
 	}
 }
 
+// --- run-cancel ---
+
+func TestRunCancelRejectsInvalidUUID(t *testing.T) {
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunCancel(cmd, runCancelOptions{Handle: "abc", BackplaneOverride: "http://x"})
+	if err == nil {
+		t.Fatalf("expected error for non-UUID handle")
+	}
+	if !strings.Contains(stderr.String(), "invalid <handle>") {
+		t.Errorf("stderr missing parse-error hint; got %q", stderr.String())
+	}
+}
+
+func TestRunCancelHappyPath(t *testing.T) {
+	handle := "11111111-1111-1111-1111-111111111111"
+	provider := "anthropic"
+	model := "claude-sonnet-4-6"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs/"+handle+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.Header.Get("Authorization") == "" {
+			t.Errorf("missing Authorization header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.AgentRunSummaryResponse{
+			RunId:     uuid.MustParse(handle),
+			Status:    api.AgentRunStatusCancelled,
+			Trigger:   "direct",
+			ModelTier: "standard",
+			Provider:  &provider,
+			Model:     &model,
+			Turns:     1,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunCancel(cmd, runCancelOptions{Handle: handle, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunCancel: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"cancelled", handle, "anthropic"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunCancelNotFoundRendersError(t *testing.T) {
+	handle := "33333333-3333-3333-3333-333333333333"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs/"+handle+"/cancel", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"detail": "agent_run_not_found"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunCancel(cmd, runCancelOptions{Handle: handle, BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 404")
+	}
+	if !strings.Contains(stderr.String(), "agent_run_not_found") {
+		t.Errorf("error should carry the detail; got %q", stderr.String())
+	}
+}
+
+func TestRunCancelAlreadyTerminalRendersError(t *testing.T) {
+	handle := "44444444-4444-4444-4444-444444444444"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs/"+handle+"/cancel", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"detail": "agent_run_not_cancellable"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunCancel(cmd, runCancelOptions{Handle: handle, BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 409")
+	}
+	if !strings.Contains(stderr.String(), "agent_run_not_cancellable") {
+		t.Errorf("error should carry the 409 detail; got %q", stderr.String())
+	}
+}
+
 // --- run-events (SSE) ---
 
 func TestRunEventsStreamsFrames(t *testing.T) {

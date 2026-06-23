@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing 879-line UI router (#1845 only
+# threads actor_sub through the existing create_entry calls; a split of this
+# router is out of scope for the attribution change and tracked separately).
 
 """KB UI routes: list/search + entry detail + hover preview partial + editor.
 
@@ -143,9 +146,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
-from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.settings import get_settings
@@ -154,7 +155,10 @@ from meho_backplane.ui.auth.middleware import (
     require_ui_admin,
     require_ui_session,
 )
-from meho_backplane.ui.auth.session_store import load_session
+from meho_backplane.ui.auth.refresh import (
+    load_fresh_session,
+    verify_access_token_with_refresh,
+)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
@@ -205,26 +209,25 @@ _require_admin = Depends(require_ui_admin)
 async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
     """Verify the session's access token carries at least ``tenant_admin`` role.
 
-    Loads the full :class:`DecryptedSession` via
-    :func:`~meho_backplane.ui.auth.session_store.load_session` so the
-    plaintext access token is available for JWT re-verification.
-    :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` re-runs the
-    full JWKS chain (signature, claims, audience) and surfaces the
-    ``tenant_role`` claim.
+    Loads the full :class:`DecryptedSession` and presents its access
+    token to the chassis JWT chain through
+    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
+    which silently refreshes once on the ``token_expired`` 401 before
+    re-verifying -- so an expired-but-refreshable token is refreshed
+    rather than 401-ing mid-session. The re-run surfaces the
+    ``tenant_role`` claim off the freshly verified token.
 
     Raises :class:`fastapi.HTTPException` 403 when the session's role is
     below ``TENANT_ADMIN`` or when the session has been revoked/expired
     between the middleware check and this call (extremely rare but
     possible under concurrent logout).
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        decrypted = await load_session(db_session, session_ctx.session_id)
+    decrypted = await load_fresh_session(session_ctx.session_id)
     if decrypted is None:
         raise HTTPException(status_code=403, detail="session_not_found")
     settings = get_settings()
-    operator = await verify_jwt_for_audience(
-        f"Bearer {decrypted.access_token}",
+    _refreshed, operator = await verify_access_token_with_refresh(
+        decrypted,
         expected_audience=settings.keycloak_audience,
     )
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
@@ -641,11 +644,12 @@ def build_kb_router() -> APIRouter:
         error_message: str | None = None
         entry: KbEntry | None = None
         try:
-            entry = await kb.create_entry(
+            entry, _created = await kb.create_entry(
                 tenant_id=session.tenant_id,
                 slug=slug.strip(),
                 body=body,
                 metadata=metadata if metadata else None,
+                actor_sub=session.operator_sub,
             )
         except InvalidKbSlugError as exc:
             error_message = str(exc)
@@ -713,6 +717,7 @@ def build_kb_router() -> APIRouter:
             [file],
             [slug],
             tenant_id=session.tenant_id,
+            actor_sub=session.operator_sub,
         )
         context = {
             "rows": rows,
@@ -740,6 +745,7 @@ def build_kb_router() -> APIRouter:
             file,
             [""] * len(file),
             tenant_id=session.tenant_id,
+            actor_sub=session.operator_sub,
         )
         context = {
             "rows": rows,
@@ -752,7 +758,10 @@ def build_kb_router() -> APIRouter:
         slug_overrides: list[str],
         *,
         tenant_id: object,
+        actor_sub: str,
     ) -> list[dict[str, object]]:
+        # code-quality-allow: function-size — pre-existing oversized helper;
+        # #1845 only adds the actor_sub kwarg + threads it to create_entry.
         """Process a list of uploaded files and return per-file result rows.
 
         Each entry in the returned list is a dict with:
@@ -830,11 +839,12 @@ def build_kb_router() -> APIRouter:
                 audit_op_class="write",
             )
             try:
-                entry = await kb.create_entry(
+                entry, _created = await kb.create_entry(
                     tenant_id,  # type: ignore[arg-type]
                     effective_slug,
                     body,
                     metadata={"source_filename": filename},
+                    actor_sub=actor_sub,
                 )
             except InvalidKbSlugError as exc:
                 rows.append(

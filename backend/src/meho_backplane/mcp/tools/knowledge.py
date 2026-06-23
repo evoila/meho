@@ -184,11 +184,12 @@ async def _add_to_knowledge_handler(
 
     service = KbService()
     try:
-        entry = await service.create_entry(
+        entry, _created = await service.create_entry(
             tenant_id=operator.tenant_id,
             slug=slug,
             body=body,
             metadata=metadata,
+            actor_sub=operator.sub,
         )
     except InvalidKbSlugError as exc:
         raise McpInvalidParamsError(f"add_to_knowledge: {exc}") from exc

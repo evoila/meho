@@ -122,8 +122,10 @@ Detail payloads land in ``extras``. Codes:
   ``connector_http_422`` (#1649) covers a ``422`` invalid-payload
   rejection in the same arm.
 * ``connector_auth_failed`` -- the connector raised
-  :exc:`httpx.HTTPStatusError` with an auth-class status (``401``, plus
-  vRLI's ``440``): the credential reached the host but was rejected on
+  :exc:`httpx.HTTPStatusError` with an auth-class status (typed connectors:
+  ``401`` plus vRLI's ``440``; a profiled connector: its profile-declared
+  ``expiry_statuses``, the single source #1973 shares with the session
+  harness): the credential reached the host but was rejected on
   authentication. T5 (#1804), the auth sibling of ``connector_http_403``
   in the same arm. The session connectors already retry once on a 401
   internally, so a 401 here means re-login *also* failed -- the
@@ -212,7 +214,7 @@ from meho_backplane.connectors import (
     ResultHandle,
     resolve_connector_or_label,
 )
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
@@ -545,6 +547,35 @@ def _elapsed_ms(started: float) -> float:
     return (time.monotonic() - started) * 1000
 
 
+def _profile_expiry_statuses(connector_instance: Connector | None) -> frozenset[int] | None:
+    """The profile-declared session-expiry status set, or ``None`` if typed.
+
+    A profiled connector carries an
+    :class:`~meho_backplane.connectors.profile.ExecutionProfile` whose
+    ``expiry_statuses`` is the single source #1973 unifies across the
+    session-retry harness and the dispatcher's auth-class arm. Returning it
+    here lets :func:`~meho_backplane.operations._errors.is_auth_failed_status`
+    classify a profiled connector's auth failure against the *profile's*
+    set (default ``{401}``; vRLI ``{401, 440}``) rather than the typed-
+    connector global.
+
+    Typed (hand-coded) connectors have no profile, so this returns ``None``
+    and the caller falls back to the unchanged global
+    ``_AUTH_FAILED_STATUSES`` -- the regression guard in this task's AC. The
+    ``getattr`` probe is deliberately duck-typed: the profile is bound onto
+    the connector instance by T4 (#1970); until then no instance exposes it
+    and every connector classifies via the global, so this change is inert
+    for shipped connectors and live only once a profile is attached.
+    """
+    profile = getattr(connector_instance, "profile", None)
+    if profile is None:
+        return None
+    expiry_statuses = getattr(profile, "expiry_statuses", None)
+    if not isinstance(expiry_statuses, frozenset):
+        return None
+    return expiry_statuses
+
+
 async def _execute_and_audit(
     *,
     op_id: str,
@@ -837,11 +868,16 @@ async def _run_branch_with_error_handling(
         # import light; in production the package is already loaded by
         # the REST routes, so this is a dict lookup.
         from meho_backplane.operations.ingest.connector_registration import (
-            GenericRestConnector,
             sibling_handrolled_impl_id,
         )
 
-        is_auto_shim = isinstance(connector_instance, GenericRestConnector)
+        # G0.28-T1 (#1967): only a *bare* auto-shim (GenericRestConnector,
+        # shim_kind == "bare") is the "unreplaced auto-shim" dead end. A
+        # profiled connector (shim_kind == "profiled") that raises
+        # NotImplementedError is a dispatchable connector whose profile
+        # wiring is incomplete, not a dead shim — it gets the generic
+        # unsupported_feature cause.
+        is_auto_shim = connector_instance is not None and shim_kind(connector_instance) == "bare"
         cause: Literal["unsupported_feature", "unreplaced_auto_shim"] = (
             "unreplaced_auto_shim" if is_auto_shim else "unsupported_feature"
         )
@@ -937,7 +973,7 @@ async def _run_branch_with_error_handling(
             return result_connector_http_403(op_id, http_exc, duration_ms)
         if status_code == 422:
             return result_connector_http_422(op_id, http_exc, duration_ms)
-        if is_auth_failed_status(status_code):
+        if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
             return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
         return result_connector_error(op_id, http_exc, duration_ms)
     except httpx.ConnectError as conn_exc:
@@ -1264,17 +1300,29 @@ async def _build_proposed_effect(
       for credential-class ops and is merged under the
       ``"permission_preflight"`` key.
 
-    Returns the merged envelope, or ``None`` when neither hook produced
-    anything (the caller then stores the identifier-only default). When
-    only the preflight fired, its result is merged onto the identifier
-    default-shaped base so the reviewer still sees the denial banner.
-    A *failed* preview (the hook's ``preview_unavailable`` marker,
-    #1628) is likewise merged onto the identifier base — the reviewer
-    keeps the op identity and additionally sees that the blast radius
-    could not be resolved, instead of a bare identifier default
-    indistinguishable from a small action.
-    Never raises: connector-resolution faults degrade to "no preview" so
-    the park always proceeds.
+    Always returns a dict on the normal path: the merged envelope when a
+    hook produced one, otherwise the identifier-only base shaped exactly
+    like the :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+    default. Onto that base it stamps the catalog
+    ``descriptor.safety_level`` (#1855) so *every* parked op carries its
+    severity (``safe`` / ``caution`` / ``dangerous``) — a ``dangerous``
+    op and a ``caution`` op are distinguishable on the reviewer-facing
+    row even when neither registers a preview builder. The severity is
+    read straight off the descriptor, never recomputed.
+
+    When only the preflight fired, its result is merged onto the
+    identifier base so the reviewer still sees the denial banner. A
+    *failed* preview (the hook's ``preview_unavailable`` marker, #1628)
+    is likewise merged onto the identifier base — the reviewer keeps the
+    op identity and additionally sees that the blast radius could not be
+    resolved, instead of a bare identifier default indistinguishable
+    from a small action. The ``op_class`` / ``preview`` / fail-soft-marker
+    envelope built by :func:`build_proposed_effect` itself is unchanged;
+    ``safety_level`` is layered on here.
+
+    Returns ``None`` only when connector resolution / hook execution
+    raises: those faults degrade to "no preview" (the caller stores its
+    own identifier-only default) so the park always proceeds.
     """
     try:
         connector_instance, resolution_error, _ = await _resolve_connector_instance(
@@ -1288,6 +1336,7 @@ async def _build_proposed_effect(
             operator=operator,
             target=target,
             params=params,
+            connector_id=connector_id,
         )
         preview = await build_proposed_effect(ctx)
         if preview is not None and preview.get("preview_unavailable") is True:
@@ -1300,20 +1349,29 @@ async def _build_proposed_effect(
             marked.update(preview)
             preview = marked
         preflight = await build_permission_preflight(ctx)
-        if preflight is None:
-            # No permission preflight ran -- preserve the prior contract
-            # (builder result, or ``None`` → identifier-only default).
-            return preview
         # The preflight fired; attach it to whatever base the preview
         # produced. When there is no preview (the common case: a
-        # suppressed credential-class write), use the same identifier-only
-        # shape ``create_pending_request`` would default to so the row
-        # still names the op alongside the denial banner.
+        # suppressed credential-class write, or an op with no registered
+        # builder), use the same identifier-only shape
+        # ``create_pending_request`` would default to so the row still
+        # names the op alongside the severity / denial banner.
         if preview is not None:
             base = dict(preview)
         else:
             base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
-        base["permission_preflight"] = preflight
+        if preflight is not None:
+            base["permission_preflight"] = preflight
+        # Promote the catalog severity onto every parked op's envelope
+        # (#1855). ``safety_level`` is op-identity metadata read straight
+        # off the descriptor -- not recomputed -- so a parked ``dangerous``
+        # op (e.g. ``keycloak.realm.create``) and a ``caution`` op (e.g.
+        # ``keycloak.user.create``) produce severity-distinguishable
+        # approval rows even when neither registers a preview builder.
+        # Stamped here (rather than in the per-op preview hook) so it
+        # rides the identifier-only default too, keeping the
+        # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
+        # :func:`build_proposed_effect` itself unchanged.
+        base["safety_level"] = descriptor.safety_level
         return base
     except Exception:
         import structlog as _structlog
@@ -1474,6 +1532,7 @@ async def dispatch(
     )
     if descriptor is None:
         known_op_count = await count_known_ops(
+            tenant_id=operator.tenant_id,
             product=product,
             version=version,
             impl_id=impl_id,

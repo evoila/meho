@@ -57,10 +57,29 @@ __all__ = [
 # into URL path substitution / query-string / request body.
 _PARAM_LOC_KEY = "x-meho-param-loc"
 
-# Path-template substitution pattern. ``"/api/vcenter/cluster/{cluster}"``
-# matches ``{cluster}``; the substituted value is :func:`urllib.parse.quote`-d
-# at substitution time (RFC 3986 reserved chars only).
-_PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
+# Path-template substitution pattern. Captures an optional leading
+# RFC6570 expression operator and the bare expression body:
+#
+# * ``{cluster}``      -> operator ``""``,  name ``"cluster"``     (simple
+#   expansion, RFC6570 §3.2.2 -- reserved chars in the value are encoded)
+# * ``{+constraints}`` -> operator ``"+"``, name ``"constraints"`` (reserved
+#   expansion, RFC6570 §3.2.3 -- reserved/gen-delim chars pass through literal)
+#
+# The operator is stripped from the captured name so the param lookup
+# keys on the bare variable name the ingest pipeline registers (``path``,
+# not ``+path``) -- without the strip a literal ``{+path}`` spec would
+# ``KeyError`` even though the param is supplied. Only ``+`` (and ``#``)
+# change the encoding safe set; the remaining operator chars are captured
+# so the regex never mis-includes a leading operator in the name, even for
+# operators this substituter does not (yet) special-case.
+_PATH_VAR_RE = re.compile(r"\{([+#./;?&]?)([^{}]+)\}")
+
+# RFC6570 §3.2.3 reserved-expansion safe set: the gen-delims + sub-delims
+# from RFC3986 §2.2 that a ``{+var}`` / ``{#var}`` expression leaves
+# unencoded so they keep their structural meaning in the URL. Genuinely
+# unsafe characters (space, control chars) are still percent-encoded by
+# :func:`urllib.parse.quote` because they are absent from this set.
+_RFC6570_RESERVED_SAFE = ":/?#[]@!$&'()*+,;="
 
 
 def _split_ingested_params(
@@ -130,21 +149,39 @@ def _unwrap_body(body_params: dict[str, Any]) -> Any:
 
 
 def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
-    """Substitute ``{var}`` placeholders in *path_template* from *path_params*.
+    """Substitute ``{var}`` / ``{+var}`` placeholders in *path_template*.
 
-    Missing path vars raise :class:`KeyError` so the dispatcher's
-    caller surfaces them as ``invalid_params`` rather than producing
-    a request with literal ``{var}`` in the URL. RFC 3986 path
-    reserved chars in the substituted value are percent-encoded by
-    :func:`urllib.parse.quote` (safe set: empty, so ``/`` in a value
-    is also encoded -- matches OpenAPI's default path-style).
+    Honours RFC6570 expression operators so an ingested op's path
+    template expands with the encoding the spec author intended:
+
+    * **Simple expansion** ``{var}`` (RFC6570 §3.2.2) -- the value is
+      percent-encoded with an empty safe set, so reserved chars like
+      ``/`` become ``%2F`` (OpenAPI's default ``style: simple`` path
+      parameter behaviour: a value cannot leak a path separator).
+    * **Reserved expansion** ``{+var}`` / ``{#var}`` (RFC6570 §3.2.3) --
+      the value is encoded with the reserved/gen-delim safe set
+      (:data:`_RFC6570_RESERVED_SAFE`), so structural chars (``/``,
+      ``:``, ``,`` ...) pass through literal. This is the form a path
+      that carries a *sub-path* expression uses, e.g. vRLI's
+      ``/api/v2/events/{+constraints}`` where the constraint is itself a
+      slash-delimited segment chain (``text/CONTAINS error/hostname/...``).
+
+    In both forms a genuinely-unsafe character (space, control chars) is
+    still percent-encoded -- only the reserved structural chars differ.
+
+    Missing path vars raise :class:`KeyError` so the dispatcher's caller
+    surfaces them as ``invalid_params`` rather than producing a request
+    with a literal ``{var}`` in the URL. The lookup is keyed on the bare
+    variable name (operator stripped), so ``{+constraints}`` resolves the
+    param named ``constraints``.
     """
 
     def _replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+        operator, name = match.group(1), match.group(2)
         if name not in path_params:
             raise KeyError(f"path template requires {name!r} but it was not supplied")
-        return quote(str(path_params[name]), safe="")
+        safe = _RFC6570_RESERVED_SAFE if operator in ("+", "#") else ""
+        return quote(str(path_params[name]), safe=safe)
 
     return _PATH_VAR_RE.sub(_replace, path_template)
 
@@ -175,12 +212,17 @@ class IngestedRequest:
         body: The raw, unwrapped JSON request body (``loc=="body"``), or
             ``None`` when the op declares no body param -- the same value
             passed as httpx's ``json=``.
+        headers: The header-located params bucket (``loc=="header"``), or
+            ``None`` when the op declares no header param -- merged onto the
+            connector's :meth:`~meho_backplane.connectors.adapters.http.HttpConnector.auth_headers`
+            as the transport's ``extra_headers=``.
     """
 
     method: str
     path: str
     query: dict[str, Any] | None
     body: Any
+    headers: dict[str, Any] | None
 
 
 async def resolve_ingested_request(
@@ -213,7 +255,7 @@ async def resolve_ingested_request(
             f"ingested descriptor {descriptor.op_id!r} missing method or path "
             f"(method={descriptor.method!r}, path={descriptor.path!r})"
         )
-    path_params, query_params, _header_params, body_params = _split_ingested_params(
+    path_params, query_params, header_params, body_params = _split_ingested_params(
         descriptor.parameter_schema,
         params,
     )
@@ -231,7 +273,80 @@ async def resolve_ingested_request(
         path=substituted,
         query=query_params or None,
         body=_unwrap_body(body_params),
+        headers=header_params or None,
     )
+
+
+def _profile_pagination(connector: Connector) -> Any:
+    """Return the connector's profiled ``cursor_token`` pagination, or ``None``.
+
+    Reads ``connector.profile.pagination`` (present only on a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` that
+    carries a stamped :class:`~meho_backplane.connectors.profile.ExecutionProfile`)
+    via ``getattr`` so the ingested-dispatch branch stays tolerant of a
+    plain :class:`HttpConnector` with no profile. Returns the
+    :class:`~meho_backplane.connectors.profile.PaginationSpec` only when its
+    strategy is ``cursor_token`` (the one strategy that drives a loop);
+    ``strategy='none'`` and a profile-less connector both yield ``None`` so
+    the caller falls through to the single-request path.
+    """
+    profile = getattr(connector, "profile", None)
+    if profile is None:
+        return None
+    pagination = getattr(profile, "pagination", None)
+    if pagination is None or pagination.strategy != "cursor_token":
+        return None
+    return pagination
+
+
+async def _dispatch_ingested_cursor_token(
+    *,
+    request_json: Any,
+    target: Any,
+    request: IngestedRequest,
+    operator: Operator,
+    pagination: Any,
+) -> dict[str, Any]:
+    """Follow a ``cursor_token`` pagination loop, concatenating each page's rows.
+
+    Each iteration GETs the same path with the next cursor merged into the
+    query under ``pagination.cursor.req_param``, unwraps the rows from the
+    literal top-level ``pagination.items_key``, and reads the next cursor
+    from the literal top-level ``pagination.cursor.resp_field``. The loop
+    stops when that field is falsy (absent / empty). Returns the assembled
+    set under the same ``items_key`` plus a ``total`` count — the unwrapped,
+    cursor-free shape the reducer / agent consumes, mirroring the hand-coded
+    gcloud paginators (``{rows, total}``).
+
+    A page whose ``items_key`` is missing or not a list is treated as a
+    zero-row page (a vendor that signals "no more" with an empty body),
+    keeping the loop robust against a trailing empty page.
+    """
+    items_key = pagination.items_key
+    cursor = pagination.cursor
+    rows: list[Any] = []
+    page_token: str | None = None
+    while True:
+        query = dict(request.query or {})
+        if page_token:
+            query[cursor.req_param] = page_token
+        payload = await request_json(
+            target,
+            request.method,
+            request.path,
+            operator=operator,
+            params=query or None,
+            json=request.body,
+            extra_headers=request.headers,
+        )
+        page_rows = payload.get(items_key) if isinstance(payload, dict) else None
+        if isinstance(page_rows, list):
+            rows.extend(page_rows)
+        next_token = payload.get(cursor.resp_field) if isinstance(payload, dict) else None
+        if not next_token:
+            break
+        page_token = str(next_token)
+    return {items_key: rows, "total": len(rows)}
 
 
 async def dispatch_ingested(
@@ -244,10 +359,13 @@ async def dispatch_ingested(
 ) -> Any:
     """Execute an ``source_kind='ingested'`` op via the connector's HTTP transport.
 
-    v0.2 routes through :meth:`HttpConnector._request_json` for idempotent
+    Routes through :meth:`HttpConnector._request_json` for idempotent
     verbs (GET / HEAD / OPTIONS) -- the only verbs the ingest pipeline
     declares as safe-to-retry. POST / PUT / DELETE / PATCH route through
-    :meth:`HttpConnector._post_json` (the same client pool, no retry).
+    :meth:`HttpConnector._post_json` (the same client pool, no retry),
+    each carrying its *actual* declared verb -- a PUT/PATCH/DELETE is no
+    longer silently downgraded to a POST. Header-located params are
+    forwarded to both transport seams as ``extra_headers``.
     The connector instance MUST be an :class:`HttpConnector` -- the
     dispatcher type-checks via ``hasattr(connector, "_request_json")``
     rather than an :func:`isinstance` import to avoid a circular
@@ -285,6 +403,19 @@ async def dispatch_ingested(
                 f"connector {type(connector).__name__} has no _request_json "
                 f"(ingested dispatch requires HttpConnector)"
             )
+        # A profiled connector whose declarative pagination strategy is
+        # ``cursor_token`` drives a follow-the-cursor loop here, assembling
+        # the full set the way the hand-coded gcloud paginators do; every
+        # other connector (and ``strategy='none'``) makes a single request.
+        pagination = _profile_pagination(connector)
+        if pagination is not None:
+            return await _dispatch_ingested_cursor_token(
+                request_json=request_json,
+                target=target,
+                request=request,
+                operator=operator,
+                pagination=pagination,
+            )
         return await request_json(
             target,
             request.method,
@@ -292,10 +423,14 @@ async def dispatch_ingested(
             operator=operator,
             params=request.query,
             json=request.body,
+            extra_headers=request.headers,
         )
-    # Non-idempotent verb -- POST / PUT / PATCH / DELETE. v0.2 routes
-    # through ``_post_json``-shaped httpx call (no retry). The connector
-    # owns the auth header injection + per-target client pool.
+    # Non-idempotent verb -- POST / PUT / PATCH / DELETE. Routes through
+    # ``_post_json`` (no retry), forwarding the *actual* declared verb so a
+    # PUT/PATCH/DELETE reaches the wire with its real method rather than a
+    # hardcoded POST. The connector owns the auth header injection + the
+    # per-target client pool; header-located params ride along as
+    # ``extra_headers``.
     post_json = getattr(connector, "_post_json", None)
     if post_json is None:
         raise RuntimeError(
@@ -306,7 +441,9 @@ async def dispatch_ingested(
         target,
         request.path,
         operator=operator,
+        verb=request.method,
         json=request.body,
+        extra_headers=request.headers,
     )
 
 

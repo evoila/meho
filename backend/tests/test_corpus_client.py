@@ -19,6 +19,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 import structlog
+import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
@@ -321,6 +322,75 @@ async def test_results_envelope_with_text_fields_returns_real_hits(
 
 
 @pytest.mark.asyncio
+async def test_document_id_threads_through_from_results_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated ``document_id`` arrives on the chunk (#2004).
+
+    The contract names the field ``document_id`` and MEHO.Knowledge speaks
+    that exact key (unlike ``content``/``source_url``, it has no second wire
+    name to alias), so a non-blank value must thread straight through the
+    ``results`` envelope onto the consumed ``document_id``.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d-042",
+                    "text": "owning-doc body",
+                    "source_uri": "https://docs.example/d-042",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].document_id == "d-042"
+
+
+@pytest.mark.asyncio
+async def test_blank_document_id_normalises_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``document_id`` is honestly typed as ``None`` (#2004).
+
+    MEHO.Knowledge returns ``document_id: ""`` for a chunk with no owning-
+    document concept. ``document_id`` is ``str | None``; a blank-after-strip
+    value normalises to ``None`` rather than threading a misleading ``""``,
+    so the citation-label fallback (``title -> document_id -> filename ->
+    URL``) skips a cleanly-``None`` rung. The blank must NOT fail parse —
+    ``document_id`` is a label fallback, not a grounding key.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "",
+                    "text": "no owning doc",
+                    "source_uri": "https://docs.example/c1",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].document_id is None
+    # The chunk still parses and carries its other consumed fields.
+    assert result.chunks[0].chunk_id == "c1"
+    assert result.chunks[0].content == "no owning doc"
+
+
+@pytest.mark.asyncio
 async def test_unrecognized_envelope_fails_loud_not_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,6 +436,24 @@ async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> No
     transport = _transport_capturing([], httpx.Response(503, text="down"))
     _patch_async_client(monkeypatch, transport, [])
 
+    # Bind a private LogCapture onto a freshly-wrapped logger and patch the
+    # subject module's ``_log`` rather than using
+    # :func:`structlog.testing.capture_logs`. ``capture_logs`` only swaps the
+    # process-global processors *list* — it leaves ``wrapper_class`` and the
+    # ``cache_logger_on_first_use`` machinery untouched. Production
+    # :func:`~meho_backplane.logging.configure_logging` (run by the FastAPI
+    # lifespan in every app-booting test) sets ``cache_logger_on_first_use=True``,
+    # which caches ``corpus._log``'s bound logger against the *then-current*
+    # processors-list object; a later same-worker ``structlog.reset_defaults()``
+    # / ``structlog.configure(...)`` (the observability / api_* per-file
+    # fixtures) rebinds that list to a new object, orphaning the cache so
+    # ``capture_logs`` can no longer intercept this module's events. Under
+    # ``pytest-xdist --dist loadscope`` that co-location is order-dependent, so
+    # the ``status==503`` capture here flaked whenever an app-booting module
+    # shared the corpus worker. The private-logger pattern is process-local,
+    # contextvar-free, and auto-restored on teardown — the same xdist-safe
+    # capture shape already used in ``test_connector_registration.py`` /
+    # ``test_operations_register_ingested.py``.
     capture = structlog.testing.LogCapture()
     private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
     monkeypatch.setattr(corpus_mod, "_log", private_log)

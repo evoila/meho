@@ -19,7 +19,7 @@ dependencies = [
     "authlib>=1.3",
     "httpx>=0.27",
     "hvac>=2.4.0",
-    "sqlalchemy[asyncio]>=2.0.50",
+    "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",
     "alembic>=1.13",
     "jsonschema>=4.26.0",
@@ -33,8 +33,8 @@ dependencies = [
     "packaging>=24.0",
     "python-frontmatter>=1.3.0",
     "jinja2>=3.1.6",
-    "google-auth>=2.54.0",
-    "duckdb>=1.4.3",
+    "google-auth>=2.55.0",
+    "duckdb>=1.5.4",
     "pyarrow>=21.0.0",
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
@@ -75,9 +75,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.0",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.17",
+    "ruff>=0.15.18",
     "mypy>=2.1.0",
     "cryptography>=49.0.0",
     "respx>=0.21",
@@ -104,6 +104,27 @@ packages = ["src/meho_backplane"]
 # meho-backplane`` deployment doesn't need an external ``alembic.ini``
 # bind-mount. ``find_alembic_ini`` (db/migrations.py) walks both
 # layouts in order: env var → package data → cwd → source tree.
+# MEHO-authored OpenAPI specs + ExecutionProfile documents (#1964 T1
+# #1975) ship as package data so a catalog row's ``spec_resource`` /
+# ``profile_resource`` resolves via :func:`importlib.resources.files`
+# in a deployed wheel. They live INSIDE the package tree
+# (``src/meho_backplane/operations/ingest/specs/`` and
+# ``src/meho_backplane/connectors/profiles/``), so the ``packages`` glob
+# above already collects their ``.yaml`` data files — the same way the
+# packaged ``catalog.yaml`` and the ``.j2`` grouping prompts ship. They
+# are listed in ``artifacts`` (below) to make the non-``.py`` data-file
+# inclusion explicit and robust against a future ``only-include``
+# narrowing; they are deliberately NOT in ``force-include`` (that table
+# is for trees OUTSIDE the package, like the ``alembic`` tree at
+# ``backend/alembic`` — re-including an in-package path there triggers a
+# duplicate-archive-entry build failure).
+artifacts = [
+    "src/meho_backplane/operations/ingest/specs/*.yaml",
+    "src/meho_backplane/operations/ingest/specs/*.json",
+    "src/meho_backplane/connectors/profiles/*.yaml",
+    "src/meho_backplane/connectors/profiles/*.json",
+]
+
 [tool.hatch.build.targets.wheel.force-include]
 "alembic.ini" = "meho_backplane/alembic.ini"
 "alembic" = "meho_backplane/alembic"

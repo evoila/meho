@@ -610,7 +610,7 @@ def test_resolve_multiple_versioned_with_wildcard_still_disambiguates() -> None:
     register_connector_v2(
         product="k8s",
         version="1.x",
-        impl_id="eks",
+        impl_id="k8s-eks",
         cls=_K8sEksConnector,
     )
     target = _FakeTarget(product="k8s", fingerprint=None)
@@ -619,8 +619,8 @@ def test_resolve_multiple_versioned_with_wildcard_still_disambiguates() -> None:
     # The wildcard ('k8s', '', '') is demoted; the operator-facing
     # candidates list names the two real impl_ids.
     assert exc_info.value.candidates == [
-        ("k8s", "1.x", "eks"),
         ("k8s", "1.x", "k8s"),
+        ("k8s", "1.x", "k8s-eks"),
     ]
 
 

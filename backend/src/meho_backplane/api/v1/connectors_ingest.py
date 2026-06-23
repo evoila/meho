@@ -109,6 +109,14 @@ The service-layer exceptions map to HTTP status codes uniformly:
   specs in the same bundle disagree on the major version. The
   structured detail names both versions so the operator's error
   message tells them exactly what to fix.
+* :class:`ProductImplIdMismatch` → 422 Unprocessable Entity. The
+  supplied ``product`` does not round-trip the ``connector_id``
+  rendered from ``impl_id`` / ``version`` (G0.27 / T3 #1817). Raised
+  at the service-layer chokepoint :meth:`IngestionPipelineService.ingest`
+  (so the MCP tool and CLI fail closed too, not just this route);
+  mapped here onto the ``product_impl_id_mismatch`` envelope via the
+  shared builder so the REST 422 body and the MCP -32602 ``data``
+  member can't drift.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService._authorize` when a service-layer
   caller bypasses the route gate) → 403.
@@ -151,7 +159,7 @@ from __future__ import annotations
 
 import asyncio
 from json import JSONDecodeError
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 from uuid import UUID
 
 import httpx
@@ -194,6 +202,7 @@ from meho_backplane.operations.ingest import (
     LlmClientUnavailable,
     LlmOutputInvalid,
     OpIdCollision,
+    ProductImplIdMismatch,
     ReviewService,
     SpecSource,
     UncoveredVersionLabel,
@@ -209,6 +218,7 @@ from meho_backplane.operations.ingest import (
     build_invalid_spec_detail,
     build_llm_output_invalid_detail,
     build_op_id_collision_detail,
+    build_product_impl_id_mismatch_detail,
     build_uncovered_version_label_detail,
     build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
@@ -217,6 +227,7 @@ from meho_backplane.operations.ingest import (
     get_job_registry,
     list_ingested_connectors,
     load_catalog,
+    load_spec_resource,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.api_schemas import (
@@ -241,6 +252,28 @@ router = APIRouter(prefix="/api/v1/connectors", tags=["connectors"])
 #: :mod:`meho_backplane.api.v1.operations`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Closed-set scope selector for the ambiguous tenant-vs-built-in case
+#: (G0.26-T? #2029). ``tenant`` resolves the operator's tenant-curated
+#: row; ``builtin`` the ``tenant_id IS NULL`` built-in row. Omitted →
+#: the #1801 fail-loud ambiguity 409. Shared by ``GET /{id}/review``
+#: and ``POST /{id}/enable-reads``; the resolver enforces the same
+#: ``tenant_admin`` gate on the built-in scope it always has.
+ConnectorScopePreference = Literal["tenant", "builtin"]
+
+#: Module-level :func:`Query` default — a call in a default-argument
+#: position is disallowed under the project's ruff config, the same
+#: reason ``_require_admin`` is hoisted above.
+_PREFER_QUERY = Query(
+    default=None,
+    description=(
+        "Disambiguate a connector_id that resolves to BOTH a "
+        "tenant-curated row and a built-in (tenant_id IS NULL) row. "
+        "'tenant' targets the operator's tenant row; 'builtin' the "
+        "built-in scope (tenant_admin only). Omit for the default "
+        "fail-loud 409 connector_scope_ambiguous response."
+    ),
+)
 
 
 #: Mutable module-level holder for the LLM-client factory used by the
@@ -392,15 +425,18 @@ async def ingest_endpoint(
     the same spec under the other scope re-inserts every op as a
     shadow copy there — verify the scope matches your intent.
     """
-    # Remember the original ``catalog_entry`` (pre-resolution) so the
-    # ``UpstreamNotSpecError`` path -- raised deep inside the parser
-    # when an HTML developer-portal page comes back instead of an
-    # OpenAPI spec -- can include the catalog reference in its 422
-    # envelope. ``_resolve_catalog_entry_if_set`` returns an explicit-
-    # quadruple body with ``catalog_entry=None``, so we have to snapshot
-    # before resolution.
+    # Snapshot the original ``catalog_entry`` before resolution (which
+    # nulls it) so the ``UpstreamNotSpecError`` 422 — raised deep in the
+    # parser when an HTML developer-portal page comes back — can still
+    # name the catalog reference.
     catalog_entry = body.catalog_entry
     resolved, catalog_compatible = _resolve_catalog_entry_if_set(body)
+    # The round-trip product guard is no longer applied here: it moved to
+    # the service-layer chokepoint :meth:`IngestionPipelineService.ingest`
+    # (G0.27 / T3 #1817) so every entry point (REST / MCP / CLI) fails
+    # closed identically. The service raises :class:`ProductImplIdMismatch`,
+    # which :func:`_raise_ingest_http_error` maps onto the same 422
+    # ``product_impl_id_mismatch`` envelope this route returned before.
     # The catalog-driven shape resolves its opt-in band from the catalog
     # row (``catalog_compatible``); the explicit-quadruple shape carries
     # the operator-supplied band on the body itself (T1 #1646). The two
@@ -739,11 +775,34 @@ def _resolve_catalog_entry_if_set(
                 "product": entry.product,
                 "version": entry.version,
                 "impl_id": entry.impl_id,
-                "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
+                "specs": _catalog_entry_specs(entry),
             },
         ),
         entry.spec_info_versions_compatible,
     )
+
+
+def _catalog_entry_specs(entry: ConnectorSpecEntry) -> list[SpecSource]:
+    """Build the ``SpecSource`` list a catalog row resolves to.
+
+    Two on-ramps (#1964 T1):
+
+    * **Shipped spec** — ``entry.spec_resource`` is set: load the
+      MEHO-authored OpenAPI bytes from package data and carry them
+      inline as :attr:`SpecSource.content` (the ``uri`` is the audit
+      label ``spec:<resource>``). The ingest pipeline uses the content
+      verbatim — no fetch, no SSRF guard — bypassing an ``upstream`` the
+      backend can't dereference (HTML portal / fqdn-templated appliance
+      URL). This is why ``_reject_unusable_entry`` exempts shipped-spec
+      rows from the typed-/templated-upstream 422s below.
+    * **Upstream fetch** — no ``spec_resource``: the historical shape,
+      one ``SpecSource(uri=...)`` per ``upstream`` URL for the backend
+      to fetch under the https guard.
+    """
+    if entry.spec_resource is not None:
+        content = load_spec_resource(entry.spec_resource)
+        return [SpecSource(uri=f"spec:{entry.spec_resource}", content=content)]
+    return [SpecSource(uri=uri) for uri in (entry.upstream or ())]
 
 
 def _parse_catalog_entry(catalog_entry: str) -> tuple[str, str]:
@@ -784,7 +843,15 @@ def _reject_unusable_entry(
     can't dereference it server-side. Both surfaces refuse the catalog-
     driven shape and point the operator at the explicit-quadruple
     fallback documented in ``docs/cross-repo/connector-catalog.md``.
+
+    A row carrying ``spec_resource`` (#1964 T1) is exempt: the spec
+    ships as package data and is loaded inline, so neither a null nor a
+    templated ``upstream`` blocks ingest — the whole point of the
+    shipped-spec on-ramp is to serve products whose upstream the
+    backend can't dereference.
     """
+    if entry.spec_resource is not None:
+        return
     if entry.upstream is None:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -988,6 +1055,16 @@ def _raise_ingest_http_error(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             build_version_mismatch_detail(exc),
         ) from exc
+    if isinstance(exc, ProductImplIdMismatch):
+        # G0.27 / T3 (#1817). The round-trip guard moved from this route
+        # into IngestionPipelineService.ingest so every entry point fails
+        # closed; here we map the service exception onto the same 422
+        # ``product_impl_id_mismatch`` envelope this route returned before.
+        # Shared builder with the MCP -32602 path so the two can't drift.
+        raise HTTPException(
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_product_impl_id_mismatch_detail(exc),
+        ) from exc
     if isinstance(exc, UncoveredVersionLabel):
         # G0.9-T9 (#741). Checked BEFORE the generic ValueError-family arm
         # below so the more-specific exception wins. Shared builder (same
@@ -1104,6 +1181,7 @@ async def catalog_endpoint(
 async def get_review_endpoint(
     connector_id: str,
     operator: Operator = _require_operator,
+    prefer: ConnectorScopePreference | None = _PREFER_QUERY,
 ) -> ConnectorReviewPayload:
     """Return the full review payload for *connector_id*.
 
@@ -1116,10 +1194,20 @@ async def get_review_endpoint(
     tenant row and a built-in row → 409 ``connector_scope_ambiguous``
     with the candidate list (G0.26-T1 #1801), identical to the write
     sibling ``POST /{id}/enable-reads`` via the shared service resolver.
+
+    The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
+    makes that 409 actionable: it resolves directly to the named scope
+    and skips the ambiguity probe, so an operator who has both rows can
+    target the tenant-curated one (``prefer=tenant``) or the built-in
+    one (``prefer=builtin``). Omitted → the fail-loud default.
     """
     service = ReviewService(operator)
     try:
-        return await service.get_review_payload(connector_id, operator.tenant_id)
+        return await service.get_review_payload(
+            connector_id,
+            operator.tenant_id,
+            prefer=prefer,
+        )
     except AmbiguousConnectorScopeError as exc:
         # The label resolves to both a tenant row and a built-in row;
         # 409 (not 404) with a structured candidate list so the operator
@@ -1274,6 +1362,7 @@ async def enable_endpoint(
 async def enable_reads_endpoint(
     connector_id: str,
     operator: Operator = _require_admin,
+    prefer: ConnectorScopePreference | None = _PREFER_QUERY,
 ) -> EnableReadsResponse:
     """Bulk-enable every read-class (GET/HEAD) ingested op (G0.25-T7 #1749).
 
@@ -1307,12 +1396,19 @@ async def enable_reads_endpoint(
     scope is always the calling operator's tenant from the JWT. The
     MCP sibling ``meho.connector.enable_reads`` accepts an optional
     ``tenant_id`` for the built-in / global scope (tenant_admin only).
+
+    The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
+    resolves the ambiguous-scope 409 directly: ``prefer=tenant`` applies
+    to the operator's tenant row, ``prefer=builtin`` to the built-in row
+    (the built-in scope is re-checked against the ``tenant_admin`` gate
+    in the service resolver). Omitted → the fail-loud default.
     """
     service = ReviewService(operator)
     try:
         ops_enabled = await service.enable_reads(
             connector_id,
             tenant_id=operator.tenant_id,
+            prefer=prefer,
         )
     except AmbiguousConnectorScopeError as exc:
         # Same shared-resolver outcome as GET /{id}/review: a label that

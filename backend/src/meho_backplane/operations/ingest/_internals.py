@@ -34,7 +34,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
-from meho_backplane.operations.ingest.connector_registration import resolved_auto_shim_class
+from meho_backplane.operations.ingest.connector_registration import (
+    resolved_auto_shim_class,
+    resolved_profiled_connector_class,
+)
 from meho_backplane.operations.ingest.exceptions import ConnectorNotFoundError
 
 _log = structlog.get_logger(__name__)
@@ -49,10 +52,12 @@ __all__ = [
     "OP_ENABLE_GROUP",
     "OP_ENABLE_READS",
     "OP_LLM_GROUPING",
+    "OP_PROFILE_STAMP",
     "READ_HTTP_METHODS",
     "VALID_SAFETY_LEVELS",
     "ConnectorScope",
     "apply_op_overrides",
+    "audit_profile_stamp",
     "bulk_enable_read_ops",
     "cascade_is_enabled",
     "enable_time_auto_shim_warnings",
@@ -81,6 +86,12 @@ OP_EDIT_GROUP: Final[str] = "meho.connector.edit_group"
 OP_EDIT_OP: Final[str] = "meho.connector.edit_op"
 OP_DELETE_CONNECTOR: Final[str] = "meho.connector.delete"
 OP_LLM_GROUPING: Final[str] = "meho.connector.llm_grouping"
+#: Audit op-id for the first stamp of an :class:`ExecutionProfile` onto an
+#: ingested connector (G0.28-T5 #1971). The stamp makes the connector
+#: *dispatchable* but deliberately does NOT auto-enable its ops — they stay
+#: ``is_enabled=False`` / ``review_status='staged'`` behind the review gate.
+#: The audit row makes the dispatchability change durable and attributable.
+OP_PROFILE_STAMP: Final[str] = "meho.connector.profile_stamp"
 
 #: HTTP methods that classify an ingested op as *read-class*. The
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
@@ -333,6 +344,50 @@ async def write_audit_row(
     )
     session.add(row)
     return audit_id
+
+
+async def audit_profile_stamp(
+    session: AsyncSession,
+    *,
+    operator_sub: str,
+    operator_tenant_id: UUID,
+    connector_id: str,
+    scope: ConnectorScope,
+    connector_class: str,
+) -> uuid.UUID:
+    """Append one :class:`AuditLog` row for the first stamp of an ExecutionProfile.
+
+    G0.28-T5 (#1971). Called once, the first time an
+    :class:`ExecutionProfile` is stamped onto an ingested connector
+    (i.e. the first time a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    becomes the resolved class for the connector's ``(product, version,
+    impl_id)``). The stamp transitions the connector from
+    non-dispatchable to **dispatchable**, but does NOT touch any op's
+    ``is_enabled`` / ``review_status`` — the review gate stays the
+    interlock, so a stamp can never auto-enable dispatch.
+
+    Reuses the open *session* so the stamp's audit row commits in the
+    same transaction as the registration mutation; the caller's outer
+    ``await session.commit()`` makes it durable. The payload records the
+    connector triple and the resolved profiled class name so an operator
+    (or an audit query) can see *when* and *by whom* the connector
+    became dispatchable — distinct from the later per-op
+    :data:`OP_EDIT_OP` rows that record the review-gate clearance.
+    """
+    return await write_audit_row(
+        session,
+        operator_sub=operator_sub,
+        operator_tenant_id=operator_tenant_id,
+        op_id=OP_PROFILE_STAMP,
+        payload={
+            "connector_id": connector_id,
+            "product": scope.product,
+            "version": scope.version,
+            "impl_id": scope.impl_id,
+            "connector_class": connector_class,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -595,30 +650,55 @@ def enable_time_auto_shim_warnings(
     op_id: str,
     scope: ConnectorScope,
 ) -> list[EditOpWarning]:
-    """Build the ``unreplaced_auto_shim`` advisory for an op enable, if due.
+    """Build the enable-time connector-tier advisory for an op enable, if due.
 
     Called by :meth:`ReviewService.edit_op` after a successful
-    ``is_enabled=True`` write. When
-    :func:`~meho_backplane.operations.ingest.connector_registration.resolved_auto_shim_class`
-    reports that dispatch for this op's ``(product, version)`` line
-    resolves to the unconfigured :class:`GenericRestConnector` ingest
-    shim, the enable is a guaranteed dispatch dead end
-    (``connector_unsupported`` / ``cause='unreplaced_auto_shim'``,
-    G0.23-T1 #1627) and the returned advisory says so up-front —
-    naming the missing per-product subclass with the same remediation
-    phrasing the dispatch-time error uses, so the proactive and
-    reactive surfaces read as one story.
+    ``is_enabled=True`` write. Replays the production resolver for this
+    op's ``(product, version)`` line and emits one advisory keyed on the
+    resolved connector's
+    :data:`~meho_backplane.connectors.base.ShimKind` tier:
+
+    * **bare** (:class:`GenericRestConnector` auto-shim) — the enable is
+      a guaranteed dispatch dead end (``connector_unsupported`` /
+      ``cause='unreplaced_auto_shim'``, G0.23-T1 #1627); the advisory
+      names the missing per-product subclass with the same remediation
+      phrasing the dispatch-time error uses, so the proactive and
+      reactive surfaces read as one story.
+    * **profiled**
+      (:class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`)
+      — the connector IS dispatchable, so this is not a dead end. But
+      stamping its :class:`ExecutionProfile` deliberately did not
+      auto-enable dispatch (the review gate is the interlock, G0.28-T5
+      #1971); this ``is_enabled=True`` write is the operator clearing
+      that gate. The advisory confirms that the enable — not the stamp —
+      made the op callable.
 
     Returns ``[]`` on the clean path (hand-rolled connector, resolver
     miss, resolver tie). Never raises: the probe decorates the write,
-    it must not break it.
+    it must not break it. The two tiers are mutually exclusive (the
+    resolver lands on exactly one class), so at most one advisory is
+    returned. The two branches are built by dedicated helpers
+    (:func:`_bare_shim_warning` / :func:`_profiled_unreviewed_warning`)
+    to keep this dispatcher under the size budget.
     """
-    shim_class = resolved_auto_shim_class(
-        product=scope.product,
-        version=scope.version,
-    )
-    if shim_class is None:
-        return []
+    shim_class = resolved_auto_shim_class(product=scope.product, version=scope.version)
+    if shim_class is not None:
+        return [_bare_shim_warning(connector_id, op_id, scope, shim_class)]
+
+    profiled_class = resolved_profiled_connector_class(product=scope.product, version=scope.version)
+    if profiled_class is not None:
+        return [_profiled_unreviewed_warning(connector_id, op_id, scope, profiled_class)]
+
+    return []
+
+
+def _bare_shim_warning(
+    connector_id: str,
+    op_id: str,
+    scope: ConnectorScope,
+    shim_class: str,
+) -> EditOpWarning:
+    """Build the ``unreplaced_auto_shim`` dead-end advisory for a bare-shim enable."""
     _log.info(
         "edit_op_auto_shim_warning",
         connector_id=connector_id,
@@ -640,10 +720,41 @@ def enable_time_auto_shim_warnings(
         f"the spec will NOT replace the shim. See "
         f"docs/codebase/spec-ingestion.md for the auto-shim lifecycle."
     )
-    return [
-        EditOpWarning(
-            code="unreplaced_auto_shim",
-            connector_class=shim_class,
-            message=message,
-        )
-    ]
+    return EditOpWarning(
+        code="unreplaced_auto_shim",
+        connector_class=shim_class,
+        message=message,
+    )
+
+
+def _profiled_unreviewed_warning(
+    connector_id: str,
+    op_id: str,
+    scope: ConnectorScope,
+    profiled_class: str,
+) -> EditOpWarning:
+    """Build the ``profiled_but_unreviewed`` gate-clearance advisory for a profiled enable."""
+    _log.info(
+        "edit_op_profiled_but_unreviewed_warning",
+        connector_id=connector_id,
+        op_id=op_id,
+        product=scope.product,
+        version=scope.version,
+        impl_id=scope.impl_id,
+        connector_class=profiled_class,
+    )
+    message = (
+        f"is_enabled=True was applied to op {op_id!r} on connector "
+        f"{connector_id!r}, whose resolved connector ({profiled_class}) is a "
+        f"profiled REST connector backed by a reviewed ExecutionProfile. "
+        f"Stamping that profile made the connector dispatchable but did NOT "
+        f"auto-enable this op -- this enable is what cleared the review gate "
+        f"and made the op callable by agents. Confirm the op was vetted "
+        f"before this enable. See docs/codebase/spec-ingestion.md for the "
+        f"profile review-gate lifecycle."
+    )
+    return EditOpWarning(
+        code="profiled_but_unreviewed",
+        connector_class=profiled_class,
+        message=message,
+    )

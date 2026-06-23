@@ -1,0 +1,42 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Audit session-replay OVER-CAP fallback (Initiative #1841 G10.15, Task #1946).
+
+  Rendered in place of the tree when the session's anchor-row count exceeds
+  the backend ``_REPLAY_ROW_CAP`` (single-sourced from ``api/v1/audit.py``,
+  surfaced as ``replay_row_cap``). The count-first guard refuses to build a
+  runaway tree -- mirroring the REST route's 413 ``session_too_large`` -- so
+  this surface offers a one-click pivot to the T1 flat query pre-filtered by
+  ``agent_session_id`` instead (the same redirect the CLI turns the 413 into).
+
+  Context variables:
+    row_count       -- int: the session's anchor-row count (over the cap)
+    replay_row_cap  -- int: the backend cap (single-sourced, not a literal)
+    flat_query_href -- str: ``/ui/audit?agent_session_id=<session_id>`` pivot
+-#}
+{% from "_icons.html" import icon %}
+<div
+  id="audit-replay-over-cap"
+  role="alert"
+  class="alert alert-warning flex flex-col items-start gap-3"
+>
+  <div>
+    <h3 class="font-semibold">Session too large to replay as a tree</h3>
+    <p class="text-sm">
+      This session carries <span class="font-mono">{{ row_count }}</span>
+      audit rows, over the
+      <span class="font-mono">{{ replay_row_cap }}</span>-row replay cap.
+      Building the full lineage tree is suppressed to keep the console
+      responsive. Browse the session's rows as a flat, paged query instead.
+    </p>
+  </div>
+  <a
+    class="btn btn-sm btn-primary gap-1"
+    href="{{ flat_query_href }}"
+    aria-label="Open the flat audit query filtered to this session"
+  >
+    {{ icon("search", class="size-3.5") }} Open flat query for this session
+  </a>
+</div>

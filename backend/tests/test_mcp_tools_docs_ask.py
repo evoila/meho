@@ -43,10 +43,23 @@ from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, Corpus
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.docs_search.answer_errors import (
+    ANSWER_ERROR_DETAIL,
+    CAUSE_CLIENT_UNAVAILABLE,
+    CAUSE_CORPUS_UNAVAILABLE,
+    CAUSE_EXPANSION_INVALID,
+    CAUSE_SYNTHESIS_CITATION_RESOLUTION,
+    CAUSE_SYNTHESIS_PARSE,
+    LEG_CORPUS,
+    LEG_EXPAND,
+    LEG_MODEL,
+    LEG_SYNTHESIS,
+)
 from meho_backplane.docs_search.synthesis import NO_GROUNDED_ANSWER
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.operations.ingest import LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -67,6 +80,14 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 #: here lets a test pin a deterministic stub or assert the fail-closed
 #: factory propagates.
 _BUILD_LLM_CLIENT = "meho_backplane.docs_search.synthesis.build_anthropic_ingest_llm_client"
+
+#: Where the corpus-aware expand step (#1916) resolves its default LLM
+#: client. Distinct from the synthesis seam so a test can pin the expand
+#: client independently (or assert its fail-closed factory propagates).
+#: ``ask_docs`` now expands the question *before* retrieval, so every
+#: pipeline-reaching test must pin a working expand client — the autouse
+#: :func:`_default_expand_client` fixture does that by default.
+_BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ingest_llm_client"
 
 #: The corpus-http backend's transport seam — the function the
 #: ``corpus-http`` adapter actually calls.
@@ -155,10 +176,46 @@ class _StubLlmClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
+        # The expand leg calls this; capture its prompt so a test can assert
+        # the manifest reached the expansion prompt (corpus-awareness).
         self.captured["system_prompt"] = system_prompt
         self.captured["user_prompt"] = user_prompt
         self.captured["max_output_tokens"] = max_output_tokens
         return self._raw
+
+    async def generate_structured_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+        response_format: Any | None = None,
+    ) -> LlmJsonResult:
+        # The synthesis leg calls this; capture the structured-output request.
+        self.captured["system_prompt"] = system_prompt
+        self.captured["user_prompt"] = user_prompt
+        self.captured["max_output_tokens"] = max_output_tokens
+        self.captured["response_format"] = response_format
+        return LlmJsonResult(text=self._raw, stop_reason="end_turn")
+
+
+@pytest.fixture(autouse=True)
+def _default_expand_client() -> Iterator[None]:
+    """Pin a working expand client for every ``ask_docs`` test (#1916).
+
+    ``ask_docs`` now runs the corpus-aware expand step before retrieval, and
+    the default expand client (``build_anthropic_ingest_llm_client``) fails
+    closed with no ``ANTHROPIC_API_KEY`` — which the test env never sets. So
+    without this fixture every pipeline-reaching test would 503 on the
+    expand leg before retrieval. The default stub proposes one extra variant
+    (so the happy-path corpus is hit twice — original + 1 variant — and the
+    RRF merge runs over two lists). A test that asserts expand behaviour or
+    its fail-closed posture re-patches ``_BUILD_EXPAND_CLIENT`` inside its
+    own ``with`` block, which wins because it is applied later.
+    """
+    stub = _StubLlmClient(json.dumps({"queries": ["VMware NSX configuration maximums"]}))
+    with patch(_BUILD_EXPAND_CLIENT, return_value=stub):
+        yield
 
 
 _SAMPLE_CHUNK = CorpusChunk(
@@ -439,6 +496,10 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     citation = payload["citations"][0]
     assert citation["chunk_id"] == "nsx-9.0-maximums-0007"
     assert citation["source_url"].endswith("/maximums")
+    # The citation carries a resolved navigable link (#1919): an already-https
+    # source passes through as the clickable href.
+    assert citation["link"]["clickable"] is True
+    assert citation["link"]["href"] == "https://docs.example.com/nsx/9.0/maximums"
 
     # The optional refinements reached the backend and the operator identity
     # was forwarded.
@@ -448,6 +509,61 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_resolves_gs_kb_citation_to_canonical_link(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A KB ``gs://`` citation resolves to a clickable Broadcom KB link (#1919).
+
+    The corpus returns a raw ``gs://`` object path an operator cannot open; the
+    ``ask_docs`` payload must carry a resolved ``link`` pointing at the
+    canonical ``knowledge.broadcom.com`` article URL, never the broken ``gs://``
+    path. The raw ``source_url`` stays on the citation for provenance.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    kb_chunk = CorpusChunk(
+        chunk_id="kb-414551-0001",
+        document_id="broadcom-kb-414551",
+        content="vCenter Server scaling maximums for vSphere 9.0.",
+        source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+        score=0.95,
+    )
+    corpus = _fake_corpus(kb_chunk)
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "vCenter scaling maximums are documented in KB 414551.",
+                "cited_chunk_ids": ["kb-414551-0001"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {"query": "What are the vCenter scaling maximums?", "collection": "vmware"},
+                call_id=6,
+            ),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    payload = json.loads(body["result"]["content"][0]["text"])
+    citation = payload["citations"][0]
+
+    # Raw object path preserved for provenance.
+    assert citation["source_url"].startswith("gs://")
+    # Resolved navigable link points at the canonical KB article, not gs://.
+    link = citation["link"]
+    assert link["kind"] == "broadcom_kb"
+    assert link["clickable"] is True
+    assert link["href"] == "https://knowledge.broadcom.com/external/article/414551"
+    assert not link["href"].startswith("gs://")
 
 
 # ---------------------------------------------------------------------------
@@ -500,13 +616,14 @@ def test_tools_call_ask_docs_zero_chunks_returns_no_grounded_answer(
 def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC4: an unconfigured synthesis model fails closed → ``-32603``.
+    """AC4: an unconfigured synthesis model fails closed → structured ``-32603``.
 
     ``build_anthropic_ingest_llm_client`` raising ``LlmClientUnavailable``
-    (no ``ANTHROPIC_API_KEY``) is the #1386 fail-closed precedent. It is
-    not caught in the handler, so it bubbles to the dispatcher's generic
-    catch → ``-32603`` (the MCP analogue of the route's 503). We never
-    return an ungrounded answer when the model is missing.
+    (no ``ANTHROPIC_API_KEY``) is the #1386 fail-closed precedent. The code
+    stays ``-32603`` (the MCP analogue of the route's 503) but ``error.data``
+    now names the ``model_unavailable`` leg (#1918), so a consumer can tell a
+    missing model from a backend outage. We never return an ungrounded answer
+    when the model is missing.
     """
     client, _op = docs_client
     _seed_collection_sync()
@@ -524,7 +641,12 @@ def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=7),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: the leg is named on error.data, not a flat -32603.
+    assert error["data"]["detail"] == ANSWER_ERROR_DETAIL
+    assert error["data"]["leg"] == LEG_MODEL
+    assert error["data"]["cause"] == CAUSE_CLIENT_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +662,9 @@ def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
 
     An unverifiable citation breaks the no-claim-without-a-REAL-citation
     contract, so the synthesis raises ``DocsSynthesisError`` rather than
-    returning an answer with a fabricated reference. Surfaces as ``-32603``.
+    returning an answer with a fabricated reference. Surfaces as a structured
+    ``-32603`` naming the ``synthesis_malformed`` leg with the
+    ``citation_resolution`` sub-cause (#1918).
     """
     client, _op = docs_client
     _seed_collection_sync()
@@ -557,7 +681,41 @@ def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=8),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_SYNTHESIS
+    assert error["data"]["cause"] == CAUSE_SYNTHESIS_CITATION_RESOLUTION
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_malformed_synthesis_output_names_parse_sub_cause(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A model returning non-JSON names ``synthesis_malformed`` / ``parse`` (#1918).
+
+    The sibling of the fabricated-citation case: here the output is
+    structurally unparseable (not a citation problem), so the sub-cause is
+    ``parse`` — letting an operator tell "the model emitted garbage" apart
+    from "the model cited a chunk that isn't in the result", which point at
+    different fixes.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    stub = _StubLlmClient("I'm sorry, I cannot answer that.")  # non-JSON
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=12),
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_SYNTHESIS
+    assert error["data"]["cause"] == CAUSE_SYNTHESIS_PARSE
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +744,11 @@ def test_tools_call_ask_docs_backend_unavailable_is_internal_error(
             _ask_call({"query": "x", "collection": "vmware"}, call_id=9),
         )
     assert response.status_code == 200
-    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: the corpus leg is named, distinct from the model/synthesis legs.
+    assert error["data"]["leg"] == LEG_CORPUS
+    assert error["data"]["cause"] == CAUSE_CORPUS_UNAVAILABLE
     # The corpus failed before synthesis was reached.
     assert stub.captured == {}
 
@@ -668,3 +830,168 @@ async def test_tools_call_ask_docs_audit_row_carries_op_id_and_collection(
     assert payload["collection"] == "vmware"
     assert "logical switch maximums" not in json.dumps(payload)
     assert payload["params_hash"]
+
+
+# ---------------------------------------------------------------------------
+# tools/call — corpus-aware expand → multi-query retrieve → RRF (AC1/AC2)
+# ---------------------------------------------------------------------------
+
+
+def _fake_corpus_per_query(by_query: dict[str, list[CorpusChunk]]) -> Any:
+    """An async ``search_corpus`` stand-in returning per-query chunk lists.
+
+    Records every query it was called with (so a test can prove retrieval
+    ran once per expanded variant) and returns the chunk list keyed by that
+    query — letting a test exercise the real RRF merge over distinct
+    per-variant results.
+    """
+    queries: list[str] = []
+
+    async def _search(operator: Operator, query: str, **kwargs: Any) -> CorpusSearchResponse:
+        queries.append(query)
+        return CorpusSearchResponse(chunks=list(by_query.get(query, [])))
+
+    _search.queries = queries  # type: ignore[attr-defined]
+    return _search
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_expands_then_rrf_merges_per_variant(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """AC1/AC2: ``ask_docs`` retrieves per expanded variant and RRF-merges.
+
+    The expand client (corpus-aware) proposes one extra, domain-term variant
+    alongside the original question. Retrieval runs once per variant — each
+    returning a *distinct* chunk plus a shared one — and the RRF merge fuses
+    them so the answer can ground on a chunk only the expanded variant found
+    (the recall win expansion exists for). The expansion prompt carries the
+    collection's manifest product token (corpus-awareness).
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+
+    original = "logical switch maximums"
+    variant = "VMware NSX configuration maximums"
+    # Distinct top hit per variant + one shared chunk → exercises the merge.
+    corpus = _fake_corpus_per_query(
+        {
+            original: [_SAMPLE_CHUNK],
+            variant: [_SECOND_CHUNK],
+        }
+    )
+    expand_stub = _StubLlmClient(json.dumps({"queries": [variant]}))
+    # Synthesis cites the chunk that ONLY the expanded variant retrieved —
+    # provable only if the merge actually included it.
+    synth_stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 1,000 transport nodes per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0008"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand_stub),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": original, "collection": "vmware"}, call_id=20),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+
+    # Retrieval ran once per variant (original + the expanded one).
+    assert sorted(corpus.queries) == sorted([original, variant])  # type: ignore[attr-defined]
+    # The answer grounded on the chunk only the expanded variant found —
+    # proof the per-variant lists were RRF-merged before synthesis.
+    assert [c["chunk_id"] for c in payload["citations"]] == ["nsx-9.0-maximums-0008"]
+    # Corpus-aware: the manifest product token reached the expansion prompt.
+    assert "nsx" in expand_stub.captured["user_prompt"]
+    assert "VMware by Broadcom" in expand_stub.captured["user_prompt"]
+    # Synthesis answered the operator's ORIGINAL question (variants only
+    # widened retrieval).
+    assert original in synth_stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_unconfigured_expand_model_is_internal_error(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """AC3: an unconfigured expand model fails closed → ``-32603``.
+
+    Expansion reuses the #1386 fail-closed client. With no expand model
+    configured it raises ``LlmClientUnavailable`` *before* retrieval, which
+    bubbles to ``-32603`` (the MCP analogue of 503). We never fall back to
+    retrieving on the raw question and returning a silently un-expanded
+    answer — the same fail-closed posture as synthesis. Neither retrieval
+    nor synthesis is reached.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    synth_stub = _StubLlmClient('{"answer": "unused", "cited_chunk_ids": []}')
+
+    def _fail_closed() -> Any:
+        raise LlmClientUnavailable("no ANTHROPIC_API_KEY configured")
+
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, side_effect=_fail_closed),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=21),
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    # #1918: a no-model failure on the EXPAND leg is attributed to expand_failed,
+    # NOT model_unavailable — even though both legs reuse the same #1386 client.
+    # The handler's per-leg wrap is what disambiguates the shared exception type.
+    assert error["data"]["leg"] == LEG_EXPAND
+    assert error["data"]["cause"] == CAUSE_CLIENT_UNAVAILABLE
+    # Expansion failed before retrieval or synthesis ran.
+    assert "query" not in corpus.captured  # type: ignore[attr-defined]
+    assert synth_stub.captured == {}
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_malformed_expansion_names_expand_leg(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A malformed expansion output names the ``expand_failed`` leg (#1918).
+
+    The expand model ran but returned non-JSON, so ``expand_docs_query``
+    raises ``DocsQueryExpansionError`` (distinct from the no-model
+    ``LlmClientUnavailable`` case above). It surfaces as ``expand_failed`` /
+    ``expansion_invalid`` — and never falls back to retrieving on the raw
+    question. Neither retrieval nor synthesis runs.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    expand_stub = _StubLlmClient("not valid json at all")  # → DocsQueryExpansionError
+    synth_stub = _StubLlmClient('{"answer": "unused", "cited_chunk_ids": []}')
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand_stub),
+        patch(_BUILD_LLM_CLIENT, return_value=synth_stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=22),
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INTERNAL_ERROR
+    assert error["data"]["leg"] == LEG_EXPAND
+    assert error["data"]["cause"] == CAUSE_EXPANSION_INVALID
+    # Expansion failed before retrieval or synthesis ran.
+    assert "query" not in corpus.captured  # type: ignore[attr-defined]
+    assert synth_stub.captured == {}

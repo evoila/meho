@@ -72,11 +72,30 @@ cardinality.
 RBAC
 ====
 
-All five routes require ``operator`` role minimum
-(:class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`).
+The five **flat / self-scoped** routes (``query``, ``who-touched``,
+``by-work-ref``, ``my-recent``, ``show``) require ``operator`` role
+minimum (:class:`~meho_backplane.auth.operator.TenantRole.OPERATOR`):
 ``read_only`` gets 403; ``tenant_admin`` gets 200. The shape mirrors
 :mod:`~meho_backplane.api.v1.retrieve` and
-:mod:`~meho_backplane.api.v1.retrieve_usage`.
+:mod:`~meho_backplane.api.v1.retrieve_usage`. These match the MCP
+``query_audit`` tool, which is also ``operator``-gated — including its
+``shape="tree"`` *self-session* replay, locked to the caller's own
+session id.
+
+The **cross-session replay** route
+(``GET /api/v1/audit/sessions/{session_id}/replay``) takes an
+*arbitrary* ``session_id`` and reconstructs another principal's full
+session trace — a privileged forensic act. It requires ``tenant_admin``
+(#1843): ``read_only`` and ``operator`` get 403; ``tenant_admin`` gets
+200. This aligns the REST surface with the MCP posture, where
+cross-session replay is the ``tenant_admin``-gated ``meho.audit.replay``
+tool (the operator-level ``query_audit`` ``shape="tree"`` path replays
+*only your own* session). Before #1843 the REST route gated cross-session
+replay at ``operator``, making the web/CLI surface more permissive than
+MCP and than ``docs/cross-repo/audit-replay.md``; tightening to
+``tenant_admin`` closes that gap. Self-scoped audit access
+(``my-recent``, an operator querying their own principal) stays at
+``operator`` — only the arbitrary-session forensic path is lifted.
 
 Error mapping
 =============
@@ -86,8 +105,9 @@ Error mapping
 * :class:`~meho_backplane.audit_query.InvalidCursorError` (tampered
   cursor) → 400 with the substrate's message.
 * :class:`~meho_backplane.audit_query.UnsupportedFilterError`
-  (``parent_audit_id`` / ``agent_session_id`` in v0.2) → 400 with the
-  column-name message from the substrate.
+  (``parent_audit_id`` in v0.2 — ``agent_session_id`` is a *supported*
+  flat filter as of G8.2 #1009) → 400 with the column-name message from
+  the substrate.
 
 Other exceptions propagate; the chassis middleware turns them into 500.
 """
@@ -131,10 +151,18 @@ from meho_backplane.api.v1._envelope import (
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
 
-#: Module-level :class:`Depends` closure for the routes' RBAC gate.
-#: Built once at import time to satisfy ruff's B008 rule, matching the
-#: convention :mod:`~meho_backplane.api.v1.retrieve_usage` established.
+#: Module-level :class:`Depends` closure for the flat / self-scoped
+#: routes' RBAC gate (``operator`` minimum). Built once at import time to
+#: satisfy ruff's B008 rule, matching the convention
+#: :mod:`~meho_backplane.api.v1.retrieve_usage` established.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
+
+#: RBAC gate for the cross-session replay route (#1843). Replaying an
+#: *arbitrary* ``session_id`` exposes another principal's full session
+#: trace, so it is a ``tenant_admin`` forensic act — matching the MCP
+#: ``meho.audit.replay`` tool and ``docs/cross-repo/audit-replay.md``.
+#: The operator-level paths above stay self-/flat-scoped.
+_require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 #: Canonical op_id every audit-query call (POST + 3 GET shortcuts) emits
 #: via the ``audit_op_id`` contextvar override honoured by
@@ -417,9 +445,19 @@ async def _count_session_rows(
 @router.get("/sessions/{session_id}/replay", response_model=AuditReplayResult)
 async def replay(
     session_id: uuid.UUID,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_tenant_admin,
 ) -> AuditReplayResult:
     """Replay one agent session as a tenant-scoped parent/child tree.
+
+    **RBAC (#1843): ``tenant_admin`` required.** This route takes an
+    *arbitrary* ``session_id`` and reconstructs another principal's full
+    session trace — a privileged forensic act, not self-service. It
+    therefore gates at ``tenant_admin`` (``read_only`` / ``operator`` →
+    403), matching the MCP ``meho.audit.replay`` tool and
+    ``docs/cross-repo/audit-replay.md``. An operator replaying *their
+    own* session uses the MCP ``query_audit`` ``shape="tree"`` path
+    instead (operator-level, self-session-only). Cross-tenant isolation
+    is unchanged and orthogonal to this gate (see below).
 
     Dispatches through
     :func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``

@@ -1,0 +1,107 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the agent-runs list (Initiative #1824, Task #1830,
+  G10.8-T3). Extends ``base.html`` so the chrome matches the rest of the
+  console; the "Agents" sidebar entry stays active (``active_surface`` ==
+  "agents") and a Definitions/Runs tab strip switches between the two
+  agents surfaces.
+
+  Layout (top-down):
+    * Tab strip -- Definitions (/ui/agents) | Runs (this page).
+    * Header -- title + blurb.
+    * Filter bar -- status <select> (closed enum) + ``work_ref`` text
+      input, HTMX-bound to ``/ui/agents/runs`` swapping only the <tbody>.
+    * Table body (``_table_rows.html`` partial) -- one row per run.
+
+  HTMX wiring mirrors the scheduler list: the filter form ``hx-get``s
+  ``/ui/agents/runs`` with ``hx-include="closest form"`` so every filter
+  value rides along, ``hx-target="#agent-runs-table-body"`` to swap only
+  the table body, and ``hx-push-url`` so the URL reflects the active
+  filter (copy/paste reproduces it).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Agent runs &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  {# ---------- Definitions / Runs tab strip ---------- #}
+  <div role="tablist" class="tabs tabs-bordered">
+    <a role="tab" class="tab" href="/ui/agents">Definitions</a>
+    <a role="tab" class="tab tab-active" aria-current="page" href="/ui/agents/runs">Runs</a>
+  </div>
+
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Agent runs</h1>
+      <p class="text-sm opacity-70">
+        Every agent invocation in this tenant, newest first. Filter by
+        lifecycle status or change ticket (work_ref); click a run to inspect
+        its status, turns, model, and output.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/agents/runs"
+    hx-target="#agent-runs-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="change from:find select, input delay:400ms from:find input[name=work_ref]"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter runs"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-2">
+      <label class="form-control">
+        <span class="label-text">Status</span>
+        <select name="status" class="select select-bordered select-sm" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          {% for option in status_options %}
+            <option value="{{ option }}" {% if option == status_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Change ticket (work_ref)</span>
+        <input
+          type="text"
+          name="work_ref"
+          value="{{ work_ref_filter }}"
+          class="input input-bordered input-sm"
+          placeholder="exact match"
+          maxlength="256"
+          aria-label="Filter by work_ref"
+        />
+      </label>
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th>Status</th>
+          <th>Trigger</th>
+          <th>Model</th>
+          <th>Turns</th>
+          <th>Change ticket</th>
+          <th>Created</th>
+          <th>Duration</th>
+          <th class="w-16"></th>
+        </tr>
+      </thead>
+      {% include "agents/runs/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

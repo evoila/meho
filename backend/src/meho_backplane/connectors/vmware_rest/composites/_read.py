@@ -85,6 +85,7 @@ from meho_backplane.connectors.vmware_rest.composites._preflight import (
 from meho_backplane.operations.composite import DispatchChild
 
 __all__ = [
+    "CompositeSubOpError",
     "cluster_drs_recommendations_composite",
     "datastore_usage_composite",
     "event_tail_composite",
@@ -181,21 +182,104 @@ def _unwrap_value(payload: Any) -> Any:
     return payload
 
 
+def _describe_sub_op_failure(result: OperationResult) -> str:
+    """Render the most diagnostic line a failed sub-op result carries.
+
+    The dispatcher's structured-error builders (``operations/_errors.py``)
+    put different fields on a sub-op's ``extras`` depending on the failure
+    class:
+
+    * An upstream ``403`` / ``422`` / ``401`` / ``440`` lands a structured
+      ``http_status`` plus the upstream's own ``upstream_message`` -- the
+      single most useful diagnostic line.
+    * Every other upstream status (``400``, ``404``, ``5xx`` ...) falls
+      through to the generic ``connector_error`` builder, which keeps the
+      stringified ``httpx.HTTPStatusError`` -- ``"Client error '400 Bad
+      Request' for url 'https://.../api/vcenter/vm?filter.datastores=...'"``
+      -- under ``exception_message``. That string already carries the
+      status code *and* the offending URL, so surfacing it is what the
+      ``filter.datastores`` 400 (#1908) needed.
+
+    Prefer the structured ``http_status`` + ``upstream_message`` when the
+    builder extracted them; otherwise fall back to the capped
+    ``exception_message``; otherwise the bare ``error`` summary. The detail
+    is appended to ``error`` only when it adds information beyond it.
+    """
+    extras = result.extras
+    http_status = extras.get("http_status")
+    upstream_message = extras.get("upstream_message")
+    detail = extras.get("exception_message")
+    parts: list[str] = []
+    if result.error:
+        parts.append(result.error)
+    if http_status is not None:
+        status_clause = f"HTTP {http_status}"
+        if isinstance(upstream_message, str) and upstream_message.strip():
+            status_clause = f"{status_clause}: {upstream_message}"
+        parts.append(status_clause)
+    elif isinstance(detail, str) and detail.strip() and detail != result.error:
+        parts.append(detail)
+    if not parts:
+        parts.append("<no error message>")
+    return " -- ".join(parts)
+
+
+class CompositeSubOpError(RuntimeError):
+    """A composite sub-op returned a non-OK :class:`OperationResult`.
+
+    Raised by :func:`_require_ok` when a *load-bearing* sub-op fails (the
+    datastore listing, a per-datastore detail read, an event/perf query).
+    The dispatcher's outer exception branch wraps the raised exception
+    into a ``connector_error`` :class:`OperationResult` for the composite
+    parent (``operations/_errors.py::result_connector_error``), which
+    records ``type(exc).__name__`` and the capped ``str(exc)`` under the
+    parent's ``extras``.
+
+    The pre-#1908 shape raised a bare :class:`RuntimeError` whose message
+    stopped at ``status='error'`` plus the sub-op's terse ``error``
+    summary (``connector_error: HTTPStatusError``) -- the actual status
+    code and offending URL only showed when the operator replayed the
+    sub-op by hand. This class threads the sub-op's structured failure
+    (``op_id`` / ``status`` / ``error`` / ``extras``) through as
+    attributes *and* folds the most diagnostic line
+    (:func:`_describe_sub_op_failure` -- a structured ``http_status`` +
+    upstream message, or the stringified ``HTTPStatusError`` carrying the
+    status + URL) into ``str(self)`` so it lands in the composite parent's
+    ``extras["exception_message"]`` rather than being lost.
+
+    The ``returned status='<status>'`` clause is preserved verbatim so
+    existing consumers that string-match it keep working.
+    """
+
+    def __init__(self, result: OperationResult) -> None:
+        self.op_id = result.op_id
+        self.status = result.status
+        self.sub_op_error = result.error
+        self.sub_op_extras = dict(result.extras)
+        super().__init__(
+            f"composite sub-op {result.op_id!r} returned status="
+            f"{result.status!r}: {_describe_sub_op_failure(result)}"
+        )
+
+
 def _require_ok(result: OperationResult) -> Any:
     """Return :attr:`OperationResult.result` or raise on a non-OK status.
 
-    The composite handlers prefer to fail loudly when a sub-op errors
-    -- a swallowed error would silently produce a malformed
-    aggregation. The dispatcher's outer exception branch wraps the
-    raised ``RuntimeError`` into a ``connector_error``
+    The composite handlers fail loudly when a *load-bearing* sub-op errors
+    -- a swallowed error would silently produce a malformed aggregation.
+    The dispatcher's outer exception branch wraps the raised
+    :class:`CompositeSubOpError` into a ``connector_error``
     :class:`OperationResult` for the composite parent, surfacing the
-    underlying sub-op's failure on ``extras["exception_class"]``.
+    underlying sub-op's failure (status code + URL where the sub-op
+    carried them) on ``extras["exception_message"]``.
+
+    Optional enrichment legs (e.g. the per-datastore VM-placement lookup
+    in :func:`datastore_usage_composite`) must NOT route through this
+    helper -- they degrade best-effort instead of sinking the whole
+    composite.
     """
     if result.status != "ok":
-        raise RuntimeError(
-            f"composite sub-op {result.op_id!r} returned status="
-            f"{result.status!r}: {result.error or '<no error message>'}"
-        )
+        raise CompositeSubOpError(result)
     return result.result
 
 
@@ -419,10 +503,11 @@ async def performance_summary_composite(
 
 
 # Pre-existing >100-line handler from G3.1-T5 #508; G0.14-T10 #1151
-# added a 6-line pre-flight call at the top, pushing the diff-only
-# checker into block territory. Refactor is out of scope for T10
-# (the L2-dependency strategy).
-# code-quality-allow: pre-existing G3.1-T5 #508 handler, T10 added preflight only
+# added a 6-line pre-flight call at the top and G0.27 #1908 made the
+# per-datastore VM-placement leg best-effort -- both extend an already
+# block-sized handler. Refactor (e.g. extracting the per-datastore row
+# builder) is out of scope here.
+# code-quality-allow: pre-existing G3.1-T5 #508 handler; #1908 best-effort enrichment only
 async def datastore_usage_composite(
     *,
     operator: Operator,
@@ -440,10 +525,19 @@ async def datastore_usage_composite(
        narrowed via ``filter.names``).
     2. For each datastore:
        a. ``GET:/vcenter/datastore/{datastore}`` -- detailed capacity /
-          free / type / accessible flag.
+          free / type / accessible flag (load-bearing: a failure here
+          sinks the composite).
        b. ``GET:/vcenter/vm`` with ``filter.datastores`` -- VMs whose
           working directory sits on this datastore. Drives the
-          ``vm_count`` + ``vm_names`` aggregation.
+          ``vm_count`` + ``vm_names`` aggregation. This leg is
+          **best-effort** (#1908): the capacity/free/type read -- the
+          data the "which datastores are filling up?" use case needs --
+          is already done by the time it runs, so when the VM lookup
+          errors (e.g. a vCenter that rejects the ``filter.datastores``
+          query with a 400) the row is still returned with
+          ``vm_count`` / ``vm_names`` set to ``null`` and an
+          ``enrichment_note`` recording why, rather than failing the
+          whole composite.
 
     Sequential dispatch is intentional: each datastore's detail call
     inherits the prior call's authentication state, and the audit
@@ -460,7 +554,11 @@ async def datastore_usage_composite(
         "capacity": ..., "free_space": ..., "vm_count": ...,
         "vm_names": [...]}, ...]}``. The ``capacity`` / ``free_space``
         fields may be ``None`` if the upstream payload omits them
-        (e.g. a partially-mounted datastore).
+        (e.g. a partially-mounted datastore). When the per-datastore
+        VM-placement enrichment errors, ``vm_count`` and ``vm_names``
+        are ``None`` and the row carries an ``enrichment_note`` string
+        describing the skipped enrichment; on success the row has no
+        ``enrichment_note`` key.
     """
     await preflight_l2_dependencies(
         composite_op_id=_COMPOSITE_OP_ID_DATASTORE_USAGE,
@@ -506,32 +604,47 @@ async def datastore_usage_composite(
             )
         )
         detail_payload = _unwrap_value(detail)
-        vms = _require_ok(
-            await dispatch_child(
-                connector_id=_CONNECTOR_ID,
-                op_id=_OP_LIST_VMS,
-                params={"filter.datastores": [ds_id]},
-            )
-        )
-        vm_entries = _unwrap_value(vms)
-        if not isinstance(vm_entries, list):
-            vm_entries = []
-        vm_names = [
-            v["name"] for v in vm_entries if isinstance(v, dict) and isinstance(v.get("name"), str)
-        ]
         capacity = detail_payload.get("capacity") if isinstance(detail_payload, dict) else None
         free_space = detail_payload.get("free_space") if isinstance(detail_payload, dict) else None
-        aggregated.append(
-            {
-                "id": ds_id,
-                "name": entry.get("name"),
-                "type": entry.get("type"),
-                "capacity": capacity,
-                "free_space": free_space,
-                "vm_count": len(vm_names),
-                "vm_names": vm_names,
-            }
+        row: dict[str, Any] = {
+            "id": ds_id,
+            "name": entry.get("name"),
+            "type": entry.get("type"),
+            "capacity": capacity,
+            "free_space": free_space,
+        }
+
+        # VM-placement enrichment is best-effort (#1908). The
+        # capacity/free/type read above already satisfies the
+        # storage-usage use case, so a failure on the optional VM lookup
+        # (e.g. a vCenter that 400s the ``filter.datastores`` query)
+        # nulls vm_count/vm_names and records why, rather than raising
+        # through ``_require_ok`` and sinking every datastore row.
+        vms_result = await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_VMS,
+            params={"filter.datastores": [ds_id]},
         )
+        if vms_result.status == "ok":
+            vm_entries = _unwrap_value(vms_result.result)
+            if not isinstance(vm_entries, list):
+                vm_entries = []
+            vm_names = [
+                v["name"]
+                for v in vm_entries
+                if isinstance(v, dict) and isinstance(v.get("name"), str)
+            ]
+            row["vm_count"] = len(vm_names)
+            row["vm_names"] = vm_names
+        else:
+            row["vm_count"] = None
+            row["vm_names"] = None
+            row["enrichment_note"] = (
+                f"vm-placement enrichment skipped: sub-op {_OP_LIST_VMS!r} "
+                f"returned status={vms_result.status!r}: "
+                f"{_describe_sub_op_failure(vms_result)}"
+            )
+        aggregated.append(row)
     return {"datastores": aggregated}
 
 

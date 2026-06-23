@@ -389,6 +389,42 @@ Auto-promotion / self-probe on create stays out of scope (#1756) — it is a
 behaviour change with ingest-cost implications; #1756 is discoverability
 only.
 
+## Global-row manifest seed (#1920)
+
+The global (`tenant_id IS NULL`) `vmware` row is provisioned **out-of-band**
+(operator DB seed) — the create surface (#1739) always scopes a row to the
+caller's tenant, so the shared corpus every tenant sees is never created
+through it. #1916's corpus-aware query expansion
+(`docs_search.expansion._render_manifest_for_prompt`) injects the
+collection's `vendor` / `products` / `description` / `when_to_use` into the
+expansion prompt and **omits empty optional fields**, so a `vmware` row
+seeded without prose contributes only `collection` / `vendor` / `products`
+lines and the model expands on a thin manifest.
+
+Migration `0048` (`backend/alembic/versions/0048_seed_vmware_collection_manifest.py`)
+closes that gap. It is a data migration (no schema change) with three
+load-bearing properties:
+
+- **`UPDATE`, never `INSERT`.** `backend` is NOT NULL with no default and is
+  deploy-specific (the corpus endpoint / RAG corpus path), so a migration
+  cannot author a complete row. It enriches the operator-seeded global row;
+  on a deploy where the row does not exist yet the `UPDATE` matches zero
+  rows — a clean no-op (an unregistered corpus has no manifest to fill).
+- **Global scope only.** Narrowed to `collection_key = 'vmware' AND
+  tenant_id IS NULL`; a tenant-curated `vmware` row is the operator's own
+  content and is left untouched.
+- **Fill-only.** `description` / `when_to_use` / `products` are written only
+  where the row's current value is empty (the operator-content-wins
+  discipline migrations `0018` / `0028` follow); `vendor` (NOT NULL) is only
+  upgraded from the bare `vmware` seed shorthand to the catalogue display
+  string `VMware by Broadcom`. Re-running is therefore idempotent, and
+  `downgrade()` clears only the prose it authored (an operator edit made
+  after the seed survives the rollback).
+
+The seeded prose is **hand-authored**, not auto-summarised from a chunk
+sample at ingest (substrate stays dumb, #1177; auto-summarisation is
+explicitly out of scope per #1920).
+
 ## Dependencies
 
 - SQLAlchemy 2.0 typed ORM (`Mapped[...]` / `mapped_column`), the
@@ -428,7 +464,15 @@ only.
   there is still no PATCH / DELETE and no cross-tenant sharing API — those
   are a later follow-up (out of scope per #1739). A shared/global row
   (`tenant_id IS NULL`) is still seeded out-of-band, since the create
-  always scopes to the caller's tenant.
+  always scopes to the caller's tenant. A **data migration** is the
+  in-repo mechanism for enriching such a global row's metadata — migration
+  `0048` fills the global `vmware` row's `description` / `when_to_use`
+  (and a canonical `vendor` / `products` when still unset) so #1916's
+  corpus-aware query expansion has a manifest to read; see
+  [Global-row manifest seed](#global-row-manifest-seed-1920) below. A
+  migration cannot author the NOT-NULL `backend` routing record (it is
+  deploy-specific), so it `UPDATE`s the operator-seeded row rather than
+  inserting one.
 - **Entitlement is not enforced here.** The per-collection capability
   gate (`meho-docs:<collection>`) and the `audit_collection` binding
   land in T3 (#1552); the registry only stores and resolves rows.

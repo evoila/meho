@@ -41,14 +41,13 @@ __all__ = [
 #: from ``VCFA_CONNECTOR_ID = "vcfa-rest-9.0"`` (``head.split("-", 1)[0]``
 #: where head is ``"vcfa-rest"``).
 #:
-#: It is **not** the same as
-#: :attr:`~meho_backplane.connectors.vcf_automation.VcfAutomationConnector.product`,
-#: which is ``"vcf-automation"`` and is used only for the v2 connector
-#: registry and the target-product resolver. All ``endpoint_descriptor``
-#: and ``operation_group`` rows for this connector triple carry
-#: ``product="vcfa"``; operators pass ``--product vcfa`` when driving
-#: ``meho connector ingest``. Same split the SDDC Manager precedent
-#: established (``"sddc"`` vs ``"sddc-manager"``).
+#: Since #1814 (Initiative #1810) this equals
+#: :attr:`~meho_backplane.connectors.vcf_automation.VcfAutomationConnector.product`
+#: (``"vcfa"``) — the v2 connector registry key and target-product
+#: resolver. All ``endpoint_descriptor`` and ``operation_group`` rows for
+#: this connector triple carry ``product="vcfa"``; operators pass
+#: ``--product vcfa`` when driving ``meho connector ingest``. Same short,
+#: dispatch-canonical token the SDDC Manager precedent uses (``"sddc"``).
 VCFA_PRODUCT: Final[str] = "vcfa"
 VCFA_VERSION: Final[str] = "9.0"
 VCFA_IMPL_ID: Final[str] = "vcfa-rest"

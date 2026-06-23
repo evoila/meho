@@ -53,71 +53,85 @@ entries:
     version: "9.0"
     impl_id: vmware-rest
     requires_connector_class: VmwareRestConnector
-    upstream:
-      - "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
-      - "https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/"
-    # G0.18-T8 (#1361, RDC #789 N8): the Broadcom Developer Portal
-    # landing pages above still serve text/html (rechecked
-    # 2026-05-31), so catalog-driven ingest 422s
-    # ``catalog_entry_upstream_not_spec``. Operators must fetch the
-    # raw specs from the appliance and pass via the explicit-
-    # quadruple ``--spec`` shape; ``GET /api/v1/connectors``
-    # surfaces that via the ``next_step`` hint.
-    catalog_ingest: spec-only
+    # #1964 T2 (#1976): profile-backed shipped-spec row. The Broadcom
+    # Developer Portal pages that host the full vSphere specs serve
+    # text/html and the appliance URL is fqdn-templated, so the backend
+    # cannot dereference an ``upstream`` -- catalog-driven ingest used to
+    # 422 ``catalog_entry_upstream_not_spec`` and force a manual --spec
+    # upload (G0.18-T8 #1361, RDC #789 N8). A MEHO-authored minimal spec
+    # now ships as package data (spec_resource) so ``meho connector ingest
+    # --catalog vmware/9.0`` works without that upload, and a reviewed
+    # ExecutionProfile (profile_resource) fills the dispatch auth slot.
+    upstream: null
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
+    spec_resource: vmware_rest_minimal.yaml
+    profile_resource: vmware_rest_minimal.yaml
+    catalog_ingest: supported
     spec_info_version: null
-    # G0.16-T6 Finding H (#1312). vSphere ships its spec under the
-    # explicit-quadruple ``info.version="9.0.0.0"`` form while the
-    # catalog ``version`` is the product-line label ``"9.0"``. The
-    # PEP-440 prefix-match in ``_classify_version_match`` already
-    # treats ``9.0`` ↔ ``9.0.0.0`` as "exact" (release tuple ``(9, 0)``
-    # is a prefix of ``(9, 0, 0, 0)``), so this declaration is
-    # belt-and-suspenders: when an operator pinned both the catalog
-    # label and a slightly different explicit-quadruple variant, the
-    # compatibility hint says "9.0.x" is the band the catalog covers.
-    # Pairs with T5 (#1307)'s gh-rest entry where the divergence is
-    # load-bearing (catalog "3" vs spec "1.1.4"; PEP-440 prefix-match
-    # alone would reject). Per api-shape-conventions.md §9.
+    # G0.16-T6 Finding H (#1312). vSphere's full appliance spec ships its
+    # ``info.version`` under the explicit-quadruple ``"9.0.0.0"`` form
+    # while the catalog ``version`` is the product-line label ``"9.0"``.
+    # The PEP-440 prefix-match in ``_classify_version_match`` already
+    # treats ``9.0`` <-> ``9.0.0.0`` as "exact" (release tuple ``(9, 0)``
+    # is a prefix of ``(9, 0, 0, 0)``); this declaration is
+    # belt-and-suspenders for an operator who later re-ingests the full
+    # appliance spec under that finer variant. Per api-shape-conventions.md
+    # section 9.
     spec_info_versions_compatible:
       - "9.0.x"
     sha256: null
     notes: >-
-      Generic-ingested. vSphere publishes two specs that merge under one
-      connector triple: vcenter.yaml (modern REST automation API, ~961 paths)
-      and vi-json.yaml (Performance Manager, snapshots, host ops, ~2,195
-      paths). Both are served by the appliance at https://<vcenter-fqdn>/ and
-      mirrored on the Broadcom Developer Portal (links above). SHARP EDGE:
-      the upstream URLs above are HTML developer-portal landing pages, not
-      raw OpenAPI YAML/JSON, so catalog-driven ingest via
-      `meho connector ingest --catalog vmware/9.0` returns HTTP 422
-      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
-      specs manually from the appliance (https://<vcenter-fqdn>/api/...)
-      and pass them via the explicit-quadruple shape. spec_info_version
-      pending the first MEHO-verified ingest. See #743 / connector-ingestion.md.
+      Profile-backed shipped-spec row (#1964 T2 #1976). The shipped
+      spec_resource (vmware_rest_minimal.yaml) is a MEHO-authored minimal,
+      Apache-2.0 OpenAPI 3.0 description of the vCenter inventory READ ops
+      MEHO surfaces -- it is NOT the full vendor surface. The full vSphere
+      specs (vcenter.yaml ~961 paths + vi-json.yaml ~2,195 paths) stay the
+      provenance pointers below for a full-surface re-ingest off the
+      appliance via the explicit-quadruple --spec shape:
+      https://developer.broadcom.com/xapis/vsphere-automation-api/latest/
+      and
+      https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/
+      (both served by the appliance at https://<vcenter-fqdn>/, mirrored on
+      the HTML Broadcom Developer Portal). VmwareRestConnector handles
+      dispatch (typed). See #743 / connector-ingestion.md.
 
-  - product: sddc-manager
+  - product: sddc
     version: "9.0"
     impl_id: sddc-rest
     requires_connector_class: SddcManagerConnector
-    upstream:
-      - "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
-    # G0.18-T8 (#1361, RDC #789 N8): same Broadcom Developer Portal
-    # text/html landing page as vmware/9.0 (rechecked 2026-05-31);
-    # catalog-driven ingest 422s. Operators fetch from the appliance
-    # and pass via ``--spec``.
-    catalog_ingest: spec-only
+    # #1964 T2 (#1976): profile-backed shipped-spec row, same on-ramp as
+    # vmware/9.0 above. The SDDC Manager API is documented on the HTML
+    # Broadcom Developer Portal and served by the appliance at an
+    # fqdn-templated URL the backend cannot dereference, so catalog-driven
+    # ingest used to 422 ``catalog_entry_upstream_not_spec`` and force a
+    # manual --spec upload (G0.18-T8 #1361, RDC #789 N8). A MEHO-authored
+    # minimal spec + reviewed ExecutionProfile now ship as package data.
+    upstream: null
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
+    spec_resource: sddc_manager_minimal.yaml
+    profile_resource: sddc_manager_minimal.yaml
+    catalog_ingest: supported
     spec_info_version: null
     sha256: null
     notes: >-
-      Generic-ingested. The SDDC Manager API is served by the appliance at
-      https://<sddc-manager-fqdn>/v1/ and documented on the Broadcom Developer
-      Portal (link above). SHARP EDGE: the upstream URL above is an HTML
-      developer-portal landing page, not raw OpenAPI YAML/JSON, so
-      catalog-driven ingest via
-      `meho connector ingest --catalog sddc-manager/9.0` returns HTTP 422
-      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
-      spec manually from the appliance and pass it via the explicit-
-      quadruple shape. spec_info_version pending first verified ingest.
-      See #743.
+      Profile-backed shipped-spec row (#1964 T2 #1976). The shipped
+      spec_resource (sddc_manager_minimal.yaml) is a MEHO-authored minimal,
+      Apache-2.0 OpenAPI 3.0 description of the nine SDDC Manager inventory
+      + lifecycle READ ops MEHO surfaces -- it is NOT the full vendor
+      surface. The full SDDC Manager API stays the provenance pointer for a
+      full-surface re-ingest off the appliance via the explicit-quadruple
+      --spec shape:
+      https://developer.broadcom.com/xapis/sddc-manager-api/latest/ (served
+      by the appliance at https://<sddc-manager-fqdn>/v1/, documented on the
+      HTML Broadcom Developer Portal). SddcManagerConnector handles dispatch
+      (typed). Product realigned from `sddc-manager` to the short,
+      dispatch-canonical `sddc` token in #1814 (Initiative #1810). See #743.
 
   - product: harbor
     version: "2.x"
@@ -257,3 +271,38 @@ entries:
       Typed-SSH connector. BIND 9 exposes no REST/OpenAPI surface (named
       driven over SSH with atomic-apply discipline), so spec ingestion is not
       possible. See #743 / bind9-onboarding.md.
+
+  # --- Profile-backed shipped-spec mechanism fixture (#1964 T1 #1975) ---
+
+  - product: _fixture
+    version: "1.0"
+    impl_id: fixture-rest
+    # Profile-backed row: requires_connector_class names the synthesised
+    # ProfiledRestConnector subclass T5 (#1971) materialises from the
+    # profile. It need not pre-exist in the v2 registry, so
+    # validate_catalog_registry_coverage exempts a profile_resource-
+    # carrying row from the class-presence + triple-registration checks.
+    requires_connector_class: ProfiledRestConnector_fixture_1_0
+    # upstream is null AND a shipped spec is present: the spec_resource
+    # on-ramp serves products whose upstream the backend can't
+    # dereference. _reject_unusable_entry exempts spec_resource rows from
+    # the typed-/templated-upstream 422s.
+    upstream: null
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
+    spec_resource: _fixture_minimal.yaml
+    profile_resource: _fixture_minimal.yaml
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      MECHANISM FIXTURE, not a shippable connector. Exercises the #1964 T1
+      shipped-spec/profile on-ramp end to end: spec_resource +
+      profile_resource resolve to package data under
+      operations/ingest/specs/ and connectors/profiles/, the
+      catalog-driven ingest route loads the spec bytes into
+      SpecSource.content (bypassing the null upstream), and the boot-time
+      validate_shipped_artifacts dry-run-parses both with the live ingest
+      parser. T2 (#1976) authors the real vmware/sddc profile-backed rows;
+      this row is the self-test that the mechanism is wired correctly.

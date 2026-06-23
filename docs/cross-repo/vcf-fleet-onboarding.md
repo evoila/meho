@@ -21,7 +21,7 @@ read-only ops are stored as `EndpointDescriptor` rows seeded from
 [`FLEET_CORE_OPS`](../../backend/src/meho_backplane/connectors/vcf_fleet/core_ops.py)
 and dispatched through `HttpConnector._request_json` by the G0.6
 `dispatch_ingested` branch. The connector registers under the
-`(product="vcf-fleet", version="9.0", impl_id="fleet-rest")` registry triple —
+`(product="fleet", version="9.0", impl_id="fleet-rest")` registry triple —
 the connector id `fleet-rest-9.0`. Auth is **HTTP Basic** on every request
 against Fleet's local LCM user store (typical service account: `admin@local`);
 no SSO federation, no session establish, no XSRF-token dance. The connector
@@ -98,7 +98,7 @@ without code changes.
   `admin@local`); no realm suffix is appended. Credentials are cached in-process
   per target after first use via the shared `CredentialsCache` helper (#841).
 - **A registered VCF Fleet target.** The CLI verbs take `--target <slug>`
-  (e.g. `--target rdc-fleet`). The target carries `product="vcf-fleet"`,
+  (e.g. `--target rdc-fleet`). The target carries `product="fleet"`,
   `host` (the appliance FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials), and
   `auth_model="shared_service_account"`.
@@ -133,23 +133,30 @@ What this means for the credentials in Vault:
   (the in-process credential cache clears on `aclose`). There is no per-target
   credential refresh hook in v0.5.
 
-To register a new target via the CLI:
+To register a new target, write a descriptor and import it. `meho targets
+import` takes a `targets.yaml` **file** (there is no `meho targets create`
+verb in v0.5 — `import` is the CLI's only write path):
+
+```yaml
+# rdc-fleet.yaml
+targets:
+  - name: rdc-fleet
+    product: fleet
+    host: vcf-fleet.rdc.evoila.io
+    port: 443
+    secret_ref: kv/data/vcf-fleet/rdc
+    auth_model: shared_service_account
+```
 
 ```bash
-meho targets import \
-  --name rdc-fleet \
-  --product vcf-fleet \
-  --host vcf-fleet.rdc.evoila.io \
-  --port 443 \
-  --secret-ref kv/data/vcf-fleet/rdc \
-  --auth-model shared_service_account
+meho targets import rdc-fleet.yaml   # add --update to PATCH an existing target
 ```
 
 Verify the fingerprint resolved correctly:
 
 ```bash
-meho targets probe --name rdc-fleet --json | jq '{product, version, reachable, extras}'
-# expected: {"product": "vcf-fleet", "version": "8.0", "reachable": true,
+meho targets probe rdc-fleet --json | jq '{product, version, reachable, extras}'
+# expected: {"product": "fleet", "version": "8.0", "reachable": true,
 #            "extras": {"lcm_api_version": "8.0", "datacenter_count": N, ...}}
 # Note: `version` carries the LCM API version (the only working version source
 # in 9.0), not the product version. The connector's class-level

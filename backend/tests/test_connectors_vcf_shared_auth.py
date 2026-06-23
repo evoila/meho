@@ -367,7 +367,7 @@ async def test_credentials_cache_isolates_same_name_across_tenants() -> None:
 
 @pytest.mark.asyncio
 async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
-    cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
+    cache = CredentialsCache(_stub_loader, product_label="fleet")
     await cache.get(_TARGET_A, _make_operator())
     await cache.get(_TARGET_B, _make_operator())
     await cache.invalidate(_TARGET_A)
@@ -376,7 +376,7 @@ async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
 
 @pytest.mark.asyncio
 async def test_credentials_cache_clear_drops_all_entries() -> None:
-    cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
+    cache = CredentialsCache(_stub_loader, product_label="fleet")
     await cache.get(_TARGET_A, _make_operator())
     await cache.get(_TARGET_B, _make_operator())
     await cache.clear()

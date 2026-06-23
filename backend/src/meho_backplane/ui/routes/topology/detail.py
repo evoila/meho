@@ -65,6 +65,9 @@ from sqlalchemy.orm import aliased
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.csrf import mint_csrf_token
+from meho_backplane.ui.routes.approvals.render import set_csrf_cookie
+from meho_backplane.ui.routes.connectors.operator import OperatorRoleProbe, resolve_role_probe
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_detail_router"]
@@ -271,6 +274,7 @@ async def _fetch_recent_ops(
 #: Module-level :class:`fastapi.Depends` closures -- ruff B008 guard.
 _require_ui_session_dep = Depends(require_ui_session)
 _get_raw_session_dep = Depends(get_raw_session)
+_resolve_role_probe_dep = Depends(resolve_role_probe)
 
 
 def _build_drawer_context(
@@ -279,6 +283,8 @@ def _build_drawer_context(
     outgoing: list[_EdgeRow],
     incoming: list[_EdgeRow],
     recent_ops: list[AuditLog],
+    is_tenant_admin: bool,
+    csrf_token: str,
 ) -> dict[str, object]:
     """Assemble the Jinja2 context dict the drawer template renders.
 
@@ -287,6 +293,15 @@ def _build_drawer_context(
     "show dependents" link target -- T3 (#882) wired the handler; the
     URL contract is ``?from=<name>&from_kind=<kind>`` so the
     dependents subgraph overlay loads with the right anchor.
+
+    ``is_tenant_admin`` drives the **soft-hide** of the curated-edge
+    annotate / remove controls (Task #1953): an operator never sees the
+    write affordances. The server-side authority is the
+    ``/ui/topology/edges*`` routes' ``tenant_admin`` gate -- the hidden
+    button is UX only; a forged POST still 403s. ``csrf_token`` is the
+    double-submit token the annotate-modal-open ``hx-get`` and the
+    per-edge remove ``hx-delete`` echo back so the CSRF middleware accepts
+    them; the drawer render (re)sets the matching ``meho_csrf`` cookie.
 
     ``graph_node.name`` is unconstrained Text (connector-populated);
     a name containing ``&`` / ``?`` / ``#`` / ``+`` / ``%`` / space
@@ -300,12 +315,97 @@ def _build_drawer_context(
         "outgoing_edges": outgoing,
         "incoming_edges": incoming,
         "recent_ops": recent_ops,
+        "is_tenant_admin": is_tenant_admin,
+        "csrf_token": csrf_token,
+        "annotate_modal_href": "/ui/topology/edges/annotate",
         "dependents_href": (
             f"/ui/topology?view=graph"
             f"&from={quote(node.name, safe='')}"
             f"&from_kind={quote(node.kind, safe='')}"
         ),
+        # Deep-link to this node's temporal history panel (Task #1955). The
+        # ``kind`` disambiguates the bare name up-front so the history route
+        # never has to fall back to its ambiguous-node banner for a node the
+        # drawer already resolved. ``name`` / ``kind`` are unconstrained Text;
+        # ``quote(safe='')`` percent-encodes the path segment + the query value.
+        "history_href": (
+            f"/ui/topology/history/{quote(node.name, safe='')}?kind={quote(node.kind, safe='')}"
+        ),
     }
+
+
+async def _render_node_detail(
+    request: Request,
+    node_id: uuid.UUID,
+    *,
+    session_ctx: UISessionContext,
+    db_session: AsyncSession,
+    role_probe: OperatorRoleProbe,
+) -> HTMLResponse:
+    """Resolve the node tenant-scoped and render the drawer fragment.
+
+    Pulls the incoming + outgoing edges via the SQLite-portable ORM query
+    and the recent ``audit_log`` rows, then renders ``topology/_drawer.html``
+    with the full context. The ``role_probe`` (fail-soft ``tenant_admin``
+    projection) drives the soft-hide of the curated-edge write controls; the
+    drawer also mints + re-sets the ``meho_csrf`` cookie so an admin's
+    annotate / remove request carries a valid double-submit token.
+
+    Returns the not-found drawer fragment (HTTP 404) for a missing /
+    cross-tenant id; HTMX swaps either response into ``#node-drawer``.
+    """
+    node = await _fetch_node(
+        db_session,
+        tenant_id=session_ctx.tenant_id,
+        node_id=node_id,
+    )
+    if node is None:
+        # 404 fragment -- HTMX swaps it into the drawer and the operator
+        # sees the "not found" message without a full page reload. HTMX does
+        # not auto-clear the swap target on 4xx by default, which is the
+        # desired behaviour.
+        return get_templates().TemplateResponse(
+            request,
+            "topology/_drawer_not_found.html",
+            {"node_id": str(node_id)},
+            status_code=404,
+        )
+
+    outgoing = await _fetch_edges(
+        db_session,
+        tenant_id=session_ctx.tenant_id,
+        node_id=node.id,
+        direction="out",
+        limit=_EDGE_LIMIT,
+    )
+    incoming = await _fetch_edges(
+        db_session,
+        tenant_id=session_ctx.tenant_id,
+        node_id=node.id,
+        direction="in",
+        limit=_EDGE_LIMIT,
+    )
+    recent_ops = await _fetch_recent_ops(
+        db_session,
+        tenant_id=session_ctx.tenant_id,
+        target_id=node.target_id,
+    )
+
+    csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    context = _build_drawer_context(
+        node=node,
+        outgoing=outgoing,
+        incoming=incoming,
+        recent_ops=recent_ops,
+        is_tenant_admin=role_probe.is_tenant_admin,
+        csrf_token=csrf_token,
+    )
+    response = get_templates().TemplateResponse(request, "topology/_drawer.html", context)
+    # Re-set the matching ``meho_csrf`` cookie so the drawer's annotate /
+    # remove controls' echoed token lines up after the HTMX swap (the
+    # cookie-desync class the approvals modal also guards against).
+    set_csrf_cookie(response, csrf_token)
+    return response
 
 
 def build_detail_router() -> APIRouter:
@@ -323,60 +423,16 @@ def build_detail_router() -> APIRouter:
         node_id: uuid.UUID,
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
+        role_probe: OperatorRoleProbe = _resolve_role_probe_dep,
     ) -> HTMLResponse:
-        """``GET /ui/topology/node/{node_id}``.
-
-        Resolves the node tenant-scoped, then pulls the incoming +
-        outgoing edges via :func:`list_edges` and the recent
-        operations directly from ``audit_log``. Renders the
-        ``topology/_drawer.html`` fragment with the full context.
-        """
-        node = await _fetch_node(
-            db_session,
-            tenant_id=session_ctx.tenant_id,
-            node_id=node_id,
+        """``GET /ui/topology/node/{node_id}`` -- delegates to the renderer."""
+        return await _render_node_detail(
+            request,
+            node_id,
+            session_ctx=session_ctx,
+            db_session=db_session,
+            role_probe=role_probe,
         )
-        if node is None:
-            # 404 fragment -- HTMX swaps it into the drawer and the
-            # operator sees the "not found" message without a full
-            # page reload. The 404 status code is also surfaced to
-            # the swap so a future ``hx-on::after-request`` hook can
-            # branch on it; HTMX does not auto-clear the swap target
-            # on 4xx by default, which is the desired behaviour.
-            return get_templates().TemplateResponse(
-                request,
-                "topology/_drawer_not_found.html",
-                {"node_id": str(node_id)},
-                status_code=404,
-            )
-
-        outgoing = await _fetch_edges(
-            db_session,
-            tenant_id=session_ctx.tenant_id,
-            node_id=node.id,
-            direction="out",
-            limit=_EDGE_LIMIT,
-        )
-        incoming = await _fetch_edges(
-            db_session,
-            tenant_id=session_ctx.tenant_id,
-            node_id=node.id,
-            direction="in",
-            limit=_EDGE_LIMIT,
-        )
-        recent_ops = await _fetch_recent_ops(
-            db_session,
-            tenant_id=session_ctx.tenant_id,
-            target_id=node.target_id,
-        )
-
-        context = _build_drawer_context(
-            node=node,
-            outgoing=outgoing,
-            incoming=incoming,
-            recent_ops=recent_ops,
-        )
-        return get_templates().TemplateResponse(request, "topology/_drawer.html", context)
 
     router.add_api_route(
         "/ui/topology/node/{node_id}",

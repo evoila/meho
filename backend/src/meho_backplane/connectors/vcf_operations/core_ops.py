@@ -135,15 +135,13 @@ _log = structlog.get_logger(__name__)
 #: extracts from ``VROPS_CONNECTOR_ID = "vrops-rest-9.0"``
 #: (``head.split("-", 1)[0]`` where head is ``"vrops-rest"``).
 #:
-#: Distinct from :attr:`VcfOperationsConnector.product` (``"vcf-operations"``)
-#: — same shape as the SDDC Manager case where
-#: ``SddcManagerConnector.product="sddc-manager"`` but rows carry
-#: ``product="sddc"``. The connector class's product field drives the
-#: v2-registry triple; ``endpoint_descriptor.product`` / ``operation_group.product``
-#: column values are derived from the connector_id via
-#: :func:`parse_connector_id` at ingest + review time, so the curation
-#: helper must reference the parser's derived value here, not the
-#: registry's.
+#: Since #1814 (Initiative #1810) this equals
+#: :attr:`VcfOperationsConnector.product` (``"vrops"``) — the connector
+#: registers under the short, dispatch-canonical token, so the v2-registry
+#: triple and the ``endpoint_descriptor.product`` / ``operation_group.product``
+#: column values (derived from the connector_id via
+#: :func:`parse_connector_id` at ingest + review time) now agree. Same
+#: short token the SDDC Manager precedent uses (``"sddc"``).
 VROPS_PRODUCT: Final[str] = "vrops"
 VROPS_VERSION: Final[str] = "9.0"
 VROPS_IMPL_ID: Final[str] = "vrops-rest"

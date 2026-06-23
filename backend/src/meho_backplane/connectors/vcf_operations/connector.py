@@ -13,7 +13,7 @@ Registered against the v2 registry at module-import time via
 idempotency check (in
 :func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`)
 no-ops on subsequent ingests against the same
-``(product="vcf-operations", version="9.0", impl_id="vrops-rest")`` triple.
+``(product="vrops", version="9.0", impl_id="vrops-rest")`` triple.
 
 Auth
 ----
@@ -150,8 +150,8 @@ class VcfOperationsConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"vrops-rest-9.0"`` -> (``"vcf-operations"``, ``"9.0"``, ``"vrops-rest"``).
-    product = "vcf-operations"
+    # ``"vrops-rest-9.0"`` -> (``"vrops"``, ``"9.0"``, ``"vrops-rest"``).
+    product = "vrops"
     version = "9.0"
     impl_id = "vrops-rest"
     supported_version_range = ">=9.0,<10.0"
@@ -165,7 +165,7 @@ class VcfOperationsConnector(HttpConnector):
         super().__init__()
         self._creds = CredentialsCache(
             credentials_loader if credentials_loader is not None else load_credentials_from_vault,
-            product_label="vcf-operations",
+            product_label="vrops",
         )
 
     async def auth_headers(
@@ -230,6 +230,7 @@ class VcfOperationsConnector(HttpConnector):
         operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Merge the auth-source query param into *params* before the base call.
 
@@ -257,6 +258,7 @@ class VcfOperationsConnector(HttpConnector):
             operator=operator,
             params=final_params,
             json=json,
+            extra_headers=extra_headers,
         )
 
     async def fingerprint(
@@ -290,7 +292,7 @@ class VcfOperationsConnector(HttpConnector):
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",
-                product="vcf-operations",
+                product="vrops",
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="GET /suite-api/api/versions/current",
@@ -298,7 +300,7 @@ class VcfOperationsConnector(HttpConnector):
             )
         return FingerprintResult(
             vendor="vmware",
-            product="vcf-operations",
+            product="vrops",
             version=payload.get("releaseName") or None,
             build=str(payload["buildNumber"]) if payload.get("buildNumber") is not None else None,
             reachable=True,
@@ -351,7 +353,7 @@ class VcfOperationsConnector(HttpConnector):
 
         The connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"vrops-rest-9.0"`` → (product=``"vcf-operations"``,
+        ``"vrops-rest-9.0"`` → (product=``"vrops"``,
         version=``"9.0"``, impl_id=``"vrops-rest"``).
         """
         from uuid import UUID

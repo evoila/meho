@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -60,7 +60,7 @@ from packaging.version import InvalidVersion, Version
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import HttpConnector
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ShimKind, shim_kind
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -69,13 +69,18 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.operations.ingest.exceptions import UncoveredVersionLabel
 
+if TYPE_CHECKING:
+    from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
+
 __all__ = [
     "GenericRestConnector",
     "check_version_covered_by_registered_class",
     "derive_supported_version_range",
     "ensure_connector_class_registered",
     "handrolled_class_for_impl_id",
+    "resolve_authoring_kind",
     "resolved_auto_shim_class",
+    "resolved_profiled_connector_class",
     "sibling_handrolled_impl_id",
 ]
 
@@ -107,6 +112,12 @@ class GenericRestConnector(HttpConnector):
     "unconfigured-auto-shim" explanation) so a stray call against
     the shim doesn't crash the dispatcher mid-flight.
     """
+
+    # G0.28-T1 (#1967) — the "bare" tier of the tri-state classifier. Every
+    # dynamically-synthesised AutoShim_* subclass inherits this, so the
+    # resolver / dispatcher / ingest / delete sites classify them via
+    # shim_kind() without an issubclass check. See base.ShimKind.
+    _shim_kind: ShimKind = "bare"
 
     #: Default base URL the auto-shim uses when the target carries
     #: no explicit base URL of its own. Set by the class factory
@@ -315,10 +326,12 @@ def handrolled_class_for_impl_id(
     version: str,
     impl_id: str,
 ) -> type[Connector] | None:
-    """Return a hand-rolled connector class registered for ``(version, impl_id)``.
+    """Return a *dispatchable* connector class registered for ``(version, impl_id)``.
 
-    G0.26-T4 (#1798). Scans the v2 registry for a **hand-rolled** class
-    (one that is *not* a :class:`GenericRestConnector` auto-shim)
+    G0.26-T4 (#1798); generalised to the tri-state classifier by G0.28-T1
+    (#1967). Scans the v2 registry for a **dispatchable** class — one whose
+    :func:`~meho_backplane.connectors.base.shim_kind` is *not* ``"bare"``,
+    i.e. a hand-coded (``"none"``) or profiled (``"profiled"``) class —
     registered under the given ``(version, impl_id)`` regardless of the
     ``product`` it registered under. Returns the first such class, or
     ``None`` when none exists.
@@ -335,22 +348,28 @@ def handrolled_class_for_impl_id(
     match is on ``impl_id`` (not the parser-derived product) precisely so
     a product-namespace divergence does not let the shim slip past.
 
-    The ``GenericRestConnector`` import is function-local to keep the
-    ``operations.ingest`` -> (its own) module graph free of an
-    import-time edge; mirrors the pattern :func:`sibling_handrolled_impl_id`
-    already uses.
+    G0.28-T1 (#1967): "already covered" means a *dispatchable* class —
+    ``shim_kind != "bare"``, i.e. a hand-coded (``"none"``) class **or** a
+    profiled (``"profiled"``) one. A profiled connector is dispatchable and
+    can be shadowed by a divergent-product bare shim exactly as a hand-coded
+    one can, so the ingest guard defers to it too; only a bare auto-shim is
+    skipped (it provides no dispatchability to defer to).
     """
     from meho_backplane.connectors.registry import all_connectors_v2
 
     for (_entry_product, entry_version, entry_impl_id), cls in all_connectors_v2().items():
         if entry_version != version or entry_impl_id != impl_id:
             continue
-        if issubclass(cls, GenericRestConnector):
+        if shim_kind(cls) == "bare":
             continue
         return cls
     return None
 
 
+# Pre-existing 129-line blocker; #1817 cut it to ~104 by retiring the
+# dispatch_product reconciliation. The three structured-log branches are
+# the operator-facing audit trail; a real split is its own task.
+# code-quality-allow: function-size — pre-existing debt reduced by #1817, full split out of scope
 def ensure_connector_class_registered(
     *,
     product: str,
@@ -363,76 +382,88 @@ def ensure_connector_class_registered(
     Returns ``True`` when a new shim class was synthesised and
     registered; ``False`` when an entry already exists for the
     ``(product, version, impl_id)`` key in the v2 registry, **or** when a
-    hand-coded connector already covers the ``(version, impl_id)`` under a
-    divergent product token (the ingest guard — see below). The return
-    value drives the ``connector_registered`` flag on
+    hand-coded connector already covers the ``(version, impl_id)`` (the
+    ingest guard — see below). The return value drives the
+    ``connector_registered`` flag on
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`
     so the CLI can report "first ingest registered the connector"
     vs "subsequent ingest reused the existing connector".
 
-    Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to
-    any hand-coded connector already registered for the same
-    ``(version, impl_id)`` — even when that class registered under a
-    *different* ``product``. Without this, ingesting a spec under a
-    divergent product token (``--product vcf-logs`` for ``vrli-rest``,
-    after the realignment moved ``VcfLogsConnector``
-    to ``product="vrli"``) would scaffold a non-dispatchable
-    ``GenericRestConnector`` shim under ``(vcf-logs, …, vrli-rest)`` that
-    shadows the real connector. The guard keys on ``impl_id`` (the
-    connector's product-independent identity), so a product-namespace
-    divergence cannot route around it. The persisted rows still reconcile
-    to the dispatch-canonical product
-    (:func:`~meho_backplane.operations.ingest.register_ingested._reconciled_row_product`),
-    so the ingested ops resolve through the hand-coded connector.
+    The shim is synthesised under the supplied ``product``. The ingest
+    pipeline service rejects a product that does not round-trip its
+    connector_id (G0.27 / T3 #1817) at the one chokepoint every entry
+    point (REST / MCP / CLI) traverses, so the supplied product is the
+    dispatch-canonical token (the spelling the rows persist under and
+    every dispatch probe queries); the shim is therefore dispatchable by
+    construction and satisfies
+    :func:`~meho_backplane.connectors.registry.register_connector_v2`'s
+    round-trip hard-fail (G0.27 / T2 #1816) rather than tripping it.
 
-    Idempotency note: the v2 registry rejects duplicate
-    registration with :class:`RuntimeError`, so checking presence
-    first is necessary (not merely an optimisation). The check is
-    racy against concurrent ingests of the same triple, but v0.2
-    ingestion is single-threaded per pod (the CLI / REST handlers
-    are operator-driven and serialised) so the race is theoretical.
+    Ingest guard (G0.26-T4 #1798): before synthesising a shim, defer to a
+    hand-coded connector already registered for the same
+    ``(version, impl_id)`` — a round-tripping ingest whose ``impl_id`` is
+    already served by a hand-coded class reuses it rather than scaffolding
+    a duplicate shim. The guard keys on ``impl_id`` (the product-
+    independent identity).
+
+    Idempotency: the v2 registry rejects duplicate registration with
+    :class:`RuntimeError`, so the presence check is necessary, not just an
+    optimisation. It is racy against concurrent ingests of the same
+    triple, but v0.2 ingestion is single-threaded per pod so the race is
+    theoretical.
     """
     from meho_backplane.connectors.registry import all_connectors_v2
 
+    # ``canonical_product`` is a local alias of ``product`` (the
+    # service-layer round-trip guard in IngestionPipelineService.ingest
+    # rejects a divergent product before any caller reaches here, so the
+    # supplied product already equals the dispatch-canonical spelling)
+    # kept only for the log fields below.
+    canonical_product = product
+
     existing = all_connectors_v2()
-    if (product, version, impl_id) in existing:
+    if (canonical_product, version, impl_id) in existing:
         _log.info(
             "connector_auto_register_skipped",
             product=product,
+            canonical_product=canonical_product,
             version=version,
             impl_id=impl_id,
-            existing_cls=existing[(product, version, impl_id)].__name__,
+            existing_cls=existing[(canonical_product, version, impl_id)].__name__,
         )
         return False
 
     handrolled = handrolled_class_for_impl_id(version=version, impl_id=impl_id)
-    if handrolled is not None and handrolled.product != product:
+    if handrolled is not None and handrolled.product != canonical_product:
         _log.info(
             "connector_auto_register_deferred_to_handrolled",
             product=product,
+            canonical_product=canonical_product,
             version=version,
             impl_id=impl_id,
             handrolled_cls=handrolled.__name__,
             handrolled_product=handrolled.product,
             message=(
                 f"not scaffolding a GenericRestConnector shim for "
-                f"({product!r}, {version!r}, {impl_id!r}): hand-coded "
+                f"({canonical_product!r}, {version!r}, {impl_id!r}): hand-coded "
                 f"{handrolled.__name__} already covers impl_id {impl_id!r} "
-                f"under product {handrolled.product!r}. Ingested rows "
-                f"reconcile to the dispatch-canonical product and dispatch "
-                f"through the hand-coded connector."
+                f"under product {handrolled.product!r}. Rows persist under the "
+                f"supplied, round-trip-validated product {canonical_product!r} "
+                f"(no reconciliation — divergent products are rejected upstream "
+                f"by the service-layer round-trip guard, #1817); dispatch "
+                f"resolves them through the hand-coded connector."
             ),
         )
         return False
 
     cls = _synthesise_shim_class(
-        product=product,
+        product=canonical_product,
         version=version,
         impl_id=impl_id,
         base_url=base_url,
     )
     register_connector_v2(
-        product=product,
+        product=canonical_product,
         version=version,
         impl_id=impl_id,
         cls=cls,
@@ -440,6 +471,7 @@ def ensure_connector_class_registered(
     _log.info(
         "connector_auto_registered",
         product=product,
+        canonical_product=canonical_product,
         version=version,
         impl_id=impl_id,
         cls=cls.__name__,
@@ -455,13 +487,16 @@ def sibling_handrolled_impl_id(
     version: str,
     exclude_impl_id: str,
 ) -> str | None:
-    """Return a hand-rolled connector's ``impl_id`` for the same ``(product, version)``.
+    """Return a dispatchable connector's ``impl_id`` for the same ``(product, version)``.
 
-    G0.25-T2 (#1753). Scans the v2 registry for a **hand-rolled**
-    connector class (one that is *not* a :class:`GenericRestConnector`
-    auto-shim) registered under the same ``(product, version)`` as
-    *exclude_impl_id* but under a **different** ``impl_id``. Returns
-    that sibling's ``impl_id``, or ``None`` when no such class exists.
+    G0.25-T2 (#1753); generalised to the tri-state classifier by G0.28-T1
+    (#1967). Scans the v2 registry for a **dispatchable** connector class
+    (one whose :func:`~meho_backplane.connectors.base.shim_kind` is *not*
+    ``"bare"`` — a hand-coded or profiled class, not a
+    :class:`GenericRestConnector` auto-shim) registered under the same
+    ``(product, version)`` as *exclude_impl_id* but under a **different**
+    ``impl_id``. Returns that sibling's ``impl_id``, or ``None`` when no
+    such class exists.
 
     Two callers want the same question answered from opposite ends of
     the auto-shim lifecycle:
@@ -479,13 +514,16 @@ def sibling_handrolled_impl_id(
       (misleadingly) that the per-product subclass is unwritten future
       work.
 
-    The "hand-rolled" predicate is ``not issubclass(cls,
-    GenericRestConnector)`` — the same precise ``isinstance`` test the
-    dispatcher uses to classify the ``unreplaced_auto_shim`` cause
-    (#1627), so a registry holding only shims (every ``impl_id`` is an
-    auto-shim) yields ``None`` and no near-miss is claimed. The first
-    matching sibling in registry-iteration order is returned; the
-    near-miss is a single-sibling advisory, not an enumeration.
+    The "dispatchable sibling" predicate is ``shim_kind(cls) != "bare"`` —
+    the tri-state classifier (G0.28-T1 #1967) replacing the former
+    ``not issubclass(cls, GenericRestConnector)`` test, sharing the same
+    classification seam the dispatcher uses for the ``unreplaced_auto_shim``
+    cause (#1627). A registry holding only bare shims (every ``impl_id`` is
+    an auto-shim) yields ``None`` and no near-miss is claimed; a profiled
+    sibling counts as dispatchable and is named, since a bare shim ingested
+    under a near-miss ``impl_id`` can shadow it just as it can a hand-coded
+    one. The first matching sibling in registry-iteration order is returned;
+    the near-miss is a single-sibling advisory, not an enumeration.
 
     Args:
         product, version: The label whose sibling is sought.
@@ -502,7 +540,7 @@ def sibling_handrolled_impl_id(
             continue
         if entry_impl_id == exclude_impl_id:
             continue
-        if issubclass(cls, GenericRestConnector):
+        if shim_kind(cls) == "bare":
             continue
         return entry_impl_id
     return None
@@ -746,8 +784,10 @@ def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
     unparseable version label) and ties
     (:exc:`AmbiguousConnectorResolution`) return ``None`` — a warning
     probe must never break the enable write it decorates. Returns the
-    resolved class's ``__name__`` only when it is a
-    :class:`GenericRestConnector` subclass (the ``AutoShim_*`` shape).
+    resolved class's ``__name__`` only when it is a **bare** auto-shim
+    (``shim_kind == "bare"``, the ``AutoShim_*`` shape; G0.28-T1 #1967). A
+    profiled connector that resolves at enable time is dispatchable, so it
+    is not flagged — the advisory names only the non-dispatchable dead end.
     """
     # Call-time import mirrors ensure_connector_class_registered's
     # deferred registry import: keep the resolver edge off this
@@ -768,6 +808,121 @@ def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
             reason=type(exc).__name__,
         )
         return None
-    if issubclass(cls, GenericRestConnector):
+    if shim_kind(cls) == "bare":
         return cls.__name__
     return None
+
+
+def resolved_profiled_connector_class(*, product: str, version: str) -> str | None:
+    """Return the profiled connector class name dispatch would resolve to, or ``None``.
+
+    G0.28-T5 (#1971). The profiled-tier counterpart of
+    :func:`resolved_auto_shim_class`: replays the production resolver
+    against a synthetic target carrying the op's ``(product, version)``
+    and returns the resolved class's ``__name__`` only when it is a
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    (``shim_kind == "profiled"``), ``None`` otherwise.
+
+    Why this exists separately from the bare probe: a profiled connector
+    is **dispatchable**, so enabling an op that resolves to it is not a
+    dead end the way a bare shim is. But stamping the connector's
+    :class:`ExecutionProfile` deliberately does **not** auto-enable
+    dispatch — the ``is_enabled=False`` / ``review_status='staged'``
+    review gate is the load-bearing interlock (#1971). This probe lets
+    the enable-time advisory confirm that the operator's
+    ``is_enabled=True`` write — not the earlier profile stamp — is what
+    cleared the gate, so the "profiled but unreviewed until now" state is
+    surfaced at exactly the moment it changes.
+
+    Fail-soft semantics mirror :func:`resolved_auto_shim_class`: resolver
+    misses and ties return ``None`` — a warning probe must never break the
+    enable write it decorates.
+    """
+    from meho_backplane.connectors.resolver import (
+        AmbiguousConnectorResolution,
+        NoMatchingConnector,
+        resolve_connector,
+    )
+
+    try:
+        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+        _log.debug(
+            "edit_op_profiled_probe_unresolved",
+            product=product,
+            version=version,
+            reason=type(exc).__name__,
+        )
+        return None
+    if shim_kind(cls) == "profiled":
+        return cls.__name__
+    return None
+
+
+def resolve_authoring_kind(
+    *,
+    product: str,
+    version: str,
+    enabled_operation_count: int,
+) -> tuple[ConnectorAuthoringKind, bool]:
+    """Project the connector's authoring-mode ``(kind, dispatchable)`` for the wire.
+
+    G0.28-T6 (#1979). The list / review surfaces need a single
+    operator-facing discriminator distinguishing a working profiled
+    connector from a dead bare shim — neither the dispatch-resolution
+    ``state`` nor the count fields carry it. This replays the production
+    resolver
+    (:func:`~meho_backplane.connectors.resolver.resolve_connector`) for
+    the row's ``(product, version)`` line — the same tie-break ladder
+    dispatch and the enable-time advisories (#1971) run — and maps the
+    resolved class's :data:`~meho_backplane.connectors.base.ShimKind`
+    tier onto the wire vocabulary:
+
+    * ``shim_kind == "none"`` (hand-coded class) → ``("typed", True)``.
+    * ``shim_kind == "bare"`` (auto-shim) → ``("ingested-shim", False)``
+      — the ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+      dead end (#1627).
+    * ``shim_kind == "profiled"`` → ``("profiled", True)`` once the
+      review gate has been cleared (``enabled_operation_count > 0``),
+      else ``("profiled-but-unreviewed", False)``. Stamping the profile
+      makes the connector dispatchable in principle, but the
+      ``is_enabled=False`` review gate (#1971) keeps it from dispatching
+      until an operator enables an op; ``profiled-but-unreviewed`` is
+      that not-yet-cleared sub-state surfaced on the read surfaces.
+
+    Resolver misses / ties (:exc:`NoMatchingConnector`,
+    :exc:`AmbiguousConnectorResolution`) read as ``("ingested-shim",
+    False)``: no dispatchable class backs the row, which is operationally
+    the same dead end as a bare shim. Fail-soft — a read-surface
+    projection must never raise.
+
+    *enabled_operation_count* is the connector's enabled-op rollup the
+    listing already aggregates (the ``is_enabled`` dispatchable subset,
+    #1636); it stands in for "has the review gate been cleared" without a
+    second DB round-trip.
+    """
+    from meho_backplane.connectors.resolver import (
+        AmbiguousConnectorResolution,
+        NoMatchingConnector,
+        resolve_connector,
+    )
+
+    try:
+        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+        _log.debug(
+            "authoring_kind_probe_unresolved",
+            product=product,
+            version=version,
+            reason=type(exc).__name__,
+        )
+        return "ingested-shim", False
+
+    tier: ShimKind = shim_kind(cls)
+    if tier == "none":
+        return "typed", True
+    if tier == "profiled":
+        if enabled_operation_count > 0:
+            return "profiled", True
+        return "profiled-but-unreviewed", False
+    return "ingested-shim", False

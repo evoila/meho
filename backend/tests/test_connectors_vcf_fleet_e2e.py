@@ -165,7 +165,7 @@ async def _seed_target() -> Any:
             tenant_id=FLEET_CANARY_OPERATOR_TENANT,
             name=FLEET_TARGET_NAME,
             aliases=[],
-            product="vcf-fleet",
+            product="fleet",
             host=FLEET_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
@@ -186,7 +186,7 @@ async def _seed_target() -> Any:
 def _resolve_connector() -> VcfFleetConnector:
     """Resolve + cache the VcfFleetConnector instance with a stubbed credentials loader."""
     registry = all_connectors_v2()
-    connector_cls = registry.get(("vcf-fleet", "9.0", "fleet-rest"))
+    connector_cls = registry.get(("fleet", "9.0", "fleet-rest"))
     assert connector_cls is VcfFleetConnector, (
         f"VcfFleetConnector not registered for (vcf-fleet, 9.0, fleet-rest); got {connector_cls!r}"
     )
@@ -197,7 +197,7 @@ def _resolve_connector() -> VcfFleetConnector:
     # ``_credentials_loader`` attr.
     instance._creds = type(instance._creds)(  # type: ignore[attr-defined]
         _fleet_credentials_loader,
-        product_label="vcf-fleet",
+        product_label="fleet",
     )
     return instance
 

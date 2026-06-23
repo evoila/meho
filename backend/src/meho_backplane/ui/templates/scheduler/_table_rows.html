@@ -1,0 +1,117 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Scheduler table-rows fragment (Task #1826).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As a standalone fragment ``GET /ui/scheduler`` returns when the
+      ``HX-Request`` header is set (filter change). HTMX outerHTML-swaps
+      it into the existing ``#scheduler-table-body`` element.
+
+  The ``Next fire`` / ``Last fired`` columns render relative strings
+  ("in 2 h", "3 h ago") with a tooltip carrying the full ISO timestamp.
+  Pure server-side via the ``_rel`` macro below; no JS, no client date
+  library. A null ``next_fire_at`` (terminal trigger) / ``last_fired_at``
+  (never fired) renders an em-dash.
+-#}
+{% macro _rel(ts) -%}
+  {#- Relative-time renderer for both past ("X ago") and future ("in X")
+      instants. The scheduler's ``next_fire_at`` is a future instant; its
+      ``last_fired_at`` is a past one. Inputs are tz-aware UTC datetimes
+      (coerced in the view projection); the tooltip carries the exact ISO
+      timestamp for operators needing precision. -#}
+  {%- set delta = (now_utc - ts).total_seconds() | int -%}
+  {%- if delta >= 0 -%}
+    {%- set ago = delta -%}
+    {%- if ago < 60 -%}just now
+    {%- elif ago < 3600 -%}{{ (ago // 60) }} min ago
+    {%- elif ago < 86400 -%}{{ (ago // 3600) }} h ago
+    {%- elif ago < 604800 -%}{{ (ago // 86400) }} d ago
+    {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+    {%- endif -%}
+  {%- else -%}
+    {%- set ahead = -delta -%}
+    {%- if ahead < 60 -%}in {{ ahead }} s
+    {%- elif ahead < 3600 -%}in {{ (ahead // 60) }} min
+    {%- elif ahead < 86400 -%}in {{ (ahead // 3600) }} h
+    {%- elif ahead < 604800 -%}in {{ (ahead // 86400) }} d
+    {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="scheduler-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-trigger-id="{{ row.id }}">
+        <td>
+          <span class="badge badge-ghost badge-sm">{{ row.kind }}</span>
+        </td>
+        <td>
+          <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
+        </td>
+        <td class="font-mono text-xs">
+          {{ row.schedule_summary }}
+          {% if row.kind == "cron" %}
+            <span class="opacity-50">· {{ row.timezone }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.next_fire_at %}
+            <span class="text-xs" title="{{ row.next_fire_at.isoformat() }}">{{ _rel(row.next_fire_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.last_fired_at %}
+            <span class="text-xs" title="{{ row.last_fired_at.isoformat() }}">{{ _rel(row.last_fired_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td class="text-xs">{{ row.agent_name }}</td>
+        <td>
+          {% if row.work_ref %}
+            <span class="badge badge-outline badge-xs font-mono">{{ row.work_ref }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td class="flex items-center gap-1">
+          <a
+            href="/ui/scheduler/{{ row.id }}"
+            class="btn btn-ghost btn-xs"
+            aria-label="View trigger {{ row.id }}"
+          >
+            View
+          </a>
+          {# Per-row cancel -- tenant_admin only, and only on a
+             non-terminal trigger (active / paused). The cancel route
+             re-checks the role server-side; the confirm dialog spells
+             out the irreversibility. #}
+          {% if is_tenant_admin and row.status in ("active", "paused") %}
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs text-error"
+              hx-get="/ui/scheduler/{{ row.id }}/cancel"
+              hx-target="#scheduler-modal-container"
+              hx-swap="innerHTML"
+              aria-label="Cancel trigger {{ row.id }}"
+            >
+              Cancel
+            </button>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="8" class="text-center text-sm opacity-60 py-6">
+        No scheduled triggers match the current filter.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

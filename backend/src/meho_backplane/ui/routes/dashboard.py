@@ -107,6 +107,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "icon": "library",
     },
     {
+        "title": "Retrieval",
+        "summary": "Diagnose retrieval: per-signal RRF score & rank breakdown.",
+        "href": "/ui/retrieval",
+        "icon": "search",
+    },
+    {
         "title": "Topology",
         "summary": "Targets, clusters, and dependencies.",
         "href": "/ui/topology",
@@ -123,6 +129,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "summary": "Operator + tenant + target memories across 5 scopes.",
         "href": "/ui/memory",
         "icon": "brain",
+    },
+    {
+        "title": "Agents",
+        "summary": "Define + manage the tenant's LLM agents.",
+        "href": "/ui/agents",
+        "icon": "bot",
     },
     {
         "title": "Runbooks",

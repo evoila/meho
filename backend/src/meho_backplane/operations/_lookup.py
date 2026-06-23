@@ -40,7 +40,6 @@ __all__ = [
     "connector_exists",
     "count_known_ops",
     "descriptor_exists_any_state",
-    "dispatch_product",
     "lookup_descriptor",
     "parse_connector_id",
 ]
@@ -89,44 +88,6 @@ def parse_connector_id(connector_id: str) -> tuple[str, str, str]:
     # single-impl case.
     product = head.split("-", 1)[0] if "-" in head else head
     return product, version, head
-
-
-def dispatch_product(*, product: str, version: str, impl_id: str) -> str:
-    """Return the product key the dispatch/query surface keys on for this connector.
-
-    The persistence-layer natural key on
-    :class:`~meho_backplane.db.models.EndpointDescriptor` /
-    :class:`~meho_backplane.db.models.OperationGroup` is the free-form
-    ``(product, version, impl_id)`` triple the ingest caller supplies.
-    The dispatch + discovery surface, however, never sees that triple
-    directly: it receives a ``connector_id`` string and recovers the
-    product via :func:`parse_connector_id`, which derives it from the
-    first hyphen-segment of ``impl_id`` (``"vrli-rest-9.0" -> "vrli"``).
-
-    For most connectors the supplied ``product`` already equals the
-    parser-derived one (``vmware`` / ``vmware-rest``; and, since
-    G0.26-T4 #1798, ``vrli`` / ``vrli-rest``), so this is a no-op. For
-    the remaining VCF-family long↔short splits the two diverge — the
-    connector class registers under the long form
-    (``product="vcf-automation"``) while the dispatcher derives the
-    short form (``"vcfa"``) from ``impl_id="vcfa-rest"``. Rows persisted
-    under the long form are then invisible to every ``connector_exists`` /
-    ``search_operations`` / ``list_operation_groups`` probe (which key on
-    the short, parser-derived form), so the catalog reports the connector
-    ``registered, 0 ops`` even though the rows exist (the listing's
-    round-trip integrity gate in
-    :func:`~meho_backplane.operations.ingest.list_connectors._resolves_through_dispatcher`
-    drops them). claude-rdc-hetzner-dc#1136.
-
-    Returning the parser-derived product gives the ingest path a single
-    point to reconcile the supplied product against the spelling the
-    dispatcher will look the rows up under, so persistence and dispatch
-    agree. The same lossless round-trip
-    :func:`~meho_backplane.operations._lookup.connector_class_registered`
-    already relies on: render ``connector_id``, re-parse, take the
-    product.
-    """
-    return parse_connector_id(f"{impl_id}-{version}")[0]
 
 
 async def lookup_descriptor(
@@ -225,21 +186,38 @@ async def descriptor_exists_any_state(
 
 async def count_known_ops(
     *,
+    tenant_id: UUID | None,
     product: str,
     version: str,
     impl_id: str,
 ) -> int:
-    """Count enabled descriptors for *(product, version, impl_id)*.
+    """Count *caller-visible* enabled descriptors for *(product, version, impl_id)*.
 
     Returned in the ``unknown_op`` error's ``extras`` so the caller has
     a "did you mean…" signal without enumerating every op id (the
     actual enumeration belongs to the ``list_operation_groups`` /
     ``search_operations`` meta-tools shipped in T8 #399).
+
+    The count is scoped to what the calling operator can see: built-in /
+    global rows (``tenant_id IS NULL``) plus this tenant's own rows
+    (``tenant_id == tenant_id``). This mirrors the tenant boundary
+    :func:`connector_exists` and the data-returning meta-tools enforce.
+    Without it the count is a cross-tenant oracle — a connector private
+    to tenant B would leak its enabled-op count into a tenant-A caller's
+    ``unknown_op`` error payload.
+
+    ``tenant_id=None`` is the operator-less chassis / CLI dispatch path
+    (the typed-connector ``execute`` shims, which resolve descriptors
+    against global rows only): the ``tenant_id == None`` clause compiles
+    to ``IS NULL``, so the predicate collapses to global rows — matching
+    those callers' own ``tenant_id IS NULL`` descriptor query.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
             select(EndpointDescriptor.id).where(
+                (EndpointDescriptor.tenant_id.is_(None))
+                | (EndpointDescriptor.tenant_id == tenant_id),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,

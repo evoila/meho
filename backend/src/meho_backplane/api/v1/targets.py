@@ -149,7 +149,6 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
-    canonical_product_token,
     registered_product_tokens,
 )
 from meho_backplane.connectors.resolver import resolve_connector_or_label
@@ -336,39 +335,39 @@ def _build_unknown_product_detail(
 
 
 def _canonicalise_and_validate_product(supplied: str) -> str:
-    """Resolve ``supplied`` to a canonical registry product or raise 422.
+    """Validate ``supplied`` against the registered product tokens or raise 422.
 
-    G0.18-T2 (#1355). Shared canonicalisation + enum-validation step
-    for the POST / PATCH write surfaces. Runs ``supplied`` through
-    :func:`canonical_product_token` so the listing-spelling alias
-    (``"sddc"``) maps to the registry's canonical form
-    (``"sddc-manager"``) before the registered-product validator
-    fires; without this an operator copying ``product`` straight out
-    of ``meho connector list`` would hit a 422 (RDC #789 Finding 6;
-    closes #1312 acceptance B).
+    G0.18-T2 (#1355); G0.27 / T3 (#1817). Shared enum-validation step for
+    the POST / PATCH write surfaces. Every shipped connector now registers
+    under the short, dispatch-canonical product token the connector
+    listing emits (the VCF family realigned by #1814 / Initiative #1810,
+    vRLI by #1798), so a token copied out of ``meho connector list``
+    validates directly — the ``PRODUCT_ALIASES`` / ``canonical_product_token``
+    write-time alias bridge that once normalised the lone ``"sddc"`` ->
+    ``"sddc-manager"`` split was retired by #1817 and the function no
+    longer canonicalises; it validates the supplied token as-is.
 
-    The 422 detail names the *originally supplied* token (not the
-    canonicalised form) so the operator's error message shows what
-    they actually typed, matching the T11 contract that
-    ``unknown_product.product`` echoes the user's input. The
-    canonical token is what the caller stores; the validator's
-    "valid set" is also the canonical-only set (``valid_products``
-    is exposed on Swagger via the same source-of-truth helper).
+    The 422 detail names the supplied token so the operator's error
+    message shows what they actually typed, matching the T11 contract that
+    ``unknown_product.product`` echoes the user's input. The validator's
+    "valid set" is the registered-token set (``valid_products``, exposed
+    on Swagger via the same source-of-truth helper).
 
     The validator is skipped when the registry is empty — that state
     means "no connectors imported" (test isolation, or a deploy
     booted before :func:`_eager_import_connectors` ran). In
     production the lifespan populates the registry before the first
     request arrives.
+
+    Returns the validated token unchanged (the caller stores it).
     """
-    canonical = canonical_product_token(supplied)
     valid_products = sorted(registered_product_tokens())
-    if valid_products and canonical not in valid_products:
+    if valid_products and supplied not in valid_products:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=_build_unknown_product_detail(supplied, valid_products),
         )
-    return canonical
+    return supplied
 
 
 def _to_full(t: TargetORM) -> Target:
@@ -387,6 +386,7 @@ def _to_full(t: TargetORM) -> Target:
         vpn_required=t.vpn_required,
         verify_tls=t.verify_tls,
         tls_ca_pin=t.tls_ca_pin,
+        tls_server_name=t.tls_server_name,
         extras=t.extras,
         notes=t.notes,
         fingerprint=t.fingerprint,
@@ -732,8 +732,8 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
 
     Shared by ``create_target`` and ``update_target`` so the two write
     paths cannot drift on the impl-id contract. Callers pass the
-    canonical product token so an ``sddc``-aliased write resolves the
-    SDDC impl set.
+    validated product token (the registered, dispatch-canonical spelling)
+    so the impl set is resolved under the spelling the registry keys on.
     """
     if preferred_impl_id is None:
         return
@@ -746,27 +746,28 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
 
 
 def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
-    """Validate + canonicalise a PATCH's ``product`` field; return the effective product.
+    """Validate a PATCH's ``product`` field; return the effective product.
 
-    G0.14-T4 (#1145) / G0.18-T2 (#1355). The PATCH ``product`` handling
-    for ``update_target``, extracted so the handler stays under the
-    function-size budget. Three steps:
+    G0.14-T4 (#1145) / G0.18-T2 (#1355) / G0.27 / T3 (#1817). The PATCH
+    ``product`` handling for ``update_target``, extracted so the handler
+    stays under the function-size budget. Two steps:
 
     1. Reject ``{"product": null}`` with a T11-compliant ``invalid_null``
        422. ``Field(default=None)`` on ``TargetUpdate.product`` is the
        absent-marker for "client did not send this field"; without this
        guard the ``setattr`` loop would assign ``None`` to the NOT NULL
        column and surface an opaque 500.
-    2. Canonicalise the supplied token in place (``updates["product"]``)
-       so a value copied from ``meho connector list`` (e.g. ``"sddc"``)
-       lands the registry spelling (``"sddc-manager"``).
-    3. Validate against the registered products **only when the value
+    2. Validate against the registered products **only when the value
        actually changes** -- a same-value PATCH short-circuits (pinned by
-       ``test_patch_product_same_value_passes_without_validator``).
+       ``test_patch_product_same_value_passes_without_validator``). The
+       supplied token is stored as-is: every connector now registers under
+       the short, dispatch-canonical token the listing emits, so the
+       write-time alias bridge was retired by #1817 and there is nothing
+       to normalise.
 
-    Returns the effective product for the post-update row -- the new
-    canonical token when the PATCH changes ``product``, else the row's
-    current product -- which scopes the ``preferred_impl_id`` validator.
+    Returns the effective product for the post-update row -- the supplied
+    token when the PATCH changes ``product``, else the row's current
+    product -- which scopes the ``preferred_impl_id`` validator.
     """
     if "product" in updates and updates["product"] is None:
         raise HTTPException(
@@ -783,15 +784,11 @@ def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
                 ),
             },
         )
-    raw_new_product = updates.get("product")
-    new_product = canonical_product_token(raw_new_product) if raw_new_product is not None else None
-    if new_product is not None:
-        updates["product"] = new_product
+    new_product = updates.get("product")
     if new_product is not None and new_product != current_product:
-        # raw_new_product is the operator's literal input; pass it
-        # through so the 422 detail echoes what they typed.
-        assert raw_new_product is not None  # guarded by the outer if
-        _canonicalise_and_validate_product(raw_new_product)
+        # new_product is the operator's literal input; the validator
+        # echoes it in the 422 detail and (post-#1817) stores it as-is.
+        _canonicalise_and_validate_product(new_product)
     return new_product if new_product is not None else current_product
 
 
@@ -1110,24 +1107,21 @@ async def create_target(
     skip branch never fires; a misregistered deploy that *did* hit it
     is recoverable via T4 #1145's PATCH-product or DELETE path.
     """
-    # G0.18-T2 (#1355). Canonicalise + validate the incoming product
-    # token in one step so a value copied straight out of
-    # ``meho connector list`` is accept-equivalent here. See
-    # :func:`_canonicalise_and_validate_product` for the
-    # ``sddc``/``sddc-manager`` rationale; the canonical token is
-    # what gets stored so the resolver and every downstream read see
-    # the registry's spelling regardless of which alias the operator
-    # typed.
+    # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
+    # token against the registered set so a value copied straight out of
+    # ``meho connector list`` is accept-equivalent here. Every connector
+    # now registers under the short, dispatch-canonical token the listing
+    # emits, so the token is stored as-is (the write-time alias bridge was
+    # retired by #1817). See :func:`_canonicalise_and_validate_product`.
     product = _canonicalise_and_validate_product(body.product)
     # G0.15-T6 (#1215). Reject an unknown ``preferred_impl_id`` at write
-    # time (the canonical product token scopes the valid set). See
+    # time (the validated product token scopes the valid set). See
     # :func:`_validate_preferred_impl_id`.
     _validate_preferred_impl_id(body.preferred_impl_id, product)
     now = datetime.now(UTC)
     create_fields = body.model_dump()
-    # Persist the canonical product token, not the alias the operator
-    # may have supplied, so the stored row matches the registry /
-    # resolver spelling (G0.18-T2 #1355).
+    # Persist the validated product token so the stored row matches the
+    # registry / resolver spelling (G0.18-T2 #1355).
     create_fields["product"] = product
     # #1723: default a fresh target's secret onto the per-tenant shared
     # path ``tenants/<tenant_id>/<name>`` so new targets land on the
@@ -1222,9 +1216,9 @@ async def update_target(
     effective_ca_pin = updates["tls_ca_pin"] if ca_pin_sent else ca_pin_before
     effective_verify_tls = updates["verify_tls"] if verify_tls_sent else verify_tls_before
     _enforce_tls_trust_exclusion(effective_ca_pin, effective_verify_tls)
-    # G0.14-T4 (#1145) / G0.18-T2 (#1355). Validate + canonicalise the
-    # patched ``product`` (rejecting ``{"product": null}``) and resolve
-    # the effective product for the impl-id scope below. See
+    # G0.14-T4 (#1145) / G0.18-T2 (#1355). Validate the patched
+    # ``product`` (rejecting ``{"product": null}``) and resolve the
+    # effective product for the impl-id scope below. See
     # :func:`_apply_product_patch`.
     effective_product = _apply_product_patch(updates, t.product)
     # G0.15-T6 (#1215). Same impl_id rejection as on POST. When the PATCH

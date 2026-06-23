@@ -90,11 +90,11 @@ from tests.acceptance._vrops_canary_fixtures import (
 # ---------------------------------------------------------------------------
 
 # Target.product matches the connector class's v2-registry key
-# ("vcf-operations"), not the parse_connector_id-derived "vrops" that
+# ("vrops"), not the parse_connector_id-derived "vrops" that
 # descriptor / group rows carry. See
 # tests.acceptance._vrops_canary_fixtures module docstring,
 # "EndpointDescriptor.product vs Target.product".
-_TARGET_PRODUCT = "vcf-operations"
+_TARGET_PRODUCT = "vrops"
 
 _OPERATOR = Operator(
     sub="vcf-operations-e2e-test",

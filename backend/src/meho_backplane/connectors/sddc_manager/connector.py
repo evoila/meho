@@ -13,7 +13,7 @@ Registered against the v2 registry at module-import time via
 idempotency check (in
 :func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
 once #408's pipeline lands in main) no-ops on subsequent ingests against the
-same ``(product="sddc-manager", version="9.0", impl_id="sddc-rest")`` triple.
+same ``(product="sddc", version="9.0", impl_id="sddc-rest")`` triple.
 
 Auth divergence from the NSX/vSphere precedents
 ------------------------------------------------
@@ -137,8 +137,8 @@ class SddcManagerConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"sddc-rest-9.0"`` -> (``"sddc-manager"``, ``"9.0"``, ``"sddc-rest"``).
-    product = "sddc-manager"
+    # ``"sddc-rest-9.0"`` -> (``"sddc"``, ``"9.0"``, ``"sddc-rest"``).
+    product = "sddc"
     version = "9.0"
     impl_id = "sddc-rest"
     supported_version_range = ">=9.0,<10.0"
@@ -265,7 +265,7 @@ class SddcManagerConnector(HttpConnector):
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",
-                product="sddc-manager",
+                product="sddc",
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="GET /v1/sddc-managers",
@@ -276,7 +276,7 @@ class SddcManagerConnector(HttpConnector):
         domain = sddc.get("domain") or sddc.get("managementDomain") or {}
         return FingerprintResult(
             vendor="vmware",
-            product="sddc-manager",
+            product="sddc",
             version=sddc.get("version"),
             build=sddc.get("build"),
             reachable=True,
@@ -322,7 +322,7 @@ class SddcManagerConnector(HttpConnector):
 
         The connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"sddc-rest-9.0"`` → (product=``"sddc-manager"``,
+        ``"sddc-rest-9.0"`` → (product=``"sddc"``,
         version=``"9.0"``, impl_id=``"sddc-rest"``).
         """
         from uuid import UUID

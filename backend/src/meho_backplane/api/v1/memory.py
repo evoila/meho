@@ -18,9 +18,10 @@ Route inventory
   :class:`~meho_backplane.memory.rbac.MemoryRbacResolver` enforces the
   per-scope matrix (e.g. only ``tenant_admin`` may write ``tenant``).
 * ``GET /api/v1/memory`` -- list memories visible to the operator
-  (``list``). Query params: ``scope`` / ``slug_pattern`` / ``tag`` /
-  ``include_expired`` / ``limit``. Returns :class:`MemoryListResponse`.
-  Role: ``operator``.
+  (``list``). Query params: ``scope`` / ``q`` (the canonical free-text
+  slug filter; ``slug_pattern`` is the deprecated alias, #1854) /
+  ``tag`` / ``include_expired`` / ``limit``. Returns
+  :class:`MemoryListResponse`. Role: ``operator``.
 * ``GET /api/v1/memory/{scope}/{slug}`` -- fetch one memory by natural
   key (``recall``). Optional ``target_name`` query param required for
   ``user-target`` / ``target`` scopes. Returns :class:`MemoryEntry`.
@@ -110,6 +111,10 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.api.v1._freetext_filter import (
+    free_text_q_query,
+    resolve_free_text_filter,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.memory import (
@@ -401,7 +406,13 @@ async def remember(
 @router.get("", response_model=MemoryListResponse)
 async def list_memories(
     scope: MemoryScope | None = Query(default=None),
-    slug_pattern: str | None = Query(default=None, max_length=_SLUG_MAX_LENGTH),
+    q: str | None = free_text_q_query(max_length=_SLUG_MAX_LENGTH),
+    slug_pattern: str | None = Query(
+        default=None,
+        max_length=_SLUG_MAX_LENGTH,
+        deprecated=True,
+        description="Deprecated alias for `q`; still honoured.",
+    ),
     tag: str | None = Query(default=None, max_length=_SLUG_MAX_LENGTH),
     include_expired: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=_LIST_LIMIT_MAX),
@@ -413,18 +424,27 @@ async def list_memories(
     tenant id from the query string. ``read_only`` operators get 403
     via :func:`require_role` before reaching this handler.
 
-    Filters (``scope`` / ``slug_pattern`` / ``tag``) are forwarded
-    verbatim to :meth:`MemoryService.list_memories`; the service is
-    the contract owner for filter semantics (slug ``in`` substring
-    match, tag membership in metadata, etc.). ``include_expired``
-    defaults to ``False`` so expired entries are filtered out on
-    the read side until G5.2 #374's daily cleanup task physically
-    removes them.
+    ``q`` is the canonical free-text filter param across the kb /
+    memory / operations-search list surfaces (#1854); ``slug_pattern``
+    is its deprecated alias, kept working for back-compat. The resolved
+    value plus ``scope`` / ``tag`` are forwarded verbatim to
+    :meth:`MemoryService.list_memories`; the service is the contract
+    owner for filter semantics (slug ``in`` substring match, tag
+    membership in metadata, etc.). Supplying both ``q`` and
+    ``slug_pattern`` with different values is a 422 rather than a
+    silent pick. ``include_expired`` defaults to ``False`` so expired
+    entries are filtered out on the read side until G5.2 #374's daily
+    cleanup task physically removes them.
 
     Binds ``audit_op_id="memory.list"`` + ``audit_op_class="read"``
     before the service call so a handler exception still produces
     an audit row classified under the canonical op id.
     """
+    resolved_slug_pattern = resolve_free_text_filter(
+        q=q,
+        legacy_value=slug_pattern,
+        legacy_name="slug_pattern",
+    )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_MEMORY_OP_IDS["list"],
         audit_op_class="read",
@@ -433,7 +453,7 @@ async def list_memories(
     entries = await service.list_memories(
         operator=operator,
         scope=scope,
-        slug_pattern=slug_pattern,
+        slug_pattern=resolved_slug_pattern,
         tag=tag,
         include_expired=include_expired,
         limit=limit,

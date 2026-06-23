@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal valid OpenAPI 3.1 spec shipped as package data so the
+# spec_resource on-ramp (#1964 T1 #1975) has a real artifact to exercise
+# end to end: the `_fixture/1.0` catalog row points its spec_resource at
+# this file, the boot-time validator dry-run-parses it with the same
+# parse_openapi the live ingest uses, and the catalog-driven ingest test
+# loads its bytes into SpecSource.content. T2 (#1976) authors the real
+# vmware/sddc specs; this fixture is the mechanism's self-test.
+openapi: "3.1.0"
+info:
+  title: MEHO shipped-spec fixture
+  version: "1.0.0"
+paths:
+  /things:
+    get:
+      operationId: listThings
+      summary: List things
+      responses:
+        "200":
+          description: A list of things.

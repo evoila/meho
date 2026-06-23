@@ -123,6 +123,15 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_engine_for_testing()
 
 
+def _iter_routes(routes):  # type: ignore[no-untyped-def]
+    """Recursively yield leaf routes from the FastAPI 0.137+ route tree."""
+    for route in routes:
+        if hasattr(route, "routes"):
+            yield from _iter_routes(route.routes)
+        else:
+            yield route
+
+
 def _build_app() -> FastAPI:
     """Construct a minimal FastAPI app wired for the broadcast UI tests."""
     app = FastAPI()
@@ -483,9 +492,11 @@ def test_overrides_route_resolves_before_event() -> None:
     # (path, method) to disambiguate. The GET must bind the overrides
     # list handler (registered before the event router), never the event
     # drawer's ``/ui/broadcast/event/{audit_id}``.
+    # Use _iter_routes to walk the 0.137+ route tree (include_router now
+    # produces nested _IncludedRouter objects, not a flat list).
     routes = {
         (getattr(route, "path", ""), method): getattr(route, "name", None)
-        for route in app.routes
+        for route in _iter_routes(app.routes)
         for method in (getattr(route, "methods", None) or set())
         if getattr(route, "path", "").startswith("/ui/broadcast/overrides")
     }

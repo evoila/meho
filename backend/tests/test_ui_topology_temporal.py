@@ -324,14 +324,14 @@ def test_topology_ui_temporal_routes_register_before_node_param() -> None:
     # Resolve through a real app: each temporal route binds GET and is its own
     # handler, not the node-detail param route.
     app = _build_app()
+    openapi_paths = app.openapi()["paths"]
     for literal in (
         "/ui/topology/timeline",
         "/ui/topology/diff",
         "/ui/topology/history/{name}",
     ):
-        matched = [route for route in app.routes if getattr(route, "path", None) == literal]
-        assert matched, f"{literal} not registered on the app"
-        assert "GET" in matched[0].methods  # type: ignore[attr-defined]
+        assert literal in openapi_paths, f"{literal} not registered on the app"
+        assert "get" in openapi_paths[literal], f"GET not registered for {literal}"
 
 
 # ---------------------------------------------------------------------------

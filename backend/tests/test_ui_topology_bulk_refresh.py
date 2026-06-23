@@ -379,14 +379,16 @@ def test_topology_ui_batch_routes_register_before_node_param() -> None:
     # Resolve through a real app: the routes must be registered with their
     # expected methods (the role gate fires inside the handlers, not here).
     app = _build_app()
-    by_path: dict[str, set[str]] = {}
-    for route in app.routes:
-        path = getattr(route, "path", None)
-        if path in ("/ui/topology/edges/bulk", "/ui/topology/refresh/{target_name}"):
-            by_path.setdefault(path, set()).update(route.methods)  # type: ignore[attr-defined]
-    assert "GET" in by_path["/ui/topology/edges/bulk"]
-    assert "POST" in by_path["/ui/topology/edges/bulk"]
-    assert "POST" in by_path["/ui/topology/refresh/{target_name}"]
+    openapi_paths = app.openapi()["paths"]
+    assert "get" in openapi_paths.get("/ui/topology/edges/bulk", {}), (
+        "GET /ui/topology/edges/bulk not registered"
+    )
+    assert "post" in openapi_paths.get("/ui/topology/edges/bulk", {}), (
+        "POST /ui/topology/edges/bulk not registered"
+    )
+    assert "post" in openapi_paths.get("/ui/topology/refresh/{target_name}", {}), (
+        "POST /ui/topology/refresh/{target_name} not registered"
+    )
 
 
 # ---------------------------------------------------------------------------

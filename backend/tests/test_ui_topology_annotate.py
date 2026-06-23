@@ -344,13 +344,11 @@ def test_topology_ui_annotate_route_registers_before_node_param() -> None:
     # route binding (the admin gate fires inside the annotate handler, never
     # the node-detail one).
     app = _build_app()
-    matched = [
-        route
-        for route in app.routes
-        if getattr(route, "path", None) == "/ui/topology/edges/annotate"
-    ]
-    assert matched, "annotate route not registered on the app"
-    assert "GET" in matched[0].methods  # type: ignore[attr-defined]
+    openapi_paths = app.openapi()["paths"]
+    assert "/ui/topology/edges/annotate" in openapi_paths, (
+        "annotate route not registered on the app"
+    )
+    assert "get" in openapi_paths["/ui/topology/edges/annotate"]
 
 
 # ---------------------------------------------------------------------------

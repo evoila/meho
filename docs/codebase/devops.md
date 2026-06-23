@@ -692,7 +692,7 @@ commits still cancel their own prior runs as before.
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 6 --dist loadscope` (excludes `tests/integration/`; `COVERAGE_CORE=sysmon --cov=meho_backplane --cov-report=xml` on **both push and PR** — the per-test re-embedding cost that made `--cov` prohibitive on PRs was eliminated in #799; sysmon PEP 669 backend — #739) -> upload `python-coverage` artefact |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 3 --dist loadscope` (excludes `tests/integration/`; `-n 3` reduced from 6 → 4 → 3 for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule) below) |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
@@ -701,10 +701,10 @@ commits still cancel their own prior runs as before.
 set, 6000m requests=limits, max 5 pods — #761 / rdc-gitops#55). The
 other three jobs (`python-integration`, `go-lint-test`,
 `helm-lint-template`) run on the dense `meho-runners-ci` pool (4-core).
-`python-lint-test` carries a 20-minute `timeout-minutes` (retuned from
-the legacy 50-min cap after #799 dropped the unit-job wall to ~9 min;
-the hard cap stays well above the observed wall for hang detection while
-the perf-budget-guard step enforces the 10-min Goal #11 budget at the
+`python-lint-test` carries a 25-minute `timeout-minutes` (raised from
+20 min after #1982 dropped `--cov` and the no-cov `-n 3` wall is
+~15-18 min; the hard cap stays above the observed wall for hang
+detection while the perf-budget-guard step enforces the budget at the
 PR level). `go-lint-test` and `helm-lint-template` carry 10 minutes;
 `python-integration` carries 60 minutes for the container-pull + DinD
 spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
@@ -712,6 +712,28 @@ in #564). Wall-clock for a green PR is the slowest job's elapsed time
 because the four jobs never block each other — `python-integration`
 typically dominates and is the dispatch surface for the Goal #11 budget
 conversation.
+
+### Runner-CPU rule
+
+**`pytest-xdist -n` must stay below the runner container's usable
+cores**, leaving at least one core for the GHA agent + xdist
+coordinator.
+
+The `meho-runners-ci-heavy` pod is currently `requests=limits=6000m`
+(QoS Guaranteed — no burst slack). With a hard 6-core cgroup quota the
+kernel enforces the cap via CPU throttle: once `-n` workers + the xdist
+coordinator + the GHA agent saturate the quota, the agent is
+CPU-throttled, misses its heartbeat, and GitHub kills the job with
+"runner lost communication" — even though the node is at ~0% CPU.
+That is the root cause of the `~15-21 min` failures that `-n 6 → 4 → 3`
+failed to fix: reducing `-n` only shifts the throttle timeline by a few
+minutes against a hard cap.
+
+**The correct fix is burst headroom on the pod's CPU _limit_**, not a
+smaller `-n`. Target: request 4000m / limit 7000m (pending
+`evoila-bosnia/rdc-gitops#70`; tracked here as #1983). Until that lands,
+do not raise `-n` above the current value to chase wall-clock gains — the
+heartbeat failures will return.
 
 ### Fail-loud posture
 

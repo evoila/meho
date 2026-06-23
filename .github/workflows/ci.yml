@@ -332,7 +332,23 @@ jobs:
         # full subscription is the intended trade. If the #761 wall/
         # variance measurement shows oversubscription symptoms (high
         # variance, wall not improving vs -n 3), drop to -n 5 (N-1) as
-        # the fallback. --dist loadscope: a module's
+        # the fallback.
+        # RULE — pytest-xdist -n vs runner CPU (#1983): -n must stay BELOW
+        # the runner container's usable cores, leaving at least one core for
+        # the GHA agent + xdist coordinator. The fix for "runner lost
+        # communication" / heartbeat starvation is burst headroom on the
+        # pod's CPU *limit* (rke2-ci heavy pool target: request 4000m /
+        # limit 7000m, pending evoila-bosnia/rdc-gitops#70 — currently
+        # 6000m requests=limits), not a smaller -n. That is why
+        # -n 6 → 4 → 3 never fixed the heartbeat failures against the hard
+        # 6-core cap: the pod had no burst slack, and with requests=limits
+        # the kernel enforces the cap via cgroup CPU quota (100% throttle),
+        # so the GHA agent misses its heartbeat and GitHub kills the job
+        # even though the nodes were at ~0% CPU. Until rdc-gitops#70 lands,
+        # do not raise -n above the current value to chase wall-clock
+        # improvements — the symptom will return. Raise the CPU *limit*
+        # instead.
+        # --dist loadscope: a module's
         # tests stay on one worker so module-/session-scoped fixtures
         # (testcontainers PG, embedding service) instantiate per
         # worker, not per test. --maxfail=1 preserves the old `-x`

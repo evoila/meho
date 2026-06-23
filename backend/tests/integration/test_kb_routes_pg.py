@@ -174,7 +174,7 @@ def _authed(token: str) -> dict[str, str]:
 @_skip_no_docker
 async def test_full_lifecycle_through_all_five_routes(
     kb_integration_app: FastAPI,
-    tmp_path: Path,
+    kb_ingest_root: Path,
 ) -> None:
     """End-to-end: ingest → list → show → create → delete via HTTP.
 
@@ -184,7 +184,7 @@ async def test_full_lifecycle_through_all_five_routes(
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
-    _write_corpus(tmp_path)
+    _write_corpus(kb_ingest_root)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-admin-1")
     operator_key, operator_token = _operator_token(tenant_id=TENANT_A_ID, sub="op-operator-1")
@@ -202,7 +202,7 @@ async def test_full_lifecycle_through_all_five_routes(
             # --- 1. Ingest the corpus via POST /api/v1/kb/ingest ---
             ingest_resp = await client.post(
                 "/api/v1/kb/ingest",
-                json={"directory": str(tmp_path)},
+                json={"directory": str(kb_ingest_root)},
                 headers=_authed(admin_token),
             )
             assert ingest_resp.status_code == 200, ingest_resp.text
@@ -364,7 +364,7 @@ async def test_cross_principal_overwrite_status_and_attribution(
 @_skip_no_docker
 async def test_tenant_boundary_holds_via_http_routes(
     kb_integration_app: FastAPI,
-    tmp_path: Path,
+    kb_ingest_root: Path,
 ) -> None:
     """Tenant A ingests; tenant B cannot list / show those entries via HTTP.
 
@@ -375,7 +375,7 @@ async def test_tenant_boundary_holds_via_http_routes(
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
-    _write_corpus(tmp_path)
+    _write_corpus(kb_ingest_root)
     fake_embed = _make_stub_embedding_service()
 
     a_admin_key, a_admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-a-admin")
@@ -406,7 +406,7 @@ async def test_tenant_boundary_holds_via_http_routes(
             # Tenant A ingests the 5-file corpus.
             ingest_resp = await client.post(
                 "/api/v1/kb/ingest",
-                json={"directory": str(tmp_path)},
+                json={"directory": str(kb_ingest_root)},
                 headers=_authed(a_admin_token),
             )
             assert ingest_resp.status_code == 200, ingest_resp.text
@@ -467,12 +467,12 @@ async def test_tenant_boundary_holds_via_http_routes(
 @_skip_no_docker
 async def test_ingest_dry_run_does_not_write(
     kb_integration_app: FastAPI,
-    tmp_path: Path,
+    kb_ingest_root: Path,
 ) -> None:
     """``dry_run=true`` returns the action plan without writing rows."""
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
-    _write_corpus(tmp_path)
+    _write_corpus(kb_ingest_root)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-dry")
     operator_key, operator_token = _operator_token(tenant_id=TENANT_A_ID, sub="op-dry-op")
@@ -490,7 +490,7 @@ async def test_ingest_dry_run_does_not_write(
             # Dry-run ingest reports 5 would-be inserts but writes nothing.
             dry_resp = await client.post(
                 "/api/v1/kb/ingest",
-                json={"directory": str(tmp_path), "dry_run": True},
+                json={"directory": str(kb_ingest_root), "dry_run": True},
                 headers=_authed(admin_token),
             )
             assert dry_resp.status_code == 200, dry_resp.text

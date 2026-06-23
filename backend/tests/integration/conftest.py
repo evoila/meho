@@ -289,6 +289,29 @@ def _integration_default_env(
 
 
 @pytest.fixture
+def kb_ingest_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    """Pin ``KB_INGEST_ROOT`` to the per-test ``tmp_path`` corpus dir.
+
+    The #101 ingest-root guard rejects any directory that resolves
+    outside ``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``).
+    Integration tests that POST ``/api/v1/kb/ingest`` build their corpus
+    under ``tmp_path``, which lives below the OS temp dir — without this
+    override the call returns ``400 kb_ingest_path_outside_root``.
+    Mirrors the autouse fixture in :mod:`tests.test_kb_service` that
+    pins the same setting to ``tmp_path`` at the unit level. The
+    ``get_settings`` cache is cleared so the freshly-set env is picked
+    up; the autouse ``_integration_default_env`` fixture clears it again
+    on teardown.
+    """
+    monkeypatch.setenv("KB_INGEST_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    return tmp_path
+
+
+@pytest.fixture
 def integration_env(
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,

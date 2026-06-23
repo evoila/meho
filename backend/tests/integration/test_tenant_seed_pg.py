@@ -143,7 +143,7 @@ async def _count_tenant_rows(tenant_id: UUID) -> int:
 @_skip_no_docker
 async def test_first_real_ingest_succeeds_on_empty_tenant_table(
     clean_room_app: FastAPI,
-    tmp_path: Path,
+    kb_ingest_root: Path,
 ) -> None:
     """Clean-room AC: empty ``tenant`` table, first real ingest persists.
 
@@ -153,7 +153,7 @@ async def test_first_real_ingest_succeeds_on_empty_tenant_table(
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
-    _write_corpus(tmp_path)
+    _write_corpus(kb_ingest_root)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=FRESH_TENANT_ID, sub="op-fresh-1")
     fresh_uuid = UUID(FRESH_TENANT_ID)
@@ -173,7 +173,7 @@ async def test_first_real_ingest_succeeds_on_empty_tenant_table(
         async with _make_async_client(clean_room_app) as client:
             resp = await client.post(
                 "/api/v1/kb/ingest",
-                json={"directory": str(tmp_path)},
+                json={"directory": str(kb_ingest_root)},
                 headers=_authed(admin_token),
             )
 
@@ -199,7 +199,7 @@ async def test_first_real_ingest_succeeds_on_empty_tenant_table(
 @_skip_no_docker
 async def test_concurrent_first_writes_seed_exactly_one_tenant_row(
     clean_room_app: FastAPI,
-    tmp_path: Path,
+    kb_ingest_root: Path,
 ) -> None:
     """Idempotency under the real race: N concurrent first writes → one row.
 
@@ -219,7 +219,7 @@ async def test_concurrent_first_writes_seed_exactly_one_tenant_row(
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
-    _write_corpus(tmp_path)
+    _write_corpus(kb_ingest_root)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=FRESH_TENANT_ID, sub="op-race-1")
     fresh_uuid = UUID(FRESH_TENANT_ID)
@@ -240,7 +240,7 @@ async def test_concurrent_first_writes_seed_exactly_one_tenant_row(
                 *(
                     client.post(
                         "/api/v1/kb/ingest",
-                        json={"directory": str(tmp_path), "dry_run": True},
+                        json={"directory": str(kb_ingest_root), "dry_run": True},
                         headers=_authed(admin_token),
                     )
                     for _ in range(8)

@@ -610,13 +610,21 @@ def test_tags_endpoint_returns_distinct_sorted_tag_options() -> None:
 
 
 def test_list_datalist_overrides_inherited_hx_target() -> None:
-    """The tag datalist pins ``hx-target="this"`` against form inheritance.
+    """The tag datalist scopes every inherited HTMX attribute it relies on.
 
     Regression for #1695: htmx resolves ``hx-target`` closest-wins up
     the ancestor chain, so without a local override the datalist
     inherits the filter form's ``hx-target="#memory-cards"`` and the
     ``hx-trigger="load"`` options fetch replaces the card grid with
     bare ``<option>`` elements on every page load.
+
+    Regression for #2069: ``hx-push-url`` and ``hx-include`` inherit
+    closest-wins the same way, so without the local overrides the
+    load-time fetch inherits the form's ``hx-push-url="true"`` (which
+    rewrites the browser URL to ``/ui/memory/tags``) and
+    ``hx-include="closest form"`` (which drags the ``tag``/``scope``
+    inputs into the request) on every page load. Guard every inherited
+    attribute the datalist pins, not just the target.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _, jwks = _make_keypair_and_jwks()
@@ -632,6 +640,10 @@ def test_list_datalist_overrides_inherited_hx_target() -> None:
     datalist_tag = body[start : body.index(">", start)]
     assert 'id="memory-tag-options"' in datalist_tag
     assert 'hx-target="this"' in datalist_tag
+    # The load-time options fetch must not rewrite the URL or drag the
+    # filter form's tag/scope inputs into the request (#2069).
+    assert 'hx-push-url="false"' in datalist_tag
+    assert 'hx-include="none"' in datalist_tag
 
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,8 @@ from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnec
 from meho_backplane.connectors.adapters.http import (
     _build_ca_pinned_ssl_context,
     _ca_pin_digest,
+    _same_origin,
+    _SameOriginRedirectClient,
 )
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -751,16 +753,16 @@ async def test_verify_tls_true_client_passes_no_verify_arg() -> None:
     The byte-identical-to-today guarantee (evoila/meho#209): when
     verification is on we must not pass ``verify=`` at all, so httpx keeps
     its default ``verify=True`` and honours ``SSL_CERT_FILE``. We assert on
-    the construction kwargs via a patched ``httpx.AsyncClient`` so the
-    proof is the *absence* of the argument, not merely an equivalent
-    context.
+    the construction kwargs via a patched ``_SameOriginRedirectClient``
+    (the shared-client class ``_http_client`` instantiates) so the proof is
+    the *absence* of the argument, not merely an equivalent context.
     """
     conn = _ConcreteHttpConnector()
     target = _make_target(name="verifying-target", verify_tls=True)
 
     with patch(
-        "meho_backplane.connectors.adapters.http.httpx.AsyncClient",
-        wraps=httpx.AsyncClient,
+        "meho_backplane.connectors.adapters.http._SameOriginRedirectClient",
+        wraps=_SameOriginRedirectClient,
     ) as mock_client:
         await conn._http_client(target)
 
@@ -1160,8 +1162,8 @@ async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
     target = _make_target(name="plain", verify_tls=True, tls_ca_pin=None)
 
     with patch(
-        "meho_backplane.connectors.adapters.http.httpx.AsyncClient",
-        wraps=httpx.AsyncClient,
+        "meho_backplane.connectors.adapters.http._SameOriginRedirectClient",
+        wraps=_SameOriginRedirectClient,
     ) as mock_client:
         await conn._http_client(target)
 
@@ -1169,3 +1171,132 @@ async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
     _, kwargs = mock_client.call_args
     assert "verify" not in kwargs
     await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Same-origin redirect policy (evoila/meho-internal#101 row L11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pooled_client_follows_same_origin_trailing_slash_301() -> None:
+    """A legitimate same-origin trailing-slash 301 on session-create succeeds.
+
+    Models the NSX/VCF ``POST /api/session`` -> ``/api/session/`` vendor
+    canonicalisation: the appliance answers the credential POST with a 301
+    to the trailing-slash form on the *same* origin. The shared client must
+    still reach the canonical endpoint (and so establish the session) — the
+    L11 fix must not break this path. httpx downgrades a 301'd POST to GET
+    per RFC, so the canonical handler answers a GET.
+    """
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/api/session":
+            return httpx.Response(301, headers={"Location": "/api/session/"})
+        return httpx.Response(200, headers={"X-XSRF-TOKEN": "session-tok"}, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://nsx.example.com",
+        transport=transport,
+    ) as client:
+        resp = await client.post(
+            "/api/session",
+            data={"j_username": "admin", "j_password": "s3cr3t"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.headers.get("X-XSRF-TOKEN") == "session-tok"
+    # Both hops were issued: the initial POST and the followed same-origin GET.
+    assert seen == [("POST", "/api/session"), ("GET", "/api/session/")]
+
+
+@pytest.mark.asyncio
+async def test_pooled_client_refuses_cross_origin_redirect_and_drops_creds() -> None:
+    """A cross-origin 3xx is NOT followed; no auth header or body leaks.
+
+    The open-redirect SSRF / auth-token-forwarding case (L11): a malicious
+    or misconfigured appliance answers the credential POST with a redirect
+    to an attacker host. The shared client must refuse to replay the request
+    off-origin, so neither the NSX ``X-XSRF-TOKEN`` header, the
+    ``Authorization`` header, nor the login form body ever reaches the
+    attacker origin.
+    """
+    reached: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        reached.append(request)
+        if request.url.host == "nsx.example.com":
+            # 308 preserves method + body across the hop, so if the client
+            # wrongly followed it the credential body would be replayed.
+            return httpx.Response(
+                308, headers={"Location": "https://attacker.example.com/api/session"}
+            )
+        return httpx.Response(200, json={"pwned": True})
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://nsx.example.com",
+        transport=transport,
+    ) as client:
+        resp = await client.post(
+            "/api/session",
+            data={"j_username": "admin", "j_password": "s3cr3t"},
+            headers={"X-XSRF-TOKEN": "leaky-token", "Authorization": "Bearer leaky-jwt"},
+        )
+
+    # The redirect was returned unfollowed — the caller sees the 3xx itself.
+    assert resp.status_code == 308
+    # Exactly one request was issued, and it never left the legitimate origin.
+    assert len(reached) == 1
+    assert reached[0].url.host == "nsx.example.com"
+    # The attacker host was never contacted, so no secret crossed the origin.
+    assert all(r.url.host == "nsx.example.com" for r in reached)
+
+
+@pytest.mark.asyncio
+async def test_pooled_client_caps_same_origin_redirect_chain() -> None:
+    """A same-origin redirect loop is bounded, not followed indefinitely.
+
+    A misconfigured same-origin reverse proxy that bounces every request to
+    a new same-origin path must not spin until the read timeout. The client
+    follows at most ``_MAX_SAME_ORIGIN_REDIRECTS`` hops, then raises
+    ``httpx.TooManyRedirects``.
+    """
+    hop = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hop["n"] += 1
+        return httpx.Response(301, headers={"Location": f"/loop/{hop['n']}"})
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://loop.example.com",
+        transport=transport,
+    ) as client:
+        with pytest.raises(httpx.TooManyRedirects):
+            await client.get("/loop/0")
+
+
+def test_same_origin_normalises_default_ports() -> None:
+    """``_same_origin`` treats implicit and explicit default ports as equal.
+
+    An origin is the ``(scheme, host, port)`` triple. ``_base_url`` builds an
+    implicit-port URL (``https://h``); a normalising proxy may name the
+    default port explicitly (``https://h:443/``). Both are the same origin,
+    so the comparison must collapse the default port — otherwise the benign
+    canonicalisation this client preserves would be refused as cross-origin.
+    A genuinely different port (a non-default ``:8443``) stays cross-origin.
+    """
+    base = httpx.URL("https://nsx.example.com/api/session")
+    explicit_default = httpx.URL("https://nsx.example.com:443/api/session/")
+    plain_http = httpx.URL("http://nsx.example.com/api/session/")
+    non_default_port = httpx.URL("https://nsx.example.com:8443/api/session/")
+
+    assert _same_origin(base, explicit_default) is True
+    # A scheme change (https -> http) is a different origin even on the host.
+    assert _same_origin(base, plain_http) is False
+    # A non-default explicit port is a genuinely different origin.
+    assert _same_origin(base, non_default_port) is False

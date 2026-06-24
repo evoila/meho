@@ -168,11 +168,16 @@ the grain wastes a publish attempt; here is what is out of bounds.
   "do these two at once".
 
 - **Template expressions beyond the allowlist.** The only substitutions
-  accepted anywhere in the body are `${run.target}` and `${run.params.X}`
+  accepted in the body are `${run.target}` and `${run.params.X}`
   (where `X` is one flat parameter name matching `[a-z_][a-z0-9_]*` — nested
   paths like `${run.params.x.y}` are rejected). Every other `${...}` pattern
   is refused when the template is validated. The check walks the whole body
   recursively, including dict keys, so there is nowhere to smuggle one in.
+  The one field that takes *no* substitution at all is `op_id`: it names the
+  operation a step or verify dispatches, which is operation identity and must
+  be fixed at publish time. Any `${...}` in an `op_id` — even an allowlisted
+  one — is rejected, so a run parameter can never redirect a published step to
+  a different operation.
 
 - **Verify DSLs.** A step's `verify` is one of exactly two shapes:
   - `confirm` — MEHO shows a `prompt` to the operator and only an affirmative

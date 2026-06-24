@@ -146,10 +146,11 @@ func validateScheme(u *url.URL, allowHTTP bool) error {
 }
 
 // isLoopbackHost reports whether host (a URL hostname, port already
-// stripped) refers to the local machine: the literal "localhost", or
-// any IP literal in a loopback range (127.0.0.0/8, ::1).
+// stripped) refers to the local machine: the literal "localhost"
+// (case-insensitive, since hostnames are per RFC 4343), or any IP
+// literal in a loopback range (127.0.0.0/8, ::1).
 func isLoopbackHost(host string) bool {
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

@@ -94,8 +94,11 @@ func TestNormaliseURLAllowHTTPFalseRejectsLoopback(t *testing.T) {
 func TestNormaliseURLAllowHTTPPermitsLoopback(t *testing.T) {
 	cases := map[string]string{
 		"http://localhost:8080/": "http://localhost:8080",
-		"http://127.0.0.1:8080":  "http://127.0.0.1:8080",
-		"http://[::1]:8080":      "http://[::1]:8080",
+		// Hostnames are case-insensitive (RFC 4343); url.Hostname()
+		// preserves case, so the loopback check must fold case.
+		"http://LOCALHOST:8080": "http://LOCALHOST:8080",
+		"http://127.0.0.1:8080": "http://127.0.0.1:8080",
+		"http://[::1]:8080":     "http://[::1]:8080",
 	}
 	for in, want := range cases {
 		got, err := NormaliseURLAllowHTTP(in, true)

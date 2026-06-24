@@ -10,13 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/migrate"
 )
 
@@ -30,9 +29,10 @@ import (
 // successor — not in scope for this Task) deliberately stay out.
 func newLoginCmd() *cobra.Command {
 	var (
-		issuerOverride   string
-		clientIDOverride string
-		scopes           []string
+		issuerOverride    string
+		clientIDOverride  string
+		scopes            []string
+		insecureAllowHTTP bool
 	)
 
 	cmd := &cobra.Command{
@@ -62,9 +62,14 @@ func newLoginCmd() *cobra.Command {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backplaneURL := strings.TrimRight(args[0], "/")
-			if _, err := url.ParseRequestURI(backplaneURL); err != nil {
-				return fmt.Errorf("invalid backplane URL %q: %w", backplaneURL, err)
+			// Normalise + enforce transport security before any
+			// network call. https is required by default so the
+			// bearer token minted below is never sent in the clear;
+			// --insecure-allow-http opts a loopback backplane out
+			// (see NormaliseURLAllowHTTP).
+			backplaneURL, err := backplane.NormaliseURLAllowHTTP(args[0], insecureAllowHTTP)
+			if err != nil {
+				return err
 			}
 
 			// Discovery and auth-config fetches honour the ambient
@@ -158,6 +163,9 @@ func newLoginCmd() *cobra.Command {
 		"OAuth client_id to use for the device-code flow (auto-discovered when blank)")
 	cmd.Flags().StringSliceVar(&scopes, "scope", nil,
 		"OAuth scopes to request (default: openid). Repeat or comma-separate for multiple.")
+	cmd.Flags().BoolVar(&insecureAllowHTTP, "insecure-allow-http", false,
+		"permit a plaintext http:// backplane URL for a localhost backplane only "+
+			"(local-dev convenience; the bearer token is sent in the clear — never use against a remote host)")
 	return cmd
 }
 

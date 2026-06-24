@@ -16,6 +16,7 @@ package backplane
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -63,9 +64,35 @@ func ClassifyError(err error) *output.StructuredError {
 	return output.Unexpected(err.Error())
 }
 
-// NormaliseURL strips trailing slashes + parses the URL to fail fast on
-// garbage input.
+// NormaliseURL strips trailing slashes, parses the URL to fail fast on
+// garbage input, and enforces the transport-security policy: https is
+// always accepted; plaintext http:// is accepted only for a loopback
+// host (localhost / 127.0.0.0/8 / ::1); http:// to any routed host is
+// rejected. The bearer token minted by `meho login` rides every request
+// in an Authorization header, so plaintext to a routed host would
+// transmit it in the clear (OWASP Transport Layer Security cheat sheet)
+// — but a loopback connection never leaves the machine, so it carries
+// no such risk. This is the resolver every verb runs against the stored
+// (already login-vetted) URL or a --backplane override.
 func NormaliseURL(s string) (string, error) {
+	// The stored/override path tolerates loopback http: a value can
+	// only have reached the config by passing `meho login`'s stricter
+	// gate (which requires --insecure-allow-http even for loopback),
+	// and httptest harnesses dial loopback http.
+	return NormaliseURLAllowHTTP(s, true)
+}
+
+// NormaliseURLAllowHTTP is NormaliseURL with explicit control over the
+// loopback-http allowance. `meho login` passes allowHTTP=false by
+// default so first-contact login is https-only, and allowHTTP=true only
+// when the operator passes --insecure-allow-http for a localhost
+// backplane. Regardless of allowHTTP, plaintext http:// to a routed
+// (non-loopback) host is always rejected — a token sent over http:// to
+// a routed host crosses the network in the clear regardless of operator
+// intent. This mirrors the deliberately narrow gating of the
+// `--insecure-skip-tls-verify` bootstrap flag: a convenience for local
+// dev, never a blanket cleartext escape hatch.
+func NormaliseURLAllowHTTP(s string, allowHTTP bool) (string, error) {
 	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
 	if trimmed == "" {
 		return "", errors.New("backplane URL is empty")
@@ -74,9 +101,57 @@ func NormaliseURL(s string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
 	}
+	// Scheme before host: the transport-security policy is the more
+	// fundamental gate, and it gives a clearer message for hostless
+	// non-http schemes (e.g. file:///tmp/x, whose host is empty) than
+	// the generic "has no host".
+	if err := validateScheme(u, allowHTTP); err != nil {
+		return "", err
+	}
 	if u.Host == "" {
 		return "", fmt.Errorf("backplane URL %q has no host", s)
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	return u.String(), nil
+}
+
+// validateScheme enforces the transport-security policy on a parsed
+// backplane URL: https always passes; plaintext http to a routed host
+// is always rejected; plaintext http to a loopback host passes only
+// when allowHTTP is set; any other scheme is rejected.
+func validateScheme(u *url.URL, allowHTTP bool) error {
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		// Routed-host plaintext is rejected regardless of allowHTTP:
+		// the token would cross the network in the clear no matter the
+		// operator's intent.
+		if !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf(
+				"backplane URL %q uses plaintext http:// to a routed host — the bearer token would be "+
+					"sent in the clear; use https://", u.String())
+		}
+		// Loopback plaintext never leaves the machine, but first-contact
+		// login still demands the explicit --insecure-allow-http opt-in.
+		if !allowHTTP {
+			return fmt.Errorf(
+				"backplane URL %q uses plaintext http:// — pass --insecure-allow-http to allow a "+
+					"localhost backplane, or use https://", u.String())
+		}
+		return nil
+	default:
+		return fmt.Errorf("backplane URL %q must use https (or http for a localhost backplane)", u.String())
+	}
+}
+
+// isLoopbackHost reports whether host (a URL hostname, port already
+// stripped) refers to the local machine: the literal "localhost", or
+// any IP literal in a loopback range (127.0.0.0/8, ::1).
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

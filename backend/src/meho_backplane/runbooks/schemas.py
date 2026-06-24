@@ -77,6 +77,7 @@ __all__ = [
     "Step",
     "TemplateSummary",
     "Verify",
+    "validate_op_id_static",
     "validate_substitutions",
 ]
 
@@ -139,6 +140,27 @@ def validate_substitutions(value: object) -> None:
             validate_substitutions(item)
     # Scalars other than str (int / float / bool / None) carry no
     # substitution surface; nothing to walk.
+
+
+def validate_op_id_static(op_id: str) -> None:
+    """Reject *any* ``${...}`` substitution token in an ``op_id``.
+
+    Stricter than :func:`validate_substitutions`: an ``op_id`` names the
+    operation a runbook step dispatches -- it is operation *identity*,
+    not call payload. Neither allowlisted form (``${run.target}`` /
+    ``${run.params.X}``) is legal here. Permitting even an allowlisted
+    substitution would let an operator-supplied run parameter redirect a
+    published step or verify to a different operation at runtime
+    (parameter injection into operation identity), defeating the
+    publish-time review of which operations a runbook may invoke. The
+    operation set a runbook can call is fixed at publish time.
+
+    Raised as :class:`ValueError` so Pydantic renders it as a 422 at the
+    HTTP boundary, matching :func:`validate_substitutions`.
+    """
+    match = _SUBSTITUTION_PATTERN.search(op_id)
+    if match is not None:
+        raise ValueError(f"disallowed substitution in op_id: {match.group(0)}")
 
 
 class ConfirmVerify(BaseModel):
@@ -272,6 +294,10 @@ class RunbookTemplateBody(BaseModel):
            and any ``${...}`` pattern other than ``${run.target}`` /
            ``${run.params.X}`` is rejected (defense in depth; G12.3
            re-checks at advance time via :func:`validate_substitutions`).
+           Step / verify ``op_id`` is held to the stricter
+           :func:`validate_op_id_static` rule -- operation identity is
+           static, so *no* substitution (not even an allowlisted one) may
+           appear there.
         """
         seen: set[str] = set()
         for step in self.steps:
@@ -282,8 +308,10 @@ class RunbookTemplateBody(BaseModel):
             validate_substitutions(step.body)
             verify = step.verify
             if isinstance(step, OperationCallStep):
+                validate_op_id_static(step.op_id)
                 validate_substitutions(step.params)
             if isinstance(verify, OperationCallVerify):
+                validate_op_id_static(verify.op_id)
                 validate_substitutions(verify.params)
                 validate_substitutions(verify.expect)
         return self

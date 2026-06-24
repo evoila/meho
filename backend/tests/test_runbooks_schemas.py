@@ -43,6 +43,7 @@ from meho_backplane.runbooks.schemas import (
     RunbookTemplateBody,
     Step,
     Verify,
+    validate_op_id_static,
     validate_substitutions,
 )
 
@@ -218,6 +219,85 @@ def test_substitution_rejected(bad: str) -> None:
                 ),
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# op_id is operation identity -- no substitution, not even an allowlisted one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_op_id",
+    [
+        "${run.params.target_op}",  # an allowlisted form is still illegal here
+        "${run.target}",  # the other allowlisted form -- also illegal in op_id
+        "vmware.${run.params.verb}.create",  # embedded substitution
+        "${anything_else}",
+    ],
+)
+def test_op_id_static_rejects_substitution(bad_op_id: str) -> None:
+    with pytest.raises(ValueError, match="disallowed substitution in op_id"):
+        validate_op_id_static(bad_op_id)
+
+
+def test_op_id_static_accepts_plain_op_id() -> None:
+    # A normal, fully-qualified op_id with no ${...} passes.
+    validate_op_id_static("vmware.composite.vm.create")
+
+
+def test_template_rejects_substitution_in_step_and_verify_op_id() -> None:
+    # A runbook whose step op_id AND verify op_id both carry a ${...}
+    # token is rejected at publish/validation time -- operation identity
+    # may not be parameter-injected. The assertion executes (non-vacuous):
+    # constructing the body raises before the model is built.
+    with pytest.raises(ValidationError, match="disallowed substitution in op_id"):
+        RunbookTemplateBody(
+            title="t",
+            description="d",
+            steps=[
+                OperationCallStep(
+                    id="inject",
+                    title="t",
+                    body="b",
+                    type="operation_call",
+                    op_id="${run.params.step_op}",
+                    params={},
+                    verify=OperationCallVerify(
+                        type="operation_call",
+                        op_id="${run.params.verify_op}",
+                        params={},
+                        expect={"ok": True},
+                    ),
+                ),
+            ],
+        )
+
+
+def test_template_accepts_static_op_id_with_allowlisted_substitutions_elsewhere() -> None:
+    # The static-op_id rule does not regress the allowlist for the other
+    # fields: a body with static op_ids but ${run.target} / ${run.params.X}
+    # in body / params / expect still validates.
+    body = RunbookTemplateBody(
+        title="t",
+        description="d",
+        steps=[
+            OperationCallStep(
+                id="rotate",
+                title="Rotate",
+                body="Rotate on ${run.target}",
+                type="operation_call",
+                op_id="vault.kv.rotate",
+                params={"path": "${run.params.secret_path}"},
+                verify=OperationCallVerify(
+                    type="operation_call",
+                    op_id="vault.kv.read",
+                    params={"path": "${run.params.secret_path}"},
+                    expect={"target": "${run.target}"},
+                ),
+            ),
+        ],
+    )
+    assert body.steps[0].op_id == "vault.kv.rotate"
 
 
 # ---------------------------------------------------------------------------

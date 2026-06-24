@@ -204,9 +204,12 @@ async def _build_ingested_preview(
 
     Dispatch Step 5 (connector resolution) followed by the literal-request
     resolve (shared with :func:`dispatch_ingested`) and body redaction.
-    Returns the ``status="ok"`` envelope, or a structured ``no_connector`` /
+    Returns the ``status="ok"`` envelope, a structured ``no_connector`` /
     ``ambiguous_connector`` error envelope when the target resolves no
-    connector. Never sends the request.
+    connector, or a ``dispatch_error`` envelope when the request can't be
+    resolved (an unsubstituted path var or a descriptor missing its
+    method/path -- the two faults :func:`resolve_ingested_request` raises).
+    Never sends the request; never raises for those faults.
     """
     cls, label, exc_message = resolve_connector_or_label(target)
     if label is not None:
@@ -224,13 +227,40 @@ async def _build_ingested_preview(
 
     # The literal request, resolved through the SAME code path
     # ``dispatch_ingested`` sends through -- no drift.
-    request = await resolve_ingested_request(
-        connector=connector_instance,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    #
+    # ``resolve_ingested_request`` deliberately *raises* on a path-template
+    # fault (``KeyError`` for an unsubstituted path var, ``RuntimeError`` for
+    # a descriptor missing its method/path) because the execute path relies on
+    # the dispatcher's structured-error mapping (``dispatcher`` generic
+    # ``except``) to convert them. The preview path has no such wrapper, so we
+    # catch those two -- and only those two -- here and map them to the same
+    # structured ``error`` envelope every other preview fault returns, honouring
+    # this module's documented never-raises contract (#2066). ``resolve_*``
+    # itself is left untouched so the execute-path contract is unchanged.
+    try:
+        request = await resolve_ingested_request(
+            connector=connector_instance,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+    except (KeyError, RuntimeError) as exc:
+        return {
+            "status": "error",
+            "op_id": op_id,
+            "connector_id": connector_id,
+            "source_kind": descriptor.source_kind,
+            "error": (
+                f"dispatch_error: the operation's request could not be resolved "
+                f"({exc}). This usually means a required path parameter was not "
+                "supplied or the descriptor is missing its method/path."
+            ),
+            "extras": {
+                "error_code": "dispatch_error",
+                "exception_message": str(exc),
+            },
+        }
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
@@ -288,9 +318,9 @@ async def preview_dispatch(
 
     * ``status`` -- ``"ok"`` when the request resolved; ``"error"`` on a
       structured failure (``unknown_op`` / ``invalid_params`` /
-      ``no_connector`` / ``ambiguous_connector``); ``"unavailable"`` when
-      the op is not previewable (a ``typed`` / ``composite`` op has no
-      literal HTTP request).
+      ``no_connector`` / ``ambiguous_connector`` / ``dispatch_error``);
+      ``"unavailable"`` when the op is not previewable (a ``typed`` /
+      ``composite`` op has no literal HTTP request).
     * ``op_id`` / ``connector_id`` -- echoed for correlation.
     * ``source_kind`` -- the descriptor's source kind (present whenever a
       descriptor resolved).

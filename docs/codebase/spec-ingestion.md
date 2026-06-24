@@ -444,6 +444,23 @@ owns `group_id` (NULL until grouping runs). T4 owns
 `custom_description`, `custom_notes`, `llm_instructions` (operator-
 authored overrides at review time).
 
+#### RFC6570 operator-bearing path-param names (#2003 / #2066)
+
+A vendor spec may declare an `in: path` parameter whose `name` carries a
+leading RFC6570 expression operator — VCF Operations-for-Logs uses
+`{"name": "+path", "in": "path"}` for the template `/events/{+path}`
+(reserved expansion, so the constraint's `/` stays literal on the wire). The
+parameter-schema builder keys the JSON-Schema property on the **bare** name
+(`path`), not the operator-bearing one, because that is the name the dispatch
+renderer (`operations/_branches._substitute_path`) resolves the value by after
+stripping the operator from the template. `descriptor.path` keeps the operator
+verbatim — the renderer needs it to pick reserved expansion. The operator set
+both stages strip is shared via `operations/_rfc6570.RFC6570_PATH_OPERATORS`,
+so the property key and the lookup key can never drift (the keying-vs-rendering
+mismatch that made these ops undispatchable at v0.19.0). A spec declaring both
+`path` and `+path` as path parameters collapses onto the same bare key and
+raises `InvalidSchemaError` rather than silently dropping one.
+
 ### `GroupProposal` / `GroupingResult` / `GroupingConfig` (`ingest/llm_groups.py`)
 
 Pydantic `frozen=True` model + two frozen-slotted dataclasses, one

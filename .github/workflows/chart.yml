@@ -346,7 +346,13 @@ jobs:
           echo ">> CHART_VERSION env present with value ${CHART_VER}"
 
   helm-test:
-    name: helm install + helm test (pgvector preflight)
+    # Internal "run" job — the REQUIRED branch-protection context lives on the
+    # `helm-test-gate` aggregator below, not here. A required job that is gated
+    # by a job-level `if:` and `needs:` reports Success when it is *skipped*
+    # (including when a needed job FAILS) — so naming this job the required
+    # context would let a `changes`/`validate` failure pass the gate untested
+    # (GitHub "Troubleshooting required status checks"; actions/runner#2566).
+    name: helm install + helm test (pgvector preflight) [run]
     # G0.4-T6 (#263) -- spins up a kind cluster, installs a
     # pgvector-enabled Postgres sidecar, helm-installs the meho chart
     # against it, and runs ``helm test`` against the deployed release.
@@ -911,6 +917,44 @@ jobs:
           # ``runAsNonRoot/runAsUser=1001/seccomp=RuntimeDefault``
           # securityContext the migration Job inherits.
           kubectl get namespace meho-test -o yaml | grep -A2 labels || true
+
+  helm-test-gate:
+    # The REQUIRED branch-protection context. It `always()` runs and explicitly
+    # evaluates the upstream job results so the gate fails CLOSED: a skipped
+    # `helm-test` (because `changes`/`validate` failed, or a transient `changes`
+    # `gh api` blip) reports Success on its own, so we must not let that skip
+    # masquerade as a passing gate. On a non-chart PR the gate passes without
+    # running kind; on a chart PR it requires `changes` + `validate` + the kind
+    # `helm-test` run to all have succeeded.
+    # Refs #349; GitHub "Troubleshooting required status checks" + actions/runner#2566.
+    name: helm install + helm test (pgvector preflight)
+    if: always()
+    needs: [changes, validate, helm-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate gate
+        run: |
+          set -euo pipefail
+          # Detection must have succeeded — a flaky `changes` must never pass.
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "::error title=Chart gate failed::the changes-detection job did not succeed (result=${{ needs.changes.result }}); failing closed."
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.chart }}" == "true" ]]; then
+            # Chart PR (or push): validate + the kind helm-test must both pass.
+            if [[ "${{ needs.validate.result }}" != "success" ]]; then
+              echo "::error title=Chart gate failed::validate (helm lint/template/kubeconform) did not pass (result=${{ needs.validate.result }})."
+              exit 1
+            fi
+            if [[ "${{ needs.helm-test.result }}" != "success" ]]; then
+              echo "::error title=Chart gate failed::helm-test (kind install + pgvector preflight) did not pass (result=${{ needs.helm-test.result }})."
+              exit 1
+            fi
+            echo "Chart change verified: validate + helm-test both passed."
+          else
+            echo "No chart-relevant changes — gate passes without running kind."
+          fi
 
   publish:
     name: Package + push + sign chart

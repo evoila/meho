@@ -351,6 +351,57 @@ def test_parse_bare_and_operator_path_param_collision_raises() -> None:
             parse_openapi(url)
 
 
+def _same_name_path_query_spec(*, path_first: bool) -> bytes:
+    """A legal OpenAPI op declaring ``id`` in BOTH path and query.
+
+    OpenAPI permits the same parameter ``name`` in different ``in`` locations.
+    The two are emitted in *path_first* or query-first order to prove the
+    flatten result is order-independent.
+    """
+    path_param = {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+    query_param = {"name": "id", "in": "query", "required": False, "schema": {"type": "string"}}
+    params = [path_param, query_param] if path_first else [query_param, path_param]
+    return yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "same-name-diff-loc", "version": "1.0.0"},
+            "paths": {
+                "/v1/items/{id}": {
+                    "get": {
+                        "operationId": "getItem",
+                        "parameters": params,
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+
+
+@pytest.mark.parametrize("path_first", [True, False])
+def test_parse_same_name_path_and_query_param_ingests_path_wins(path_first: bool) -> None:
+    """``id`` in path AND query is legal: it ingests, and the path location wins.
+
+    Regression for the over-broad collision guard (#2066 review B1): the guard
+    must fire only on path-vs-path bare-name collisions, never on the legal
+    same-name-across-different-``in`` shape. The flattened single property keeps
+    ``x-meho-param-loc: path`` regardless of declaration order so the path
+    template var ``{id}`` stays substitutable (the op stays dispatchable); a
+    query twin can't shadow it into an undispatchable op.
+    """
+    spec = _same_name_path_query_spec(path_first=path_first)
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "same_name.yaml", spec)
+        rows = parse_openapi(url)  # must NOT raise
+    op = _by_op_id(rows)["GET:/v1/items/{id}"]
+    props = op.parameter_schema["properties"]
+    assert "id" in props
+    # Path location wins (order-independent) so the path var is satisfiable.
+    assert props["id"]["x-meho-param-loc"] == "path"
+    # Path params are implicitly required.
+    assert "id" in op.parameter_schema["required"]
+
+
 def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())

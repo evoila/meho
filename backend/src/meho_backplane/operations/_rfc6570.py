@@ -54,9 +54,14 @@ def split_path_operator(name: str) -> tuple[str, str]:
     """Split a single leading RFC6570 operator off a path-variable name.
 
     Mirrors the renderer's ``_PATH_VAR_RE`` capture exactly: at most one
-    leading character is consumed as an operator, and only when it is one
-    of :data:`RFC6570_PATH_OPERATORS`. A second operator char, or an
-    operator anywhere but the first position, stays part of the name.
+    leading character is consumed as an operator, and only when it is one of
+    :data:`RFC6570_PATH_OPERATORS` **and** a non-empty name remains after it.
+    A second operator char, or an operator anywhere but the first position,
+    stays part of the name; an operator-only token (``"+"``) is treated as the
+    whole name, because ``_PATH_VAR_RE``'s ``[^{}]+`` name group requires at
+    least one character -- so for ``{+}`` the regex captures operator ``""`` /
+    name ``"+"``, and this helper must classify it identically (the module's
+    anti-drift invariant).
 
     >>> split_path_operator("+path")
     ('+', 'path')
@@ -66,10 +71,12 @@ def split_path_operator(name: str) -> tuple[str, str]:
     ('+', '+weird')
     >>> split_path_operator("path+")
     ('', 'path+')
+    >>> split_path_operator("+")
+    ('', '+')
 
     Returns ``(operator, bare_name)`` where ``operator`` is ``""`` when the
     name carries none.
     """
-    if name and name[0] in RFC6570_PATH_OPERATORS:
+    if len(name) >= 2 and name[0] in RFC6570_PATH_OPERATORS:
         return name[0], name[1:]
     return "", name

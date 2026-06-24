@@ -856,30 +856,51 @@ def _populate_param_properties(
     force the caller to pass ``+path`` to satisfy validation, which the renderer
     would then fail to resolve -- the #2003/#2066 dead-op. ``descriptor.path``
     keeps the operator verbatim so the renderer still selects reserved
-    expansion. A spec declaring both ``path`` and ``+path`` collapses onto the
-    same bare key and raises :class:`InvalidSchemaError` rather than silently
-    dropping one.
+    expansion.
+
+    Two **path** parameters that collapse onto the same bare key (a spec
+    declaring both ``path`` and ``+path``) raise :class:`InvalidSchemaError`
+    rather than silently dropping one -- one of the resulting template vars
+    would be unsatisfiable. A same-name collision *across different* ``in``
+    locations (the legal OpenAPI ``id``-in-path + ``id``-in-query) is **not** a
+    fault and never raises: the params flatten to one property (the model
+    carries a single ``x-meho-param-loc`` per name), and the **path** location
+    wins regardless of declaration order so the path template var stays
+    satisfiable -- a query/header twin can't shadow it into an undispatchable
+    op. The guard is scoped to path-vs-path so it never rejects this legal
+    shape.
     """
+    path_bare_names: set[str] = set()
     for (name, location), param in merged.items():
         prop_schema = _build_param_property(param, component_schemas)
         prop_schema["x-meho-param-loc"] = location
         prop_name = name
         if location == "path":
             _operator, prop_name = split_path_operator(name)
-        if prop_name in properties:
-            # Two path params collapse onto the same property key once the
-            # RFC6570 operator is stripped (a spec declaring both ``path`` and
-            # ``+path``, in either order). A raw duplicate ``(name, in)`` can't
-            # reach here -- ``merged`` already dedupes those -- so a collision
-            # is always an operator-normalised path-param clash. Fail loudly
-            # rather than silently drop a parameter the renderer still needs.
-            raise InvalidSchemaError(
-                f"paths.{path}.{method.lower()}: path parameter {name!r} "
-                f"normalises to property key {prop_name!r} (RFC6570 operator "
-                "stripped), which is already declared; a spec must not declare "
-                "both the bare and an operator-prefixed form of one path "
-                "variable."
-            )
+            if prop_name in path_bare_names:
+                # Another path param already claimed this bare key once the
+                # RFC6570 operator was stripped (``path`` + ``+path``, in either
+                # order). Failing loudly beats silently dropping a path var the
+                # renderer still needs. Scoped to path-vs-path: a collision with
+                # a non-path param of the same name is the legal cross-location
+                # shape handled below.
+                raise InvalidSchemaError(
+                    f"paths.{path}.{method.lower()}: path parameter {name!r} "
+                    f"normalises to property key {prop_name!r} (RFC6570 operator "
+                    "stripped), which another path parameter already declares; a "
+                    "spec must not declare both the bare and an operator-prefixed "
+                    "form of one path variable."
+                )
+            path_bare_names.add(prop_name)
+        elif prop_name in path_bare_names:
+            # A non-path param shares its name with a path param already
+            # placed. Don't let it overwrite the path property -- the path var
+            # must stay substitutable or the op is undispatchable. Keep the
+            # path binding; drop this twin (it can't have its own property key
+            # in the flattened model anyway). Order-independent: the symmetric
+            # "path declared after the twin" case is handled by the path branch
+            # overwriting the twin below.
+            continue
         properties[prop_name] = prop_schema
         is_required = param.get("required") is True or location == "path"
         if is_required and prop_name not in required:

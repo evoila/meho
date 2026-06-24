@@ -458,8 +458,13 @@ verbatim — the renderer needs it to pick reserved expansion. The operator set
 both stages strip is shared via `operations/_rfc6570.RFC6570_PATH_OPERATORS`,
 so the property key and the lookup key can never drift (the keying-vs-rendering
 mismatch that made these ops undispatchable at v0.19.0). A spec declaring both
-`path` and `+path` as path parameters collapses onto the same bare key and
-raises `InvalidSchemaError` rather than silently dropping one.
+`path` and `+path` as **path** parameters collapses onto the same bare key and
+raises `InvalidSchemaError` rather than silently dropping one. The collision
+guard is scoped to path-vs-path only: a name shared *across different* `in`
+locations (the legal OpenAPI `id`-in-path + `id`-in-query) is **not** a fault —
+it flattens to one property, and the **path** location wins regardless of
+declaration order so the path template var stays substitutable (a query/header
+twin can't shadow the op into being undispatchable).
 
 ### `GroupProposal` / `GroupingResult` / `GroupingConfig` (`ingest/llm_groups.py`)
 

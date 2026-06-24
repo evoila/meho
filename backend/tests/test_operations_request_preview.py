@@ -1038,3 +1038,49 @@ async def test_preview_operation_meta_tool_missing_path_var_never_raises(
 
     assert envelope["status"] == "error"
     assert envelope["extras"]["error_code"] == "dispatch_error"
+
+
+@pytest.mark.asyncio
+async def test_call_operation_same_name_path_and_query_param_dispatches(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An op with ``id`` in both path and query dispatches: the path var substitutes.
+
+    End-to-end proof for #2066 review B1 — the legal same-name-across-locations
+    shape is dispatchable. Ingest keys the flattened property on ``id`` with
+    ``x-meho-param-loc: path`` (path wins), so the caller's ``id`` routes to the
+    path bucket and ``/v1/items/{id}`` substitutes with no ``KeyError``.
+    """
+    from meho_backplane.operations.dispatcher import dispatch
+
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/items/{id}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/items/{id}",
+        # The shape ingest produces for ``id`` in path + query: one property,
+        # path location wins (proven by the parser test).
+        parameter_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string", "x-meho-param-loc": "path"}},
+            "required": ["id"],
+        },
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="GET:/v1/items/{id}",
+        target=_FakeTarget(name="gh-prod"),
+        params={"id": "42"},
+    )
+
+    assert result.status == "ok", result.error
+    assert len(connector.calls) == 1
+    assert connector.calls[0]["path"] == "/v1/items/42"

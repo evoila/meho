@@ -36,6 +36,12 @@ from meho_backplane.operations._rfc6570 import (
         ("++weird", ("+", "+weird")),  # only the first leading char is consumed
         ("path+", ("", "path+")),  # a trailing operator stays part of the name
         ("", ("", "")),  # empty name
+        # Operator-only tokens: stripping would leave an empty name, which
+        # ``_PATH_VAR_RE``'s ``[^{}]+`` group can't match -- so the operator is
+        # the whole name, no operator stripped (m1, #2066).
+        ("+", ("", "+")),
+        ("#", ("", "#")),
+        ("&", ("", "&")),
     ],
 )
 def test_split_path_operator(name: str, expected: tuple[str, str]) -> None:
@@ -61,3 +67,43 @@ def test_renderer_regex_uses_the_shared_operator_set() -> None:
     assert no_op is not None
     assert no_op.group(1) == ""
     assert no_op.group(2) == "xname"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "+",  # operator-only: m1 regression
+        "#",
+        ".",
+        "/",
+        ";",
+        "?",
+        "&",
+        "+path",
+        "path",
+        "++weird",
+        "path+",
+        "+a",
+        "ab",
+    ],
+)
+def test_split_path_operator_agrees_with_renderer_regex(name: str) -> None:
+    """``split_path_operator`` classifies a var name identically to ``_PATH_VAR_RE``.
+
+    The module's anti-drift invariant: for any single-segment template
+    ``{<name>}``, the (operator, bare-name) split the parser computes must equal
+    the one the renderer's compiled regex computes. The load-bearing case is an
+    **operator-only** token like ``{+}``: the regex's ``[^{}]+`` name group
+    can't match an empty name, so it captures operator ``""`` / name ``"+"`` --
+    and ``split_path_operator`` must agree (m1, #2066), or the parser would key
+    a property the renderer can't look up (or vice versa).
+    """
+    split = split_path_operator(name)
+    match = _PATH_VAR_RE.fullmatch(f"{{{name}}}")
+    if match is None:
+        # The regex rejects the whole ``{<name>}`` as a template var (the name
+        # group couldn't match). The only way that happens for a non-empty name
+        # is never, given ``[^{}]+`` -- assert the contract holds regardless.
+        assert split == ("", name)
+    else:
+        assert (match.group(1), match.group(2)) == split

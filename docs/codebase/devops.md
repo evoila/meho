@@ -758,8 +758,12 @@ because the gate's inputs haven't changed and rebuilding would add zero
 signal. Repeating the build in `ci.yml` would double the cost for
 backend PRs and pointlessly run the gate for the non-backend PRs that
 `image.yml` already filters out. The same reasoning applies to the
-chart publish (`chart.yml` runs `validate` on PRs as a path-scoped
-gate) — `ci.yml` exercises a parallel `helm lint`/`helm template`/
+chart publish (`chart.yml` runs `validate` + the required `helm-test`
+job on PRs, gated by a `changes` job rather than an `on:` path filter —
+a path-filtered workflow whose job is a *required* check would block
+non-chart PRs on a never-reported status, so the jobs skip via a
+job-level `if:` (→ reported Success) when the chart is untouched) —
+`ci.yml` exercises a parallel `helm lint`/`helm template`/
 `kubeconform` pass unconditionally so a chart-touching regression also
 fails the central CI check, but it does not duplicate the publish
 path. Migration backward-compat (`migration-compat.yml`), dependency

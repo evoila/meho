@@ -70,6 +70,8 @@ from urllib.parse import urlparse
 import httpx
 import pytest
 
+from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient
+
 __all__ = [
     "DEFAULT_VCSIM_PASSWORD",
     "DEFAULT_VCSIM_TOPOLOGY",
@@ -384,16 +386,18 @@ def patch_vmware_connector_for_vcsim(
                 ssl_ctx = ssl.create_default_context()
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
-                clients[target.name] = httpx.AsyncClient(
+                clients[target.name] = _SameOriginRedirectClient(
                     base_url=base_url,
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
                     verify=ssl_ctx,
-                    # Mirror production HttpConnector._http_client:
-                    # vcsim's legacy ``/rest`` mount 301s missing
-                    # trailing slashes, so the patched client must
-                    # follow redirects too or the dispatch leg sees a
-                    # spurious HTTPStatusError instead of vcsim data.
-                    follow_redirects=True,
+                    # Mirror production HttpConnector._http_client: vcsim's
+                    # legacy ``/rest`` mount 301s missing trailing slashes,
+                    # so the patched client must follow that same-origin
+                    # ``301`` too or the dispatch leg sees a spurious
+                    # HTTPStatusError instead of vcsim data. Using the
+                    # production same-origin client (not a plain
+                    # ``follow_redirects=True`` client) keeps the fixture
+                    # faithful to the redirect policy under test (L11).
                 )
             return clients[target.name]
 

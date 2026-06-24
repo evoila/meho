@@ -172,6 +172,96 @@ def _retryable(exc: BaseException) -> bool:
     return False
 
 
+# Hard cap on the same-origin redirect chain followed by
+# :class:`_SameOriginRedirectClient`. Vendor canonicalisation never chains
+# more than one trailing-slash hop in practice; the cap is a cheap guard
+# against a same-origin redirect loop (a reverse proxy that bounces
+# ``/a`` -> ``/a/`` -> ``/a`` would otherwise spin until the read timeout).
+# httpx's own default ``max_redirects`` is 20; this is stricter because the
+# only redirects we ever follow are benign single-hop canonicalisations.
+_MAX_SAME_ORIGIN_REDIRECTS = 5
+
+
+def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
+    """Return ``True`` when *a* and *b* share scheme, host, and port.
+
+    An origin is the ``(scheme, host, port)`` triple (RFC 6454). httpx's
+    :attr:`httpx.URL.port` is ``None`` when the URL omits the port, so two
+    URLs that differ only in an explicit-vs-implicit default port (e.g.
+    ``https://h/`` vs ``https://h:443/``) compare unequal here. That is the
+    safe direction: we under-follow (refuse an ambiguous hop) rather than
+    over-follow into a potentially different origin.
+    """
+    return (a.scheme, a.host, a.port) == (b.scheme, b.host, b.port)
+
+
+class _SameOriginRedirectClient(httpx.AsyncClient):
+    """An ``AsyncClient`` that follows redirects **only within one origin**.
+
+    The shared pooled client must not transparently follow ``httpx``'s
+    default redirect chain across origins: a malicious or misconfigured
+    vendor appliance can answer a session-create / login ``POST`` with a
+    ``3xx`` whose ``Location`` points at an attacker host, and ``httpx``
+    will replay the request there. ``httpx`` strips the ``Authorization``
+    header on a cross-origin hop, but it does **not** strip vendor-specific
+    auth headers (NSX's ``X-XSRF-TOKEN``) nor — on a method-preserving
+    ``307``/``308`` — the credential request body, so the login secret and
+    session token leak to the redirect target (open-redirect SSRF /
+    auth-token forwarding, evoila/meho-internal#101 row L11).
+
+    This client is built with ``follow_redirects=False`` and re-implements
+    a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
+    same-origin canonicalisation (the vendor trailing-slash ``301`` that
+    vcsim's ``/rest`` mount and some appliances emit) is still followed, so
+    no vendor flow regresses. Any cross-origin ``Location`` terminates the
+    loop and the ``3xx`` response is returned to the caller unfollowed — the
+    request is **never** replayed off-origin, so no header or body crosses
+    the origin boundary.
+    """
+
+    async def send(
+        self,
+        request: httpx.Request,
+        *,
+        stream: bool = False,
+        auth: Any = httpx.USE_CLIENT_DEFAULT,
+        follow_redirects: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> httpx.Response:
+        # Always issue the underlying request without httpx's own redirect
+        # following; this class owns the redirect decision so the
+        # same-origin invariant cannot be undone by a per-call
+        # ``follow_redirects=True`` slipping through a convenience method.
+        response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
+        for _ in range(_MAX_SAME_ORIGIN_REDIRECTS):
+            if not response.has_redirect_location:
+                return response
+            # ``next_request`` is httpx's own correctly-built follow-up
+            # request (method downgrade on 301/302, body/headers carried on
+            # 307/308) — reuse it rather than reconstructing the hop.
+            next_request = response.next_request
+            if next_request is None or not _same_origin(request.url, next_request.url):
+                # Cross-origin (or unresolvable) redirect: refuse to
+                # follow. Returning the 3xx unfollowed means no header or
+                # body — and so no ``X-XSRF-TOKEN`` / credential — is ever
+                # replayed to the off-origin ``Location``.
+                logger.warning(
+                    "connector_redirect_not_followed_cross_origin",
+                    method=request.method,
+                    from_url=str(request.url),
+                    location=response.headers.get("Location"),
+                )
+                return response
+            await response.aclose()
+            request = next_request
+            response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
+        # Exhausted the same-origin hop budget — surface httpx's own error
+        # so the caller sees a redirect loop rather than a silent 3xx.
+        raise httpx.TooManyRedirects(
+            f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
+            request=request,
+        )
+
+
 class HttpConnector(Connector):
     """Abstract HTTP-API connector with retry/timeout/cert-bundle support.
 
@@ -294,20 +384,21 @@ class HttpConnector(Connector):
                         host=getattr(target, "host", None),
                     )
                     verify_kwargs["verify"] = _insecure_ssl_context()
-                self._clients[cache_key] = httpx.AsyncClient(
+                self._clients[cache_key] = _SameOriginRedirectClient(
                     base_url=self._base_url(target),
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
-                    # Follow 301/302/307/308. Vendor REST surfaces
+                    # Same-origin-only redirect following (see
+                    # ``_SameOriginRedirectClient``). Vendor REST surfaces
                     # routinely canonicalise to a trailing slash with a
-                    # 301 (the govmomi/vcsim legacy ``/rest`` mount does
-                    # this; some real appliances do too behind a
-                    # normalising reverse proxy). httpx defaults to
-                    # not following — a connector that 500s on a benign
-                    # 301 is needlessly fragile. Idempotent verbs are
-                    # safe to replay on redirect; non-idempotent ones
-                    # go through ``_post_json`` which the vendor APIs
-                    # don't 301 mid-write.
-                    follow_redirects=True,
+                    # ``301`` (the govmomi/vcsim legacy ``/rest`` mount does
+                    # this; some real appliances do too behind a normalising
+                    # reverse proxy) — those benign single-origin hops are
+                    # still followed, so no vendor flow regresses. A
+                    # *cross-origin* ``3xx`` is refused: ``httpx``'s default
+                    # ``follow_redirects=True`` would replay the request off
+                    # origin and forward NSX's ``X-XSRF-TOKEN`` and the
+                    # login body to an attacker-controlled ``Location``
+                    # (open-redirect SSRF, evoila/meho-internal#101 row L11).
                     **verify_kwargs,
                 )
             return self._clients[cache_key]

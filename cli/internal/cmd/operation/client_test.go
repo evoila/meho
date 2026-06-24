@@ -522,7 +522,7 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--backplane", "http://x"})
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
 	}
@@ -553,7 +553,7 @@ func TestRunCallAwaitingApprovalJSON(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--json", "--backplane", "http://x"})
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--target", "rdc-argocd", "--json", "--backplane", "https://x"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}

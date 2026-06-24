@@ -380,6 +380,22 @@ The login subcommand authenticates the operator against the
 backplane's configured Keycloak realm using the OAuth 2.0 Device
 Authorization Grant (RFC 8628). End-to-end shape:
 
+0. **Transport-security gate (arg parse).** The `<backplane-url>`
+   argument is normalised through `backplane.NormaliseURLAllowHTTP`
+   before any network call. `https://` is required by default: the
+   access token minted below rides every subsequent request in an
+   `Authorization` header, so a plaintext `http://` backplane would
+   transmit it in the clear (OWASP TLS cheat sheet). Plaintext is
+   permitted only for a **loopback** backplane
+   (`localhost` / `127.0.0.0/8` / `::1`) and only when the operator
+   passes `--insecure-allow-http`; `http://` to any routed host is
+   rejected even with the flag, because the token would still cross
+   the network unencrypted. The shared resolver
+   `backplane.NormaliseURL` (run by every verb against the stored or
+   `--backplane` URL) applies the same policy but tolerates loopback
+   `http://` without the flag — a stored value can only have passed
+   login's stricter gate, and a loopback connection never leaves the
+   machine.
 1. **Auth-config discovery.** The CLI calls
    `GET <backplane-url>/api/v1/auth-config` to learn the Keycloak
    realm issuer and the public device-code `client_id` to use. The

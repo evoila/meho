@@ -275,6 +275,61 @@ func TestLoginCommandRejectsMissingArg(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsPlaintextHTTPArg confirms the login arg-parse refuses
+// a plaintext http:// backplane URL by default — the bearer token would
+// otherwise be sent in the clear (#101 L17). The error fires before any
+// network call, so no httptest server is needed.
+func TestLoginRejectsPlaintextHTTPArg(t *testing.T) {
+	cmd := newLoginCmd()
+	cmd.SetArgs([]string{"http://meho.test"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "routed host") {
+		t.Fatalf("expected routed-host plaintext rejection, got %v", err)
+	}
+}
+
+// TestLoginRejectsLoopbackHTTPWithoutFlag confirms login is stricter
+// than the resolver: even a loopback http:// URL is rejected unless
+// --insecure-allow-http is passed, and the error points at the flag.
+func TestLoginRejectsLoopbackHTTPWithoutFlag(t *testing.T) {
+	cmd := newLoginCmd()
+	cmd.SetArgs([]string{"http://localhost:8080"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--insecure-allow-http") {
+		t.Fatalf("expected opt-in hint for loopback http, got %v", err)
+	}
+}
+
+// TestLoginInsecureAllowHTTPRejectsRemote confirms that even with
+// --insecure-allow-http, a non-loopback http:// host is rejected: the
+// flag is a localhost-only convenience, not a blanket cleartext escape.
+func TestLoginInsecureAllowHTTPRejectsRemote(t *testing.T) {
+	cmd := newLoginCmd()
+	cmd.SetArgs([]string{"--insecure-allow-http", "http://meho.test"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "routed host") {
+		t.Fatalf("expected routed-host rejection, got %v", err)
+	}
+}
+
+// TestLoginCommandHelpListsInsecureAllowHTTP pins the flag's
+// discoverability — install scripts and operators grep --help for it.
+func TestLoginCommandHelpListsInsecureAllowHTTP(t *testing.T) {
+	cmd := newLoginCmd()
+	if out := cmd.UsageString(); !strings.Contains(out, "--insecure-allow-http") {
+		t.Errorf("usage missing --insecure-allow-http flag:\n%s", out)
+	}
+}
+
 // ── Post-login nudge ──────────────────────────────────────────────────────────
 
 func writeMemoryFixture(t *testing.T, dir, name, content string) {

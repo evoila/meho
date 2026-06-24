@@ -69,6 +69,7 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     result_connector_auth_failed,
 )
+from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.dispatcher import _profile_expiry_statuses
 from meho_backplane.settings import get_settings
 
@@ -908,3 +909,467 @@ async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
     assert result.error.startswith("connector_auth_failed:")
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["http_status"] == 440
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-path session-expiry recovery (G0.29-T2 #2067)
+# ---------------------------------------------------------------------------
+#
+# These assert at the level the bug actually traverses: a seeded
+# ``source_kind='ingested'`` descriptor dispatched via ``dispatch()`` ->
+# ``dispatch_ingested`` -> the connector's ``_request_json`` / ``_post_json``.
+# The pre-#2067 ``test_connectors_vcf_logs_e2e.py`` drives
+# ``_get_json_with_session_retry`` directly and stayed green while the bug
+# shipped, because that helper has no caller on this path.
+
+
+class _RecoveringConnector(_Http401Connector):
+    """Auth-fails the first transport call per cache-key, then succeeds.
+
+    Models a connector whose cached session expired server-side: the first
+    dispatched call gets an auth-class status, and -- once the dispatcher
+    calls :meth:`invalidate_session` and re-dispatches -- the next call (a
+    fresh login on the connector's side) succeeds. Per-``(tenant_id,
+    target.id)`` call counts let the tests assert exactly-one-retry and the
+    cross-tenant isolation guard.
+    """
+
+    impl_id = "vcfops-rest-recovering"
+    status_code: ClassVar[int] = 401
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: dict[tuple[str, str], int] = {}
+        self.invalidations: list[tuple[str, str]] = []
+
+    def _next(self, target: Any, method: str, path: str) -> dict[str, Any]:
+        key = (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
+        self.attempts[key] = self.attempts.get(key, 0) + 1
+        if self.attempts[key] == 1:
+            raise _make_http_status_error(
+                headers=self.response_headers,
+                json_body=self.response_body,
+                status_code=self.status_code,
+            )
+        return {"ok": True, "method": method, "path": path}
+
+    async def _request_json(  # type: ignore[override]
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._next(target, method, path)
+
+    async def _post_json(  # type: ignore[override]
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._next(target, verb, path)
+
+    async def invalidate_session(self, target: Any) -> None:
+        self.invalidations.append(
+            (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
+        )
+
+
+class _Recovering440Connector(_RecoveringConnector):
+    """vRLI shape: auth-fails once with a 440, then succeeds."""
+
+    impl_id = "vcfops-rest-recovering-440"
+    status_code: ClassVar[int] = 440
+    response_body: ClassVar[dict[str, Any]] = {"message": "Login Time-out"}
+
+
+class _PersistentAuthFailConnector(_RecoveringConnector):
+    """Has the hook but auth-fails *every* call -- re-login genuinely failed."""
+
+    impl_id = "vcfops-rest-persistent-401"
+
+    def _next(self, target: Any, method: str, path: str) -> dict[str, Any]:
+        key = (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
+        self.attempts[key] = self.attempts.get(key, 0) + 1
+        raise _make_http_status_error(
+            headers=self.response_headers,
+            json_body=self.response_body,
+            status_code=self.status_code,
+        )
+
+
+class _Recovering500Connector(_RecoveringConnector):
+    """5xx on the first call -- the not-an-auth-failure boundary.
+
+    Has the ``invalidate_session`` hook, but a 5xx must NOT trip the
+    retry-and-invalidate seam (it may have executed); it flattens straight to
+    ``connector_error`` with the session never invalidated.
+    """
+
+    impl_id = "vcfops-rest-recovering-500"
+    status_code: ClassVar[int] = 500
+    response_body: ClassVar[dict[str, Any]] = {"message": "Server Error"}
+
+
+async def _seed(
+    *,
+    session: AsyncSession,
+    impl_id: str,
+    embedding: list[float],
+    method: str = "GET",
+    op_id: str = "GET:/api/v2/events",
+    path: str = "/api/v2/events",
+) -> None:
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id=impl_id,
+        op_id=op_id,
+        embedding=embedding,
+        method=method,
+        path=path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovers_401_via_invalidate_and_retry_once(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A typed-vCenter-shape 401 on an expired session recovers via one re-login.
+
+    The dispatcher evicts the cached session (``invalidate_session``) and
+    re-dispatches the same ingested GET exactly once; the retry succeeds and
+    the call returns ``ok`` -- no backplane restart. Exactly one *success*
+    audit row, no spurious error row.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-recovering",
+        cls=_RecoveringConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-recovering",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-recovering-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    # The dispatcher cached one instance for the class; fetch it to inspect
+    # the per-cache-key attempt count + invalidations.
+    connector = get_or_create_connector_instance(_RecoveringConnector)
+    assert isinstance(connector, _RecoveringConnector)
+    # Exactly two transport attempts (initial 401 + recovered retry), one
+    # invalidation, for this single cache key.
+    key = ("", str(target.id))  # _FakeTarget has no tenant_id attr -> ""
+    assert connector.attempts[key] == 2
+    assert connector.invalidations == [key]
+
+    # Exactly one audit row, and it is the *success* row (no spurious error).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "GET:/api/v2/events")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "ok"
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovers_440_via_invalidate_and_retry_once(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A generic-ingested vRLI GET that 440s after idle-expiry recovers once.
+
+    This is the soak-confirmed #1135/#1139 case: the dispatched op (NOT the
+    uncalled ``_get_json_with_session_retry`` helper) recovers via one
+    automatic re-login + single retry.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-recovering-440",
+        cls=_Recovering440Connector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-recovering-440",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="vrli-lab", host="vrli.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-recovering-440-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    connector = get_or_create_connector_instance(_Recovering440Connector)
+    assert isinstance(connector, _Recovering440Connector)
+    assert connector.attempts[("", str(target.id))] == 2
+    assert len(connector.invalidations) == 1
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovers_non_idempotent_post_on_401(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A non-idempotent POST on an expired session also recovers via one retry.
+
+    A 401/440 is rejected pre-execution (the stale token never reached the
+    op), so retry-once is safe for POST too -- the AC's
+    ``POST:/vcenter/*`` recovery.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-recovering",
+        cls=_RecoveringConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-recovering",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="POST",
+        op_id="POST:/api/v2/events",
+        path="/api/v2/events",
+    )
+
+    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-recovering-9",
+        op_id="POST:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    connector = get_or_create_connector_instance(_RecoveringConnector)
+    assert isinstance(connector, _RecoveringConnector)
+    assert connector.attempts[("", str(target.id))] == 2
+    assert connector.invalidations == [("", str(target.id))]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Re-login also fails -> ``connector_auth_failed`` with no retry loop.
+
+    Exactly two transport attempts (initial + the single retry); the second
+    auth failure falls through to the structured error, and exactly one
+    *error* audit row lands.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-persistent-401",
+        cls=_PersistentAuthFailConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-persistent-401",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-persistent-401-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_auth_failed:")
+    assert result.extras["error_code"] == "connector_auth_failed"
+    connector = get_or_create_connector_instance(_PersistentAuthFailConnector)
+    assert isinstance(connector, _PersistentAuthFailConnector)
+    # Initial attempt + exactly one retry, then it gave up (no loop).
+    assert connector.attempts[("", str(target.id))] == 2
+    assert len(connector.invalidations) == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "GET:/api/v2/events")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_5xx_with_hook_is_not_retried(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A 5xx is never retried, even when the connector has the hook.
+
+    Recovery is gated on the auth-class set only -- a 5xx may have executed,
+    so it flattens straight to ``connector_error`` with the session never
+    invalidated (exactly one transport attempt).
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-recovering-500",
+        cls=_Recovering500Connector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-recovering-500",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="rdc-vcenter", host="vcenter.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-recovering-500-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert "connector_auth_failed" not in result.error
+    connector = get_or_create_connector_instance(_Recovering500Connector)
+    assert isinstance(connector, _Recovering500Connector)
+    # No retry, no invalidation.
+    assert connector.attempts[("", str(target.id))] == 1
+    assert connector.invalidations == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_stateless_connector_without_hook_is_not_retried(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A connector with no ``invalidate_session`` hook is unaffected (no retry).
+
+    :class:`_Http401Connector` is stateless (no hook). A 401 still maps to
+    ``connector_auth_failed`` exactly as before #2067, with a single
+    transport attempt -- the seam never fires.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest",
+        cls=_Http401Connector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    assert not hasattr(_Http401Connector, "invalidate_session")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-9",
+        op_id="GET:/api/v2/events",
+        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_auth_failed:")
+    assert result.extras["http_status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovery_preserves_per_tenant_cache_isolation(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Two same-named targets in different tenants recover independently.
+
+    The invalidate-and-retry is keyed on ``(tenant_id, target.id)`` via the
+    connector's own per-key state, so evicting + recovering one target never
+    collapses or clobbers the other's slot (#1642/#1672/#1684).
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-recovering",
+        cls=_RecoveringConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-recovering",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    # Two distinct targets (distinct ``.id``) standing in for two tenants'
+    # same-named appliance. Each independently fails-once-then-recovers.
+    target_a = _FakeTarget(name="vcenter", host="vcenter.lab.internal")
+    target_b = _FakeTarget(name="vcenter", host="vcenter.lab.internal")
+    assert target_a.id != target_b.id
+
+    for tgt in (target_a, target_b):
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vcfops-rest-recovering-9",
+            op_id="GET:/api/v2/events",
+            target=tgt,
+            params={},
+        )
+        assert result.status == "ok", result.error
+
+    connector = get_or_create_connector_instance(_RecoveringConnector)
+    assert isinstance(connector, _RecoveringConnector)
+    # Each cache key took its own initial-fail + one-retry; neither leaked
+    # into the other's count.
+    assert connector.attempts[("", str(target_a.id))] == 2
+    assert connector.attempts[("", str(target_b.id))] == 2
+    assert ("", str(target_a.id)) in connector.invalidations
+    assert ("", str(target_b.id)) in connector.invalidations

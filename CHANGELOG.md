@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover expired connector sessions on the generic-ingested dispatch
+  path: an auth-class status (`401` for vCenter REST, `440` for vRLI)
+  now triggers a single automatic re-login + retry at the dispatcher's
+  `HTTPStatusError` arm instead of hard-failing until a backplane
+  restart. Both `VmwareRestConnector` (cold-401) and `VcfLogsConnector`
+  (idle-440) — and any session-stateful connector exposing the new
+  duck-typed `invalidate_session(target)` hook — recover transparently;
+  a second consecutive auth failure still surfaces the actionable
+  `connector_auth_failed` error. Retry-once is gated strictly on the
+  auth-class set (a `5xx`/timeout is never retried) and a recovered call
+  emits exactly one success audit row, no spurious error row.
+  (#2067)
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

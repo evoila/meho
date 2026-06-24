@@ -450,6 +450,33 @@ class VmwareRestConnector(HttpConnector):
         )
         return token
 
+    async def invalidate_session(self, target: VsphereTargetLike) -> None:
+        """Evict the cached session token + login path for *target*.
+
+        The duck-typed recovery hook the generic-ingested dispatch path calls
+        on an auth-class status (401 / vRLI's 440) before re-dispatching the
+        op once (G0.29-T2 #2067). Dropping the cached token forces the next
+        :meth:`_session_token` to miss the cache and re-run
+        :meth:`_establish_and_cache_session`, which re-authenticates and
+        re-runs the modern->legacy ``/api/session`` 404 fallback from a clean
+        state -- the path that recovers vCenter's cold-401 (the freshly minted
+        token expired server-side) without a backplane restart.
+
+        Evicts under ``self._session_lock`` keyed on the tenant-unique
+        ``target_cache_key(target)`` tuple, so the per-``(tenant_id,
+        target.id)`` isolation (#1642/#1672/#1684) holds across eviction and
+        re-establish: two same-named targets in different tenants never share
+        or clobber each other's cache slot. The recorded login path is dropped
+        alongside the token so the re-establish rediscovers the live endpoint.
+        The credentials are not touched -- a 401/440 means the *session token*
+        expired or was rejected, not that the service-account credential is
+        wrong. The hook is a no-op when no token is cached.
+        """
+        cache_key = target_cache_key(target)
+        async with self._session_lock:
+            self._session_tokens.pop(cache_key, None)
+            self._session_paths.pop(cache_key, None)
+
     async def fingerprint(
         self,
         target: VsphereTargetLike,

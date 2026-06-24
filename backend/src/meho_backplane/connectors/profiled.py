@@ -528,15 +528,29 @@ class ProfiledRestConnector(HttpConnector):
             )
         return spec
 
+    async def invalidate_session(self, target: Any) -> None:
+        """Public duck-typed session-eviction hook for the dispatch path.
+
+        The seam the generic-ingested dispatch path calls on an auth-class
+        status before re-dispatching the op once (G0.29-T2 #2067). Delegates
+        to :meth:`_invalidate_session` so a profiled connector recovers from
+        session expiry through the *same* dispatcher arm as the typed
+        ``VmwareRestConnector`` / ``VcfLogsConnector`` -- the duck-typed hook
+        is what lets #2067 forward-fit a future profiled runtime class
+        (#1974) without an ``isinstance`` ladder, and without #2067 depending
+        on that migration.
+        """
+        await self._invalidate_session(target)
+
     async def _invalidate_session(self, target: Any) -> None:
         """Drop the cached session token for *target*.
 
         Called on a downstream session-expiry status so the next
-        :meth:`_session_token` re-establishes from a clean state. Holds the
-        lock so a concurrent re-establish doesn't race the invalidation.
+        :meth:`_session_token` re-establishes from a clean state, and by the
+        public :meth:`invalidate_session` dispatch-path hook (#2067). Holds
+        the lock so a concurrent re-establish doesn't race the invalidation.
         Mirrors the typed connectors' re-login-once recovery seam; the
-        downstream-call retry loop that invokes it lands with the
-        profile-driven dispatch path (the dispatcher owns the wire call).
+        dispatcher owns the wire call + the retry.
         """
         async with self._session_lock:
             cache_key = target_cache_key(target)

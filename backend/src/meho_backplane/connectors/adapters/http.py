@@ -182,17 +182,36 @@ def _retryable(exc: BaseException) -> bool:
 _MAX_SAME_ORIGIN_REDIRECTS = 5
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _effective_port(url: httpx.URL) -> int | None:
+    """Return *url*'s port, substituting the scheme default when implicit.
+
+    :attr:`httpx.URL.port` is ``None`` when the URL omits the port, so a
+    bare ``https://h/`` and an explicit ``https://h:443/`` would otherwise
+    compare unequal. Both name the same origin, so collapse them onto the
+    scheme's default port before comparison.
+    """
+    return url.port if url.port is not None else _DEFAULT_PORTS.get(url.scheme)
+
+
 def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     """Return ``True`` when *a* and *b* share scheme, host, and port.
 
-    An origin is the ``(scheme, host, port)`` triple (RFC 6454). httpx's
-    :attr:`httpx.URL.port` is ``None`` when the URL omits the port, so two
-    URLs that differ only in an explicit-vs-implicit default port (e.g.
-    ``https://h/`` vs ``https://h:443/``) compare unequal here. That is the
-    safe direction: we under-follow (refuse an ambiguous hop) rather than
-    over-follow into a potentially different origin.
+    An origin is the ``(scheme, host, port)`` triple (RFC 6454). Default
+    ports are normalised via :func:`_effective_port` so a vendor redirect
+    that names the port explicitly (``https://h:443/api/session/``) is
+    still recognised as same-origin against the implicit-port base URL
+    ``HttpConnector._base_url`` builds (``https://h``) — otherwise the
+    benign trailing-slash canonicalisation this client exists to preserve
+    would be wrongly refused as cross-origin.
     """
-    return (a.scheme, a.host, a.port) == (b.scheme, b.host, b.port)
+    return (a.scheme, a.host, _effective_port(a)) == (
+        b.scheme,
+        b.host,
+        _effective_port(b),
+    )
 
 
 class _SameOriginRedirectClient(httpx.AsyncClient):
@@ -255,7 +274,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             request = next_request
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
         # Exhausted the same-origin hop budget — surface httpx's own error
-        # so the caller sees a redirect loop rather than a silent 3xx.
+        # so the caller sees a redirect loop rather than a silent 3xx. Close
+        # the final 3xx first so its connection is released back to the pool
+        # rather than held checked-out until GC (a looping target would
+        # otherwise slowly starve the pooled client).
+        await response.aclose()
         raise httpx.TooManyRedirects(
             f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
             request=request,

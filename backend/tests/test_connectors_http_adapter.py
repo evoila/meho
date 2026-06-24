@@ -63,6 +63,7 @@ from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnec
 from meho_backplane.connectors.adapters.http import (
     _build_ca_pinned_ssl_context,
     _ca_pin_digest,
+    _same_origin,
     _SameOriginRedirectClient,
 )
 from meho_backplane.connectors.schemas import (
@@ -1277,3 +1278,25 @@ async def test_pooled_client_caps_same_origin_redirect_chain() -> None:
     ) as client:
         with pytest.raises(httpx.TooManyRedirects):
             await client.get("/loop/0")
+
+
+def test_same_origin_normalises_default_ports() -> None:
+    """``_same_origin`` treats implicit and explicit default ports as equal.
+
+    An origin is the ``(scheme, host, port)`` triple. ``_base_url`` builds an
+    implicit-port URL (``https://h``); a normalising proxy may name the
+    default port explicitly (``https://h:443/``). Both are the same origin,
+    so the comparison must collapse the default port — otherwise the benign
+    canonicalisation this client preserves would be refused as cross-origin.
+    A genuinely different port (a non-default ``:8443``) stays cross-origin.
+    """
+    base = httpx.URL("https://nsx.example.com/api/session")
+    explicit_default = httpx.URL("https://nsx.example.com:443/api/session/")
+    plain_http = httpx.URL("http://nsx.example.com/api/session/")
+    non_default_port = httpx.URL("https://nsx.example.com:8443/api/session/")
+
+    assert _same_origin(base, explicit_default) is True
+    # A scheme change (https -> http) is a different origin even on the host.
+    assert _same_origin(base, plain_http) is False
+    # A non-default explicit port is a genuinely different origin.
+    assert _same_origin(base, non_default_port) is False

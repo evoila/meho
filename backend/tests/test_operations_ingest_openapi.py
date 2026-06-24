@@ -37,7 +37,11 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     read_spec_info_version,
 )
-from meho_backplane.operations.ingest.openapi import _MAX_REDIRECTS, _assert_fetchable_remote_url
+from meho_backplane.operations.ingest.openapi import (
+    _INLINE_SPEC_ONRAMP_REMEDIATION,
+    _MAX_REDIRECTS,
+    _assert_fetchable_remote_url,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 PETSTORE_30 = FIXTURES / "petstore_30.yaml"
@@ -1440,6 +1444,89 @@ def test_assert_fetchable_remote_url_accepts_public_ip() -> None:
     ):
         # Should not raise.
         _assert_fetchable_remote_url("https://example.com/spec.yaml")
+
+
+# -- SSRF rejection names the inline on-ramp (#2070) -----------------------
+#
+# The guard stays default-deny; #2070 only enriches the rejection text so a
+# self-hosted operator with an internal-only spec discovers the inline
+# ``file:///`` / ``docs:`` upload path instead of publishing the spec to the
+# public internet. The remedy must be named but stay path-free (no resolved
+# IP / hostname echoed) so the rejection is not a network-topology oracle.
+
+
+def test_non_https_rejection_names_inline_onramp() -> None:
+    """The non-https scheme rejection names the inline ``file:///`` / ``docs:``
+    upload remedy (#2070) while keeping the https-only guard intact.
+    """
+    with pytest.raises(InvalidSpecError, match="https") as exc_info:
+        _assert_fetchable_remote_url("http://internal-host.corp/spec.yaml")
+    msg = str(exc_info.value)
+    assert _INLINE_SPEC_ONRAMP_REMEDIATION in msg
+    assert "file:///" in msg and "docs:" in msg
+
+
+def test_non_public_rejection_names_inline_onramp() -> None:
+    """The non-public-address rejection names the inline upload remedy (#2070)
+    while keeping the destination guard intact.
+    """
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))],
+        ),
+        pytest.raises(InvalidSpecError, match="non-public") as exc_info,
+    ):
+        _assert_fetchable_remote_url("https://looks-public.example.test/spec.yaml")
+    msg = str(exc_info.value)
+    assert _INLINE_SPEC_ONRAMP_REMEDIATION in msg
+    assert "file:///" in msg and "docs:" in msg
+
+
+def test_ssrf_rejection_messages_stay_path_free() -> None:
+    """Both enriched rejections remain topology-oracle-safe: the remedy text
+    is generic and the message never echoes the supplied path, the resolved
+    IP, or the hostname (#2070 keeps the #95 oracle-free invariant).
+    """
+    # Non-https path: the operator-supplied path/host must not be reflected.
+    with pytest.raises(InvalidSpecError) as scheme_exc:
+        _assert_fetchable_remote_url("http://secret-internal-host.corp/private/spec.yaml")
+    scheme_msg = str(scheme_exc.value)
+    assert "secret-internal-host.corp" not in scheme_msg
+    assert "/private/spec.yaml" not in scheme_msg
+
+    # Non-public path: neither the resolved private IP nor the hostname leaks.
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.1.2.3", 443))],
+        ),
+        pytest.raises(InvalidSpecError) as ip_exc,
+    ):
+        _assert_fetchable_remote_url("https://looks-public.example.test/spec.yaml")
+    ip_msg = str(ip_exc.value)
+    assert "10.1.2.3" not in ip_msg
+    assert "looks-public.example.test" not in ip_msg
+
+
+def test_inline_onramp_happy_path_bypasses_fetch_guard() -> None:
+    """AC happy path (#2070 / #1535): an internal-only spec ingests via the
+    inline-content channel with no fetch and no public-internet exposure.
+
+    A ``file:///`` source label that would otherwise trip the https-only
+    guard parses cleanly because the CLI uploads the bytes as ``content``,
+    which ``_load_spec_bytes`` uses verbatim — the path the SSRF rejection
+    now points operators toward.
+    """
+    spec_text = HANDAUTHORED_MINIMAL_30.read_text()
+    with patch(
+        "meho_backplane.operations.ingest.openapi._fetch_spec_bytes",
+        side_effect=AssertionError("inline content must not trigger a remote fetch"),
+    ):
+        rows = parse_openapi("file:///srv/specs/internal-only.yaml", content=spec_text)
+        version = read_spec_info_version("file:///srv/specs/internal-only.yaml", content=spec_text)
+    assert rows, "inline internal-only spec should parse to operations"
+    assert version == "1.0"
 
 
 # -- read_spec_info_version ------------------------------------------------

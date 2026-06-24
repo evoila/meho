@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — connector ingest SSRF rejection (discoverability)
+
+- The ingest SSRF guard's rejection messages (non-`https` scheme and
+  non-public destination) now name the inline on-ramp: a spec inside your
+  own network can be ingested by passing it as a `file:///path` or
+  `docs:<product>-<version>/<file>` source so the CLI uploads it inline,
+  instead of having to publish internal specs to the public internet. The
+  guard remains default-deny and the message stays path-free (no resolved
+  IP / hostname echoed). (#2070)
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

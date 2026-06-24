@@ -1306,9 +1306,17 @@ activity:
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
    internal endpoint from exhausting pod memory.
 
-5. **Oracle-free error messages.** Error messages never echo the
-   operator-supplied URI or OS-level error text. Error text is
-   intentionally terse and path-free.
+5. **Oracle-free error messages that name the inline remedy.** Error
+   messages never echo the operator-supplied URI, the resolved IP /
+   hostname, or OS-level error text — the rejection is path-free so it
+   is not a network-topology oracle. The scheme + non-public rejections
+   additionally name the inline on-ramp generically
+   (`_INLINE_SPEC_ONRAMP_REMEDIATION`): a spec inside the operator's own
+   network is ingestable by passing it as a `file:///` / `docs:` source,
+   whose bytes the CLI uploads inline (bypassing this fetch guard — see
+   the shipped-spec on-ramp section and #1535) rather than publishing the
+   spec to the public internet to satisfy the `https`-public-fetch
+   constraint.
 
 Pre-#95: `http`/`https` URIs were fetched with `follow_redirects=True` and
 no IP check; `file://` URIs and bare paths were read via `Path(...).read_bytes()`;

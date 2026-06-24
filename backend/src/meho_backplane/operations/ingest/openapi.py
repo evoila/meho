@@ -123,6 +123,24 @@ _SWAGGER_2_CONVERSION_REMEDIATION = (
     "converted 3.x document"
 )
 
+# Operator-facing remediation appended to the SSRF-guard rejections
+# (non-https scheme + non-public destination). The backplane only fetches
+# ``https`` public URLs, so a spec that lives inside the operator's own
+# network (a lab file, a pod-filesystem path, an internal artifact host the
+# CLI can reach) is unreachable by remote fetch by design. The remedy is
+# the inline on-ramp (#1535): ``meho connector ingest`` reads a
+# ``file:///`` or ``docs:`` source locally and uploads its bytes as inline
+# content, which bypasses the fetch path's scheme + destination guard
+# entirely. Naming it here makes the path self-serviceable instead of
+# leaving operators to publish internal specs to the public internet. The
+# wording is deliberately path-free (no resolved IP / hostname) so the
+# rejection is not a network-topology oracle for the caller.
+_INLINE_SPEC_ONRAMP_REMEDIATION = (
+    "for a spec inside your own network, pass it as a `file:///path` or "
+    "`docs:<product>-<version>/<file>` source so the CLI uploads it inline "
+    "(no public-internet fetch needed)"
+)
+
 # Path-parameter placeholders look like ``{cluster}`` / ``{vm-id}`` /
 # ``{filter.names}``. Compiled once and reused per operation.
 _PATH_PARAM_RE = re.compile(r"\{([^{}/]+)\}")
@@ -383,13 +401,19 @@ def _assert_fetchable_remote_url(url: str) -> None:
     Raises:
         InvalidSpecError: Scheme is not ``https``, the hostname is
             absent or unresolvable, or any resolved address is
-            non-public. The message is intentionally terse and
-            path-free so the response is not a network-topology
-            oracle for the caller.
+            non-public. The scheme + non-public rejections name the
+            inline ``file:///`` / ``docs:`` on-ramp
+            (:data:`_INLINE_SPEC_ONRAMP_REMEDIATION`) so an operator
+            with an internal-only spec can self-serve; the message
+            stays path-free (no resolved IP / hostname echoed) so the
+            response is not a network-topology oracle for the caller.
     """
     parsed = urlparse(url)
     if parsed.scheme != "https":
-        raise InvalidSpecError(f"spec URI must use the https scheme; got {parsed.scheme!r}")
+        raise InvalidSpecError(
+            f"spec URI must use the https scheme; got {parsed.scheme!r}. "
+            f"{_INLINE_SPEC_ONRAMP_REMEDIATION}."
+        )
     hostname = parsed.hostname
     if not hostname:
         raise InvalidSpecError("spec URI must include a hostname")
@@ -414,7 +438,8 @@ def _assert_fetchable_remote_url(url: str) -> None:
             or addr.is_unspecified
         ):
             raise InvalidSpecError(
-                "spec URI resolves to a non-public address; remote fetch refused"
+                "spec URI resolves to a non-public address; remote fetch "
+                f"refused. {_INLINE_SPEC_ONRAMP_REMEDIATION}."
             )
 
 

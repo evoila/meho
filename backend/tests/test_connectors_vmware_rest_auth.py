@@ -341,6 +341,60 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidate_session_evicts_only_the_targets_slot() -> None:
+    """``invalidate_session`` drops one target's token + path, leaving others.
+
+    G0.29-T2 (#2067): the dispatch-path recovery hook. Seeds two targets'
+    cached tokens + login paths, invalidates target A, and asserts only A's
+    slot is evicted -- per-``(tenant_id, target.id)`` isolation holds across
+    eviction (#1642/#1672/#1684), so a re-login for A never disturbs B.
+    """
+    connector = _make_connector()
+    key_a = target_cache_key(_TARGET_A)
+    key_b = target_cache_key(_TARGET_B)
+    connector._session_tokens[key_a] = "token-for-a"
+    connector._session_tokens[key_b] = "token-for-b"
+    connector._session_paths[key_a] = "/api/session"
+    connector._session_paths[key_b] = "/rest/com/vmware/cis/session"
+
+    await connector.invalidate_session(_TARGET_A)
+
+    # A's token + path are gone; B's are untouched.
+    assert connector._session_tokens == {key_b: "token-for-b"}
+    assert connector._session_paths == {key_b: "/rest/com/vmware/cis/session"}
+
+    # A second invalidation of an already-evicted target is a no-op.
+    await connector.invalidate_session(_TARGET_A)
+    assert connector._session_tokens == {key_b: "token-for-b"}
+
+
+@pytest.mark.asyncio
+async def test_invalidate_then_auth_headers_re_establishes_session() -> None:
+    """After ``invalidate_session``, the next ``auth_headers`` re-logs-in.
+
+    Proves the eviction forces a cache miss -> ``_establish_and_cache_session``
+    (a fresh ``POST /api/session``), the recovery the dispatcher relies on for
+    vCenter's cold-401 -- no backplane restart.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock() as mock:
+        route = mock.post("https://vcenter-a.test.invalid/api/session").respond(
+            200, json="fresh-token"
+        )
+        connector._session_tokens[target_cache_key(_TARGET_A)] = "stale-token"
+
+        await connector.invalidate_session(_TARGET_A)
+        headers = await connector.auth_headers(_TARGET_A, _make_operator())
+
+    assert route.called  # re-login actually fired
+    assert headers == {"vmware-api-session-id": "fresh-token"}
+    assert connector._session_tokens[target_cache_key(_TARGET_A)] == "fresh-token"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_same_name_targets_in_different_tenants_get_distinct_sessions() -> None:
     """Same-named targets in DIFFERENT tenants never share a cached session.
 

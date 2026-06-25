@@ -321,6 +321,28 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_public_invalidate_session_evicts_only_the_targets_slot() -> None:
+    """Public ``invalidate_session`` (the #2067 dispatch-path hook) evicts one slot.
+
+    Delegates to ``_invalidate_session``; seeds two targets and asserts only A's
+    token is dropped, so the dispatcher's re-login of a dispatched vRLI op
+    preserves per-``(tenant_id, target.id)`` isolation.
+    """
+    connector = _make_connector()
+    key_a = target_cache_key(_TARGET_A)
+    key_b = target_cache_key(_TARGET_B)
+    connector._session_tokens[key_a] = "token-a"
+    connector._session_tokens[key_b] = "token-b"
+
+    await connector.invalidate_session(_TARGET_A)
+
+    assert connector._session_tokens == {key_b: "token-b"}
+    # No-op on an already-evicted target.
+    await connector.invalidate_session(_TARGET_A)
+    assert connector._session_tokens == {key_b: "token-b"}
+
+
 # ---------------------------------------------------------------------------
 # Session establishment -- failure modes
 # ---------------------------------------------------------------------------

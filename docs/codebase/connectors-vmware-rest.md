@@ -486,10 +486,19 @@ they never park.
   `None` for pre-G0.3 targets) is accepted. `per_user` and
   `impersonation` raise `NotImplementedError`; both are deferred to
   v0.2.next.
-- **No proactive 401 retry** — vSphere's ~5-minute idle timeout means
-  a long-idle connection may see a 401 on the next dispatch. The
-  caller-side retry logic in `_request_json` does not retry 401 by
-  policy; an explicit refresh loop is v0.2.next polish.
+- **Reactive 401 recovery at the dispatch path (#2067)** — vSphere's
+  ~5-minute idle timeout means a long-idle cached session may see a 401 on
+  the next dispatch. The connector caches one token per `(tenant_id,
+  target.id)` with no TTL, and `_request_json`/`_post_json` do not retry 401
+  themselves. Recovery instead lives at the generic-ingested dispatch arm:
+  on an auth-class status it calls the connector's public
+  `invalidate_session(target)` hook (which pops the cached token + login
+  path under `_session_lock`, keyed on `target_cache_key`) and re-dispatches
+  the op once, so the next transport call misses the cache and re-runs
+  `_establish_and_cache_session` — re-authenticating and re-running the
+  modern→legacy `/api/session` 404 fallback. A second 401 (re-login also
+  failed) surfaces as `connector_auth_failed`. **Proactive** token TTL
+  (re-mint before the doomed call) remains v0.2.next polish.
 - **`vi-json.yaml` ingestion live** — T3 (#503) shipped the ingestion
   pipeline (depends on T2 / #501's `$ref` resolver). The same
   connector dispatches the ~2,195 vi-json ops alongside the ~1,275

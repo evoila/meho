@@ -224,6 +224,188 @@ def test_parse_petstore_30_path_param_is_required() -> None:
     assert "petId" in get_pet.parameter_schema["required"]
 
 
+# -- RFC6570 operator-bearing path-param names (#2003 / #2066) --------------
+
+# A minimal spec whose path parameter declares a leading RFC6570 reserved-
+# expansion operator in its ``name`` -- the shape VCF Operations-for-Logs
+# uses for ``/events/{+path}``. Built inline (not a fixture file) so the
+# operator-bearing name is right next to the assertion that the parser keys
+# the property on the *bare* name.
+_PLUS_PATH_SPEC = yaml.safe_dump(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "plus-path", "version": "1.0.0"},
+        "paths": {
+            "/v1/{+path}": {
+                "get": {
+                    "operationId": "readPath",
+                    "parameters": [
+                        {
+                            "name": "+path",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+).encode()
+
+
+def test_parse_operator_bearing_path_param_keyed_on_bare_name() -> None:
+    """A ``{"name": "+path", "in": "path"}`` param is keyed on the bare ``path``.
+
+    The ingest half of #2003 (#2066): the renderer strips the RFC6570
+    operator from the ``{+path}`` template and looks the value up by ``path``,
+    so the parser must register the JSON-Schema property under the same bare
+    name -- not ``+path`` -- or the op is undispatchable.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "plus_path.yaml", _PLUS_PATH_SPEC)
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["GET:/v1/{+path}"]
+    props = op.parameter_schema["properties"]
+    assert isinstance(props, dict)
+    # Keyed on the bare name -- the operator is gone from the property key.
+    assert "path" in props
+    assert "+path" not in props
+    assert props["path"]["x-meho-param-loc"] == "path"
+    # Required under the bare name too.
+    assert "path" in op.parameter_schema["required"]
+    assert "+path" not in op.parameter_schema["required"]
+    # The template keeps the operator verbatim -- the renderer needs it to
+    # select reserved expansion so the value's ``/`` stays literal.
+    assert op.path == "/v1/{+path}"
+
+
+def test_parse_path_param_without_operator_unchanged() -> None:
+    """A plain ``{"name": "cluster"}`` path param keeps its name verbatim."""
+    spec = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "plain-path", "version": "1.0.0"},
+            "paths": {
+                "/v1/{cluster}": {
+                    "get": {
+                        "operationId": "readCluster",
+                        "parameters": [
+                            {
+                                "name": "cluster",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "plain_path.yaml", spec)
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["GET:/v1/{cluster}"]
+    props = op.parameter_schema["properties"]
+    assert props["cluster"]["x-meho-param-loc"] == "path"
+    assert "cluster" in op.parameter_schema["required"]
+
+
+def test_parse_bare_and_operator_path_param_collision_raises() -> None:
+    """A spec declaring both ``path`` and ``+path`` path params fails loudly.
+
+    Both collapse onto the bare property key ``path``; silently keeping one
+    would drop a parameter the renderer still needs, so ingest of that op
+    raises :class:`InvalidSchemaError` rather than half-building it.
+    """
+    spec = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "collision", "version": "1.0.0"},
+            "paths": {
+                "/v1/{path}/{+path}": {
+                    "get": {
+                        "operationId": "collide",
+                        "parameters": [
+                            {
+                                "name": "path",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "+path",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "collision.yaml", spec)
+        with pytest.raises(InvalidSchemaError, match="normalises to property key 'path'"):
+            parse_openapi(url)
+
+
+def _same_name_path_query_spec(*, path_first: bool) -> bytes:
+    """A legal OpenAPI op declaring ``id`` in BOTH path and query.
+
+    OpenAPI permits the same parameter ``name`` in different ``in`` locations.
+    The two are emitted in *path_first* or query-first order to prove the
+    flatten result is order-independent.
+    """
+    path_param = {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+    query_param = {"name": "id", "in": "query", "required": False, "schema": {"type": "string"}}
+    params = [path_param, query_param] if path_first else [query_param, path_param]
+    return yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "same-name-diff-loc", "version": "1.0.0"},
+            "paths": {
+                "/v1/items/{id}": {
+                    "get": {
+                        "operationId": "getItem",
+                        "parameters": params,
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+
+
+@pytest.mark.parametrize("path_first", [True, False])
+def test_parse_same_name_path_and_query_param_ingests_path_wins(path_first: bool) -> None:
+    """``id`` in path AND query is legal: it ingests, and the path location wins.
+
+    Regression for the over-broad collision guard (#2066 review B1): the guard
+    must fire only on path-vs-path bare-name collisions, never on the legal
+    same-name-across-different-``in`` shape. The flattened single property keeps
+    ``x-meho-param-loc: path`` regardless of declaration order so the path
+    template var ``{id}`` stays substitutable (the op stays dispatchable); a
+    query twin can't shadow it into an undispatchable op.
+    """
+    spec = _same_name_path_query_spec(path_first=path_first)
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "same_name.yaml", spec)
+        rows = parse_openapi(url)  # must NOT raise
+    op = _by_op_id(rows)["GET:/v1/items/{id}"]
+    props = op.parameter_schema["properties"]
+    assert "id" in props
+    # Path location wins (order-independent) so the path var is satisfiable.
+    assert props["id"]["x-meho-param-loc"] == "path"
+    # Path params are implicitly required.
+    assert "id" in op.parameter_schema["required"]
+
+
 def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())

@@ -419,15 +419,29 @@ class VcfLogsConnector(HttpConnector):
             )
             return token
 
+    async def invalidate_session(self, target: VcfLogsTargetLike) -> None:
+        """Public duck-typed session-eviction hook for the dispatch path.
+
+        The seam the generic-ingested dispatch path calls on an auth-class
+        status (vRLI's 440 / 401) before re-dispatching the op once (G0.29-T2
+        #2067) -- the path vRLI's curated read ops actually traverse, which
+        :meth:`_get_json_with_session_retry` (the helper that carried #1921's
+        440-recovery) never sat on. Delegates to :meth:`_invalidate_session`
+        so the dispatch-path recovery and the helper's internal retry share
+        one eviction implementation.
+        """
+        await self._invalidate_session(target)
+
     async def _invalidate_session(self, target: VcfLogsTargetLike) -> None:
         """Drop the cached session token for *target*.
 
         Called by :meth:`_get_json_with_session_retry` on a session-expiry
-        status (440 or 401) from a downstream call so the subsequent
-        :meth:`_session_token` re-issues ``POST /api/v2/sessions`` from a
-        clean state. Holds the lock so a concurrent re-establish doesn't
-        race with the invalidation. Credentials cache is left intact -- a
-        440/401 means the *session token* expired or was rejected, not
+        status (440 or 401) from a downstream call, and by the public
+        :meth:`invalidate_session` dispatch-path hook (#2067), so the
+        subsequent :meth:`_session_token` re-issues ``POST /api/v2/sessions``
+        from a clean state. Holds the lock so a concurrent re-establish
+        doesn't race with the invalidation. Credentials cache is left intact
+        -- a 440/401 means the *session token* expired or was rejected, not
         that the credentials are wrong.
         """
         async with self._session_lock:

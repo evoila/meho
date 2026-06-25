@@ -90,7 +90,7 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed
+### Fixed — session-expiry dispatch recovery
 
 - Recover expired connector sessions on the generic-ingested dispatch
   path: an auth-class status (`401` for vCenter REST, `440` for vRLI)
@@ -104,6 +104,19 @@ connector-related release-notes line.
   auth-class set (a `5xx`/timeout is never retried) and a recovered call
   emits exactly one success audit row, no spurious error row.
   (#2067)
+
+### Fixed — RFC6570 {+path} ingest
+
+- Ingest now keys an `in: path` parameter whose declared name carries a
+  leading RFC6570 expression operator (e.g. `{"name": "+path"}` for a
+  `/v1/{+path}` template) on the **bare** name (`path`), matching the
+  dispatch renderer (PR #2020) which strips the operator before looking the
+  value up — so these ops dispatch instead of dying with a `KeyError`. The
+  operator set is now a single shared constant, so the ingest key and the
+  render lookup can't drift again. A spec declaring both `path` and `+path`
+  path params fails ingest loudly. `preview_operation` on such an op now
+  returns a structured `dispatch_error` envelope instead of an uncaught
+  exception / MCP `-32603` (#2066).
 
 ## [0.19.0] - 2026-06-22
 

@@ -40,6 +40,7 @@ from urllib.parse import quote
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations._rfc6570 import RFC6570_PATH_OPERATORS
 
 __all__ = [
     "IngestedRequest",
@@ -71,8 +72,12 @@ _PARAM_LOC_KEY = "x-meho-param-loc"
 # ``KeyError`` even though the param is supplied. Only ``+`` (and ``#``)
 # change the encoding safe set; the remaining operator chars are captured
 # so the regex never mis-includes a leading operator in the name, even for
-# operators this substituter does not (yet) special-case.
-_PATH_VAR_RE = re.compile(r"\{([+#./;?&]?)([^{}]+)\}")
+# operators this substituter does not (yet) special-case. The operator
+# character class is shared with the ingest parser via
+# :data:`~meho_backplane.operations._rfc6570.RFC6570_PATH_OPERATORS` so the
+# name the renderer looks up can never drift from the name ingest keys the
+# JSON-Schema property on (#2003 / #2066).
+_PATH_VAR_RE = re.compile(rf"\{{([{re.escape(RFC6570_PATH_OPERATORS)}]?)([^{{}}]+)\}}")
 
 # RFC6570 §3.2.3 reserved-expansion safe set: the gen-delims + sub-delims
 # from RFC3986 §2.2 that a ``{+var}`` / ``{#var}`` expression leaves

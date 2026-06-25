@@ -62,6 +62,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import yaml
 
+from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
     InvalidSpecError,
@@ -758,6 +759,17 @@ def _build_parameter_schema(
     a top-level property on the returned object with the
     ``x-meho-param-loc`` extension carrying its OpenAPI ``in`` value.
 
+    A path parameter whose declared ``name`` carries a leading RFC6570
+    expression operator (``{"name": "+path", "in": "path"}`` for a
+    ``/events/{+path}`` template) is keyed on the *bare* name (``path``) so
+    the property matches the name the renderer resolves the value by after
+    stripping the operator from the template (the operator set is shared via
+    :data:`~meho_backplane.operations._rfc6570.RFC6570_PATH_OPERATORS`).
+    ``descriptor.path`` keeps the operator verbatim -- the renderer needs it
+    to select reserved expansion. A spec declaring both ``path`` and
+    ``+path`` as path parameters collides on the bare key and raises
+    :class:`InvalidSchemaError` rather than silently dropping one.
+
     Parameters may be inlined (``{"name": ..., "in": ..., "schema": ...}``)
     or referenced via ``{"$ref": "#/components/parameters/<name>"}`` —
     the second form is what ``vi-json.yaml`` uses on every operation
@@ -796,14 +808,14 @@ def _build_parameter_schema(
             continue
         merged[(name, location)] = resolved
 
-    for (name, location), param in merged.items():
-        prop_schema = _build_param_property(param, component_schemas)
-        prop_schema["x-meho-param-loc"] = location
-        properties[name] = prop_schema
-        # Path parameters are implicitly required per OpenAPI 3.x.
-        is_required = param.get("required") is True or location == "path"
-        if is_required and name not in required:
-            required.append(name)
+    _populate_param_properties(
+        merged,
+        properties=properties,
+        required=required,
+        component_schemas=component_schemas,
+        path=path,
+        method=method,
+    )
 
     body_property = _build_body_property(request_body, component_schemas, component_request_bodies)
     if body_property is not None:
@@ -817,6 +829,82 @@ def _build_parameter_schema(
     if required:
         schema["required"] = required
     return schema
+
+
+def _populate_param_properties(
+    merged: dict[tuple[str, str], dict[str, Any]],
+    *,
+    properties: dict[str, object],
+    required: list[str],
+    component_schemas: dict[str, Any],
+    path: str,
+    method: str,
+) -> None:
+    """Add one JSON-Schema property per merged parameter, keyed on its name.
+
+    Mutates *properties* and *required* in place (the body property is added by
+    the caller afterwards). Each parameter's ``x-meho-param-loc`` carries its
+    OpenAPI ``in``; a ``path`` parameter is implicitly required per OpenAPI 3.x.
+
+    A path parameter whose declared ``name`` carries a leading RFC6570
+    expression operator (e.g. VCF Operations-for-Logs declares
+    ``{"name": "+path"}`` for the template ``/events/{+path}``) is keyed on the
+    *bare* name (``path``): that is the name the renderer
+    (:func:`~meho_backplane.operations._branches._substitute_path`) resolves
+    the value by after stripping the operator from the template, and so the
+    name the caller supplies. Keeping the operator in the property key would
+    force the caller to pass ``+path`` to satisfy validation, which the renderer
+    would then fail to resolve -- the #2003/#2066 dead-op. ``descriptor.path``
+    keeps the operator verbatim so the renderer still selects reserved
+    expansion.
+
+    Two **path** parameters that collapse onto the same bare key (a spec
+    declaring both ``path`` and ``+path``) raise :class:`InvalidSchemaError`
+    rather than silently dropping one -- one of the resulting template vars
+    would be unsatisfiable. A same-name collision *across different* ``in``
+    locations (the legal OpenAPI ``id``-in-path + ``id``-in-query) is **not** a
+    fault and never raises: the params flatten to one property (the model
+    carries a single ``x-meho-param-loc`` per name), and the **path** location
+    wins regardless of declaration order so the path template var stays
+    satisfiable -- a query/header twin can't shadow it into an undispatchable
+    op. The guard is scoped to path-vs-path so it never rejects this legal
+    shape.
+    """
+    path_bare_names: set[str] = set()
+    for (name, location), param in merged.items():
+        prop_schema = _build_param_property(param, component_schemas)
+        prop_schema["x-meho-param-loc"] = location
+        prop_name = name
+        if location == "path":
+            _operator, prop_name = split_path_operator(name)
+            if prop_name in path_bare_names:
+                # Another path param already claimed this bare key once the
+                # RFC6570 operator was stripped (``path`` + ``+path``, in either
+                # order). Failing loudly beats silently dropping a path var the
+                # renderer still needs. Scoped to path-vs-path: a collision with
+                # a non-path param of the same name is the legal cross-location
+                # shape handled below.
+                raise InvalidSchemaError(
+                    f"paths.{path}.{method.lower()}: path parameter {name!r} "
+                    f"normalises to property key {prop_name!r} (RFC6570 operator "
+                    "stripped), which another path parameter already declares; a "
+                    "spec must not declare both the bare and an operator-prefixed "
+                    "form of one path variable."
+                )
+            path_bare_names.add(prop_name)
+        elif prop_name in path_bare_names:
+            # A non-path param shares its name with a path param already
+            # placed. Don't let it overwrite the path property -- the path var
+            # must stay substitutable or the op is undispatchable. Keep the
+            # path binding; drop this twin (it can't have its own property key
+            # in the flattened model anyway). Order-independent: the symmetric
+            # "path declared after the twin" case is handled by the path branch
+            # overwriting the twin below.
+            continue
+        properties[prop_name] = prop_schema
+        is_required = param.get("required") is True or location == "path"
+        if is_required and prop_name not in required:
+            required.append(prop_name)
 
 
 def _build_param_property(

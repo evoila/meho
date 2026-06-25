@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing 1000+-line parser; #1796 only
+# adds the servers-base fold helpers. Splitting this module by responsibility
+# is a separate refactor (tracked as an adjacent finding), out of scope here.
 
 """Pure-function OpenAPI 3.0/3.1 spec parser.
 
@@ -304,6 +307,7 @@ def parse_openapi(
     return list(
         _iter_operations(
             paths=paths,
+            server_base_path=_server_base_path(spec),
             component_schemas=cast(dict[str, Any], component_schemas),
             component_parameters=cast(dict[str, Any], component_parameters),
             component_responses=cast(dict[str, Any], component_responses),
@@ -641,9 +645,60 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
         )
 
 
+def _server_base_path(spec: dict[str, Any]) -> str:
+    """Return the path prefix to fold into every op, from ``servers[0].url``.
+
+    OpenAPI resolves an operation's effective URL as ``server.url + path``
+    (Server Object, OAS 3.1 §4.8.5). MEHO always dispatches against the
+    operator-configured *target* host, so only the **path** component of a
+    **relative** server base contributes: an absolute ``servers[].url`` names
+    a host MEHO must not adopt (the SSRF / topology boundary), and a
+    server-variable-templated base (``/{region}/api``) cannot be resolved
+    here. Those, plus an absent or bare ``"/"`` base, return ``""`` -- no
+    fold, the pre-#1796 behaviour.
+
+    The first server wins (OpenAPI orders ``servers`` by preference).
+    Returns a normalised prefix with a leading and no trailing slash
+    (``"/api/v2"``), or ``""`` when nothing should be folded.
+    """
+    servers = spec.get("servers")
+    if not isinstance(servers, list) or not servers:
+        return ""
+    first = servers[0]
+    if not isinstance(first, dict):
+        return ""
+    url = first.get("url")
+    if not isinstance(url, str) or not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme or parsed.netloc:
+        # Absolute base -> out of scope: never adopt a spec-declared host.
+        return ""
+    base = parsed.path.rstrip("/")
+    if not base or "{" in base:
+        # "/" or "" -> nothing to fold; "{" -> unresolvable server-variable
+        # templating (out of scope).
+        return ""
+    return base if base.startswith("/") else "/" + base
+
+
+def _apply_server_base(server_base: str, path: str) -> str:
+    """Prefix *path* with the relative server base (see :func:`_server_base_path`).
+
+    No-op when *server_base* is ``""``. The result is the op's
+    dispatch-canonical path -- e.g. base ``/api/v2`` + path ``/events/{+path}``
+    -> ``/api/v2/events/{+path}`` -- which becomes both the descriptor ``path``
+    the renderer substitutes at dispatch and the ``op_id`` suffix.
+    """
+    if not server_base:
+        return path
+    return f"{server_base}{path}" if path.startswith("/") else f"{server_base}/{path}"
+
+
 def _iter_operations(
     *,
     paths: dict[str, Any],
+    server_base_path: str,
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any],
     component_responses: dict[str, Any],
@@ -671,6 +726,7 @@ def _iter_operations(
             yield _build_proto(
                 method=verb.upper(),
                 path=path_template,
+                server_base_path=server_base_path,
                 operation=operation,
                 path_level_params=path_level_params,
                 component_schemas=component_schemas,
@@ -685,6 +741,7 @@ def _build_proto(
     *,
     method: str,
     path: str,
+    server_base_path: str,
     operation: dict[str, Any],
     path_level_params: list[Any],
     component_schemas: dict[str, Any],
@@ -693,7 +750,14 @@ def _build_proto(
     component_request_bodies: dict[str, Any],
     spec_source: str | None,
 ) -> EndpointDescriptorProto:
-    """Assemble a single :class:`EndpointDescriptorProto`."""
+    """Assemble a single :class:`EndpointDescriptorProto`.
+
+    *path* is the literal spec path key (used verbatim in parameter-schema
+    error messages so they point at the spec location the author wrote).
+    The descriptor's dispatch-canonical ``path`` / ``op_id`` fold in
+    *server_base_path* (#1796) so a relative ``servers[].url`` base is honoured
+    at dispatch.
+    """
     op_params = operation.get("parameters") or []
     if not isinstance(op_params, list):
         raise InvalidSchemaError(
@@ -733,10 +797,11 @@ def _build_proto(
     if spec_source is not None:
         tags.append(spec_source)
 
+    full_path = _apply_server_base(server_base_path, path)
     return EndpointDescriptorProto(
-        op_id=f"{method}:{path}",
+        op_id=f"{method}:{full_path}",
         method=method,
-        path=path,
+        path=full_path,
         summary=_optional_string(operation.get("summary")),
         description=_optional_string(operation.get("description")),
         tags=tags,

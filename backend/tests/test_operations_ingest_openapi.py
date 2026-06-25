@@ -355,6 +355,105 @@ def test_parse_bare_and_operator_path_param_collision_raises() -> None:
             parse_openapi(url)
 
 
+# -- parse_openapi: servers[].url base path (#1796) ------------------------
+
+
+def _servers_spec(*, server_url: str | None, path: str) -> bytes:
+    """A minimal one-GET-op spec with an optional ``servers`` base."""
+    spec: dict[str, object] = {
+        "openapi": "3.0.3",
+        "info": {"title": "servers-base", "version": "1.0.0"},
+        "paths": {
+            path: {
+                "get": {
+                    "operationId": "readThing",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    if server_url is not None:
+        spec["servers"] = [{"url": server_url}]
+    return yaml.safe_dump(spec).encode()
+
+
+def test_parse_relative_server_base_folded_into_op_path() -> None:
+    """A relative ``servers[].url`` is folded into the op_id and path (#1796).
+
+    The vRLI / VCF Operations-for-Logs spec declares ``servers: [{url: /api/v2}]``
+    with paths relative to it. Pre-#1796 ingest dropped the base, so
+    ``GET:/version`` dispatched to ``host/version`` and 404'd; the real endpoint
+    is ``host/api/v2/version``.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(
+            router, "servers_rel.yaml", _servers_spec(server_url="/api/v2", path="/version")
+        )
+        rows = parse_openapi(url)
+    ops = _by_op_id(rows)
+    assert "GET:/api/v2/version" in ops
+    assert ops["GET:/api/v2/version"].path == "/api/v2/version"
+
+
+def test_parse_no_servers_op_path_unchanged() -> None:
+    """No ``servers`` block -> the op path is the bare spec path (no fold)."""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(
+            router, "servers_none.yaml", _servers_spec(server_url=None, path="/version")
+        )
+        rows = parse_openapi(url)
+    assert "GET:/version" in _by_op_id(rows)
+
+
+def test_parse_root_server_base_is_noop() -> None:
+    """A bare ``servers: [{url: /}]`` base contributes nothing (no fold)."""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(
+            router, "servers_root.yaml", _servers_spec(server_url="/", path="/version")
+        )
+        rows = parse_openapi(url)
+    assert "GET:/version" in _by_op_id(rows)
+
+
+def test_parse_absolute_server_base_not_folded() -> None:
+    """An absolute ``servers[].url`` host is NOT adopted (#1796 out-of-scope).
+
+    MEHO dispatches against the operator-configured target host, never a
+    spec-declared one, so an absolute base contributes no path prefix.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(
+            router,
+            "servers_abs.yaml",
+            _servers_spec(server_url="https://vendor.example/api/v2", path="/version"),
+        )
+        rows = parse_openapi(url)
+    ops = _by_op_id(rows)
+    assert "GET:/version" in ops
+    assert "GET:/api/v2/version" not in ops
+
+
+def test_parse_server_base_composes_with_operator_path_param() -> None:
+    """The base fold composes with the #2066 bare-name keying for ``{+path}``.
+
+    The log-sentry events op ``GET:/api/v2/events/{+path}`` must carry the folded
+    base in its op_id/path AND key its path param on the bare ``path``.
+    """
+    decoded = yaml.safe_load(_servers_spec(server_url="/api/v2", path="/events/{+path}"))
+    decoded["paths"]["/events/{+path}"]["get"]["parameters"] = [
+        {"name": "+path", "in": "path", "required": True, "schema": {"type": "string"}}
+    ]
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "servers_operator.yaml", yaml.safe_dump(decoded).encode())
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["GET:/api/v2/events/{+path}"]
+    assert op.path == "/api/v2/events/{+path}"
+    props = op.parameter_schema["properties"]
+    assert isinstance(props, dict)
+    assert "path" in props
+    assert "+path" not in props
+
+
 def _same_name_path_query_spec(*, path_first: bool) -> bytes:
     """A legal OpenAPI op declaring ``id`` in BOTH path and query.
 

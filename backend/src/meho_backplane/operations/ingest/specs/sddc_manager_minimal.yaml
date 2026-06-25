@@ -41,7 +41,7 @@ servers:
   - url: /v1
     description: SDDC Manager appliance API root.
 paths:
-  /v1/releases/system:
+  /releases/system:
     get:
       operationId: getSystemRelease
       summary: Get the SDDC Manager software release
@@ -55,7 +55,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Release"
-  /v1/sddc-managers:
+  /sddc-managers:
     get:
       operationId: listSddcManagers
       summary: List SDDC Manager appliances
@@ -69,7 +69,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SddcManagerPage"
-  /v1/domains:
+  /domains:
     get:
       operationId: listDomains
       summary: List workload and management domains
@@ -83,7 +83,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DomainPage"
-  /v1/domains/{id}:
+  /domains/{id}:
     get:
       operationId: getDomain
       summary: Get a domain by id
@@ -102,7 +102,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Domain"
-  /v1/clusters:
+  /clusters:
     get:
       operationId: listClusters
       summary: List clusters across all domains
@@ -116,7 +116,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ClusterPage"
-  /v1/hosts:
+  /hosts:
     get:
       operationId: listHosts
       summary: List ESXi hosts across all domains
@@ -130,7 +130,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HostPage"
-  /v1/network-pools:
+  /network-pools:
     get:
       operationId: listNetworkPools
       summary: List network pools
@@ -142,7 +142,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NetworkPoolPage"
-  /v1/bundles:
+  /bundles:
     get:
       operationId: listBundles
       summary: List lifecycle-management bundles
@@ -156,7 +156,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BundlePage"
-  /v1/tasks:
+  /tasks:
     get:
       operationId: listTasks
       summary: List workflow tasks

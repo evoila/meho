@@ -1669,12 +1669,16 @@ silent no-op that audits worse).
 ### HTMX conventions
 
 * `hx-get` for scope tabs + tag filter (idempotent reads).
-* The tag datalist (`#memory-tag-options`) pins `hx-target="this"`
-  on its `hx-trigger="load"` options fetch. htmx resolves
-  `hx-target` closest-wins up the ancestor chain, so without the
-  local override the datalist inherits the filter form's
-  `hx-target="#memory-cards"` and the `<option>` fragment replaces
-  the card grid on page load (#1695).
+* The tag datalist (`#memory-tag-options`) pins `hx-target="this"`,
+  `hx-push-url="false"`, and `hx-include="none"` on its
+  `hx-trigger="load"` options fetch. htmx resolves all three
+  closest-wins up the ancestor chain, so without the local overrides
+  the datalist inherits the filter form's `hx-target="#memory-cards"`
+  (the `<option>` fragment replaces the card grid on page load,
+  #1695), its `hx-push-url="true"` (the load-time fetch rewrites the
+  browser URL to `/ui/memory/tags`, #2069), and its
+  `hx-include="closest form"` (the fetch drags the `tag`/`scope`
+  inputs into the query string, #2069).
 * `hx-patch` for the edit-in-place save; the form's
   `id="memory-body"` is the swap target so Save replaces the form
   with the rendered body view in place.

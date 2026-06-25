@@ -27,6 +27,13 @@
       walking ancestors (closest wins), so without the local override
       the datalist inherits the filter form's ``#memory-cards`` target
       and the ``<option>`` fragment replaces the card grid (#1695).
+      ``hx-push-url="false"`` and ``hx-include="none"`` scope the same
+      way: htmx inherits both closest-wins too, so without the local
+      overrides the load-time fetch would inherit the form's
+      ``hx-push-url="true"`` (rewriting the browser URL to
+      ``/ui/memory/tags``) and ``hx-include="closest form"`` (dragging
+      the ``tag``/``scope`` inputs into the query string) on every
+      page load (#2069).
     * The page-level ``hx-headers`` directive echoes the CSRF token
       for any state-changing request triggered from this page
       (delete-from-detail, for example).
@@ -128,6 +135,8 @@
           hx-trigger="load"
           hx-target="this"
           hx-swap="innerHTML"
+          hx-push-url="false"
+          hx-include="none"
         ></datalist>
       </label>
       {# Hidden input echoes the active scope so a tag-filter change

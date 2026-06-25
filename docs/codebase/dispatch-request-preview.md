@@ -119,7 +119,7 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind` |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `no_connector` / `ambiguous_connector`) + per-code detail |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail |
 | `unavailable` | not an HTTP-ingested op | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
 
 Operator-input faults come back **inside** the envelope (not as
@@ -127,6 +127,18 @@ exceptions), mirroring the dispatcher's never-raises contract so the REST
 route and MCP tool keep one uniform shape. The only exception the
 meta-tool raises is the missing-`target.name` `ValueError`, which the
 route maps to a `400` (identical to `/call`).
+
+The shared resolver `resolve_ingested_request` deliberately *raises* on a
+path-template fault — `KeyError` for an unsubstituted path var, `RuntimeError`
+for a descriptor missing its method/path — because the **execute** path relies
+on the dispatcher's generic `except` to convert them to a structured
+`connector_error`. The preview path has no such wrapper, so
+`_build_ingested_preview` catches exactly those two and maps them to a
+`dispatch_error` envelope (#2066). Before that wrap they escaped uncaught and
+surfaced as MCP `-32603` / HTTP 500 — violating the never-raises contract this
+table documents. `resolve_ingested_request` itself is unchanged (the
+execute-path contract must keep raising), so the two surfaces stay aligned via
+their respective wrappers, not a shared swallow.
 
 ## Redaction
 

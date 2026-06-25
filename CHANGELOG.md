@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — RFC6570 {+path} ingest
+
+- Ingest now keys an `in: path` parameter whose declared name carries a
+  leading RFC6570 expression operator (e.g. `{"name": "+path"}` for a
+  `/v1/{+path}` template) on the **bare** name (`path`), matching the
+  dispatch renderer (PR #2020) which strips the operator before looking the
+  value up — so these ops dispatch instead of dying with a `KeyError`. The
+  operator set is now a single shared constant, so the ingest key and the
+  render lookup can't drift again. A spec declaring both `path` and `+path`
+  path params fails ingest loudly. `preview_operation` on such an op now
+  returns a structured `dispatch_error` envelope instead of an uncaught
+  exception / MCP `-32603` (#2066).
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

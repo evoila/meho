@@ -44,9 +44,13 @@ info:
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
-servers:
-  - url: /api
-    description: Modern vCenter automation API mount (vSphere 8.0+).
+# No `servers` block: the `/api` mount is baked into each path key below
+# (`/api/about`, `/api/vcenter/...`). #1796 made the OpenAPI Server Object
+# load-bearing -- the ingest parser now folds a relative `servers[].url`
+# onto every op path. Declaring `servers:[{url:/api}]` here while the paths
+# already carry `/api` would double-prefix to `/api/api/about`. The mount is
+# documented in `info.description` instead; the vCenter connector's
+# `mount_op_path` hook owns the modern `/api` vs legacy `/rest` selection.
 paths:
   /api/about:
     get:

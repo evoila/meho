@@ -146,6 +146,88 @@ _INLINE_SPEC_ONRAMP_REMEDIATION = (
 # ``{filter.names}``. Compiled once and reused per operation.
 _PATH_PARAM_RE = re.compile(r"\{([^{}/]+)\}")
 
+
+def _require_spec_mapping(value: Any, label: str) -> dict[str, Any]:
+    """Return ``value`` as a dict, or raise :exc:`InvalidSpecError` naming ``label``.
+
+    The OpenAPI ``components`` container and each of its sub-objects
+    (``schemas`` / ``parameters`` / ``responses`` / ``requestBodies``)
+    must be mappings; a scalar or list there is a malformed spec. Callers
+    pass ``spec.get(key) or {}`` so an absent key arrives as the empty
+    mapping and validates trivially.
+    """
+    if not isinstance(value, dict):
+        raise InvalidSpecError(f"{label!r} must be a mapping, got {type(value).__name__}")
+    return cast(dict[str, Any], value)
+
+
+def _server_base_path(servers: Any) -> str:
+    """Return the relative path prefix declared by ``servers[0].url``.
+
+    OpenAPI resolves an operation's effective URL by *appending* the
+    path-item key to the Server Object's ``url`` (OAS 3.1 §4.8.5: "The
+    path is appended (no relative URL resolution) to the expanded URL
+    from the Server Object's ``url`` field"). meho dispatches against the
+    operator-configured target host, so only the **path** component of a
+    *relative* server base is honoured -- it is folded into each op's
+    path at ingest time (#1796) so the dispatch path stays unchanged.
+
+    Returns the normalised base path (leading ``/``, no trailing ``/``)
+    for a relative server url such as ``/api/v2``; returns ``""`` (no
+    fold, today's behaviour) when:
+
+    * ``servers`` is absent / empty / malformed,
+    * the first server url is ``/`` or empty (a no-op base),
+    * the first server url is **absolute** (has a scheme or authority) --
+      an absolute base points at a spec-declared host, which meho does
+      not dispatch against (SSRF / topology boundary, out of scope per
+      #1796); only its path would be foldable and conflating the two is
+      a footgun, so absolute bases are left entirely to the operator's
+      target configuration.
+
+    Only the first server entry is consulted: OpenAPI allows multiple
+    servers for environment selection, but meho dispatches against one
+    operator-configured target, so the first (primary) base is the one
+    that pairs with it.
+    """
+    if not isinstance(servers, list) or not servers:
+        return ""
+    first = servers[0]
+    if not isinstance(first, dict):
+        return ""
+    url = first.get("url")
+    if not isinstance(url, str) or not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme or parsed.netloc:
+        # Absolute URL (or protocol-relative ``//host/...``) -- out of
+        # scope; the host is the operator's target, not the spec's.
+        return ""
+    base = parsed.path.rstrip("/")
+    if not base or base == "/":
+        return ""
+    if not base.startswith("/"):
+        base = "/" + base
+    return base
+
+
+def _fold_server_base(base: str, path: str) -> str:
+    """Append an operation ``path`` to the relative server ``base``.
+
+    ``base`` is the normalised output of :func:`_server_base_path`
+    (leading ``/``, no trailing ``/``) or ``""``. Joins them into a
+    single path-template with exactly one separator slash, collapsing
+    the double slash that arises from ``base`` + a leading-``/`` ``path``
+    (``"/api/v2"`` + ``"/version"`` -> ``"/api/v2/version"``). An empty
+    ``base`` returns ``path`` unchanged (the no-server-base case).
+    """
+    if not base:
+        return path
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
 # OpenAPI 3.x operation-level keys other than the verbs. Used to skip
 # ``parameters`` / ``summary`` / ``description`` while iterating verbs.
 _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "trace"})
@@ -245,7 +327,9 @@ def parse_openapi(
         A list of :class:`EndpointDescriptorProto`. One entry per
         (method, path) operation; path-level / spec-level metadata
         is not represented here. Paths with no operations are
-        silently skipped.
+        silently skipped. A relative ``servers[].url`` base is folded
+        into each op's ``path`` / ``op_id`` -- see
+        :func:`_server_base_path` (#1796).
 
     Raises:
         InvalidSpecError: Document is not a mapping, lacks ``paths``,
@@ -276,38 +360,25 @@ def parse_openapi(
     if not isinstance(paths, dict):
         raise InvalidSpecError(f"'paths' must be a mapping, got {type(paths).__name__}")
 
-    components = spec.get("components") or {}
-    if not isinstance(components, dict):
-        raise InvalidSpecError(f"'components' must be a mapping, got {type(components).__name__}")
-    component_schemas = components.get("schemas") or {}
-    if not isinstance(component_schemas, dict):
-        raise InvalidSpecError(
-            f"'components.schemas' must be a mapping, got {type(component_schemas).__name__}"
-        )
-    component_parameters = components.get("parameters") or {}
-    if not isinstance(component_parameters, dict):
-        raise InvalidSpecError(
-            f"'components.parameters' must be a mapping, got {type(component_parameters).__name__}"
-        )
-    component_responses = components.get("responses") or {}
-    if not isinstance(component_responses, dict):
-        raise InvalidSpecError(
-            f"'components.responses' must be a mapping, got {type(component_responses).__name__}"
-        )
-    component_request_bodies = components.get("requestBodies") or {}
-    if not isinstance(component_request_bodies, dict):
-        raise InvalidSpecError(
-            f"'components.requestBodies' must be a mapping, got "
-            f"{type(component_request_bodies).__name__}"
-        )
+    components = _require_spec_mapping(spec.get("components") or {}, "components")
+    server_base = _server_base_path(spec.get("servers"))
 
     return list(
         _iter_operations(
             paths=paths,
-            component_schemas=cast(dict[str, Any], component_schemas),
-            component_parameters=cast(dict[str, Any], component_parameters),
-            component_responses=cast(dict[str, Any], component_responses),
-            component_request_bodies=cast(dict[str, Any], component_request_bodies),
+            server_base=server_base,
+            component_schemas=_require_spec_mapping(
+                components.get("schemas") or {}, "components.schemas"
+            ),
+            component_parameters=_require_spec_mapping(
+                components.get("parameters") or {}, "components.parameters"
+            ),
+            component_responses=_require_spec_mapping(
+                components.get("responses") or {}, "components.responses"
+            ),
+            component_request_bodies=_require_spec_mapping(
+                components.get("requestBodies") or {}, "components.requestBodies"
+            ),
             spec_source=spec_source,
         )
     )
@@ -644,13 +715,21 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
 def _iter_operations(
     *,
     paths: dict[str, Any],
+    server_base: str,
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any],
     component_responses: dict[str, Any],
     component_request_bodies: dict[str, Any],
     spec_source: str | None,
 ) -> Iterable[EndpointDescriptorProto]:
-    """Yield one :class:`EndpointDescriptorProto` per (method, path)."""
+    """Yield one :class:`EndpointDescriptorProto` per (method, path).
+
+    ``server_base`` is the normalised relative server-base path (e.g.
+    ``/api/v2``, or ``""`` for none) from :func:`_server_base_path`; it
+    is folded into each operation's path so the persisted ``path`` /
+    ``op_id`` carry the full template the dispatcher puts on the wire
+    (#1796).
+    """
     for path_template, path_item in paths.items():
         if not isinstance(path_item, dict):
             # A non-dict ``paths.<path>`` value is malformed per the
@@ -670,7 +749,7 @@ def _iter_operations(
                 continue
             yield _build_proto(
                 method=verb.upper(),
-                path=path_template,
+                path=_fold_server_base(server_base, path_template),
                 operation=operation,
                 path_level_params=path_level_params,
                 component_schemas=component_schemas,

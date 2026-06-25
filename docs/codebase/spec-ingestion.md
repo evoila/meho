@@ -427,7 +427,7 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 |---|---|---|
 | `op_id` | `op_id` | `f"{METHOD}:{path}"`; the connector-side natural key |
 | `method` | `method` | Upper-case HTTP verb |
-| `path` | `path` | URL template, `{var}` placeholders |
+| `path` | `path` | URL template, `{var}` placeholders. A **relative** `servers[].url` base is folded in at parse time (#1796) — e.g. `servers: [{url: /api/v2}]` + `/version` → `/api/v2/version` — so dispatch (`host + path`) reaches the real endpoint. Absolute/templated bases are left unfolded (MEHO never adopts a spec-declared host). |
 | `summary` | `summary` | Verbatim from spec |
 | `description` | `description` | Verbatim from spec |
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |

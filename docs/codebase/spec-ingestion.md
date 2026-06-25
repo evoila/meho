@@ -444,6 +444,28 @@ owns `group_id` (NULL until grouping runs). T4 owns
 `custom_description`, `custom_notes`, `llm_instructions` (operator-
 authored overrides at review time).
 
+#### RFC6570 operator-bearing path-param names (#2003 / #2066)
+
+A vendor spec may declare an `in: path` parameter whose `name` carries a
+leading RFC6570 expression operator — VCF Operations-for-Logs uses
+`{"name": "+path", "in": "path"}` for the template `/events/{+path}`
+(reserved expansion, so the constraint's `/` stays literal on the wire). The
+parameter-schema builder keys the JSON-Schema property on the **bare** name
+(`path`), not the operator-bearing one, because that is the name the dispatch
+renderer (`operations/_branches._substitute_path`) resolves the value by after
+stripping the operator from the template. `descriptor.path` keeps the operator
+verbatim — the renderer needs it to pick reserved expansion. The operator set
+both stages strip is shared via `operations/_rfc6570.RFC6570_PATH_OPERATORS`,
+so the property key and the lookup key can never drift (the keying-vs-rendering
+mismatch that made these ops undispatchable at v0.19.0). A spec declaring both
+`path` and `+path` as **path** parameters collapses onto the same bare key and
+raises `InvalidSchemaError` rather than silently dropping one. The collision
+guard is scoped to path-vs-path only: a name shared *across different* `in`
+locations (the legal OpenAPI `id`-in-path + `id`-in-query) is **not** a fault —
+it flattens to one property, and the **path** location wins regardless of
+declaration order so the path template var stays substitutable (a query/header
+twin can't shadow the op into being undispatchable).
+
 ### `GroupProposal` / `GroupingResult` / `GroupingConfig` (`ingest/llm_groups.py`)
 
 Pydantic `frozen=True` model + two frozen-slotted dataclasses, one
@@ -1306,9 +1328,17 @@ activity:
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
    internal endpoint from exhausting pod memory.
 
-5. **Oracle-free error messages.** Error messages never echo the
-   operator-supplied URI or OS-level error text. Error text is
-   intentionally terse and path-free.
+5. **Oracle-free error messages that name the inline remedy.** Error
+   messages never echo the operator-supplied URI, the resolved IP /
+   hostname, or OS-level error text — the rejection is path-free so it
+   is not a network-topology oracle. The scheme + non-public rejections
+   additionally name the inline on-ramp generically
+   (`_INLINE_SPEC_ONRAMP_REMEDIATION`): a spec inside the operator's own
+   network is ingestable by passing it as a `file:///` / `docs:` source,
+   whose bytes the CLI uploads inline (bypassing this fetch guard — see
+   the shipped-spec on-ramp section and #1535) rather than publishing the
+   spec to the public internet to satisfy the `https`-public-fetch
+   constraint.
 
 Pre-#95: `http`/`https` URIs were fetched with `follow_redirects=True` and
 no IP check; `file://` URIs and bare paths were read via `Path(...).read_bytes()`;

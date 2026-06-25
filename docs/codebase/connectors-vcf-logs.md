@@ -153,8 +153,21 @@ returned 440 until a backplane restart cleared the in-memory token cache —
 breaking any scheduled / long-running vRLI consumer. The
 dispatcher-side classification of 440 → structured `connector_auth_failed`
 (#1804, `operations/_errors.py`) only fixed the *diagnosability* of the
-flat error; the recovery (re-login on 440) lives here in the
-session-retry.
+flat error.
+
+**`_get_json_with_session_retry` is not on the dispatch path (#2067).**
+This helper recovers a 440/401 only for a *direct* caller. vRLI's curated
+read ops dispatch as `source_kind='ingested'` through
+`operations/_branches.py::dispatch_ingested` → `HttpConnector._request_json`
+— they never call this wrapper, so #1909's 440-recovery never executed for
+the dispatched ops the soak actually exercises, and the 440-until-restart
+symptom persisted. #2067 closes that by wiring invalidate-and-retry-once
+into the dispatcher's auth-class arm: the connector exposes a public
+`invalidate_session(target)` (delegating to `_invalidate_session`), and on a
+440/401 the dispatch path evicts the token and re-dispatches once — so a
+dispatched vRLI GET recovers the same way a direct
+`_get_json_with_session_retry` call does. The helper is retained for its
+direct callers and shares the one `_invalidate_session` eviction.
 
 ### Fingerprint + probe
 

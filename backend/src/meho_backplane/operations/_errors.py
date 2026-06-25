@@ -816,11 +816,18 @@ def result_connector_http_422(
 #: The non-2xx statuses the dispatcher classifies as an auth/session
 #: failure rather than the generic ``connector_error`` **for a typed
 #: (hand-coded) connector**. ``401`` is the load-bearing, connector-
-#: agnostic case: the hand-coded session connectors (NSX, vcf_logs,
-#: vmware_rest, ...) already retry once on a 401 internally
-#: (``_get_json_with_session_retry``), so a 401 that reaches the dispatcher
-#: means re-login *also* failed -- the credential is missing / invalid /
-#: expired in Vault, or the target's ``auth_model`` is wrong. ``440`` is
+#: agnostic case. G0.29-T2 (#2067) wires invalidate-and-retry-once on an
+#: auth-class status into the generic-ingested dispatch path itself
+#: (:func:`~meho_backplane.operations.dispatcher._handle_http_status_error`):
+#: a session-stateful connector advertising ``invalidate_session(target)``
+#: has its cached token evicted and the op re-dispatched once, so an expired
+#: vCenter (401) / vRLI (440) session re-logs-in there. Only when that
+#: dispatch-path re-login *also* fails does an auth-class status reach
+#: :func:`result_connector_auth_failed` -- meaning the credential is missing
+#: / invalid / expired in Vault, or the target's ``auth_model`` is wrong.
+#: (Earlier comments here claimed the connectors retried internally on a 401
+#: via ``_get_json_with_session_retry``; that helper had no caller on the
+#: ingested dispatch path, which is the gap #2067 closes.) ``440`` is
 #: vRLI's own session-expiry status (the literal code the operator saw
 #: flattened to ``connector_error (440)`` on the #1798 dispatch); the team
 #: opted to recognise it here so the appliance status that surfaced the gap
@@ -879,10 +886,11 @@ def result_connector_auth_failed(
     (:data:`_AUTH_FAILED_STATUSES`: ``401``, plus vRLI's ``440``).
 
     ``401`` is the load-bearing case and is connector-agnostic. The
-    hand-coded session connectors already retry once on a 401 internally
-    (``_get_json_with_session_retry``), so a 401 that reaches the
-    dispatcher means **re-login also failed** -- not a transient blip but
-    a credential / ``auth_model`` problem the operator must fix. Routing
+    dispatch path itself now re-logs-in and retries once on an auth-class
+    status when the connector advertises ``invalidate_session`` (G0.29-T2
+    #2067), so a status that reaches *this* builder means **re-login also
+    failed** -- not a transient blip but a credential / ``auth_model``
+    problem the operator must fix. Routing
     it through :func:`result_connector_error` flattened that into an
     opaque ``connector_error: HTTPStatusError`` with the cause buried in
     ``extras["exception_message"]``, which is exactly the diagnosability
@@ -917,13 +925,13 @@ def result_connector_auth_failed(
     summary = (
         f"connector_auth_failed: the upstream returned an auth/session "
         f"failure (HTTP {status_code}) for {host}. The connector reached the "
-        f"host but its credential or session was rejected. The session "
-        f"connectors re-login once on a session-expiry status (401 or vRLI's "
-        f"440) on their session-retry path, so when this reaches the "
-        f"dispatcher the credential is most likely missing, invalid, or "
-        f"expired in Vault, or the target's auth_model is wrong. Verify the "
-        f"target's Vault credential and its auth_model against what the "
-        f"connector expects, then retry. See docs/architecture/connector-auth.md "
+        f"host but its credential or session was rejected. The dispatch path "
+        f"already re-logged-in and retried once on a session-expiry status "
+        f"(401 or vRLI's 440), so when this reaches you the re-login also "
+        f"failed: the credential is most likely missing, invalid, or expired "
+        f"in Vault, or the target's auth_model is wrong. Verify the target's "
+        f"Vault credential and its auth_model against what the connector "
+        f"expects, then retry. See docs/architecture/connector-auth.md "
         f"for the connector auth contract and "
         f"docs/codebase/error-message-shape.md for the dispatch error "
         f"convention."

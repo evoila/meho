@@ -835,3 +835,252 @@ async def test_preview_operation_missing_target_name_raises_valueerror() -> None
                 "params": {},
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# RFC6570 {+path} end-to-end: dispatch succeeds + preview never raises (#2066)
+# ---------------------------------------------------------------------------
+#
+# The descriptor shape these tests seed is exactly what the ingest parser now
+# produces for an operator-bearing path param ({"name": "+path"} keyed on the
+# bare ``path`` -- proven by the parser-level tests in
+# tests/test_operations_ingest_openapi.py): template carries the operator
+# verbatim, the parameter_schema property is keyed on the bare name. These
+# tests close the loop by proving that shape dispatches and previews cleanly.
+
+
+@pytest.mark.asyncio
+async def test_call_operation_dispatches_operator_bearing_path_param(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """``call_operation`` on a ``/v1/{+path}`` op dispatches via reserved expansion.
+
+    The renderer strips the ``+`` operator, looks the value up by the bare
+    ``path`` the schema keys, and reserved-expands it so ``/`` stays literal.
+    No ``KeyError`` reaches the wire -- the #2066 dead-op is gone.
+    """
+    from meho_backplane.operations.dispatcher import dispatch
+
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/{+path}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/{+path}",
+        parameter_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "x-meho-param-loc": "path"}},
+            "required": ["path"],
+        },
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="GET:/v1/{+path}",
+        target=_FakeTarget(name="gh-prod"),
+        params={"path": "events/CONTAINS error"},
+    )
+
+    assert result.status == "ok", result.error
+    assert len(connector.calls) == 1
+    sent = connector.calls[0]
+    assert sent["verb"] == "GET"
+    # Reserved expansion: the slash stays literal, the space is still encoded.
+    assert sent["path"] == "/v1/events/CONTAINS%20error"
+
+
+@pytest.mark.asyncio
+async def test_preview_operator_bearing_path_param_resolves_clean(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Previewing the same ``/v1/{+path}`` op returns the reserved-expanded path."""
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/{+path}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/{+path}",
+        parameter_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "x-meho-param-loc": "path"}},
+            "required": ["path"],
+        },
+    )
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="GET:/v1/{+path}",
+        target=_FakeTarget(name="gh-prod"),
+        params={"path": "a/b/c"},
+    )
+
+    assert envelope["status"] == "ok"
+    assert envelope["resolved_path"] == "/v1/a/b/c"
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_preview_unresolvable_path_var_returns_structured_dispatch_error(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A path template var with no schema property -> structured ``dispatch_error``.
+
+    Restores the preview's never-raises contract (#2066): pre-fix the
+    ``KeyError`` ``resolve_ingested_request`` raises for an unsubstituted path
+    var escaped the preview path uncaught and surfaced as MCP ``-32603`` /
+    HTTP 500. Here the template needs ``{+path}`` but the parameter_schema
+    declares no ``path`` property, so ``validate_params`` passes (nothing is
+    required) yet the renderer can't resolve the var. The preview must return a
+    structured ``status="error"`` envelope -- never an uncaught exception.
+    """
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/{+path}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/{+path}",
+        # Empty schema: nothing required, so validation passes; the renderer
+        # then KeyErrors on the unsatisfiable ``{+path}`` template var.
+        parameter_schema={"type": "object", "properties": {}},
+    )
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="GET:/v1/{+path}",
+        target=_FakeTarget(name="gh-prod"),
+        params={},
+    )
+
+    assert envelope["status"] == "error"
+    assert envelope["error"].startswith("dispatch_error:")
+    assert envelope["extras"]["error_code"] == "dispatch_error"
+    assert "path" in envelope["extras"]["exception_message"]
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
+async def test_preview_operation_meta_tool_missing_path_var_never_raises(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The shared ``preview_operation`` funnel returns the structured error too.
+
+    Proves the never-raises fix holds through the meta-tool both REST and MCP
+    call -- the MCP ``preview_operation`` tool is a thin shim over this
+    function, so an uncaught exception here would surface as ``-32603``.
+    """
+    _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/{+path}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/{+path}",
+        parameter_schema={"type": "object", "properties": {}},
+    )
+    target_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT,
+                name="gh-prod",
+                aliases=[],
+                product="gh",
+                version="3",
+                host="api.github.com",
+                port=443,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    envelope = await preview_operation(
+        _make_operator(),
+        {
+            "connector_id": "gh-rest-3",
+            "op_id": "GET:/v1/{+path}",
+            "target": "gh-prod",
+            "params": {},
+        },
+    )
+
+    assert envelope["status"] == "error"
+    assert envelope["extras"]["error_code"] == "dispatch_error"
+
+
+@pytest.mark.asyncio
+async def test_call_operation_same_name_path_and_query_param_dispatches(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """An op with ``id`` in both path and query dispatches: the path var substitutes.
+
+    End-to-end proof for #2066 review B1 — the legal same-name-across-locations
+    shape is dispatchable. Ingest keys the flattened property on ``id`` with
+    ``x-meho-param-loc: path`` (path wins), so the caller's ``id`` routes to the
+    path bucket and ``/v1/items/{id}`` substitutes with no ``KeyError``.
+    """
+    from meho_backplane.operations.dispatcher import dispatch
+
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="GET:/v1/items/{id}",
+        embedding=stub_embedding_service.encode_one.return_value,
+        method="GET",
+        path="/v1/items/{id}",
+        # The shape ingest produces for ``id`` in path + query: one property,
+        # path location wins (proven by the parser test).
+        parameter_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string", "x-meho-param-loc": "path"}},
+            "required": ["id"],
+        },
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="GET:/v1/items/{id}",
+        target=_FakeTarget(name="gh-prod"),
+        params={"id": "42"},
+    )
+
+    assert result.status == "ok", result.error
+    assert len(connector.calls) == 1
+    assert connector.calls[0]["path"] == "/v1/items/42"

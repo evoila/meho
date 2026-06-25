@@ -94,6 +94,44 @@ connector-related release-notes line.
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.
 
+### Changed — connector ingest SSRF rejection (discoverability)
+
+- The ingest SSRF guard's rejection messages (non-`https` scheme and
+  non-public destination) now name the inline on-ramp: a spec inside your
+  own network can be ingested by passing it as a `file:///path` or
+  `docs:<product>-<version>/<file>` source so the CLI uploads it inline,
+  instead of having to publish internal specs to the public internet. The
+  guard remains default-deny and the message stays path-free (no resolved
+  IP / hostname echoed). (#2070)
+
+### Fixed — session-expiry dispatch recovery
+
+- Recover expired connector sessions on the generic-ingested dispatch
+  path: an auth-class status (`401` for vCenter REST, `440` for vRLI)
+  now triggers a single automatic re-login + retry at the dispatcher's
+  `HTTPStatusError` arm instead of hard-failing until a backplane
+  restart. Both `VmwareRestConnector` (cold-401) and `VcfLogsConnector`
+  (idle-440) — and any session-stateful connector exposing the new
+  duck-typed `invalidate_session(target)` hook — recover transparently;
+  a second consecutive auth failure still surfaces the actionable
+  `connector_auth_failed` error. Retry-once is gated strictly on the
+  auth-class set (a `5xx`/timeout is never retried) and a recovered call
+  emits exactly one success audit row, no spurious error row.
+  (#2067)
+
+### Fixed — RFC6570 {+path} ingest
+
+- Ingest now keys an `in: path` parameter whose declared name carries a
+  leading RFC6570 expression operator (e.g. `{"name": "+path"}` for a
+  `/v1/{+path}` template) on the **bare** name (`path`), matching the
+  dispatch renderer (PR #2020) which strips the operator before looking the
+  value up — so these ops dispatch instead of dying with a `KeyError`. The
+  operator set is now a single shared constant, so the ingest key and the
+  render lookup can't drift again. A spec declaring both `path` and `+path`
+  path params fails ingest loudly. `preview_operation` on such an op now
+  returns a structured `dispatch_error` envelope instead of an uncaught
+  exception / MCP `-32603` (#2066).
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

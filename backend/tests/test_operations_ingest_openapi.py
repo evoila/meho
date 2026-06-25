@@ -37,7 +37,11 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     read_spec_info_version,
 )
-from meho_backplane.operations.ingest.openapi import _MAX_REDIRECTS, _assert_fetchable_remote_url
+from meho_backplane.operations.ingest.openapi import (
+    _INLINE_SPEC_ONRAMP_REMEDIATION,
+    _MAX_REDIRECTS,
+    _assert_fetchable_remote_url,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 PETSTORE_30 = FIXTURES / "petstore_30.yaml"
@@ -218,6 +222,188 @@ def test_parse_petstore_30_path_param_is_required() -> None:
     props = get_pet.parameter_schema["properties"]
     assert props["petId"]["x-meho-param-loc"] == "path"
     assert "petId" in get_pet.parameter_schema["required"]
+
+
+# -- RFC6570 operator-bearing path-param names (#2003 / #2066) --------------
+
+# A minimal spec whose path parameter declares a leading RFC6570 reserved-
+# expansion operator in its ``name`` -- the shape VCF Operations-for-Logs
+# uses for ``/events/{+path}``. Built inline (not a fixture file) so the
+# operator-bearing name is right next to the assertion that the parser keys
+# the property on the *bare* name.
+_PLUS_PATH_SPEC = yaml.safe_dump(
+    {
+        "openapi": "3.0.3",
+        "info": {"title": "plus-path", "version": "1.0.0"},
+        "paths": {
+            "/v1/{+path}": {
+                "get": {
+                    "operationId": "readPath",
+                    "parameters": [
+                        {
+                            "name": "+path",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+).encode()
+
+
+def test_parse_operator_bearing_path_param_keyed_on_bare_name() -> None:
+    """A ``{"name": "+path", "in": "path"}`` param is keyed on the bare ``path``.
+
+    The ingest half of #2003 (#2066): the renderer strips the RFC6570
+    operator from the ``{+path}`` template and looks the value up by ``path``,
+    so the parser must register the JSON-Schema property under the same bare
+    name -- not ``+path`` -- or the op is undispatchable.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "plus_path.yaml", _PLUS_PATH_SPEC)
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["GET:/v1/{+path}"]
+    props = op.parameter_schema["properties"]
+    assert isinstance(props, dict)
+    # Keyed on the bare name -- the operator is gone from the property key.
+    assert "path" in props
+    assert "+path" not in props
+    assert props["path"]["x-meho-param-loc"] == "path"
+    # Required under the bare name too.
+    assert "path" in op.parameter_schema["required"]
+    assert "+path" not in op.parameter_schema["required"]
+    # The template keeps the operator verbatim -- the renderer needs it to
+    # select reserved expansion so the value's ``/`` stays literal.
+    assert op.path == "/v1/{+path}"
+
+
+def test_parse_path_param_without_operator_unchanged() -> None:
+    """A plain ``{"name": "cluster"}`` path param keeps its name verbatim."""
+    spec = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "plain-path", "version": "1.0.0"},
+            "paths": {
+                "/v1/{cluster}": {
+                    "get": {
+                        "operationId": "readCluster",
+                        "parameters": [
+                            {
+                                "name": "cluster",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "plain_path.yaml", spec)
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["GET:/v1/{cluster}"]
+    props = op.parameter_schema["properties"]
+    assert props["cluster"]["x-meho-param-loc"] == "path"
+    assert "cluster" in op.parameter_schema["required"]
+
+
+def test_parse_bare_and_operator_path_param_collision_raises() -> None:
+    """A spec declaring both ``path`` and ``+path`` path params fails loudly.
+
+    Both collapse onto the bare property key ``path``; silently keeping one
+    would drop a parameter the renderer still needs, so ingest of that op
+    raises :class:`InvalidSchemaError` rather than half-building it.
+    """
+    spec = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "collision", "version": "1.0.0"},
+            "paths": {
+                "/v1/{path}/{+path}": {
+                    "get": {
+                        "operationId": "collide",
+                        "parameters": [
+                            {
+                                "name": "path",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "+path",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "collision.yaml", spec)
+        with pytest.raises(InvalidSchemaError, match="normalises to property key 'path'"):
+            parse_openapi(url)
+
+
+def _same_name_path_query_spec(*, path_first: bool) -> bytes:
+    """A legal OpenAPI op declaring ``id`` in BOTH path and query.
+
+    OpenAPI permits the same parameter ``name`` in different ``in`` locations.
+    The two are emitted in *path_first* or query-first order to prove the
+    flatten result is order-independent.
+    """
+    path_param = {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+    query_param = {"name": "id", "in": "query", "required": False, "schema": {"type": "string"}}
+    params = [path_param, query_param] if path_first else [query_param, path_param]
+    return yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "same-name-diff-loc", "version": "1.0.0"},
+            "paths": {
+                "/v1/items/{id}": {
+                    "get": {
+                        "operationId": "getItem",
+                        "parameters": params,
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+
+
+@pytest.mark.parametrize("path_first", [True, False])
+def test_parse_same_name_path_and_query_param_ingests_path_wins(path_first: bool) -> None:
+    """``id`` in path AND query is legal: it ingests, and the path location wins.
+
+    Regression for the over-broad collision guard (#2066 review B1): the guard
+    must fire only on path-vs-path bare-name collisions, never on the legal
+    same-name-across-different-``in`` shape. The flattened single property keeps
+    ``x-meho-param-loc: path`` regardless of declaration order so the path
+    template var ``{id}`` stays substitutable (the op stays dispatchable); a
+    query twin can't shadow it into an undispatchable op.
+    """
+    spec = _same_name_path_query_spec(path_first=path_first)
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "same_name.yaml", spec)
+        rows = parse_openapi(url)  # must NOT raise
+    op = _by_op_id(rows)["GET:/v1/items/{id}"]
+    props = op.parameter_schema["properties"]
+    assert "id" in props
+    # Path location wins (order-independent) so the path var is satisfiable.
+    assert props["id"]["x-meho-param-loc"] == "path"
+    # Path params are implicitly required.
+    assert "id" in op.parameter_schema["required"]
 
 
 def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
@@ -1440,6 +1626,89 @@ def test_assert_fetchable_remote_url_accepts_public_ip() -> None:
     ):
         # Should not raise.
         _assert_fetchable_remote_url("https://example.com/spec.yaml")
+
+
+# -- SSRF rejection names the inline on-ramp (#2070) -----------------------
+#
+# The guard stays default-deny; #2070 only enriches the rejection text so a
+# self-hosted operator with an internal-only spec discovers the inline
+# ``file:///`` / ``docs:`` upload path instead of publishing the spec to the
+# public internet. The remedy must be named but stay path-free (no resolved
+# IP / hostname echoed) so the rejection is not a network-topology oracle.
+
+
+def test_non_https_rejection_names_inline_onramp() -> None:
+    """The non-https scheme rejection names the inline ``file:///`` / ``docs:``
+    upload remedy (#2070) while keeping the https-only guard intact.
+    """
+    with pytest.raises(InvalidSpecError, match="https") as exc_info:
+        _assert_fetchable_remote_url("http://internal-host.corp/spec.yaml")
+    msg = str(exc_info.value)
+    assert _INLINE_SPEC_ONRAMP_REMEDIATION in msg
+    assert "file:///" in msg and "docs:" in msg
+
+
+def test_non_public_rejection_names_inline_onramp() -> None:
+    """The non-public-address rejection names the inline upload remedy (#2070)
+    while keeping the destination guard intact.
+    """
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))],
+        ),
+        pytest.raises(InvalidSpecError, match="non-public") as exc_info,
+    ):
+        _assert_fetchable_remote_url("https://looks-public.example.test/spec.yaml")
+    msg = str(exc_info.value)
+    assert _INLINE_SPEC_ONRAMP_REMEDIATION in msg
+    assert "file:///" in msg and "docs:" in msg
+
+
+def test_ssrf_rejection_messages_stay_path_free() -> None:
+    """Both enriched rejections remain topology-oracle-safe: the remedy text
+    is generic and the message never echoes the supplied path, the resolved
+    IP, or the hostname (#2070 keeps the #95 oracle-free invariant).
+    """
+    # Non-https path: the operator-supplied path/host must not be reflected.
+    with pytest.raises(InvalidSpecError) as scheme_exc:
+        _assert_fetchable_remote_url("http://secret-internal-host.corp/private/spec.yaml")
+    scheme_msg = str(scheme_exc.value)
+    assert "secret-internal-host.corp" not in scheme_msg
+    assert "/private/spec.yaml" not in scheme_msg
+
+    # Non-public path: neither the resolved private IP nor the hostname leaks.
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.1.2.3", 443))],
+        ),
+        pytest.raises(InvalidSpecError) as ip_exc,
+    ):
+        _assert_fetchable_remote_url("https://looks-public.example.test/spec.yaml")
+    ip_msg = str(ip_exc.value)
+    assert "10.1.2.3" not in ip_msg
+    assert "looks-public.example.test" not in ip_msg
+
+
+def test_inline_onramp_happy_path_bypasses_fetch_guard() -> None:
+    """AC happy path (#2070 / #1535): an internal-only spec ingests via the
+    inline-content channel with no fetch and no public-internet exposure.
+
+    A ``file:///`` source label that would otherwise trip the https-only
+    guard parses cleanly because the CLI uploads the bytes as ``content``,
+    which ``_load_spec_bytes`` uses verbatim — the path the SSRF rejection
+    now points operators toward.
+    """
+    spec_text = HANDAUTHORED_MINIMAL_30.read_text()
+    with patch(
+        "meho_backplane.operations.ingest.openapi._fetch_spec_bytes",
+        side_effect=AssertionError("inline content must not trigger a remote fetch"),
+    ):
+        rows = parse_openapi("file:///srv/specs/internal-only.yaml", content=spec_text)
+        version = read_spec_info_version("file:///srv/specs/internal-only.yaml", content=spec_text)
+    assert rows, "inline internal-only spec should parse to operations"
+    assert version == "1.0"
 
 
 # -- read_spec_info_version ------------------------------------------------

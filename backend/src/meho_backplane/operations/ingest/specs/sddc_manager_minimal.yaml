@@ -37,9 +37,12 @@ info:
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
-servers:
-  - url: /v1
-    description: SDDC Manager appliance API root.
+# No `servers` block: the `/v1` root is baked into each path key below
+# (`/v1/releases/system`, `/v1/sddc-managers`, ...). #1796 made the OpenAPI
+# Server Object load-bearing -- the ingest parser now folds a relative
+# `servers[].url` onto every op path. Declaring `servers:[{url:/v1}]` here
+# while the paths already carry `/v1` would double-prefix to
+# `/v1/v1/releases/system`. The root is documented in `info.description`.
 paths:
   /v1/releases/system:
     get:

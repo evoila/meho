@@ -41,6 +41,7 @@ from meho_backplane.operations.ingest.openapi import (
     _INLINE_SPEC_ONRAMP_REMEDIATION,
     _MAX_REDIRECTS,
     _assert_fetchable_remote_url,
+    _server_base_path,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
@@ -312,6 +313,173 @@ def test_parse_path_param_without_operator_unchanged() -> None:
     props = op.parameter_schema["properties"]
     assert props["cluster"]["x-meho-param-loc"] == "path"
     assert "cluster" in op.parameter_schema["required"]
+
+
+# -- relative server base fold (#1796) -------------------------------------
+
+
+def _server_base_spec(server_url: object, op_path: str = "/version") -> bytes:
+    """Build a minimal one-op spec whose ``servers`` is ``server_url``.
+
+    ``server_url`` is placed verbatim into ``servers:[{url: ...}]`` so a
+    test can pass a relative base, ``"/"``, an absolute URL, or omit
+    ``servers`` entirely (pass ``None``).
+    """
+    spec: dict[str, object] = {
+        "openapi": "3.0.3",
+        "info": {"title": "server-base", "version": "1.0.0"},
+        "paths": {
+            op_path: {
+                "get": {
+                    "operationId": "op",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
+    if server_url is not None:
+        spec["servers"] = [{"url": server_url}]
+    return yaml.safe_dump(spec).encode()
+
+
+def test_parse_relative_server_base_folded_into_path() -> None:
+    """A relative ``servers:[{url:"/api/v2"}]`` is folded onto each op path.
+
+    The vRLI / VCF-Operations-for-Logs case (#1796): without the fold the
+    dispatcher builds ``host:port/version`` and 404s; with it the persisted
+    ``path`` / ``op_id`` carry ``/api/v2/version``, which the dispatcher
+    puts on the wire verbatim against the operator-configured target host.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "server_base.yaml", _server_base_spec("/api/v2"))
+        rows = parse_openapi(url)
+    ops = _by_op_id(rows)
+    # The folded path is the natural key the dispatcher resolves against:
+    # descriptor.path -> request path -> host:port + path on the wire.
+    assert "GET:/api/v2/version" in ops
+    assert "GET:/version" not in ops
+    assert ops["GET:/api/v2/version"].path == "/api/v2/version"
+
+
+def test_parse_relative_server_base_regression_dispatched_url_contains_base() -> None:
+    """AC regression: ``servers:[{url:"/base"}]`` + path ``/x`` -> ``/base/x``.
+
+    Asserts on the descriptor ``path`` -- the exact string the dispatcher
+    feeds httpx as the request path, so ``base_url(host:port) + /base/x``
+    lands on the real endpoint.
+    """
+    rows = parse_openapi(
+        "file:///x.yaml",
+        content=_server_base_spec("/base", op_path="/x").decode(),
+    )
+    op = _by_op_id(rows)["GET:/base/x"]
+    assert op.path == "/base/x"
+    assert "/base/x" in op.path
+
+
+def test_parse_relative_server_base_with_trailing_slash_no_double_slash() -> None:
+    """``servers:[{url:"/api/v2/"}]`` + ``/version`` joins as ``/api/v2/version``.
+
+    The OpenAPI spec leaves slash normalisation implementation-defined;
+    #1796 requires collapsing the double slash a trailing-slash base would
+    otherwise produce.
+    """
+    rows = parse_openapi(
+        "file:///x.yaml",
+        content=_server_base_spec("/api/v2/").decode(),
+    )
+    assert "GET:/api/v2/version" in _by_op_id(rows)
+
+
+def test_parse_relative_server_base_folds_before_rfc6570_template() -> None:
+    """The fold prefixes the base without disturbing a ``{+path}`` suffix.
+
+    ``/api/v2`` + ``/events/{+path}`` -> ``/api/v2/events/{+path}``; the
+    RFC6570 operator stays on the template so #2066's renderer still
+    selects reserved expansion.
+    """
+    spec = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "base-plus-path", "version": "1.0.0"},
+            "servers": [{"url": "/api/v2"}],
+            "paths": {
+                "/events/{+path}": {
+                    "get": {
+                        "operationId": "readEvents",
+                        "parameters": [
+                            {
+                                "name": "+path",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+    ).encode()
+    rows = parse_openapi("file:///x.yaml", content=spec.decode())
+    op = _by_op_id(rows)["GET:/api/v2/events/{+path}"]
+    assert op.path == "/api/v2/events/{+path}"
+    # The bare-name param keying (#2066) is unaffected by the prefix.
+    assert "path" in op.parameter_schema["properties"]
+
+
+@pytest.mark.parametrize("server_url", [None, "/", ""])
+def test_parse_absent_or_root_server_base_no_regression(server_url: object) -> None:
+    """No ``servers``, ``"/"``, or empty base ingests exactly as today.
+
+    The bare spec path is kept verbatim -- no fold -- so existing
+    single-base-less specs are unchanged.
+    """
+    rows = parse_openapi(
+        "file:///x.yaml",
+        content=_server_base_spec(server_url).decode(),
+    )
+    assert "GET:/version" in _by_op_id(rows)
+
+
+def test_parse_absolute_server_base_not_folded_out_of_scope() -> None:
+    """An absolute ``servers[].url`` host is out of scope -- path is untouched.
+
+    meho dispatches against the operator-configured target host, not a
+    spec-declared one (SSRF / topology boundary, #1796 out-of-scope).
+    Folding only the path component of an absolute base would silently
+    diverge the op key from the operator's target, so absolute bases are
+    left entirely alone -- the bare spec path is kept.
+    """
+    rows = parse_openapi(
+        "file:///x.yaml",
+        content=_server_base_spec("https://other-host.example/api/v2").decode(),
+    )
+    assert "GET:/version" in _by_op_id(rows)
+    assert "GET:/api/v2/version" not in _by_op_id(rows)
+
+
+@pytest.mark.parametrize(
+    ("server_url", "expected"),
+    [
+        ("/api/v2", "/api/v2"),
+        ("/api/v2/", "/api/v2"),
+        ("api/v2", "/api/v2"),  # missing leading slash -> normalised
+        ("/", ""),
+        ("", ""),
+        ("https://h/api", ""),  # absolute -> no fold
+        ("//host/api", ""),  # protocol-relative authority -> no fold
+    ],
+)
+def test_server_base_path_normalisation(server_url: str, expected: str) -> None:
+    """``_server_base_path`` normalises the relative base and rejects absolutes."""
+    assert _server_base_path([{"url": server_url}]) == expected
+
+
+@pytest.mark.parametrize("servers", [None, [], [{}], [{"url": 123}], "not-a-list"])
+def test_server_base_path_malformed_yields_empty(servers: object) -> None:
+    """Absent / empty / malformed ``servers`` yields no base (no-op fold)."""
+    assert _server_base_path(servers) == ""
 
 
 def test_parse_bare_and_operator_path_param_collision_raises() -> None:

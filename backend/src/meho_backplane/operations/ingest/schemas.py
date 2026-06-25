@@ -63,8 +63,11 @@ class EndpointDescriptorProto(BaseModel):
     ``"PATCH"`` / ``"DELETE"`` / ``"HEAD"`` / ``"OPTIONS"``)."""
 
     path: str
-    """URL path template with ``{var}`` placeholders, verbatim from
-    the spec's ``paths`` key."""
+    """URL path template with ``{var}`` placeholders. Verbatim from the
+    spec's ``paths`` key, except that a relative OpenAPI server base
+    (``servers:[{url:"/api/v2"}]``) is folded onto the front at ingest
+    (``/version`` -> ``/api/v2/version``, #1796) so the dispatcher's
+    ``host:port + path`` join honours the Server Object."""
 
     summary: str | None = None
     description: str | None = None

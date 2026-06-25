@@ -763,12 +763,18 @@ async def _run_branch_with_error_handling(
 
     T5 (#1804) adds a ``connector_auth_failed`` catch in the same
     ``httpx.HTTPStatusError`` arm for an auth-class status (``401``, plus
-    vRLI's ``440``) -- a re-login failure (the session connectors already
-    retry once on a 401) whose missing/invalid/expired-credential or
-    misconfigured-``auth_model`` cause used to flatten into the opaque
-    ``connector_error`` that made the #1798 vRLI dispatch (``connector_error
-    (440)``) unactionable. Scoped to the auth-class set; every other status
-    (404, 429, 5xx) still falls through to ``connector_error``.
+    vRLI's ``440``); G0.29-T2 (#2067) then makes that status *recoverable*
+    at the dispatch path itself (the delegation lives in
+    :func:`_handle_http_status_error`): a session-stateful connector that
+    advertises a duck-typed ``invalidate_session(target)`` hook has its
+    cached token evicted and the op re-dispatched once, so an expired vCenter
+    (401) / vRLI (440) session re-logs-in and recovers without a backplane
+    restart. Only when the re-login *also* fails does the missing/invalid/
+    expired-credential or misconfigured-``auth_model`` cause surface as
+    ``connector_auth_failed`` (the shape that made the #1798 vRLI dispatch --
+    ``connector_error (440)`` -- unactionable). Scoped to the auth-class set;
+    every other status (404, 429, 5xx) still falls through to
+    ``connector_error``.
 
     Initiative #1774 T3 (#1782) adds a ``connector_tls_verify_failed``
     catch for an :exc:`httpx.ConnectError` whose ``__cause__`` is an
@@ -917,65 +923,18 @@ async def _run_branch_with_error_handling(
             sibling_impl_id=sibling_impl_id,
         )
     except httpx.HTTPStatusError as http_exc:
-        # G0.24-T4 (#1649): an upstream 403 or 422 carries actionable
-        # detail the generic ``connector_error`` arm would bury in
-        # ``extras.exception_message`` (consumer
-        # ``claude-rdc-hetzner-dc#1138``), because the shared
-        # ``HttpConnector`` adapter does no error mapping. Two distinct,
-        # connector-agnostic causes:
-        #
-        # * 403 -> insufficient permission: the credential reached the
-        #   upstream and was authenticated, but lacks the scope the op
-        #   requires (a GitHub App with ``issues: read`` but not
-        #   ``issues: write`` on ``POST /repos/.../issues``). GitHub
-        #   returns a body message + ``X-Accepted-GitHub-Permissions`` /
-        #   ``x-oauth-scopes`` headers.
-        # * 422 -> invalid payload: the upstream parsed the request and
-        #   rejected its *content* (a malformed/mis-nested body, a missing
-        #   field -- the requestBody-mangling bug T5 #1656). GitHub
-        #   returns a body message + an ``errors[]`` array naming the
-        #   offending fields.
-        #
-        # T5 (#1804) extends the same arm to auth-class statuses: a 401
-        # (and vRLI's 440) carries an actionable auth/session-failure cause
-        # the generic ``connector_error`` likewise buried. The hand-coded
-        # session connectors already retry once on a 401 internally
-        # (``_get_json_with_session_retry``), so a 401 that reaches the
-        # dispatcher means re-login *also* failed -- the credential is
-        # missing/invalid/expired in Vault, or the ``auth_model`` is wrong.
-        # That flattened to ``connector_error (440)`` on the #1798 vRLI
-        # dispatch the operator saw as opaque. ``connector_auth_failed``
-        # names the host, status, likely cause, and the Vault-credential /
-        # ``auth_model`` remediation.
-        #
-        # Scoped to 403 + 422 + the auth-class set (``401`` / ``440``,
-        # :data:`~meho_backplane.operations._errors._AUTH_FAILED_STATUSES`):
-        # every other status (404, 429, 5xx) flattens to the unchanged
-        # generic ``connector_error`` shape (429 rate-limit is a separate
-        # deliberate follow-up, not this surface). The branch is taken
-        # *inside* this arm rather than re-``raise``-ing to the
-        # ``except Exception`` below -- a re-raise from one except clause is
-        # not caught by a sibling clause of the same ``try``, so it would
-        # escape the dispatcher's never-raises contract.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
+        return await _handle_http_status_error(
+            http_exc=http_exc,
+            op_id=op_id,
             descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
+            audit_id=audit_id,
+            started=started,
         )
-        status_code = http_exc.response.status_code
-        if status_code == 403:
-            return result_connector_http_403(op_id, http_exc, duration_ms)
-        if status_code == 422:
-            return result_connector_http_422(op_id, http_exc, duration_ms)
-        if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
-            return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
-        return result_connector_error(op_id, http_exc, duration_ms)
     except httpx.ConnectError as conn_exc:
         # #1782 (Initiative #1774 T3): a ConnectError carries no
         # ``.response``, so it skips the HTTPStatusError arm above and used
@@ -1035,6 +994,240 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
         return result_connector_error(op_id, exc, duration_ms)
+
+
+async def _audit_error(
+    *,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    started: float,
+) -> float:
+    """Write the dispatch's ``result_status='error'`` audit row + broadcast.
+
+    Returns the elapsed-milliseconds value the calling error arm threads into
+    the structured :class:`OperationResult` builder, so the audited duration
+    and the returned duration are the same measurement.
+    """
+    duration_ms = _elapsed_ms(started)
+    await audit_and_broadcast_safe(
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        result_status="error",
+        duration_ms=duration_ms,
+    )
+    return duration_ms
+
+
+def _classify_http_status_error(
+    *,
+    http_exc: httpx.HTTPStatusError,
+    op_id: str,
+    connector_instance: Connector | None,
+    target: Any,
+    duration_ms: float,
+) -> OperationResult:
+    """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
+
+    The pure status -> builder mapping with no audit and no retry side effects,
+    so both the first-failure path (after a retry is exhausted or skipped) and
+    a retry's *second*-attempt failure classify a status identically:
+
+    * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
+      authenticated but lacks the op's required scope.
+    * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
+      parsed the request and rejected its content.
+    * an auth-class status (``401`` / vRLI's ``440``, scoped by the connector's
+      profile ``expiry_statuses`` or the typed-connector global) ->
+      :func:`result_connector_auth_failed` (#1804).
+    * every other status (404, 429, 5xx) -> the generic
+      :func:`result_connector_error`.
+    """
+    status_code = http_exc.response.status_code
+    if status_code == 403:
+        return result_connector_http_403(op_id, http_exc, duration_ms)
+    if status_code == 422:
+        return result_connector_http_422(op_id, http_exc, duration_ms)
+    if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
+        return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
+    return result_connector_error(op_id, http_exc, duration_ms)
+
+
+async def _handle_http_status_error(
+    *,
+    http_exc: httpx.HTTPStatusError,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    started: float,
+) -> Any | OperationResult:
+    """Convert a dispatch ``HTTPStatusError`` to a result, recovering session expiry.
+
+    G0.24-T4 (#1649): an upstream 403 or 422 carries actionable detail the
+    generic ``connector_error`` arm would bury in ``extras.exception_message``
+    (consumer ``claude-rdc-hetzner-dc#1138``), because the shared
+    ``HttpConnector`` adapter does no error mapping. 403 -> insufficient
+    permission (authenticated but lacking the op's scope); 422 -> invalid
+    payload (the upstream parsed the request and rejected its content).
+
+    G0.26-T5 (#1804) extended the same arm to auth-class statuses: a ``401``
+    (and vRLI's ``440``) carries an actionable auth/session-failure cause the
+    generic ``connector_error`` likewise buried (the #1798 vRLI dispatch the
+    operator saw as opaque ``connector_error (440)``).
+
+    G0.29-T2 (#2067) makes the auth-class status *recoverable* here, the seam
+    both the typed session connectors (vCenter 401, vRLI 440, nsx) and a
+    future ``ProfiledRestConnector`` traverse: this is the only place a
+    generic-ingested dispatch acts on an auth failure. When the status is
+    auth-class **and** the connector advertises a duck-typed
+    ``invalidate_session(target)`` hook, evict the cached session token and
+    re-dispatch the *same* ingested request exactly once. A re-login that
+    succeeds returns the raw payload up to the caller's success path, which
+    runs the redact -> reduce -> audit sequence -- so a recovered call writes
+    exactly one *success* audit row and no spurious error row (the error audit
+    is deferred until a failure is actually returned). A second auth failure
+    (re-login also failed) falls through to ``connector_auth_failed`` -- the
+    credential is missing/invalid/expired in Vault, or the ``auth_model`` is
+    wrong. The hook is duck-typed (``getattr``) rather than an ``isinstance``
+    ladder so it satisfies the typed connectors and a future profiled one
+    without coupling; a connector with no session state (stateless / Basic)
+    exposes no hook and is never retried.
+
+    Retry-once on an auth-class status is safe even for non-idempotent verbs:
+    a ``401`` / ``440`` means the upstream rejected the request *before*
+    executing it (the session token was stale), so no side effect occurred.
+    The recovery is gated strictly on the auth-class set; a 5xx / timeout --
+    which may have executed -- is never retried (it classifies straight to
+    ``connector_error`` with no invalidation).
+
+    The whole conversion stays inside the caller's ``try`` (this coroutine is
+    awaited from the ``except httpx.HTTPStatusError`` arm) and the retry's
+    second attempt is itself classified rather than re-raised, so the
+    dispatcher's never-raises contract holds on every path. Scoped to
+    403 + 422 + the auth-class set; every other status (404, 429, 5xx)
+    flattens to the unchanged generic ``connector_error`` shape.
+    """
+    status_code = http_exc.response.status_code
+    is_auth_failure = is_auth_failed_status(
+        status_code, _profile_expiry_statuses(connector_instance)
+    )
+    invalidate_session = getattr(connector_instance, "invalidate_session", None)
+    if is_auth_failure and callable(invalidate_session):
+        recovered = await _retry_after_session_invalidation(
+            invalidate_session=invalidate_session,
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            op_id=op_id,
+            started=started,
+        )
+        return recovered
+
+    duration_ms = await _audit_error(
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        started=started,
+    )
+    return _classify_http_status_error(
+        http_exc=http_exc,
+        op_id=op_id,
+        connector_instance=connector_instance,
+        target=target,
+        duration_ms=duration_ms,
+    )
+
+
+async def _retry_after_session_invalidation(
+    *,
+    invalidate_session: Callable[[Any], Awaitable[None]],
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    op_id: str,
+    started: float,
+) -> Any | OperationResult:
+    """Evict the cached session for *target* and re-dispatch the op once.
+
+    Helper for :func:`_handle_http_status_error`'s G0.29-T2 (#2067) recovery
+    seam. Invalidates the connector's cached session token (forcing the next
+    transport call to re-login -- vCenter's modern->legacy ``/api/session``
+    404 fallback re-runs because ``_establish_and_cache_session`` runs on the
+    now-cold cache), then re-runs :func:`_run_source_kind_branch` with the
+    same arguments. On success the raw payload flows back to the caller's
+    success path (redact -> reduce -> audit) so no error audit row is written.
+
+    The second attempt is wrapped so any exception it raises is converted to a
+    structured result with the error audit row written *here* -- the retry is
+    awaited outside the dispatcher's ``except`` ladder, so a re-raise would
+    not be caught by the sibling arms and would breach the never-raises
+    contract. ``HTTPStatusError`` is classified through the same status map as
+    the first failure (a second auth failure => ``connector_auth_failed``;
+    every other status => its usual shape); any other exception (a
+    second-attempt ``ConnectError``, a loader ``RuntimeError`` from the
+    re-login itself, ...) flattens to ``connector_error``.
+    """
+    await invalidate_session(target)
+    try:
+        return await _run_source_kind_branch(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except httpx.HTTPStatusError as retry_exc:
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        return _classify_http_status_error(
+            http_exc=retry_exc,
+            op_id=op_id,
+            connector_instance=connector_instance,
+            target=target,
+            duration_ms=duration_ms,
+        )
+    except Exception as retry_exc:
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        return result_connector_error(op_id, retry_exc, duration_ms)
 
 
 def _apply_redaction_middleware(

@@ -580,6 +580,34 @@ async def test_invalidate_session_drops_recorded_login_path() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_public_invalidate_session_delegates_to_private_eviction() -> None:
+    """Public ``invalidate_session`` (the #2067 dispatch-path hook) evicts token + path.
+
+    The duck-typed seam the dispatcher calls forward-fits a future profiled
+    runtime class without an ``isinstance`` ladder; it delegates to
+    ``_invalidate_session`` so a profiled connector recovers from session
+    expiry through the same dispatcher arm as the typed connectors.
+    """
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vcsim", host="vcsim.invalid")
+
+    async with respx.mock(base_url="https://vcsim.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
+        await connector.auth_headers(target, operator=_operator())
+
+    key = target_cache_key(target)
+    assert key in connector._session_tokens
+    assert key in connector._session_login_paths
+
+    await connector.invalidate_session(target)
+
+    assert key not in connector._session_tokens
+    assert key not in connector._session_login_paths
+    await connector.aclose()
+
+
 def test_session_login_basic_declares_vetted_legacy_fallback() -> None:
     """The fallback is a closed, vetted vCenter pair — and the only one."""
     from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS

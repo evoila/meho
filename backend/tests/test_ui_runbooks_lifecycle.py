@@ -44,13 +44,15 @@ import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -68,10 +70,13 @@ from meho_backplane.runbooks.service import RunbookTemplateService
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.auth.errors import ui_session_expired_exception_handler
 from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.middleware import UISessionContext
+from meho_backplane.ui.auth.refresh import SESSION_EXPIRED_DETAIL
 from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
@@ -916,3 +921,92 @@ def test_catalog_row_button_gates_refresh_on_success() -> None:
     assert "$event.detail.successful" in body
     assert "alert-error" in body  # appears in the gate expression
     assert "$dispatch('runbooks-refresh')" in body
+
+
+# ---------------------------------------------------------------------------
+# Role-lift failure on the detail read surface (#2114)
+#
+# The detail page recomputes the admin verdict per request by re-verifying the
+# session's stored access token (``_resolve_role``). A *terminal* session
+# expiry (token aged out + refresh failed) must NOT silently degrade a genuine
+# ``tenant_admin`` onto the opacity-restricted banner -- it must propagate the
+# ``session_expired`` 401 so the app-level handler redirects to re-auth. A
+# transient / malformed-token failure still fails soft (restricted view).
+# ---------------------------------------------------------------------------
+
+_RB_ROUTES = "meho_backplane.ui.routes.runbooks.routes"
+
+
+def _build_app_with_session_expired_handler() -> FastAPI:
+    """`_build_app` plus the app-level ``session_expired`` handler main wires."""
+    app = _build_app()
+    app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_resolve_role_reraises_session_expired() -> None:
+    """A terminal ``session_expired`` propagates (not swallowed to ``None``)."""
+    from meho_backplane.ui.routes.runbooks.routes import _resolve_role
+
+    ctx = UISessionContext(session_id=uuid.uuid4(), operator_sub=_OPERATOR_SUB, tenant_id=_TENANT_A)
+    expired = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SESSION_EXPIRED_DETAIL)
+    with (
+        patch(f"{_RB_ROUTES}.load_fresh_session", AsyncMock(return_value=object())),
+        patch(
+            f"{_RB_ROUTES}.verify_access_token_with_refresh",
+            AsyncMock(side_effect=expired),
+        ),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await _resolve_role(ctx)
+    assert excinfo.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert excinfo.value.detail == SESSION_EXPIRED_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_resolve_role_soft_fails_on_non_session_expired_401() -> None:
+    """A non-expiry verification failure still fails soft to ``None`` (operator)."""
+    from meho_backplane.ui.routes.runbooks.routes import _resolve_role
+
+    ctx = UISessionContext(session_id=uuid.uuid4(), operator_sub=_OPERATOR_SUB, tenant_id=_TENANT_A)
+    bad_signature = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED, detail="signature_verification_failed"
+    )
+    with (
+        patch(f"{_RB_ROUTES}.load_fresh_session", AsyncMock(return_value=object())),
+        patch(
+            f"{_RB_ROUTES}.verify_access_token_with_refresh",
+            AsyncMock(side_effect=bad_signature),
+        ),
+    ):
+        assert await _resolve_role(ctx) is None
+
+
+def test_detail_session_expired_redirects_admin_to_reauth() -> None:
+    """An admin whose session token expired is redirected to re-login, not the banner.
+
+    Regression for #2114: the fail-soft role lift used to drop a genuine
+    ``tenant_admin`` onto the opacity-restricted banner (``restricted=True``)
+    when the token re-verify raised ``session_expired``. It must instead
+    propagate to the app-level handler's 302 -> ``/ui/auth/login``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    session_id, _jwks = _admin_session()
+
+    client = TestClient(_build_app_with_session_expired_handler(), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    expired = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SESSION_EXPIRED_DETAIL)
+    with (
+        patch(f"{_RB_ROUTES}.load_fresh_session", AsyncMock(return_value=object())),
+        patch(
+            f"{_RB_ROUTES}.verify_access_token_with_refresh",
+            AsyncMock(side_effect=expired),
+        ),
+    ):
+        response = client.get("/ui/runbooks/rotate-cert", headers={"accept": "text/html"})
+
+    assert response.status_code == 302, response.text
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+    assert "Step details are restricted" not in response.text

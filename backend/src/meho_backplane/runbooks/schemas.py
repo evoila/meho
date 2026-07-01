@@ -51,7 +51,7 @@ import re
 from datetime import datetime
 from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from meho_backplane.kb.schemas import SLUG_PATTERN
 
@@ -220,7 +220,7 @@ class OperationCallStep(BaseModel):
 
     id: Annotated[str, Field(pattern=STEP_ID_PATTERN.pattern)]
     title: str
-    body: Annotated[str, Field(min_length=1)]
+    body: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     type: Literal["operation_call"]
     op_id: str
     params: dict[str, object]
@@ -239,7 +239,7 @@ class ManualStep(BaseModel):
 
     id: Annotated[str, Field(pattern=STEP_ID_PATTERN.pattern)]
     title: str
-    body: Annotated[str, Field(min_length=1)]
+    body: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     type: Literal["manual"]
     verify: Verify
 

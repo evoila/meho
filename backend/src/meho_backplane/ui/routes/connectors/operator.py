@@ -52,6 +52,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
+    SESSION_EXPIRED_DETAIL,
     load_fresh_session,
     verify_access_token_with_refresh,
 )
@@ -166,21 +167,36 @@ async def resolve_role_probe(
     the booleans the detail template reads.
 
     Used by the read-only ``GET /ui/connectors/{name}`` handler. Fails
-    **soft**: any JWT-validation hiccup (session row gone, JWKS endpoint
-    unreachable from this deploy, token swapped) projects to a
-    "no privileges" probe rather than 5xx-ing the page. The probe
-    handler (``POST /ui/connectors/{name}/probe``) remains the
-    server-side authority -- a soft "no privileges" hint just hides
-    the re-probe button optimistically; an attacker who crafts the
-    POST with a forged form still hits the 403 gate on the write
-    surface. The read surface must keep rendering even when the
-    JWT round-trip can't complete (transient JWKS outage, etc.).
+    **soft** for a *transient* JWT-validation hiccup (session row gone,
+    JWKS endpoint unreachable from this deploy, malformed/bad-signature
+    stored token, token swapped): projects to a "no privileges" probe
+    rather than 5xx-ing the page. The probe handler
+    (``POST /ui/connectors/{name}/probe``) remains the server-side
+    authority -- a soft "no privileges" hint just hides the re-probe
+    button optimistically; an attacker who crafts the POST with a forged
+    form still hits the 403 gate on the write surface. The read surface
+    must keep rendering even when the JWT round-trip can't complete
+    (transient JWKS outage, etc.).
+
+    The one exception is a **terminal** ``session_expired`` -- the token
+    aged out and its refresh failed, so the session row is dead. That is
+    re-raised so the app-level handler
+    (:mod:`meho_backplane.ui.auth.errors`) redirects the browser to
+    re-authenticate, rather than silently degrading a genuine
+    ``tenant_admin`` to the no-privileges render (#143; sibling of the
+    runbooks read-surface fix in ``routes.py::_resolve_role``).
     """
     if session_ctx is None:
         session_ctx = await require_ui_session(request)
     try:
         operator = await _lift_operator(session_ctx)
     except Exception as exc:
+        if (
+            isinstance(exc, HTTPException)
+            and exc.status_code == status.HTTP_401_UNAUTHORIZED
+            and exc.detail == SESSION_EXPIRED_DETAIL
+        ):
+            raise
         _log.info(
             "ui_connectors_role_probe_unavailable",
             session_id=str(session_ctx.session_id),

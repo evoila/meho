@@ -773,20 +773,38 @@ class TestT4OpsRegistration:
         assert len(BIND9_OPS) == 11
 
     @pytest.mark.parametrize(
-        "op_id, expected_safety",
+        "op_id, expected_safety, expected_requires_approval",
         [
-            ("bind9.config.apply_file", "dangerous"),
-            ("bind9.config.apply_views", "dangerous"),
-            ("bind9.config.backup", "caution"),
-            ("bind9.config.reload", "caution"),
+            # The two dangerous config-replacement ops require four-eyes on
+            # every principal kind (#129) — the non-agent gate keys on
+            # requires_approval, so a dangerous op must set it or a human
+            # tenant_admin could run it with no approval.
+            ("bind9.config.apply_file", "dangerous", True),
+            ("bind9.config.apply_views", "dangerous", True),
+            # caution ops stay default-allow for humans (auto-execute).
+            ("bind9.config.backup", "caution", False),
+            ("bind9.config.reload", "caution", False),
         ],
     )
-    def test_safety_levels_pin_to_spec(self, op_id: str, expected_safety: str) -> None:
+    def test_safety_levels_pin_to_spec(
+        self, op_id: str, expected_safety: str, expected_requires_approval: bool
+    ) -> None:
         op = next(o for o in BIND9_OPS if o.op_id == op_id)
         assert op.safety_level == expected_safety
-        # Dev-default: no production approval gate yet (G7/G10 keys on
-        # safety_level, not on requires_approval).
-        assert op.requires_approval is False
+        assert op.requires_approval is expected_requires_approval
+
+    def test_no_dangerous_op_bypasses_approval(self) -> None:
+        """No ``dangerous`` bind9 op ships ``requires_approval=False`` (#129).
+
+        The non-agent policy gate (``_non_agent_verdict``) keys only on
+        ``requires_approval``, so a ``dangerous`` op left ``requires_approval=
+        False`` lets a human/service principal execute it with no four-eyes
+        step. Pin the invariant so a future write op can't reintroduce the gap.
+        """
+        offenders = [
+            o.op_id for o in BIND9_OPS if o.safety_level == "dangerous" and not o.requires_approval
+        ]
+        assert offenders == [], offenders
 
     @pytest.mark.parametrize("op_id", ["bind9.config.apply_file", "bind9.config.apply_views"])
     def test_dangerous_op_carries_global_atomic_warning_in_description(self, op_id: str) -> None:

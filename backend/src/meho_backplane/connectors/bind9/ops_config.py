@@ -1364,7 +1364,7 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
         group_key="config",
         tags=("write", "config", "atomic-apply"),
         safety_level="dangerous",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions=BIND9_CONFIG_APPLY_FILE_LLM_INSTRUCTIONS,
     ),
     Bind9Op(
@@ -1384,7 +1384,7 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
         group_key="config",
         tags=("write", "config", "atomic-apply"),
         safety_level="dangerous",
-        requires_approval=False,
+        requires_approval=True,
         llm_instructions=BIND9_CONFIG_APPLY_VIEWS_LLM_INSTRUCTIONS,
     ),
     Bind9Op(

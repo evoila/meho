@@ -97,6 +97,7 @@ from typing import Annotated, Final, Literal
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
+from pydantic import StringConstraints
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.runbooks.run_service import RunbookRunService
@@ -433,7 +434,11 @@ def build_runbooks_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
-        target_kind: str | None = Query(default=None, max_length=_MAX_TARGET_KIND_LENGTH),
+        target_kind: Annotated[
+            Annotated[str, StringConstraints(max_length=_MAX_TARGET_KIND_LENGTH)] | None,
+            EMPTY_STR_TO_NONE,
+            Query(),
+        ] = None,
     ) -> HTMLResponse:
         return await _render_index(request, session, status, target_kind)
 
@@ -442,7 +447,11 @@ def build_runbooks_router() -> APIRouter:
         request: Request,
         session: UISessionContext = _require_session,
         status: Annotated[_StatusFilter | None, EMPTY_STR_TO_NONE, Query()] = None,
-        target_kind: str | None = Query(default=None, max_length=_MAX_TARGET_KIND_LENGTH),
+        target_kind: Annotated[
+            Annotated[str, StringConstraints(max_length=_MAX_TARGET_KIND_LENGTH)] | None,
+            EMPTY_STR_TO_NONE,
+            Query(),
+        ] = None,
     ) -> HTMLResponse:
         return await _render_list_fragment(request, session, status, target_kind)
 

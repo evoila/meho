@@ -22767,6 +22767,7 @@
           },
           "body": {
             "type": "string",
+            "minLength": 1,
             "title": "Body"
           },
           "type": {
@@ -22951,6 +22952,7 @@
           },
           "body": {
             "type": "string",
+            "minLength": 1,
             "title": "Body"
           },
           "type": {

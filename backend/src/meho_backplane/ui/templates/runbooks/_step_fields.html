@@ -121,7 +121,7 @@
                   x-bind:data-step-index="idx"
                   hx-post="/ui/runbooks/preview"
                   hx-trigger="input changed delay:500ms"
-                  hx-target="closest .flex-wrap >> .runbook-step-preview"
+                  hx-target="next .runbook-step-preview"
                   hx-swap="innerHTML"
                   hx-vals='js:{body: event.target.value}'
                   hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'

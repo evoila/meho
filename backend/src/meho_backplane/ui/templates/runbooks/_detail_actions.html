@@ -70,6 +70,16 @@
         >
           Publish
         </button>
+        {# Edit — a draft is mutable, so the editor route mutates it in place
+           (no fork; the engine's update_or_fork forks only a published version).
+           Lets an author fix a draft without publishing it first. #}
+        <a
+          href="/ui/runbooks/{{ template.slug }}/edit"
+          class="btn btn-outline btn-sm"
+          aria-label="Edit {{ template.slug }} v{{ template.version }}"
+        >
+          Edit
+        </a>
       {% elif template.status == "published" %}
         {# Deprecate — retires this published version. #}
         <button

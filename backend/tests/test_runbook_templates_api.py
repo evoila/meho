@@ -1181,3 +1181,29 @@ async def test_publish_writes_audit_row_with_publish_op_id_and_version() -> None
     # The template body / step contents never reach the audit payload.
     serialised = json.dumps(payload)
     assert "revoke-old-cert" not in serialised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank_body", ["", "   ", "\t\n  "])
+async def test_draft_rejects_blank_step_body_422(blank_body: str) -> None:
+    """A step with an empty or whitespace-only body is rejected at request validation (#2117 D3).
+
+    ``ManualStep.body`` / ``OperationCallStep.body`` carry
+    ``StringConstraints(strip_whitespace=True, min_length=1)``; a blank body
+    (empty *or* whitespace-only) is a non-functional step (the operator sees a
+    blank verify prompt), so it must not be silently accepted. Pydantic v2
+    strips before the min_length check, so a whitespace-only body collapses to
+    ``""`` and fails.
+    """
+    key, token = _admin_token()
+    payload = _template_body()
+    payload["steps"][0]["body"] = blank_body  # blank body -> min_length violation after strip
+    test_client = TestClient(_build_app())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = test_client.post(
+            "/api/v1/runbooks/templates",
+            json={"slug": "rotate-cert", "body": payload},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text

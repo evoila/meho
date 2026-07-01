@@ -220,7 +220,7 @@ class OperationCallStep(BaseModel):
 
     id: Annotated[str, Field(pattern=STEP_ID_PATTERN.pattern)]
     title: str
-    body: str
+    body: Annotated[str, Field(min_length=1)]
     type: Literal["operation_call"]
     op_id: str
     params: dict[str, object]
@@ -239,7 +239,7 @@ class ManualStep(BaseModel):
 
     id: Annotated[str, Field(pattern=STEP_ID_PATTERN.pattern)]
     title: str
-    body: str
+    body: Annotated[str, Field(min_length=1)]
     type: Literal["manual"]
     verify: Verify
 

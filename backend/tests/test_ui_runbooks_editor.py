@@ -926,3 +926,29 @@ def test_editor_new_reflected_xss_payload_cannot_break_out_of_x_data() -> None:
 
     assert response.status_code == 422, response.text
     _assert_no_xss_breakout(response.text)
+
+
+def test_editor_new_step_preview_uses_valid_hx_target() -> None:
+    """The step-body live-preview targets ``next .runbook-step-preview`` (#2117 D1).
+
+    The prior ``closest .flex-wrap >> .runbook-step-preview`` used the
+    shadow-DOM piercing combinator ``>>``, invalid in htmx target resolution /
+    ``Element.closest()`` — it threw a JS SyntaxError and killed the preview.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/new")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'hx-target="next .runbook-step-preview"' in body
+    # The invalid combinator selector must be gone.
+    assert ".flex-wrap >> .runbook-step-preview" not in body

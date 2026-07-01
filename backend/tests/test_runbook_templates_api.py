@@ -1181,3 +1181,25 @@ async def test_publish_writes_audit_row_with_publish_op_id_and_version() -> None
     # The template body / step contents never reach the audit payload.
     serialised = json.dumps(payload)
     assert "revoke-old-cert" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_draft_rejects_empty_step_body_422() -> None:
+    """A step with an empty body is rejected at request validation (#2117 D3).
+
+    ``ManualStep.body`` / ``OperationCallStep.body`` carry ``min_length=1``; an
+    empty body is a non-functional step (the operator sees a blank verify
+    prompt), so it must not be silently accepted.
+    """
+    key, token = _admin_token()
+    payload = _template_body()
+    payload["steps"][0]["body"] = ""  # empty body -> min_length=1 violation
+    test_client = TestClient(_build_app())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = test_client.post(
+            "/api/v1/runbooks/templates",
+            json={"slug": "rotate-cert", "body": payload},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text

@@ -916,3 +916,30 @@ def test_catalog_row_button_gates_refresh_on_success() -> None:
     assert "$event.detail.successful" in body
     assert "alert-error" in body  # appears in the gate expression
     assert "$dispatch('runbooks-refresh')" in body
+
+
+def test_detail_draft_shows_edit_affordance() -> None:
+    """A draft detail exposes an in-place Edit link, not just Publish (#2117 D2).
+
+    Editing a draft mutates it in place (the engine's ``update_or_fork`` forks
+    only a published version), so an author can fix a draft without publishing
+    first. The Edit link routes to the shared ``/ui/runbooks/<slug>/edit`` editor.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")  # publish defaults False -> draft
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'href="/ui/runbooks/rotate-cert/edit"' in body
+    # The draft still shows Publish alongside Edit.
+    assert "Publish" in body

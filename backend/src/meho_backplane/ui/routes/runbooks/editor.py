@@ -532,6 +532,11 @@ async def handle_editor_submit(
     missing template -- the editor is re-rendered inline at HTTP 422 with the
     entered data preserved and a freshly-minted CSRF token.
     """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="runbook.draft_template" if mode == "new" else "runbook.edit_template",
+        audit_op_class="write",
+        audit_slug=slug,
+    )
     raw_steps: object = []
     error_message: str | None = None
     body: RunbookTemplateBody | None = None

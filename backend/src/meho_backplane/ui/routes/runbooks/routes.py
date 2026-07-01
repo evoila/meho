@@ -51,10 +51,15 @@ notice. This matches the REST surface's ``403 detail="opacity_floor"``
 posture while keeping the console a navigable page rather than an error.
 
 The role lift fails **soft** to operator-level privileges (no admin) when
-the JWT round-trip can't complete (session row vanished mid-request, JWKS
-transiently unreachable) -- the same posture
+the JWT round-trip can't complete for a *transient* reason (session row
+vanished mid-request, JWKS transiently unreachable, a malformed stored
+token) -- the same posture
 :func:`meho_backplane.ui.routes.connectors.operator.resolve_role_probe`
-adopts. The restricted-detail render is the safe default, never a 5xx.
+adopts. The restricted-detail render is the safe default, never a 5xx. The
+one exception is a **terminal** ``session_expired`` (the token aged out and
+its refresh failed): that is re-raised so the app-level handler redirects to
+re-auth, rather than silently degrading a genuine ``tenant_admin`` onto the
+restricted banner (#2114).
 
 Tenant scoping
 --------------
@@ -90,7 +95,7 @@ from dataclasses import dataclass
 from typing import Annotated, Final, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -107,6 +112,7 @@ from meho_backplane.runbooks.service import (
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
+    SESSION_EXPIRED_DETAIL,
     load_fresh_session,
     verify_access_token_with_refresh,
 )
@@ -174,12 +180,23 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
     re-verifying -- so an expired-but-refreshable token lifts the real role
     instead of degrading the operator to the restricted view mid-session.
 
-    Fails **soft**: any hiccup (session row vanished between the middleware
-    check and here, JWKS transiently unreachable, refresh unavailable,
-    identity mismatch on the decoded token) returns ``None`` -- the caller
-    then treats the request as a plain operator (no admin privilege). The
-    opacity-floor branch is the safe default; an unavailable role lift must
-    never 5xx the read surface.
+    Fails **soft** for a *recoverable-later* hiccup (session row vanished
+    between the middleware check and here, JWKS transiently unreachable, a
+    malformed / bad-signature stored token, identity mismatch on the decoded
+    token): returns ``None`` so the caller treats the request as a plain
+    operator (no admin privilege). The opacity-floor branch is the safe
+    default; a transiently-unavailable role lift must never 5xx the read
+    surface.
+
+    The one exception is a **terminal** ``session_expired`` -- the BFF
+    session's access token aged out and its refresh failed, so the row is
+    dead and can never mint a fresh token. That must **not** degrade to the
+    restricted view: doing so silently drops a genuine ``tenant_admin`` onto
+    the opacity banner ("complete a run to unlock"), non-deterministically
+    per browser as each session's token expires (#2114). It is re-raised so
+    the app-level ``session_expired`` handler
+    (:mod:`meho_backplane.ui.auth.errors`) redirects the browser to
+    re-authenticate; after re-login the fresh token lifts the real role.
     """
     try:
         decrypted = await load_fresh_session(session_ctx.session_id)
@@ -191,6 +208,12 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
             expected_audience=settings.keycloak_audience,
         )
     except Exception as exc:
+        if (
+            isinstance(exc, HTTPException)
+            and exc.status_code == status.HTTP_401_UNAUTHORIZED
+            and exc.detail == SESSION_EXPIRED_DETAIL
+        ):
+            raise
         log.info(
             "ui_runbooks_role_lift_unavailable",
             session_id=str(session_ctx.session_id),
@@ -217,9 +240,11 @@ async def _is_admin(session_ctx: UISessionContext) -> bool:
     Thin wrapper over :func:`_resolve_role` returning just the admin verdict --
     the catalog + list-fragment renders need the boolean (to show / hide the
     lifecycle row actions) but not the full :class:`Operator`. Fails soft to
-    ``False`` (operator privileges) via :func:`_resolve_role`, so the row
-    actions are hidden whenever the role lift can't complete. The POST handlers
-    re-check server-side, so a hidden-but-forged action is still a 403.
+    ``False`` (operator privileges) for a transient lift failure, so the row
+    actions are hidden whenever the role lift can't complete. A terminal
+    ``session_expired`` propagates (via :func:`_resolve_role`) to the re-auth
+    redirect rather than degrading. The POST handlers re-check server-side, so
+    a hidden-but-forged action is still a 403.
     """
     operator = await _resolve_role(session_ctx)
     return operator is not None and operator.tenant_role == TenantRole.TENANT_ADMIN

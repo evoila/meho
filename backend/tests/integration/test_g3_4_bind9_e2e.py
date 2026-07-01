@@ -989,6 +989,14 @@ async def test_dispatch_config_apply_file_writes_state_before_after(
 ) -> None:
     """``bind9.config.apply_file`` writes a fragment + audit row carries
     state_before / state_after.
+
+    ``apply_file`` is a dangerous, four-eyes-gated op (#129): a lone-operator
+    dispatch parks awaiting approval. ``_approved=True`` is the flag
+    ``api.v1.approvals`` passes on the resume re-dispatch after a *second*
+    operator approves; here it drives the post-approval execution path so the
+    write + state_before/after audit assertions still hold. The park/gate
+    itself is unit-covered (``test_dispatch_human_requires_approval_op_queues``
+    + ``test_no_dangerous_op_bypasses_approval``).
     """
     operator = _make_operator(sub="op-apply-file", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
@@ -1000,6 +1008,7 @@ async def test_dispatch_config_apply_file_writes_state_before_after(
             "path": "named.conf.options",
             "content": "// e2e applied fragment\n",
         },
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result["op_class"] == "write"
@@ -1016,7 +1025,12 @@ async def test_dispatch_config_apply_file_writes_state_before_after(
 async def test_dispatch_config_apply_views_writes_multi_file_tree(
     bind9_e2e: _Bind9Target,
 ) -> None:
-    """``bind9.config.apply_views`` writes a multi-file tree successfully."""
+    """``bind9.config.apply_views`` writes a multi-file tree successfully.
+
+    Like ``apply_file``, ``apply_views`` is dangerous + four-eyes-gated (#129);
+    ``_approved=True`` drives the post-approval resume execution path (the
+    park/gate is unit-covered). See the ``apply_file`` e2e above.
+    """
     operator = _make_operator(sub="op-apply-views", tenant_id=_OPERATOR_TENANT_ID)
     result = await dispatch(
         operator=operator,
@@ -1028,6 +1042,7 @@ async def test_dispatch_config_apply_views_writes_multi_file_tree(
                 "named.conf.smoke-e2e": "// apply_views e2e smoke fragment\n",
             },
         },
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result["op_class"] == "write"

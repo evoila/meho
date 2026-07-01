@@ -507,6 +507,38 @@ def test_runbooks_list_empty_status_filter_is_200_unfiltered() -> None:
     assert "drain-node" in index_response.text
 
 
+def test_runbooks_list_empty_target_kind_filter_is_200_unfiltered() -> None:
+    """An empty ``?target_kind=`` (and combined empty filters) returns the full catalog (#2117 D5).
+
+    The post-deprecate ``runbooks-refresh`` re-fetches ``/ui/runbooks/list``
+    with ``hx-include="[name='status'], [name='target_kind']"``, so an empty
+    target-kind input submits ``?target_kind=``. Without the empty-string
+    coercion the filter applied ``WHERE target_kind = ''`` and matched nothing,
+    emptying the list after every deprecate (the same footgun as the status
+    filter, which already coerces). Both filters empty must return the
+    unfiltered catalog.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="k8s-drain", body=_manual_body(target_kind="k8s-node"))
+    _seed_template(
+        tenant_id=_TENANT_A, slug="vcenter-cert", body=_manual_body(target_kind="vmware-vcenter")
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        tk_only = client.get("/ui/runbooks/list", params={"target_kind": ""})
+        both = client.get("/ui/runbooks/list", params={"status": "", "target_kind": ""})
+
+    assert tk_only.status_code == 200, tk_only.text
+    assert "k8s-drain" in tk_only.text
+    assert "vcenter-cert" in tk_only.text
+    # The exact post-deprecate refresh shape: both filters empty -> full catalog.
+    assert both.status_code == 200, both.text
+    assert "k8s-drain" in both.text
+    assert "vcenter-cert" in both.text
+
+
 # ---------------------------------------------------------------------------
 # GET /ui/runbooks/<slug> -- detail (admin / post-completion sees full steps)
 # ---------------------------------------------------------------------------

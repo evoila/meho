@@ -47,13 +47,15 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -76,10 +78,13 @@ from meho_backplane.db.models import (
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.auth.errors import ui_session_expired_exception_handler
 from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.middleware import UISessionContext
+from meho_backplane.ui.auth.refresh import SESSION_EXPIRED_DETAIL
 from meho_backplane.ui.auth.session_store import (
     create_session,
     reset_fernet_cache_for_testing,
@@ -1305,3 +1310,78 @@ def test_list_sort_hrefs_preserve_active_product_filter() -> None:
     # The header link to swap the sort direction must carry the filter
     # so a sort click doesn't drop ``?product=``.
     assert "product=vmware" in body
+
+
+# ---------------------------------------------------------------------------
+# Role-lift failure on the connectors detail read surface (#143)
+#
+# `resolve_role_probe` recomputes the admin verdict per request by re-verifying
+# the session's stored access token. A *terminal* session expiry (token aged
+# out + refresh failed -> `session_expired`) must NOT silently degrade a
+# genuine `tenant_admin` to the no-privileges render -- it must propagate the
+# 401 so the app-level handler redirects to re-auth. A transient / malformed-
+# token failure still fails soft to the no-privileges probe. Sibling of the
+# runbooks read-surface fix in routes.py::_resolve_role (evoila/meho#2114).
+# ---------------------------------------------------------------------------
+
+_OPERATOR_MOD = "meho_backplane.ui.routes.connectors.operator"
+
+
+def _build_app_with_session_expired_handler() -> FastAPI:
+    """`_build_app` plus the app-level ``session_expired`` handler main wires."""
+    app = _build_app()
+    app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_resolve_role_probe_reraises_session_expired() -> None:
+    """A terminal ``session_expired`` propagates (not swallowed to a no-priv probe)."""
+    from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
+
+    ctx = UISessionContext(session_id=uuid.uuid4(), operator_sub=_OP_ADMIN, tenant_id=_TENANT_A)
+    expired = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SESSION_EXPIRED_DETAIL)
+    with (
+        patch(f"{_OPERATOR_MOD}._lift_operator", AsyncMock(side_effect=expired)),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await resolve_role_probe(None, ctx)
+    assert excinfo.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert excinfo.value.detail == SESSION_EXPIRED_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_resolve_role_probe_soft_fails_on_non_session_expired_401() -> None:
+    """A non-expiry verification failure still degrades soft to a no-priv probe."""
+    from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
+
+    ctx = UISessionContext(session_id=uuid.uuid4(), operator_sub=_OP_ADMIN, tenant_id=_TENANT_A)
+    bad_signature = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED, detail="signature_verification_failed"
+    )
+    with patch(f"{_OPERATOR_MOD}._lift_operator", AsyncMock(side_effect=bad_signature)):
+        probe = await resolve_role_probe(None, ctx)
+    assert probe.is_tenant_admin is False
+    assert probe.is_operator is False
+
+
+def test_detail_session_expired_redirects_to_reauth() -> None:
+    """A connectors-detail GET with an expired session redirects to re-login, not a degraded render.
+
+    Regression for #143: the fail-soft role probe used to drop a genuine
+    ``tenant_admin`` to a no-privileges render when the token re-verify raised
+    ``session_expired``. It must instead propagate to the app-level handler's
+    302 -> ``/ui/auth/login``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="expired-view", product="ssh")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_OP_ADMIN)
+
+    client = TestClient(_build_app_with_session_expired_handler(), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    expired = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=SESSION_EXPIRED_DETAIL)
+    with patch(f"{_OPERATOR_MOD}._lift_operator", AsyncMock(side_effect=expired)):
+        response = client.get("/ui/connectors/expired-view", headers={"accept": "text/html"})
+
+    assert response.status_code == 302, response.text
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")

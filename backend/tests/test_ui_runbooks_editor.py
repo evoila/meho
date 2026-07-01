@@ -54,11 +54,13 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import RunbookRun, Tenant
+from meho_backplane.db.models import AuditLog, RunbookRun, Tenant
 from meho_backplane.runbooks.schemas import (
     ConfirmVerify,
     DraftTemplateRequest,
@@ -156,6 +158,28 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _build_app() -> FastAPI:
     """Minimal FastAPI app wired for runbooks UI tests (T1-suite shape)."""
     app = FastAPI()
+    app.add_middleware(CSRFMiddleware)
+    app.add_middleware(UISessionMiddleware)
+    app.mount(
+        "/ui/static",
+        StaticFiles(directory=str(static_root_dir()), check_dir=False),
+        name="ui_static",
+    )
+    app.include_router(build_ui_auth_router())
+    app.include_router(build_ui_router())
+    return app
+
+
+def _build_app_with_audit() -> FastAPI:
+    """`_build_app` plus the chassis `AuditMiddleware`.
+
+    The editor write handlers bind the canonical `runbook.*` audit op id, and
+    the chassis middleware commits the row from those contextvars (mirrors the
+    T2 promote wiring in `test_ui_memory_create_promote`). The plain
+    `_build_app` omits the audit middleware, so it can't observe the row.
+    """
+    app = FastAPI()
+    app.add_middleware(AuditMiddleware)
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(UISessionMiddleware)
     app.mount(
@@ -952,3 +976,110 @@ def test_editor_new_step_preview_uses_valid_hx_target() -> None:
     assert 'hx-target="next .runbook-step-preview"' in body
     # The invalid combinator selector must be gone.
     assert ".flex-wrap >> .runbook-step-preview" not in body
+
+
+# ---------------------------------------------------------------------------
+# Audit op-id on UI-path template writes (#2116)
+#
+# The REST POST/PATCH routes bind the canonical `runbook.draft_template` /
+# `runbook.edit_template` audit op ids; the run-driver routes bind
+# `runbook.next_step` / `runbook.abort` / `runbook.reassign`. The editor
+# create/edit routes did not, so a UI-path template write landed under a
+# path-derived `ui.view.*` op id and an op-id-scoped audit query missed it.
+# ---------------------------------------------------------------------------
+
+
+def _audit_rows_for_http_path(tenant_id: uuid.UUID, http_path: str) -> list[AuditLog]:
+    """Read back the chassis audit rows for *tenant_id* on the HTTP route *http_path*.
+
+    The chassis :class:`AuditMiddleware` writes one row per request with
+    ``AuditLog.path`` = the HTTP path and the operation id inside
+    ``payload['op_id']`` (mirrors ``test_runbook_templates_api`` for the REST
+    routes). This is distinct from the verb-style rows the run service
+    self-writes (where ``path`` is the op id itself).
+    """
+
+    async def _do() -> list[AuditLog]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLog).where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.path == http_path,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return list(rows)
+
+    return asyncio.run(_do())
+
+
+def test_create_draft_writes_audit_row_with_draft_op_id() -> None:
+    """A UI create writes an audit row under `runbook.draft_template` (#2116)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = TestClient(_build_app_with_audit(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/new",
+            data={
+                "slug": "rotate-cert",
+                "title": "Rotate certificate",
+                "description": "Rotate the serving cert.",
+                "target_kind": "vmware.vcenter",
+                "steps": _steps_json_manual_and_opcall(),
+            },
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 204, response.text
+    rows = _audit_rows_for_http_path(_TENANT_A, "/ui/runbooks/new")
+    assert any(r.payload.get("op_id") == "runbook.draft_template" for r in rows), [
+        r.payload.get("op_id") for r in rows
+    ]
+
+
+def test_edit_draft_writes_audit_row_with_edit_op_id() -> None:
+    """A UI edit writes an audit row under `runbook.edit_template` (#2116)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", body=_manual_body())
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = TestClient(_build_app_with_audit(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/drain-node/edit",
+            data={
+                "title": "Drain node (edited)",
+                "description": "Drain and cordon a node.",
+                "target_kind": "k8s-node",
+                "steps": _steps_json_manual_and_opcall(),
+            },
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code in (200, 204), response.text
+    rows = _audit_rows_for_http_path(_TENANT_A, "/ui/runbooks/drain-node/edit")
+    assert any(r.payload.get("op_id") == "runbook.edit_template" for r in rows), [
+        r.payload.get("op_id") for r in rows
+    ]

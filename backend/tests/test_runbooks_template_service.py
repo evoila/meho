@@ -41,6 +41,7 @@ from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.runbooks.schemas import (
     ConfirmVerify,
     DeprecateTemplateRequest,
+    DiscardTemplateRequest,
     DraftTemplateRequest,
     EditTemplateRequest,
     ListTemplatesFilter,
@@ -449,3 +450,125 @@ async def test_show_template_missing_raises() -> None:
 
     with pytest.raises(TemplateNotFoundError):
         await service.show_template(tenant_id, "ghost")
+
+
+# ---------------------------------------------------------------------------
+# discard (delete-for-drafts leg, #135)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discard_removes_draft() -> None:
+    """A draft discards cleanly; a subsequent show 404s (AC1)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+
+    resp = await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+    assert resp.status == "discarded"
+    assert resp.slug == "drain-node"
+    assert resp.version == 1
+
+    # The draft is gone: show now raises, and the slug re-drafts as v1.
+    with pytest.raises(TemplateNotFoundError):
+        await service.show_template(tenant_id, "drain-node", version=1)
+    listed = await service.list_templates(tenant_id, ListTemplatesFilter())
+    assert [t.slug for t in listed] == []
+
+
+@pytest.mark.asyncio
+async def test_discard_forked_draft_leaves_published_parent_and_runs_intact() -> None:
+    """Discarding a forked v2 draft must not touch the published v1 or its runs.
+
+    The interesting correctness path: a draft forked from a published version
+    that has in-flight runs. Discarding the fork removes only the v2 row --
+    v1 stays published, its pinned run survives (``runbook_runs`` carries no
+    FK to ``runbook_templates``), and v1 becomes the latest again.
+    """
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+    await _seed_run(tenant_id, "drain-node", 1, "in_progress")
+    # Editing a published slug with no draft forks a new v2 draft.
+    forked = await service.update_or_fork(
+        tenant_id, OPERATOR, EditTemplateRequest(slug="drain-node", body=_body("v2"))
+    )
+    assert forked.version == 2
+
+    resp = await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=2))
+    assert resp.status == "discarded"
+
+    # v1 is untouched and is once again the latest version.
+    v1 = await service.show_template(tenant_id, "drain-node", version=1)
+    assert v1.status == "published"
+    with pytest.raises(TemplateNotFoundError):
+        await service.show_template(tenant_id, "drain-node", version=2)
+    latest = await service.show_template(tenant_id, "drain-node")
+    assert latest.version == 1
+
+    # The in-flight run pinned to v1 survives the fork's discard.
+    assert await service.count_in_flight_runs(tenant_id, "drain-node", 1) == 1
+
+
+@pytest.mark.asyncio
+async def test_discard_slug_is_reusable_after_discard() -> None:
+    """Discarding v1 frees the slug: create_draft succeeds again at v1."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+    # No DuplicateDraftError -- the slug has no rows left.
+    again = await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1-again"))
+    )
+    assert again.version == 1
+
+
+@pytest.mark.asyncio
+async def test_discard_published_raises_pointing_at_deprecate() -> None:
+    """Discarding a published version raises TemplateNotDraftError naming deprecate (AC2)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+
+    with pytest.raises(TemplateNotDraftError, match="deprecate"):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+    # The published row is untouched by the refused discard.
+    assert (await service.show_template(tenant_id, "drain-node", version=1)).status == "published"
+
+
+@pytest.mark.asyncio
+async def test_discard_deprecated_raises() -> None:
+    """Discarding a deprecated version is refused (retired, not discardable)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+    await service.deprecate(tenant_id, DeprecateTemplateRequest(slug="drain-node", version=1))
+
+    with pytest.raises(TemplateNotDraftError):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+
+@pytest.mark.asyncio
+async def test_discard_missing_raises() -> None:
+    """Discarding a non-existent (slug, version) raises TemplateNotFoundError."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+
+    with pytest.raises(TemplateNotFoundError):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="ghost", version=1))

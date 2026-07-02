@@ -3,11 +3,11 @@
 
 """Tests for the ``meho.runbook.*`` template-lifecycle MCP tools (G12.2-T4, #1298).
 
-Covers the task's acceptance criteria for the six template-lifecycle
+Covers the task's acceptance criteria for the seven template-lifecycle
 tools that wrap :class:`~meho_backplane.runbooks.service.RunbookTemplateService`
-on the MCP transport:
+on the MCP transport (``discard_template`` added by #135):
 
-* All six tools register against the G0.5 registry with strict 2020-12
+* All seven tools register against the G0.5 registry with strict 2020-12
   ``inputSchema`` and the MEHO-internal RBAC fields stripped from the
   wire shape.
 * RBAC: five tools are ``TENANT_ADMIN``-only; ``meho.runbook.list_templates``
@@ -63,6 +63,7 @@ _ADMIN_TOOLS = {
     "meho.runbook.edit_template",
     "meho.runbook.publish_template",
     "meho.runbook.deprecate_template",
+    "meho.runbook.discard_template",
 }
 # ``meho.runbook.show_template`` is OPERATOR-readable at the dispatcher gate
 # (G12.3-T4 / #1309); the run-state-conditional opacity-floor check lives
@@ -128,10 +129,10 @@ def _result_payload(body: Any) -> Any:
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_all_six_tools_registered_with_strict_schema(
+def test_all_seven_tools_registered_with_strict_schema(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: all six tools surface for a TENANT_ADMIN with strict input schemas."""
+    """AC: all seven tools surface for a TENANT_ADMIN with strict input schemas."""
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
@@ -378,6 +379,41 @@ def test_deprecate_tool_invocation(
         "version": 1,
         "status": "deprecated",
     }
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_discard_tool_invocation(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC4: discard a draft; a published version and a re-discard both → ``-32602``."""
+    client, _op = client_with_operator
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
+
+    ok = _result_payload(
+        _call(
+            client, "meho.runbook.discard_template", {"template_slug": "cert-rotate", "version": 1}
+        )
+    )
+    assert ok == {
+        "slug": "cert-rotate",
+        "template_slug": "cert-rotate",
+        "version": 1,
+        "status": "discarded",
+    }
+
+    # Re-discarding the now-removed draft → TemplateNotFoundError → -32602.
+    gone = _call(
+        client, "meho.runbook.discard_template", {"template_slug": "cert-rotate", "version": 1}
+    )
+    assert gone["error"]["code"] == INVALID_PARAMS
+
+    # Discarding a published version is refused (retired via deprecate, not discarded).
+    _call(client, "meho.runbook.draft_template", {"template_slug": "drain-node", "body": _body()})
+    _call(client, "meho.runbook.publish_template", {"template_slug": "drain-node", "version": 1})
+    published = _call(
+        client, "meho.runbook.discard_template", {"template_slug": "drain-node", "version": 1}
+    )
+    assert published["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------

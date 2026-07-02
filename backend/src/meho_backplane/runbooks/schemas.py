@@ -61,6 +61,8 @@ __all__ = [
     "ConfirmVerify",
     "DeprecateTemplateRequest",
     "DeprecateTemplateResponse",
+    "DiscardTemplateRequest",
+    "DiscardTemplateResponse",
     "DraftTemplateRequest",
     "DraftTemplateResponse",
     "EditTemplateRequest",
@@ -420,6 +422,34 @@ class DeprecateTemplateResponse(BaseModel):
     slug: str
     version: int
     status: Literal["deprecated"]
+
+
+class DiscardTemplateRequest(BaseModel):
+    """Request body for ``meho.runbook.discard_template`` -- delete an unpublished draft."""
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: Annotated[str, Field(pattern=SLUG_PATTERN.pattern)]
+    version: int
+
+
+class DiscardTemplateResponse(BaseModel):
+    """Response for ``meho.runbook.discard_template`` -- the discarded draft's coordinates.
+
+    ``status`` is the synthetic terminal marker ``"discarded"`` -- unlike
+    the other lifecycle verbs it is **not** a stored
+    :class:`~meho_backplane.db.models.RunbookTemplate` status (the row is
+    deleted, not transitioned), it signals to the caller that the draft
+    was removed. Only unpublished drafts are discardable; published /
+    deprecated versions are retired via ``deprecate`` (preserving history),
+    never discarded.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    version: int
+    status: Literal["discarded"]
 
 
 class ListTemplatesFilter(BaseModel):

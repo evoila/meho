@@ -404,14 +404,16 @@ def test_list_operation_groups_paginates_keyset_on_group_key() -> None:
 # §14.9 — runbook family: dotted names only + template_slug field
 # ---------------------------------------------------------------------------
 
-#: The 11 canonical dotted runbook tool names (#1612). After #1625 these
-#: are the *only* runbook tools on the surface — the flat ``runbook_*``
-#: aliases that bridged the one-release migration window were removed.
+#: The 12 canonical dotted runbook tool names (#1612, + discard_template
+#: #135). After #1625 these are the *only* runbook tools on the surface —
+#: the flat ``runbook_*`` aliases that bridged the one-release migration
+#: window were removed.
 _DOTTED_RUNBOOK_TOOLS = (
     "meho.runbook.draft_template",
     "meho.runbook.edit_template",
     "meho.runbook.publish_template",
     "meho.runbook.deprecate_template",
+    "meho.runbook.discard_template",
     "meho.runbook.list_templates",
     "meho.runbook.show_template",
     "meho.runbook.start",
@@ -437,14 +439,14 @@ _REMOVED_FLAT_RUNBOOK_TOOLS = (
 )
 
 
-def test_runbook_family_is_exactly_eleven_dotted_tools() -> None:
-    """Convention §14.9: the runbook family is exactly 11 dotted tools, zero flat.
+def test_runbook_family_is_exactly_twelve_dotted_tools() -> None:
+    """Convention §14.9: the runbook family is exactly 12 dotted tools, zero flat.
 
     The runbook family was the last flat multi-verb family on the surface
     (#1612). #1612 made the dotted ``meho.runbook.<verb>`` names canonical
     and kept the flat ``runbook_*`` names as deprecated aliases for one
-    release; #1625 removed them. The wire surface now serves exactly the
-    11 dotted tools and no flat aliases.
+    release; #1625 removed them. #135 added ``discard_template``. The wire
+    surface now serves exactly the 12 dotted tools and no flat aliases.
     """
     # Enumerate the live tool registry (the same private map the
     # dispatcher resolves against). The structural pin is total: the set

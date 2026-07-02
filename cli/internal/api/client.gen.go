@@ -3014,6 +3014,21 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DiscardTemplateResponse Response for “meho.runbook.discard_template“ -- the discarded draft's coordinates.
+//
+// “status“ is the synthetic terminal marker “"discarded"“ -- unlike
+// the other lifecycle verbs it is **not** a stored
+// :class:`~meho_backplane.db.models.RunbookTemplate` status (the row is
+// deleted, not transitioned), it signals to the caller that the draft
+// was removed. Only unpublished drafts are discardable; published /
+// deprecated versions are retired via “deprecate“ (preserving history),
+// never discarded.
+type DiscardTemplateResponse struct {
+	Slug    string `json:"slug"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
+}
+
 // DocCollectionBackend The “{type, ref}“ backend routing record a create supplies.
 //
 // “type“ is the search-backend type the row routes to (validated at
@@ -6134,7 +6149,7 @@ type UnderscoreSortDirection string
 // }}“ rendering stable (“"all"“, not “"_StatusFilter.ALL"“).
 type UnderscoreStatusFilter string
 
-// UnderscoreVersionBody Request body for the publish / deprecate routes -- carries “version“ only.
+// UnderscoreVersionBody Request body for the publish / deprecate / discard routes -- carries “version“ only.
 //
 // The slug is the URL's job (the route's “{slug}“ path parameter); the
 // body carries just the integer version to act on. “extra="forbid"“
@@ -6755,6 +6770,11 @@ type DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams defines parameters for DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost.
+type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams defines parameters for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7372,6 +7392,9 @@ type EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody = RunbookTemplat
 
 // DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody defines body for DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost for application/json ContentType.
 type DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody = UnderscoreVersionBody
+
+// DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody defines body for DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost for application/json ContentType.
+type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody = UnderscoreVersionBody
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody defines body for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost for application/json ContentType.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = UnderscoreVersionBody
@@ -8942,6 +8965,11 @@ type ClientInterface interface {
 	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBody(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBody request with any body
+	DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBody(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, body DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody request with any body
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11355,6 +11383,30 @@ func (c *Client) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBod
 
 func (c *Client) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBody(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, body DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequest(c.Server, slug, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -21407,6 +21459,68 @@ func NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequestWithBody(
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s/deprecate", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequest calls the generic DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost builder with application/json body
+func NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequest(server string, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, body DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequestWithBody generates requests for DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost with any type of body
+func NewDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostRequestWithBody(server string, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s/discard", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -33700,6 +33814,11 @@ type ClientWithResponsesInterface interface {
 
 	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithResponse(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error)
 
+	// DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBodyWithResponse request with any body
+	DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse, error)
+
+	DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithResponse(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, body DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody, reqEditors ...RequestEditorFn) (*DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse, error)
+
 	// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse request with any body
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
 
@@ -36679,6 +36798,29 @@ func (r DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse) Status
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DiscardTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -42713,6 +42855,23 @@ func (c *ClientWithResponses) DeprecateTemplateApiV1RunbooksTemplatesSlugDepreca
 	return ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse(rsp)
 }
 
+// DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBodyWithResponse request with arbitrary body returning *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse
+func (c *ClientWithResponses) DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse, error) {
+	rsp, err := c.DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithResponse(ctx context.Context, slug string, params *DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams, body DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody, reqEditors ...RequestEditorFn) (*DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse, error) {
+	rsp, err := c.DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPost(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse(rsp)
+}
+
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse request with arbitrary body returning *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse
 func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error) {
 	rsp, err := c.PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx, slug, params, contentType, body, reqEditors...)
@@ -48588,6 +48747,39 @@ func ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse(rsp *
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest DeprecateTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse parses an HTTP response from a DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostWithResponse call
+func ParseDiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse(rsp *http.Response) (*DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DiscardTemplateResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

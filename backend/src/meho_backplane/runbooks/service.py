@@ -68,6 +68,8 @@ from meho_backplane.kb.schemas import validate_slug
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
     DeprecateTemplateResponse,
+    DiscardTemplateRequest,
+    DiscardTemplateResponse,
     DraftTemplateRequest,
     DraftTemplateResponse,
     EditTemplateRequest,
@@ -112,7 +114,12 @@ class TemplateNotFoundError(LookupError):
 
 
 class TemplateNotDraftError(ValueError):
-    """Raised when publish is called against a non-draft template."""
+    """Raised when a draft-only op hits a non-draft template.
+
+    Both ``publish`` (a published/deprecated version cannot be re-published)
+    and ``discard`` (a published/deprecated version is retired via
+    ``deprecate``, never discarded) require the target to be a draft.
+    """
 
 
 class TemplateNotPublishedError(ValueError):
@@ -363,6 +370,55 @@ class RunbookTemplateService:
         )
         return DeprecateTemplateResponse(
             slug=request.slug, version=request.version, status="deprecated"
+        )
+
+    async def discard(
+        self,
+        tenant_id: uuid.UUID,
+        request: DiscardTemplateRequest,
+    ) -> DiscardTemplateResponse:
+        """Delete an **unpublished draft** ``(tenant_id, slug, version)``.
+
+        Completes the template CRUD lifecycle with a delete-for-drafts leg:
+        an operator who drafts incorrectly (typo'd slug, wrong steps) can
+        remove the draft cleanly instead of the publish-then-deprecate
+        workaround. Only ``draft`` rows are discardable -- a ``published``
+        or ``deprecated`` version raises :class:`TemplateNotDraftError`
+        (those are retired via :meth:`deprecate`, never erased, preserving
+        the audit/lifecycle of anything that was ever live). A missing
+        ``(tenant, slug, version)`` triple raises
+        :class:`TemplateNotFoundError` -- the same not-found posture as
+        :meth:`publish` / :meth:`deprecate` (so a re-discard of an
+        already-removed draft is a 404, not a silent success).
+
+        A pure draft cannot have runs (``start_run`` pins to a *published*
+        version), so there is no cascade to handle -- the row is deleted
+        outright.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            row = await self._load_exact(session, tenant_id, request.slug, request.version)
+            if row is None:
+                raise TemplateNotFoundError(
+                    f"no template {request.slug!r} v{request.version} for tenant"
+                )
+            if row.status != "draft":
+                raise TemplateNotDraftError(
+                    f"template {request.slug!r} v{request.version} is "
+                    f"{row.status!r}, not draft; cannot discard "
+                    f"(use deprecate to retire a published version)"
+                )
+            await session.delete(row)
+            await session.commit()
+
+        structlog.get_logger().info(
+            "runbook_template_discarded",
+            tenant_id=str(tenant_id),
+            slug=request.slug,
+            version=request.version,
+        )
+        return DiscardTemplateResponse(
+            slug=request.slug, version=request.version, status="discarded"
         )
 
     async def count_in_flight_runs(

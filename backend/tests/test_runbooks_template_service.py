@@ -41,6 +41,7 @@ from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.runbooks.schemas import (
     ConfirmVerify,
     DeprecateTemplateRequest,
+    DiscardTemplateRequest,
     DraftTemplateRequest,
     EditTemplateRequest,
     ListTemplatesFilter,
@@ -449,3 +450,88 @@ async def test_show_template_missing_raises() -> None:
 
     with pytest.raises(TemplateNotFoundError):
         await service.show_template(tenant_id, "ghost")
+
+
+# ---------------------------------------------------------------------------
+# discard (delete-for-drafts leg, #135)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discard_removes_draft() -> None:
+    """A draft discards cleanly; a subsequent show 404s (AC1)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+
+    resp = await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+    assert resp.status == "discarded"
+    assert resp.slug == "drain-node"
+    assert resp.version == 1
+
+    # The draft is gone: show now raises, and the slug re-drafts as v1.
+    with pytest.raises(TemplateNotFoundError):
+        await service.show_template(tenant_id, "drain-node", version=1)
+    listed = await service.list_templates(tenant_id, ListTemplatesFilter())
+    assert [t.slug for t in listed] == []
+
+
+@pytest.mark.asyncio
+async def test_discard_slug_is_reusable_after_discard() -> None:
+    """Discarding v1 frees the slug: create_draft succeeds again at v1."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+    # No DuplicateDraftError -- the slug has no rows left.
+    again = await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1-again"))
+    )
+    assert again.version == 1
+
+
+@pytest.mark.asyncio
+async def test_discard_published_raises_pointing_at_deprecate() -> None:
+    """Discarding a published version raises TemplateNotDraftError naming deprecate (AC2)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+
+    with pytest.raises(TemplateNotDraftError, match="deprecate"):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+    # The published row is untouched by the refused discard.
+    assert (await service.show_template(tenant_id, "drain-node", version=1)).status == "published"
+
+
+@pytest.mark.asyncio
+async def test_discard_deprecated_raises() -> None:
+    """Discarding a deprecated version is refused (retired, not discardable)."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+    await service.deprecate(tenant_id, DeprecateTemplateRequest(slug="drain-node", version=1))
+
+    with pytest.raises(TemplateNotDraftError):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=1))
+
+
+@pytest.mark.asyncio
+async def test_discard_missing_raises() -> None:
+    """Discarding a non-existent (slug, version) raises TemplateNotFoundError."""
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+
+    with pytest.raises(TemplateNotFoundError):
+        await service.discard(tenant_id, DiscardTemplateRequest(slug="ghost", version=1))

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: load-bearing tool descriptions per issue #1298; the
-# six template-verb descriptions teach the multi-session drafting pattern,
+# seven template-verb descriptions teach the multi-session drafting pattern,
 # fork-on-edit semantics, and the opacity-floor carve-out, and are
 # regression-tested verbatim. The file was already over the 600-line limit
 # on main; #1625's removal of the deprecated-alias machinery shrank it.
@@ -10,7 +10,7 @@
 
 """``meho.runbook.*`` template-lifecycle MCP tools (G12.2-T4).
 
-Six tool registrations that surface
+Seven tool registrations that surface
 :class:`~meho_backplane.runbooks.service.RunbookTemplateService` on the
 MCP transport. The matching REST routes are owned by the sibling Task
 #1297; both transports converge on the same service, so the versioning
@@ -53,8 +53,8 @@ The description IS the contract for "how to use this tool well."
 RBAC, audit, error mapping
 ===========================
 
-Four of the six tools are ``TENANT_ADMIN``-only (authoring + status
-flips). ``meho.runbook.list_templates`` is ``OPERATOR``-readable
+Five of the seven tools are ``TENANT_ADMIN``-only (authoring + status
+flips + draft discard). ``meho.runbook.list_templates`` is ``OPERATOR``-readable
 (summaries, no step bodies). ``meho.runbook.show_template`` admits an
 ``OPERATOR`` at the
 dispatcher gate but applies a *run-state-conditional* carve-out inside
@@ -103,6 +103,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
+    DiscardTemplateRequest,
     DraftTemplateRequest,
     EditTemplateRequest,
     ListTemplatesFilter,
@@ -286,6 +287,25 @@ _DEPRECATE_DESCRIPTION: Final[str] = (
     "Requires TENANT_ADMIN role."
 )
 
+_DISCARD_DESCRIPTION: Final[str] = (
+    "Delete an UNPUBLISHED DRAFT version of a template. The delete-for-drafts "
+    "leg of the\n"
+    "template lifecycle: use it to throw away a draft you got wrong (typo'd "
+    "slug, wrong\n"
+    "steps) instead of the publish-then-deprecate workaround.\n\n"
+    "ONLY drafts are discardable. A published or deprecated version is "
+    "refused with\n"
+    "-32602 — those are retired with `meho.runbook.deprecate_template` "
+    "(which preserves\n"
+    "lifecycle history), never erased. A missing (slug, version) is also "
+    "-32602, so a\n"
+    "re-discard of an already-removed draft is a not-found, not a silent "
+    "success.\n\n"
+    "Use when: you drafted a template incorrectly and want it gone before "
+    "publishing.\n\n"
+    "Requires TENANT_ADMIN role."
+)
+
 _LIST_DESCRIPTION: Final[str] = (
     "List runbook templates in the operator's tenant. Returns "
     "template_slugs + titles + status\n"
@@ -348,7 +368,7 @@ _TEMPLATE_SLUG_PROPERTY: Final[dict[str, Any]] = {
         "entries): must start with a lowercase letter and contain only "
         "lowercase letters, digits, hyphens, or dots. Example: "
         "'vcenter-9.0-cert-rotation'. REQUIRED. Canonical field name "
-        "across all 11 runbook tools (#1612) — the same name "
+        "across all 12 runbook tools (#1612) — the same name "
         "`meho.runbook.start` takes and every template response returns."
     ),
 }
@@ -481,6 +501,31 @@ async def _deprecate_template_handler(
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
         raise _to_invalid_params("meho.runbook.deprecate_template", exc) from exc
+    return _mirror_template_slug(response.model_dump(mode="json"))
+
+
+async def _discard_template_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Delete an unpublished draft ``(slug, version)``.
+
+    Maps :class:`TemplateNotDraftError` (version is published/deprecated)
+    and :class:`TemplateNotFoundError` (missing / already-removed) to
+    ``-32602`` via :data:`_INVALID_PARAMS_ERRORS`.
+    """
+    service = RunbookTemplateService()
+    slug = _resolve_template_slug("meho.runbook.discard_template", arguments)
+    try:
+        request = DiscardTemplateRequest.model_validate(
+            {"slug": slug, "version": arguments["version"]}
+        )
+        response = await service.discard(
+            tenant_id=operator.tenant_id,
+            request=request,
+        )
+    except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
+        raise _to_invalid_params("meho.runbook.discard_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -700,6 +745,26 @@ register_mcp_tool(
         op_class=_OP_CLASS_WRITE,
     ),
     handler=_deprecate_template_handler,
+)
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.runbook.discard_template",
+        description=_DISCARD_DESCRIPTION,
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "template_slug": _TEMPLATE_SLUG_PROPERTY,
+                "version": _VERSION_PROPERTY,
+            },
+            "required": ["template_slug", "version"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.TENANT_ADMIN,
+        op_class=_OP_CLASS_WRITE,
+    ),
+    handler=_discard_template_handler,
 )
 
 

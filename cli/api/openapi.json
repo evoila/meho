@@ -4335,6 +4335,69 @@
         }
       }
     },
+    "/api/v1/runbooks/templates/{slug}/discard": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Discard Template",
+        "description": "Delete an **unpublished draft** ``(slug, body.version)``.\n\n``tenant_admin`` only -- the delete-for-drafts leg of the template\nlifecycle. A draft version is removed outright (subsequent ``GET\n/{slug}`` / ``list`` no longer surface it). A missing\n``(tenant, slug, version)`` triple surfaces as 404\n:class:`TemplateNotFoundError` (cross-tenant probes collapse here too,\nand a re-discard of an already-removed draft is a 404 rather than a\nsilent success). A version that exists but is ``published`` /\n``deprecated`` surfaces as 400 :class:`TemplateNotDraftError` -- those\nare retired via ``/deprecate`` (preserving lifecycle history), never\ndiscarded.\n\nA path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`\nsurfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the\naudit/broadcast contextvars are bound so a rejected slug never fires a\nwrite-classified audit row (consistent with the sibling write routes).\n\nBinds ``audit_op_id=\"runbook.discard_template\"`` + ``audit_op_class=\n\"write\"`` + ``audit_slug`` + ``audit_version`` before the service call.",
+        "operationId": "discard_template_api_v1_runbooks_templates__slug__discard_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_VersionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscardTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runbooks/runs": {
       "post": {
         "tags": [
@@ -21569,6 +21632,31 @@
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``meho.runbook.deprecate_template`` -- the now-deprecated coordinates."
       },
+      "DiscardTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "const": "discarded",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "status"
+        ],
+        "title": "DiscardTemplateResponse",
+        "description": "Response for ``meho.runbook.discard_template`` -- the discarded draft's coordinates.\n\n``status`` is the synthetic terminal marker ``\"discarded\"`` -- unlike\nthe other lifecycle verbs it is **not** a stored\n:class:`~meho_backplane.db.models.RunbookTemplate` status (the row is\ndeleted, not transitioned), it signals to the caller that the draft\nwas removed. Only unpublished drafts are discardable; published /\ndeprecated versions are retired via ``deprecate`` (preserving history),\nnever discarded."
+      },
       "DocCollectionBackend": {
         "properties": {
           "type": {
@@ -26274,7 +26362,7 @@
           "version"
         ],
         "title": "_VersionBody",
-        "description": "Request body for the publish / deprecate routes -- carries ``version`` only.\n\nThe slug is the URL's job (the route's ``{slug}`` path parameter); the\nbody carries just the integer version to act on. ``extra=\"forbid\"``\nrejects a stray ``slug`` in the body at 422 rather than silently\nignoring it -- the URL is the single source of truth for which\ntemplate the operation targets, and a body that smuggled a different\nslug would otherwise be a confused-deputy footgun."
+        "description": "Request body for the publish / deprecate / discard routes -- carries ``version`` only.\n\nThe slug is the URL's job (the route's ``{slug}`` path parameter); the\nbody carries just the integer version to act on. ``extra=\"forbid\"``\nrejects a stray ``slug`` in the body at 422 rather than silently\nignoring it -- the URL is the single source of truth for which\ntemplate the operation targets, and a body that smuggled a different\nslug would otherwise be a confused-deputy footgun."
       },
       "_ViewMode": {
         "type": "string",

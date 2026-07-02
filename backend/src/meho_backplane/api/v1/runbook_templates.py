@@ -3,7 +3,7 @@
 
 """``/api/v1/runbooks/templates*`` -- REST surface for the runbook template layer.
 
-G12.2-T3 (#1297) of Initiative #1197. Six routes mounted under
+G12.2-T3 (#1297) of Initiative #1197. Seven routes mounted under
 ``/api/v1/runbooks/templates*`` that expose
 :class:`~meho_backplane.runbooks.service.RunbookTemplateService` (T2
 #1296) to operators and ops UIs. The MCP tools (T4 #1298) wrap the same
@@ -41,6 +41,9 @@ Route inventory
   published. Body: ``{"version": int}``. Role: ``tenant_admin``.
 * ``POST /api/v1/runbooks/templates/{slug}/deprecate`` -- retire a
   published version. Body: ``{"version": int}``. Role: ``tenant_admin``.
+* ``POST /api/v1/runbooks/templates/{slug}/discard`` -- delete an
+  unpublished draft version (the delete-for-drafts lifecycle leg). Body:
+  ``{"version": int}``. Role: ``tenant_admin``.
 
 Tenant scoping
 --------------
@@ -49,7 +52,7 @@ Every route derives ``tenant_id`` from the JWT-validated
 :class:`~meho_backplane.auth.operator.Operator`. No surface accepts a
 tenant id from the body or query string -- cross-tenant access is
 impossible by construction. A cross-tenant ``show`` / ``publish`` /
-``deprecate`` / ``edit`` probe surfaces as 404 (the service's tenant
+``deprecate`` / ``discard`` / ``edit`` probe surfaces as 404 (the service's tenant
 filter makes the row invisible, so :class:`TemplateNotFoundError` fires
 exactly as it would for a genuinely absent slug); the conflation
 prevents enumerating another tenant's templates via status-code
@@ -59,7 +62,8 @@ Role floor
 ----------
 
 ``list`` accepts ``operator`` (and ``tenant_admin``); ``draft`` /
-``edit`` / ``publish`` / ``deprecate`` require ``tenant_admin``. ``show``
+``edit`` / ``publish`` / ``deprecate`` / ``discard`` require
+``tenant_admin``. ``show``
 admits ``operator`` at the role gate but applies a *run-state-conditional*
 carve-out in the handler (G12.3-T4 / #1309): a ``tenant_admin`` is a
 pass-through, an ``operator`` is granted the read only when
@@ -101,7 +105,7 @@ publish-on-write broadcast hook (G6.1-T3) classify the row correctly:
   ``runbook.deprecate_template`` (the canonical operation identifiers
   tracked under :data:`_RUNBOOK_OP_IDS`).
 * ``audit_op_class`` -- ``"read"`` for ``list`` / ``show``, ``"write"``
-  for ``draft`` / ``edit`` / ``publish`` / ``deprecate``. Bound
+  for ``draft`` / ``edit`` / ``publish`` / ``deprecate`` / ``discard``. Bound
   explicitly because
   :func:`~meho_backplane.broadcast.events.classify_op` would not reliably
   suffix-match these op ids -- ``runbook.list_templates`` /
@@ -112,7 +116,7 @@ publish-on-write broadcast hook (G6.1-T3) classify the row correctly:
   :mod:`meho_backplane.api.v1.kb` documents.
 
 The ``audit_slug`` (all per-slug routes) and ``audit_version`` (the
-version-targeted publish / deprecate routes) are bound so the audit_log
+version-targeted publish / deprecate / discard routes) are bound so the audit_log
 payload (and the broadcast ``params``) carries the operation's
 coordinates -- the template body / step contents are **never** in the
 payload, only the slug + version.
@@ -149,6 +153,8 @@ from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
     DeprecateTemplateResponse,
+    DiscardTemplateRequest,
+    DiscardTemplateResponse,
     DraftTemplateRequest,
     DraftTemplateResponse,
     EditTemplateRequest,
@@ -189,11 +195,12 @@ _RUNBOOK_OP_IDS: Final[dict[str, str]] = {
     "edit": "runbook.edit_template",
     "publish": "runbook.publish_template",
     "deprecate": "runbook.deprecate_template",
+    "discard": "runbook.discard_template",
 }
 
 #: Register the one typed exception this surface maps through the shared
-#: ``http_for`` emitter -- a slug failing SLUG_PATTERN on the four write
-#: routes (draft / edit / publish / deprecate); ``type_tag`` / ``loc``
+#: ``http_for`` emitter -- a slug failing SLUG_PATTERN on the five write
+#: routes (draft / edit / publish / deprecate / discard); ``type_tag`` / ``loc``
 #: feed the OpenAPI 422 validation-error LIST shape (see ``_errors``).
 register_error(
     InvalidKbSlugError,
@@ -218,7 +225,7 @@ class RunbookTemplateListResponse(BaseModel):
 
 
 class _VersionBody(BaseModel):
-    """Request body for the publish / deprecate routes -- carries ``version`` only.
+    """Request body for the publish / deprecate / discard routes -- carries ``version`` only.
 
     The slug is the URL's job (the route's ``{slug}`` path parameter); the
     body carries just the integer version to act on. ``extra="forbid"``
@@ -629,6 +636,59 @@ async def deprecate_template(
             detail=str(exc),
         ) from exc
     except TemplateNotPublishedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/{slug}/discard", response_model=DiscardTemplateResponse)
+async def discard_template(
+    slug: str,
+    body: _VersionBody,
+    operator: Operator = _require_admin,
+) -> DiscardTemplateResponse:
+    """Delete an **unpublished draft** ``(slug, body.version)``.
+
+    ``tenant_admin`` only -- the delete-for-drafts leg of the template
+    lifecycle. A draft version is removed outright (subsequent ``GET
+    /{slug}`` / ``list`` no longer surface it). A missing
+    ``(tenant, slug, version)`` triple surfaces as 404
+    :class:`TemplateNotFoundError` (cross-tenant probes collapse here too,
+    and a re-discard of an already-removed draft is a 404 rather than a
+    silent success). A version that exists but is ``published`` /
+    ``deprecated`` surfaces as 400 :class:`TemplateNotDraftError` -- those
+    are retired via ``/deprecate`` (preserving lifecycle history), never
+    discarded.
+
+    A path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`
+    surfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the
+    audit/broadcast contextvars are bound so a rejected slug never fires a
+    write-classified audit row (consistent with the sibling write routes).
+
+    Binds ``audit_op_id="runbook.discard_template"`` + ``audit_op_class=
+    "write"`` + ``audit_slug`` + ``audit_version`` before the service call.
+    """
+    try:
+        validate_slug(slug)
+    except InvalidKbSlugError as exc:
+        raise http_for(exc) from exc
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_RUNBOOK_OP_IDS["discard"],
+        audit_op_class="write",
+        audit_slug=slug,
+        audit_version=body.version,
+    )
+    discard_request = DiscardTemplateRequest(slug=slug, version=body.version)
+    service = RunbookTemplateService()
+    try:
+        return await service.discard(operator.tenant_id, discard_request)
+    except TemplateNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except TemplateNotDraftError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=str(exc),

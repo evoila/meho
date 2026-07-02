@@ -60,6 +60,7 @@ from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateResponse,
+    DiscardTemplateResponse,
     DraftTemplateResponse,
     EditTemplateResponse,
     ForkInfo,
@@ -258,8 +259,8 @@ async def _audit_rows_for_path(path: str) -> list[AuditLog]:
 # ---------------------------------------------------------------------------
 
 
-def test_all_six_routes_mounted_on_main_app() -> None:
-    """All six routes appear in :mod:`meho_backplane.main`'s app + OpenAPI."""
+def test_all_seven_routes_mounted_on_main_app() -> None:
+    """All seven routes appear in :mod:`meho_backplane.main`'s app + OpenAPI."""
     from meho_backplane.main import app
 
     openapi = app.openapi()
@@ -270,6 +271,7 @@ def test_all_six_routes_mounted_on_main_app() -> None:
         "/api/v1/runbooks/templates/{slug}",
         "/api/v1/runbooks/templates/{slug}/publish",
         "/api/v1/runbooks/templates/{slug}/deprecate",
+        "/api/v1/runbooks/templates/{slug}/discard",
     }
     missing = expected_paths - paths.keys()
     assert not missing, f"missing routes: {missing}"
@@ -280,6 +282,7 @@ def test_all_six_routes_mounted_on_main_app() -> None:
     assert "patch" in paths["/api/v1/runbooks/templates/{slug}"]
     assert "post" in paths["/api/v1/runbooks/templates/{slug}/publish"]
     assert "post" in paths["/api/v1/runbooks/templates/{slug}/deprecate"]
+    assert "post" in paths["/api/v1/runbooks/templates/{slug}/discard"]
 
 
 # ---------------------------------------------------------------------------
@@ -977,6 +980,83 @@ def test_deprecate_draft_400(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# POST /{slug}/discard  (#135)
+# ---------------------------------------------------------------------------
+
+
+def test_discard_200(client: TestClient) -> None:
+    """POST /discard deletes a draft → 200 with status="discarded"."""
+    key, token = _admin_token()
+    fake_discard = AsyncMock(
+        return_value=DiscardTemplateResponse(slug="rotate-cert", version=1, status="discarded")
+    )
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.discard", fake_discard),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/runbooks/templates/rotate-cert/discard",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "discarded"
+
+
+def test_discard_published_400(client: TestClient) -> None:
+    """POST /discard on a published version → 400 (TemplateNotDraftError)."""
+    key, token = _admin_token()
+    fake_discard = AsyncMock(
+        side_effect=TemplateNotDraftError(
+            "is 'published', not draft; cannot discard (use deprecate)"
+        )
+    )
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.discard", fake_discard),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/runbooks/templates/rotate-cert/discard",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 400
+    assert "deprecate" in response.json()["detail"]
+
+
+def test_discard_missing_404(client: TestClient) -> None:
+    """POST /discard on a missing (slug, version) → 404 (TemplateNotFoundError)."""
+    key, token = _admin_token()
+    fake_discard = AsyncMock(side_effect=TemplateNotFoundError("no template 'ghost' v1 for tenant"))
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.discard", fake_discard),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/runbooks/templates/ghost/discard",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 404
+
+
+def test_discard_operator_role_403(client: TestClient) -> None:
+    """Operator on POST /discard → 403 (tenant_admin-only, matches sibling verbs)."""
+    key, token = _operator_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/runbooks/templates/rotate-cert/discard",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Malformed path slug on the model-rebuilding routes (regression: #1336 B1)
 #
 # PATCH /{slug}, POST /{slug}/publish, and POST /{slug}/deprecate rebuild a
@@ -1063,6 +1143,25 @@ def test_deprecate_malformed_slug_422_no_service_call(client: TestClient) -> Non
     assert response.status_code == 422
     _assert_invalid_kb_slug_shape(response.json()["detail"])
     fake_deprecate.assert_not_awaited()
+
+
+def test_discard_malformed_slug_422_no_service_call(client: TestClient) -> None:
+    """POST /discard on a malformed path slug → 422, service never invoked."""
+    key, token = _admin_token()
+    fake_discard = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.discard", fake_discard),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/runbooks/templates/{_MALFORMED_SLUG}/discard",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    _assert_invalid_kb_slug_shape(response.json()["detail"])
+    fake_discard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1181,6 +1280,35 @@ async def test_publish_writes_audit_row_with_publish_op_id_and_version() -> None
     # The template body / step contents never reach the audit payload.
     serialised = json.dumps(payload)
     assert "revoke-old-cert" not in serialised
+
+
+@pytest.mark.asyncio
+async def test_discard_writes_audit_row_with_discard_op_id_and_version() -> None:
+    """POST /discard → audit row ``op_id="runbook.discard_template"`` + slug + version (AC4)."""
+    key, token = _admin_token()
+    fake_discard = AsyncMock(
+        return_value=DiscardTemplateResponse(slug="rotate-cert", version=2, status="discarded")
+    )
+    test_client = TestClient(_build_app())
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.discard", fake_discard),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = test_client.post(
+            "/api/v1/runbooks/templates/rotate-cert/discard",
+            json={"version": 2},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+
+    rows = await _audit_rows_for_path("/api/v1/runbooks/templates/rotate-cert/discard")
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["op_id"] == "runbook.discard_template"
+    assert payload["op_class"] == "write"
+    assert payload["slug"] == "rotate-cert"
+    assert payload["version"] == 2
 
 
 @pytest.mark.asyncio

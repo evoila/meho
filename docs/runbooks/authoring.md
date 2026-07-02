@@ -40,8 +40,8 @@ same time.
 
 - **Senior** — owns the procedure. Walks Claude through it during authoring,
   reviews the draft, and signs off on publish. The senior is the only role
-  that drafts, edits, publishes, or deprecates a template (those tools are
-  `TENANT_ADMIN`-only).
+  that drafts, edits, publishes, deprecates, or discards a template (those
+  tools are `TENANT_ADMIN`-only).
 - **Claude** — the authoring agent. During a drafting session it captures
   what the senior demonstrates (bash, SSH, the verification at each step)
   into the template body and persists it through the `meho.runbook.*` template
@@ -105,6 +105,17 @@ scratchpad you keep appending to until the senior signs off.
 The status state machine is `draft -> published -> deprecated`. Publish is
 idempotent (re-publishing an already-published version is a no-op);
 deprecate is idempotent the same way.
+
+**Discarding a draft.** A draft you got wrong (typo'd slug, wrong steps)
+can be thrown away before publishing with
+`meho.runbook.discard_template(template_slug, version)` (REST: `POST
+/api/v1/runbooks/templates/{slug}/discard`). It deletes the draft row
+outright — no publish-then-deprecate workaround. Only **drafts** are
+discardable: a `published` or `deprecated` version is refused (retire it
+with `deprecate`, which preserves lifecycle history, rather than erasing
+it). A missing `(slug, version)` — including a re-discard of an
+already-removed draft — is a not-found, not a silent success.
+`tenant_admin` only, like the other authoring verbs.
 
 ## Fork-on-edit semantics
 
@@ -303,8 +314,8 @@ would be rejected at publish.
 - [Goal #1195](https://github.com/evoila/meho/issues/1195) — G12 Runbooks
   (the overall outcome).
 - [Initiative #1197](https://github.com/evoila/meho/issues/1197) — G12.2
-  template lifecycle (draft / edit / publish / deprecate / list / show + this
-  drafting pattern + fork-visibility-on-edit).
+  template lifecycle (draft / edit / publish / deprecate / discard / list / show
+  + this drafting pattern + fork-visibility-on-edit).
 - [Initiative #1198](https://github.com/evoila/meho/issues/1198) — G12.3 run
   lifecycle (the execution-side counterpart: start / next / abort / reassign).
 - [#1191](https://github.com/evoila/meho/issues/1191) — design source for the

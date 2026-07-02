@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from meho_backplane.auth.corpus import CorpusChunk
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends import resolve_backend
+from meho_backplane.docs_search.citation_links import normalize_source_ref
 
 if TYPE_CHECKING:
     from meho_backplane.docs_collections import DocCollection
@@ -147,6 +148,14 @@ class DocsChunk(BaseModel):
     ``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own
     optional owning-document id (``None`` when the corpus has no document
     concept for a chunk) and is only read as a citation-label fallback.
+
+    ``source_url`` is the **backend-agnostic** citation reference (#132): a
+    canonical public URL where one is derivable, else an opaque
+    ``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's
+    raw ``gs://`` object path — the projection in :func:`_project_chunk`
+    normalizes it via
+    :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
+    so no storage-backend scheme or internal bucket/layout reaches the wire.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -217,18 +226,39 @@ def build_docs_scope(
     )
 
 
-def _project_chunk(chunk: CorpusChunk, *, collection: str | None = None) -> DocsChunk:
+def _project_chunk(
+    chunk: CorpusChunk,
+    *,
+    collection: str | None = None,
+    collection_key: str | None = None,
+) -> DocsChunk:
     """Project a corpus chunk into MEHO's cited-chunk surface.
 
     *collection* tags the chunk's provenance on the cross-collection
     fan-out path (T5 #1554); it is ``None`` on the single-collection path,
     where the source collection is already implied by the request scope.
+
+    ``source_url`` is normalized through
+    :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
+    (#132) so the wire never carries the corpus's raw ``gs://`` object path
+    (which would leak the storage backend + internal bucket/layout) — it
+    becomes a canonical public URL where one is derivable, else an opaque
+    ``meho://docs/<collection>/<chunk_id>`` ref. This is the single seam both
+    ``search_docs`` and ``ask_docs`` citations (every :class:`DocsChunk` is
+    born here) normalize through. *collection_key* is the routing collection
+    that namespaces the opaque ref; it falls back to the *collection*
+    provenance tag (set on the fan-out path).
     """
     return DocsChunk(
         chunk_id=chunk.chunk_id,
         document_id=chunk.document_id,
         content=chunk.content,
-        source_url=chunk.source_url,
+        source_url=normalize_source_ref(
+            chunk.source_url,
+            collection_key=collection_key or collection,
+            chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
+        ),
         score=chunk.score,
         collection=collection,
     )
@@ -294,7 +324,7 @@ async def search_docs(
         metadata_filters=filters or None,
         limit=limit,
     )
-    chunks = [_project_chunk(c) for c in response.chunks]
+    chunks = [_project_chunk(c, collection_key=scope.collection_key) for c in response.chunks]
     _log.info(
         "docs_search_completed",
         operator_sub=operator.sub,

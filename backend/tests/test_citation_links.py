@@ -20,6 +20,7 @@ import pytest
 
 from meho_backplane.docs_search import (
     citation_link_payload,
+    normalize_source_ref,
     resolve_citation_link,
 )
 
@@ -209,3 +210,53 @@ def test_citation_link_is_frozen() -> None:
     link = resolve_citation_link(_KB_GS)
     with pytest.raises(AttributeError):
         link.href = "mutated"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# normalize_source_ref (#132) — the backend-agnostic wire source_url
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_kb_gs_becomes_canonical_url_not_gs() -> None:
+    """A KB ``gs://`` path normalizes to the canonical portal URL (Option A)."""
+    ref = normalize_source_ref(_KB_GS, collection_key="vmware", chunk_id="kb-1")
+
+    assert ref == "https://knowledge.broadcom.com/external/article/414551"
+    assert not ref.startswith("gs://")
+
+
+def test_normalize_https_passes_through() -> None:
+    """An already-canonical ``https`` source is its own reference."""
+    url = "https://docs.vendor.test/vsan#disk-groups"
+    assert normalize_source_ref(url, collection_key="vmware", chunk_id="c1") == url
+
+
+def test_normalize_community_gs_becomes_opaque_meho_ref() -> None:
+    """A community ``gs://`` path (no public URL) falls back to an opaque ref (Option B)."""
+    ref = normalize_source_ref(_COMMUNITY_GS, collection_key="vmware", chunk_id="c-42")
+
+    assert ref == "meho://docs/vmware/c-42"
+    assert not ref.startswith("gs://")
+
+
+def test_normalize_unknown_gs_becomes_opaque_meho_ref() -> None:
+    """Any unrecognised ``gs://`` object falls back to the opaque ref, never gs://."""
+    ref = normalize_source_ref("gs://bucket/x/y.bin", collection_key="vmware", chunk_id="z9")
+
+    assert ref == "meho://docs/vmware/z9"
+    assert not ref.startswith("gs://")
+
+
+def test_normalize_none_source_still_yields_usable_ref() -> None:
+    """A chunk with no source_url still gets a non-null opaque ref (AC4)."""
+    ref = normalize_source_ref(None, collection_key="vmware", chunk_id="c1")
+
+    assert ref == "meho://docs/vmware/c1"
+
+
+def test_normalize_missing_collection_key_uses_placeholder_segment() -> None:
+    """A blank/absent collection key keeps the ref well-formed (no empty segment)."""
+    assert normalize_source_ref(None, collection_key=None, chunk_id="c1") == "meho://docs/_/c1"
+    assert normalize_source_ref(_COMMUNITY_GS, collection_key="  ", chunk_id="c1") == (
+        "meho://docs/_/c1"
+    )

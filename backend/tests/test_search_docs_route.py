@@ -239,6 +239,70 @@ def test_search_docs_returns_200_with_cited_chunks(client: TestClient) -> None:
     assert call_args.kwargs["limit"] == 5
 
 
+def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> None:
+    """No chunk ``source_url`` exposes the ``gs://`` storage backend (#132, AC1).
+
+    The corpus returns raw ``gs://`` object paths (KB, community, and an
+    unrecognised object). The wire ``source_url`` must be backend-agnostic:
+    the KB path normalizes to the canonical portal URL, the others to opaque
+    ``meho://`` refs — none carry ``gs://`` or the internal bucket/layout.
+    """
+    _seed_collection_sync()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key,
+        sub="op-1",
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(UUID("33333333-3333-3333-3333-333333333333")),
+        capabilities=_ENTITLED_CAPS,
+    )
+    kb = CorpusChunk(
+        chunk_id="kb-1",
+        document_id="broadcom-kb-414551",
+        content="scaling maximums",
+        source_url="gs://meho-knowledge-vmware-corpus/kb/broadcom-kb/articles/41/414551.html",
+        score=0.9,
+    )
+    community = CorpusChunk(
+        chunk_id="com-1",
+        content="community post",
+        source_url="gs://meho-knowledge-vmware-corpus/community/williamlam/blog/post.md",
+        score=0.8,
+    )
+    unknown = CorpusChunk(
+        chunk_id="unk-1",
+        content="opaque object",
+        source_url="gs://meho-knowledge-vmware-corpus/misc/blob.bin",
+        score=0.7,
+    )
+    fake_corpus = _mock_corpus(kb, community, unknown)
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "vsan", "collection": "vmware", "limit": 5},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    chunks = response.json()["chunks"]
+    source_urls = [c["source_url"] for c in chunks]
+    # AC1: no source_url carries the gs:// backend scheme (nor the bucket name).
+    for url in source_urls:
+        assert url is not None
+        assert not url.startswith("gs://")
+        assert "meho-knowledge-vmware-corpus" not in url
+    # KB -> canonical portal URL; community / unknown -> opaque meho refs.
+    assert source_urls[0] == "https://knowledge.broadcom.com/external/article/414551"
+    assert source_urls[1] == "meho://docs/vmware/com-1"
+    assert source_urls[2] == "meho://docs/vmware/unk-1"
+    # The raw gs:// backend path never appears anywhere in the response body.
+    assert "gs://" not in json.dumps(response.json())
+
+
 def test_optional_refinements_forwarded_as_binary_filter_not_weight(
     client: TestClient,
 ) -> None:

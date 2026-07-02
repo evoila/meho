@@ -515,12 +515,14 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
 def test_tools_call_ask_docs_resolves_gs_kb_citation_to_canonical_link(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A KB ``gs://`` citation resolves to a clickable Broadcom KB link (#1919).
+    """A KB ``gs://`` citation is normalized to the canonical KB URL (#1919, #132).
 
-    The corpus returns a raw ``gs://`` object path an operator cannot open; the
-    ``ask_docs`` payload must carry a resolved ``link`` pointing at the
-    canonical ``knowledge.broadcom.com`` article URL, never the broken ``gs://``
-    path. The raw ``source_url`` stays on the citation for provenance.
+    The corpus returns a raw ``gs://`` object path an operator cannot open.
+    Post-#132 that path never reaches the wire: the citation's ``source_url``
+    is normalized to the canonical ``knowledge.broadcom.com`` article URL
+    (backend-agnostic, clickable). The re-derived ``link`` resolves via the
+    ``external`` pass-through arm (same ``href``; only the ``kind`` differs
+    from the pre-#132 ``broadcom_kb``).
     """
     client, _op = docs_client
     _seed_collection_sync()
@@ -556,11 +558,13 @@ def test_tools_call_ask_docs_resolves_gs_kb_citation_to_canonical_link(
     payload = json.loads(body["result"]["content"][0]["text"])
     citation = payload["citations"][0]
 
-    # Raw object path preserved for provenance.
-    assert citation["source_url"].startswith("gs://")
+    # #132: the raw gs:// object path never reaches the wire — source_url is
+    # normalized to the canonical KB URL (no backend leak).
+    assert not citation["source_url"].startswith("gs://")
+    assert citation["source_url"] == "https://knowledge.broadcom.com/external/article/414551"
     # Resolved navigable link points at the canonical KB article, not gs://.
     link = citation["link"]
-    assert link["kind"] == "broadcom_kb"
+    assert link["kind"] == "external"  # re-derived from the canonical https URL
     assert link["clickable"] is True
     assert link["href"] == "https://knowledge.broadcom.com/external/article/414551"
     assert not link["href"].startswith("gs://")

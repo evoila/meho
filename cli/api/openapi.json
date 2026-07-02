@@ -18640,6 +18640,11 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "policy_decision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Decision"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -18668,6 +18673,7 @@
           "parent_audit_id",
           "agent_session_id",
           "work_ref",
+          "policy_decision",
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
@@ -23791,6 +23797,11 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "policy_decision": {
+            "type": "string",
+            "nullable": true,
+            "title": "Policy Decision"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -23830,6 +23841,7 @@
           "parent_audit_id",
           "agent_session_id",
           "work_ref",
+          "policy_decision",
           "broadcast_event_id",
           "depth"
         ],

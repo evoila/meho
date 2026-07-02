@@ -57,6 +57,7 @@ Field-to-source mapping:
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
+| `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -113,6 +114,7 @@ query_audit(filters, tenant_id, session)
   │                 parent_audit_id=row.parent_audit_id,
   │                 agent_session_id=row.agent_session_id,
   │                 work_ref=row.work_ref,
+  │                 policy_decision=row.policy_decision,
   │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))

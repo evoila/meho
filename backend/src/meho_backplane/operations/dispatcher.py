@@ -219,6 +219,7 @@ from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
+    policy_decision_var,
 )
 from meho_backplane.operations._branches import (
     dispatch_composite,
@@ -1741,108 +1742,129 @@ async def dispatch(
     # Skipped on the approval-queue resume path (``_approved``): a human
     # operator already approved this exact call, so re-running the gate
     # would only re-deny or re-queue it. The approval is the authorization.
-    if not _approved:
-        # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
-        # / deny). The call site signature is unchanged; the function now
-        # awaits a DB read to load the principal's AgentPermission rows.
-        verdict, gate_reason = await policy_gate(
-            operator=operator, descriptor=descriptor, target=target
+    # #130: scope the policy-gate verdict to this dispatch so both audit
+    # writers (the dispatch-row writer and the approval-queue writer) can
+    # stamp ``audit_log.policy_decision`` off ``policy_decision_var`` without
+    # threading it through every write call site. Bound to the decided
+    # verdict below (or to ``needs-approval`` on the approval resume path,
+    # where the approval *was* the authorization). The token reset in the
+    # ``finally`` restores a composite parent dispatch's verdict after a
+    # child ``dispatch`` rebinds the var, and clears it for the next dispatch
+    # reusing this task.
+    _verdict_token = policy_decision_var.set(None)
+    try:
+        if not _approved:
+            # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
+            # / deny). The call site signature is unchanged; the function now
+            # awaits a DB read to load the principal's AgentPermission rows.
+            verdict, gate_reason = await policy_gate(
+                operator=operator, descriptor=descriptor, target=target
+            )
+            policy_decision_var.set(verdict.value)
+            if verdict == PermissionVerdict.DENY:
+                duration_ms = _elapsed_ms(started)
+                await audit_and_broadcast_safe(
+                    audit_id=uuid.uuid4(),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                )
+                return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+            if verdict == PermissionVerdict.NEEDS_APPROVAL:
+                # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
+                # synchronous "request" audit row) and return an
+                # awaiting_approval result. Reached by an agent principal
+                # whose verdict floors to needs-approval AND (G11.7-T1 #1401)
+                # by a human/service principal hitting a requires_approval op
+                # — both park the call durably for an operator to decide.
+                duration_ms = _elapsed_ms(started)
+                return await _handle_needs_approval(
+                    op_id=op_id,
+                    connector_id=connector_id,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=duration_ms,
+                )
+            if verdict is not PermissionVerdict.AUTO_EXECUTE:
+                # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
+                # to execution. Any unexpected verdict (a future enum member, a
+                # bug in the resolver) denies rather than silently executing.
+                duration_ms = _elapsed_ms(started)
+                await audit_and_broadcast_safe(
+                    audit_id=uuid.uuid4(),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                )
+                return result_denied(
+                    op_id,
+                    gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                    duration_ms,
+                )
+        else:
+            # Approval-queue resume path: the gate is skipped because an
+            # operator already approved this exact call. Stamp the row with
+            # the verdict that governed it — ``needs-approval`` — so the
+            # executed row honestly records it was four-eyes-gated, not
+            # auto-executed.
+            policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
+
+        # --- Step 5: connector resolution ---------------------------------
+        connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
+            descriptor, target
         )
-        if verdict == PermissionVerdict.DENY:
-            duration_ms = _elapsed_ms(started)
-            await audit_and_broadcast_safe(
-                audit_id=uuid.uuid4(),
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                result_status="denied",
-                duration_ms=duration_ms,
-            )
-            return result_denied(op_id, gate_reason or "policy denied", duration_ms)
-        if verdict == PermissionVerdict.NEEDS_APPROVAL:
-            # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
-            # synchronous "request" audit row) and return an
-            # awaiting_approval result. Reached by an agent principal
-            # whose verdict floors to needs-approval AND (G11.7-T1 #1401)
-            # by a human/service principal hitting a requires_approval op
-            # — both park the call durably for an operator to decide.
-            duration_ms = _elapsed_ms(started)
-            return await _handle_needs_approval(
-                op_id=op_id,
-                connector_id=connector_id,
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                duration_ms=duration_ms,
-            )
-        if verdict is not PermissionVerdict.AUTO_EXECUTE:
-            # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
-            # to execution. Any unexpected verdict (a future enum member, a
-            # bug in the resolver) denies rather than silently executing.
-            duration_ms = _elapsed_ms(started)
-            await audit_and_broadcast_safe(
-                audit_id=uuid.uuid4(),
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                result_status="denied",
-                duration_ms=duration_ms,
-            )
-            return result_denied(
+        if resolution_error == "target_required":
+            # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
+            # handler invoked with ``target=None``. Clean usage error before
+            # the handler proceeds unbound and trips ``dispatch_typed``'s loud
+            # self-guard RuntimeError (preserved for genuine instance-cache
+            # faults, which only arise when a target *was* supplied).
+            return result_target_required(op_id, _elapsed_ms(started))
+        if resolution_error == "no_connector":
+            return result_no_connector(
                 op_id,
-                gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-                duration_ms,
+                product,
+                version,
+                _elapsed_ms(started),
+                exception_message=exception_message,
+            )
+        if resolution_error == "ambiguous_connector":
+            # The exception's message is the single most diagnostic string
+            # the resolver computes (candidate list + remediation step);
+            # surface it verbatim under ``extras["exception_message"]``.
+            # ``exception_message`` is guaranteed non-None for this label
+            # by ``resolve_connector_or_label``'s contract — the empty
+            # string fallback is a defensive type-check guard, never hit.
+            return result_ambiguous_connector(
+                op_id,
+                product,
+                version,
+                exception_message or "",
+                _elapsed_ms(started),
             )
 
-    # --- Step 5: connector resolution -------------------------------------
-    connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
-        descriptor, target
-    )
-    if resolution_error == "target_required":
-        # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
-        # handler invoked with ``target=None``. Clean usage error before
-        # the handler proceeds unbound and trips ``dispatch_typed``'s loud
-        # self-guard RuntimeError (preserved for genuine instance-cache
-        # faults, which only arise when a target *was* supplied).
-        return result_target_required(op_id, _elapsed_ms(started))
-    if resolution_error == "no_connector":
-        return result_no_connector(
-            op_id,
-            product,
-            version,
-            _elapsed_ms(started),
-            exception_message=exception_message,
+        # --- Steps 6/7/8/9: branch + reduce + audit + broadcast -----------
+        return await _execute_and_audit(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
         )
-    if resolution_error == "ambiguous_connector":
-        # The exception's message is the single most diagnostic string
-        # the resolver computes (candidate list + remediation step);
-        # surface it verbatim under ``extras["exception_message"]``.
-        # ``exception_message`` is guaranteed non-None for this label
-        # by ``resolve_connector_or_label``'s contract — the empty
-        # string fallback is a defensive type-check guard, never hit.
-        return result_ambiguous_connector(
-            op_id,
-            product,
-            version,
-            exception_message or "",
-            _elapsed_ms(started),
-        )
-
-    # --- Steps 6/7/8/9: branch + reduce + audit + broadcast ---------------
-    return await _execute_and_audit(
-        op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        connector_instance=connector_instance,
-        operator=operator,
-        target=target,
-        params=params,
-        params_hash=params_hash,
-        started=started,
-    )
+    finally:
+        policy_decision_var.reset(_verdict_token)

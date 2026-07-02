@@ -112,6 +112,7 @@ def _make_entry(**overrides: object) -> AuditEntry:
         "parent_audit_id": None,
         "agent_session_id": None,
         "work_ref": None,
+        "policy_decision": None,
         "broadcast_event_id": None,
     }
     defaults.update(overrides)

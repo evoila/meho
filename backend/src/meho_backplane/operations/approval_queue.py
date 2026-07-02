@@ -73,7 +73,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditLog,
 )
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import policy_decision_var, work_ref_var
 from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
@@ -229,6 +229,16 @@ async def _write_audit_row(
     }
     if extra_payload:
         payload.update(extra_payload)
+    # policy-gate verdict (#130). The parked "request" row is written on the
+    # requester's task, where the dispatcher bound ``policy_decision_var`` to
+    # ``needs-approval`` before parking, so the var carries the verdict here.
+    # A "decision" row is written on the *approver's* task (var unset) and on
+    # a path where no gate ran, so it correctly stays NULL — the operator's
+    # approve/reject is recorded via ``result_status``, not a gate verdict.
+    # ``hasattr`` guard mirrors ``write_audit_row``: the column lands in ``0051``.
+    policy_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "policy_decision"):
+        policy_kwargs["policy_decision"] = policy_decision_var.get()
     row = AuditLog(
         id=audit_id,
         occurred_at=_now(),
@@ -250,6 +260,7 @@ async def _write_audit_row(
         # durable source of truth -- it keeps both audit rows aligned with
         # the value the request was parked under.
         work_ref=request.work_ref,
+        **policy_kwargs,
     )
     session.add(row)
     await session.flush()

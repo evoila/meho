@@ -1071,6 +1071,7 @@ type AuditEntry struct {
 	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
 	Path             string                 `json:"path"`
 	Payload          map[string]interface{} `json:"payload"`
+	PolicyDecision   *string                `json:"policy_decision"`
 	PrincipalName    *string                `json:"principal_name"`
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`
@@ -4382,6 +4383,7 @@ type ReplayNode struct {
 	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
 	Path             string                 `json:"path"`
 	Payload          map[string]interface{} `json:"payload"`
+	PolicyDecision   *string                `json:"policy_decision"`
 	PrincipalName    *string                `json:"principal_name"`
 	PrincipalSub     string                 `json:"principal_sub"`
 	RequestId        *openapi_types.UUID    `json:"request_id"`

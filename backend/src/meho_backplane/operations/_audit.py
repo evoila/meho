@@ -51,6 +51,7 @@ __all__ = [
     "agent_session_id_var",
     "audit_and_broadcast_safe",
     "parent_audit_id_var",
+    "policy_decision_var",
     "publish_broadcast",
     "run_id_var",
     "step_id_var",
@@ -161,6 +162,22 @@ step_id_var: ContextVar[str | None] = ContextVar(
 #: column stays NULL except where a caller binds the var directly.
 work_ref_var: ContextVar[str | None] = ContextVar(
     "work_ref",
+    default=None,
+)
+
+#: The policy-gate verdict for the in-flight dispatch (#130). The
+#: dispatcher binds it (a :class:`PermissionVerdict` value string) right
+#: after :func:`~meho_backplane.operations._validate.policy_gate` decides,
+#: with a token/finally reset scoping it to the dispatch — the same
+#: bound-at-a-boundary / read-at-every-write-call-site discipline as
+#: :data:`run_id_var`. Both audit writers read it: the dispatch-row writer
+#: (:func:`write_audit_row`) and the approval-queue writer
+#: (:func:`meho_backplane.operations.approval_queue._write_audit_row`, so the
+#: parked "request" row carries ``needs-approval``). ``None`` where no gate
+#: ran (pre-gate usage errors, system-internal writers) — the correct value
+#: for the nullable ``audit_log.policy_decision`` column.
+policy_decision_var: ContextVar[str | None] = ContextVar(
+    "policy_decision",
     default=None,
 )
 
@@ -435,6 +452,12 @@ async def write_audit_row(
     # is ``None`` until a caller binds the var.
     if hasattr(AuditLog, "work_ref"):
         runbook_kwargs["work_ref"] = work_ref_var.get()
+    # policy-gate verdict (#130) -- read the dispatch-scoped var the
+    # dispatcher bound after the gate decided. Same hasattr forward-compat
+    # guard as the runbook / work_ref columns: the ``policy_decision`` column
+    # is added by migration ``0051``. ``None`` when no gate ran for this row.
+    if hasattr(AuditLog, "policy_decision"):
+        runbook_kwargs["policy_decision"] = policy_decision_var.get()
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,

@@ -189,6 +189,7 @@ def _make_entry(
     audit_id: UUID = _DEFAULT_AUDIT_ID,
     tenant_id: UUID = _TENANT_A,
     principal_sub: str = "op-1",
+    policy_decision: str | None = None,
 ) -> AuditEntry:
     return AuditEntry(
         id=audit_id,
@@ -210,6 +211,7 @@ def _make_entry(
         parent_audit_id=None,
         agent_session_id=None,
         work_ref=None,
+        policy_decision=policy_decision,
         broadcast_event_id=None,
     )
 
@@ -468,6 +470,46 @@ def test_my_recent_injects_principal_from_jwt(client: TestClient) -> None:
     assert resp.status_code == 200
     filters = mock_query.await_args.args[0]
     assert filters.principal == "op-42-jwt-sub"
+
+
+def test_audit_query_row_includes_policy_decision(client: TestClient) -> None:
+    """#130 AC2: the ``/audit/query`` row shape carries ``policy_decision``."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    entry = _make_entry(policy_decision="deny")
+    mock_query = AsyncMock(return_value=AuditQueryResult(rows=[entry], next_cursor=None))
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert rows[0]["policy_decision"] == "deny"
+
+
+def test_audit_my_recent_row_includes_policy_decision(client: TestClient) -> None:
+    """#130 AC2: the ``/audit/my-recent`` row shape carries ``policy_decision``."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    entry = _make_entry(policy_decision="needs-approval")
+    mock_query = AsyncMock(return_value=AuditQueryResult(rows=[entry], next_cursor=None))
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            "/api/v1/audit/my-recent",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["rows"][0]["policy_decision"] == "needs-approval"
 
 
 # ---------------------------------------------------------------------------

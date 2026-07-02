@@ -50,6 +50,7 @@ from meho_backplane.docs_search.backends import (
 from meho_backplane.docs_search.citation_links import (
     CitationLink,
     citation_link_payload,
+    normalize_source_ref,
     resolve_citation_link,
 )
 from meho_backplane.docs_search.collection_access import (
@@ -122,6 +123,7 @@ __all__ = [
     "classify_answer_error",
     "collection_capability_key",
     "expand_docs_query",
+    "normalize_source_ref",
     "parse_collection_scope",
     "resolve_backend",
     "resolve_backend_or_label",

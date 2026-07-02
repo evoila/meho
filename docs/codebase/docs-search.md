@@ -434,6 +434,41 @@ naming the matched rule.
   anchor href + link text. So KB / community / unknown citations resolve
   identically across the answer payload and the console.
 
+### `normalize_source_ref(source_url, *, collection_key, chunk_id, ...)` (`meho_backplane.docs_search.citation_links`, #132)
+
+The wire `source_url` a consumer sees must never carry the storage backend's
+scheme (`gs://`, `qdrant://`) or the corpus's internal bucket/directory
+layout — the `doc-corpus` contract promises citations are *backend-agnostic;
+the agent never sees the backend*. This function is the **single seam** that
+enforces that, called from `_project_chunk` (so every `DocsChunk` — the
+`search_docs` response chunks **and** each `ask_docs` citation — is born with
+a normalized `source_url`; it also keeps the raw path out of the synthesis
+prompt).
+
+Normalization is **Option A (canonical public URL) with an Option B (opaque
+MEHO ref) fallback**:
+
+- When `resolve_citation_link(source_url)` derives a **canonical public URL**
+  (a Broadcom KB article, or an already-`https` source), that URL *is* the
+  reference — the most consumer-useful outcome (a clickable citation), and a
+  vendor/web URL exposes no MEHO or backend internals.
+- Otherwise (a community/unrecognised `gs://` object with no recoverable
+  public URL, or no source at all) the reference is an opaque
+  `meho://docs/<collection>/<chunk_id>` — uniform regardless of backend,
+  resolvable through MEHO, and **never null** (so a chunk always carries a
+  usable reference). MEHO owns the reference→object mapping internally.
+
+The raw corpus object path (`gs://meho-knowledge-.../...`) is **never**
+returned — that leak is exactly what this closes. Pure Option B (an opaque
+ref for *every* chunk) was rejected: it would drop the clickable KB/web URL
+the resolver already derives. A consequence of Option A: because the wire
+`source_url` for a KB chunk is now the canonical `https://knowledge.broadcom.com/...`
+URL, the `link` an `ask_docs`/MCP citation re-derives from it resolves via the
+`external` (pass-through) arm rather than `broadcom_kb` — the `href` and
+clickability are identical; only the `kind` tag differs. `CorpusChunk.source_url`
+(`auth/corpus.py`) stays the raw corpus value — the normalization is applied at
+MEHO's projection boundary, not in the corpus adapter.
+
 ### `POST /api/v1/search_docs` (`meho_backplane.api.v1.search_docs`, T3 #1552)
 
 The REST face. `operator` role minimum (`read_only` → 403). Validates

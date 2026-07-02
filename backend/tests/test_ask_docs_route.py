@@ -352,7 +352,14 @@ def test_ask_docs_returns_grounded_cited_answer(client: TestClient) -> None:
 
 
 def test_ask_docs_kb_gs_citation_resolves_to_canonical_link(client: TestClient) -> None:
-    """A KB ``gs://`` citation resolves to a clickable Broadcom KB link (#1919)."""
+    """A KB ``gs://`` citation is normalized to the canonical KB URL (#1919, #132).
+
+    Post-#132 the raw ``gs://`` object path never reaches the wire: the
+    citation's ``source_url`` is normalized to the canonical Broadcom KB URL
+    (backend-agnostic, still clickable). The re-derived ``link`` therefore
+    resolves via the ``external`` pass-through arm (same ``href``, only the
+    ``kind`` tag differs from the pre-#132 ``broadcom_kb``).
+    """
     _seed_collection_sync()
     key = _make_rsa_keypair("kid-A")
     token = _token(key, sub="op-kb")
@@ -380,9 +387,12 @@ def test_ask_docs_kb_gs_citation_resolves_to_canonical_link(client: TestClient) 
         )
     assert response.status_code == 200
     citation = response.json()["citations"][0]
-    assert citation["source_url"].startswith("gs://")  # raw path preserved
+    # #132: the raw gs:// object path never reaches the wire — source_url is
+    # normalized to the canonical KB URL.
+    assert not citation["source_url"].startswith("gs://")
+    assert citation["source_url"] == "https://knowledge.broadcom.com/external/article/414551"
     link = citation["link"]
-    assert link["kind"] == "broadcom_kb"
+    assert link["kind"] == "external"  # re-derived from the canonical https URL
     assert link["clickable"] is True
     assert link["href"] == "https://knowledge.broadcom.com/external/article/414551"
 

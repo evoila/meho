@@ -66,6 +66,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "CitationLink",
     "citation_link_payload",
+    "normalize_source_ref",
     "resolve_citation_link",
 ]
 
@@ -74,6 +75,19 @@ __all__ = [
 #: link (#1919 AC 2). Resolution either rewrites it to a canonical web URL
 #: or degrades to a non-clickable label.
 _GCS_SCHEME: Final[str] = "gs"
+
+#: The backend-agnostic MEHO citation reference scheme (#132). When a chunk's
+#: raw ``source_url`` has no derivable public URL, the wire carries an opaque
+#: ``meho://docs/<collection>/<chunk_id>`` reference instead of the corpus's
+#: raw object path -- so no storage-backend scheme (``gs://``, ``qdrant://``)
+#: or internal bucket/directory layout reaches the consumer. MEHO owns the
+#: reference->object resolution internally; the ref is stable per chunk.
+_MEHO_DOCS_REF_SCHEME: Final[str] = "meho"
+
+#: Placeholder collection segment in a ``meho://`` ref when the routing
+#: collection key is unknown at projection time -- keeps the ref well-formed
+#: (never ``meho://docs//<id>``) rather than emitting an empty segment.
+_UNKNOWN_COLLECTION_SEGMENT: Final[str] = "_"
 
 #: The canonical Broadcom KB article URL stem. A KB object path's numeric
 #: article id (the filename, e.g. ``414551.html`` -> ``414551``) appends to
@@ -357,3 +371,67 @@ def citation_link_payload(
         "kind": link.kind,
         "clickable": link.clickable,
     }
+
+
+def normalize_source_ref(
+    source_url: str | None,
+    *,
+    collection_key: str | None,
+    chunk_id: str,
+    title: str | None = None,
+    document_id: str | None = None,
+) -> str:
+    """Return a backend-agnostic citation reference for a chunk (#132).
+
+    The wire ``source_url`` a ``search_docs`` / ``ask_docs`` consumer sees must
+    never carry the storage backend's scheme (``gs://``, ``qdrant://``) or the
+    corpus's internal bucket / directory layout -- FEATURES.md's ``doc-corpus``
+    contract promises citations are "backend-agnostic ... the agent never sees
+    the backend." This is the single seam both surfaces normalize their wire
+    ``source_url`` through (``search_docs`` via
+    :func:`~meho_backplane.docs_search.service._project_chunk`, which every
+    ``DocsChunk`` -- including each ``ask_docs`` citation -- is born from).
+
+    Normalization is **Option A (canonical public URL) with an Option B
+    (opaque MEHO ref) fallback**:
+
+    * When :func:`resolve_citation_link` derives a **canonical public URL** --
+      a Broadcom KB article (``https://knowledge.broadcom.com/...``) or an
+      already-``https`` source -- that URL *is* the reference. Most
+      consumer-useful (a clickable citation), and a vendor/web URL exposes no
+      MEHO or backend internals.
+    * Otherwise -- a community / unrecognised ``gs://`` (or other non-web)
+      object with no recoverable public URL, or no source at all -- the
+      reference is an opaque ``meho://docs/<collection>/<chunk_id>``. Uniform
+      regardless of backend, resolvable through MEHO, and **never null**
+      (so a chunk always carries a usable reference). MEHO owns the
+      reference->object mapping internally.
+
+    The raw corpus object path (``gs://meho-knowledge-.../...``) is **never**
+    returned -- that leak is exactly what this closes. A pure Option B (opaque
+    ref for every chunk) was rejected: it would drop the clickable KB/web URL
+    the resolver already derives, and Option A is the more consumer-useful
+    half whenever a public URL exists.
+
+    Args:
+        source_url: The chunk's raw corpus citation (``gs://`` object path,
+            an ``https`` URL, or ``None``).
+        collection_key: The routing collection the chunk came from, used to
+            namespace the opaque ``meho://`` ref. Falls back to
+            :data:`_UNKNOWN_COLLECTION_SEGMENT` when unknown.
+        chunk_id: The chunk's stable id -- the opaque ref's leaf.
+        title: Optional chunk title (only affects the resolver's label, not
+            the returned reference).
+        document_id: Optional owning-document id (label fallback in the
+            resolver; not part of the returned reference).
+
+    Returns:
+        A non-empty, backend-agnostic reference string: a canonical
+        ``http(s)`` URL, or an opaque ``meho://docs/<collection>/<chunk_id>``.
+        Never a ``gs://`` (or other backend-scheme) path.
+    """
+    link = resolve_citation_link(source_url, title=title, document_id=document_id)
+    if link.href is not None:
+        return link.href
+    collection = (collection_key or "").strip() or _UNKNOWN_COLLECTION_SEGMENT
+    return f"{_MEHO_DOCS_REF_SCHEME}://docs/{collection}/{chunk_id}"

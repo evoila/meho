@@ -442,6 +442,7 @@ def test_replay_node_is_frozen() -> None:
         parent_audit_id=None,
         agent_session_id=None,
         work_ref=None,
+        policy_decision=None,
         broadcast_event_id=None,
         depth=0,
         children=[],

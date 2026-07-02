@@ -341,6 +341,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         parent_audit_id=row.parent_audit_id,
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
+        policy_decision=row.policy_decision,
         broadcast_event_id=None,
     )
 

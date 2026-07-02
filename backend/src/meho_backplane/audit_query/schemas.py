@@ -154,6 +154,13 @@ class AuditEntry(BaseModel):
     parent_audit_id: uuid.UUID | None
     agent_session_id: uuid.UUID | None
     work_ref: str | None
+    # Policy-gate verdict stamped on the row (#130): ``auto-execute`` /
+    # ``needs-approval`` / ``deny``, or ``None`` on rows where no gate ran
+    # (pre-#130 rows, pre-gate usage errors, system-internal writers). Sourced
+    # from the real ``audit_log.policy_decision`` column, so a consumer reads
+    # the verdict directly instead of joining ``method``+``path`` + parsing
+    # ``payload``.
+    policy_decision: str | None
     broadcast_event_id: uuid.UUID | None
 
 

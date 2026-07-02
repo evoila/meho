@@ -1989,6 +1989,88 @@ async def test_dispatch_pending_caution_op_no_permission_row(
 
 
 @pytest.mark.asyncio
+async def test_audit_row_stamps_policy_decision_per_verdict(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#130 AC1: each governed dispatch stamps its gate verdict on ``policy_decision``.
+
+    An ``auto-execute`` dispatch (safe op, human), a ``needs-approval`` park
+    (caution op, agent → the ``approval.request`` row), and a ``deny`` (dangerous
+    op, agent, no grant) each land the matching :class:`PermissionVerdict` on the
+    ``audit_log`` row — queryable without joining ``method``+``path`` + parsing
+    ``payload``.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    for op_id, safety in (
+        ("vault.kv.autoexec", "safe"),
+        ("vault.kv.needsapproval", "caution"),
+        ("vault.kv.deny", "dangerous"),
+    ):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id=op_id,
+            handler=_module_handler_returning_dict,
+            summary=f"{safety} op.",
+            description=f"A {safety} operation.",
+            parameter_schema={"type": "object"},
+            safety_level=safety,
+            when_to_use=None,
+            embedding_service=stub_embedding_service,
+        )
+
+    target = _FakeTarget(product="vault")
+
+    auto = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.autoexec",
+        target=target,
+        params={},
+    )
+    assert auto.status == "ok", auto.error
+
+    parked = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.needsapproval",
+        target=target,
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+
+    denied = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.deny",
+        target=target,
+        params={},
+    )
+    assert denied.status == "denied", denied.error
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        by_path = {row.path: row for row in (await fresh.execute(select(AuditLog))).scalars().all()}
+        parked_request = await fresh.get(
+            ApprovalRequest, UUID(parked.extras["approval_request_id"])
+        )
+        assert parked_request is not None
+
+    # auto-execute dispatch row.
+    assert by_path["vault.kv.autoexec"].policy_decision == "auto-execute"
+    # deny dispatch row.
+    assert by_path["vault.kv.deny"].policy_decision == "deny"
+    # the parked "request" row carries the needs-approval verdict; the op's own
+    # path wrote no row (it never executed).
+    assert by_path["approval.request"].policy_decision == "needs-approval"
+    assert "vault.kv.needsapproval" not in by_path
+
+
+@pytest.mark.asyncio
 async def test_dispatch_human_dangerous_op_auto_executes(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],

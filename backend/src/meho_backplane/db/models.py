@@ -547,8 +547,39 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Policy-gate verdict stamped on the row (#130). The synchronous gate
+    # (:func:`meho_backplane.operations._validate.policy_gate`) computes a
+    # :class:`PermissionVerdict` on every governed dispatch; the dispatcher
+    # binds it to :data:`meho_backplane.operations._audit.policy_decision_var`
+    # and both audit writers (the dispatch-row writer and the approval-queue
+    # writer) read it here so a consumer can ``WHERE policy_decision = ...``
+    # without joining ``method``+``path`` and parsing ``payload``. The closed
+    # vocabulary is the real ``PermissionVerdict`` enum
+    # (``auto-execute`` / ``needs-approval`` / ``deny``) — DB-enforced by the
+    # CHECK below, matching ``agent_permission.verdict``. Nullable: pre-#130
+    # rows, and rows written on a path where no gate ran (pre-gate usage
+    # errors, system-internal writers), carry NULL. Added by migration
+    # ``0051``. No index — it is a low-cardinality equality filter usually
+    # combined with a time/principal predicate that an existing index covers.
+    policy_decision: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
+        # Verdict vocabulary is the closed ``PermissionVerdict`` set. The
+        # literal mirrors ``_PERMISSION_VERDICTS`` (defined later in this
+        # module, after the enum) rather than referencing it — this
+        # ``__table_args__`` is evaluated at class-definition time, before the
+        # enum/helper exist. The enum is intentionally closed (a fourth verdict
+        # is a coordinated code+migration change), so the duplication cannot
+        # drift silently. ``... IS NULL`` keeps pre-#130 / no-gate rows valid.
+        sa.CheckConstraint(
+            "policy_decision IN ('auto-execute', 'needs-approval', 'deny') "
+            "OR policy_decision IS NULL",
+            name="ck_audit_log_policy_decision",
+        ),
         Index(
             "audit_log_occurred_at_idx",
             "occurred_at",

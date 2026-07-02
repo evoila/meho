@@ -479,6 +479,43 @@ async def test_discard_removes_draft() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discard_forked_draft_leaves_published_parent_and_runs_intact() -> None:
+    """Discarding a forked v2 draft must not touch the published v1 or its runs.
+
+    The interesting correctness path: a draft forked from a published version
+    that has in-flight runs. Discarding the fork removes only the v2 row --
+    v1 stays published, its pinned run survives (``runbook_runs`` carries no
+    FK to ``runbook_templates``), and v1 becomes the latest again.
+    """
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body("v1"))
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+    await _seed_run(tenant_id, "drain-node", 1, "in_progress")
+    # Editing a published slug with no draft forks a new v2 draft.
+    forked = await service.update_or_fork(
+        tenant_id, OPERATOR, EditTemplateRequest(slug="drain-node", body=_body("v2"))
+    )
+    assert forked.version == 2
+
+    resp = await service.discard(tenant_id, DiscardTemplateRequest(slug="drain-node", version=2))
+    assert resp.status == "discarded"
+
+    # v1 is untouched and is once again the latest version.
+    v1 = await service.show_template(tenant_id, "drain-node", version=1)
+    assert v1.status == "published"
+    with pytest.raises(TemplateNotFoundError):
+        await service.show_template(tenant_id, "drain-node", version=2)
+    latest = await service.show_template(tenant_id, "drain-node")
+    assert latest.version == 1
+
+    # The in-flight run pinned to v1 survives the fork's discard.
+    assert await service.count_in_flight_runs(tenant_id, "drain-node", 1) == 1
+
+
+@pytest.mark.asyncio
 async def test_discard_slug_is_reusable_after_discard() -> None:
     """Discarding v1 frees the slug: create_draft succeeds again at v1."""
     service = RunbookTemplateService()

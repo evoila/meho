@@ -3155,6 +3155,14 @@ type DocCollectionSummary struct {
 // “document_id“ is “str | None“ (#2004): it mirrors the corpus's own
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
+//
+// “source_url“ is the **backend-agnostic** citation reference (#132): a
+// canonical public URL where one is derivable, else an opaque
+// “meho://docs/<collection>/<chunk_id>“ ref. It is **never** the corpus's
+// raw “gs://“ object path — the projection in :func:`_project_chunk`
+// normalizes it via
+// :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
+// so no storage-backend scheme or internal bucket/layout reaches the wire.
 type DocsChunk struct {
 	ChunkId    string   `json:"chunk_id"`
 	Collection *string  `json:"collection"`

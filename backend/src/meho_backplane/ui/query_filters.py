@@ -43,8 +43,21 @@ the extra and the empty string keeps 422-ing::
 
     status: Annotated[_RunStateFilter | None, EMPTY_STR_TO_NONE, Query()] = None
 
-``str | None`` filter params (e.g. ``assignee``, ``target_kind``) do not
-need this: an empty string is a valid ``str``, so they never 422.
+``str | None`` filter params never 422 on the empty string (it is a
+valid ``str``) -- but they still need the coercion whenever the value
+flows into an exact-match SQL filter, where ``""`` silently becomes
+``WHERE col = ''`` and matches nothing (the runbook catalog's
+``target_kind``, the topology table's ``kind``). For those, pin any
+``max_length`` guard on the inner ``str`` branch via
+:class:`pydantic.StringConstraints` -- a bare ``Query(max_length=...)``
+on the nullable field raises ``TypeError`` when the validator produces
+``None``::
+
+    kind: Annotated[
+        Annotated[str, StringConstraints(max_length=64)] | None,
+        EMPTY_STR_TO_NONE,
+        Query(),
+    ] = None
 
 Existing surfaces that use an in-vocabulary ``all`` sentinel enum member
 (e.g. the connector-registry ``ConnectorStatusFilter`` -- ``value="all"``,

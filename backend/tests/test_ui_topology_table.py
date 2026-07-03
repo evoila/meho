@@ -518,6 +518,27 @@ def test_table_bogus_kind_filter_still_returns_no_rows() -> None:
     assert "vm-keep" not in response.text
 
 
+def test_table_overlong_kind_and_q_still_422() -> None:
+    """``max_length`` still fires after moving onto the inner ``str`` branch.
+
+    The empty-string coercion relocated the guard from ``Query(max_length=...)``
+    to ``StringConstraints`` on the nullable params' ``str`` branch; an
+    over-limit value must still be rejected at the HTTP boundary.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        kind_response = client.get(
+            "/ui/topology", params={"kind": "x" * 65}, headers={"HX-Request": "true"}
+        )
+        q_response = client.get(
+            "/ui/topology", params={"q": "x" * 257}, headers={"HX-Request": "true"}
+        )
+    assert kind_response.status_code == 422, kind_response.text
+    assert q_response.status_code == 422, q_response.text
+
+
 # ---------------------------------------------------------------------------
 # Cross-tenant isolation -- the table
 # ---------------------------------------------------------------------------

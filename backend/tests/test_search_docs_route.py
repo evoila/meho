@@ -228,6 +228,8 @@ def test_search_docs_returns_200_with_cited_chunks(client: TestClient) -> None:
     assert len(body["chunks"]) == 2
     assert body["chunks"][0]["chunk_id"] == "c1"
     assert body["chunks"][0]["content"] == "vSAN disk groups..."
+    # #133: a query that retrieved chunks signals grounded (AC2).
+    assert body["grounded"] is True
     # The backend id never appears in the response.
     assert "backend" not in json.dumps(body)
 
@@ -237,6 +239,83 @@ def test_search_docs_returns_200_with_cited_chunks(client: TestClient) -> None:
     assert operator_arg.tenant_id == tenant_id
     assert call_args.args[1] == "vsan disk groups"
     assert call_args.kwargs["limit"] == 5
+
+
+def test_search_docs_out_of_corpus_query_not_grounded(client: TestClient) -> None:
+    """#133 AC1 (re-scoped): a query the corpus can't answer signals not-grounded.
+
+    An out-of-corpus query returns no chunks, so ``grounded`` is ``False`` — a
+    consumer switches on that single boolean to refuse an ungrounded answer,
+    distinguishable from an in-corpus query (``grounded=True``, covered by
+    ``test_search_docs_returns_200_with_cited_chunks``).
+
+    Per the Option-1 re-scope of #133, the verdict is presence-based (empty
+    retrieval → not grounded), the deterministic determination ``ask_docs``
+    already uses. The live "3 noise chunks at deceptively-high scores" case
+    (the guitar-string probe) returns chunks and so still reports grounded
+    here; separating it needs the deferred Option-A calibrated score floor.
+    """
+    _seed_collection_sync()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key,
+        sub="op-1",
+        tenant_role=TenantRole.OPERATOR.value,
+        tenant_id=str(UUID("33333333-3333-3333-3333-333333333333")),
+        capabilities=_ENTITLED_CAPS,
+    )
+
+    empty_corpus = _mock_corpus()  # no chunks → out-of-corpus
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=empty_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={
+                "query": "how do I tune my acoustic guitar strings",
+                "collection": "vmware",
+                "limit": 5,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chunks"] == []
+    assert body["grounded"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_docs_grounded_verdict_shared_with_ask_docs() -> None:
+    """#133 AC3: search_docs' grounded flag and ask_docs agree via one seam.
+
+    Both surfaces read :func:`retrieval_is_grounded`; ``ask_docs``'s synthesis
+    short-circuits to ``NO_GROUNDED_ANSWER`` on exactly the retrievals that
+    helper calls not-grounded. Assert the boundary agrees, so the two cannot
+    drift to divergent thresholds.
+    """
+    from meho_backplane.docs_search import (
+        NO_GROUNDED_ANSWER,
+        DocsChunk,
+        DocsSearchResult,
+        retrieval_is_grounded,
+        synthesize_docs_answer,
+    )
+
+    empty = DocsSearchResult(chunks=[])
+    assert retrieval_is_grounded(empty.chunks) is False
+    # ask_docs short-circuits (no model call) on the same emptiness.
+    answer = await synthesize_docs_answer("any question", empty)
+    assert answer.answer == NO_GROUNDED_ANSWER
+    assert answer.citations == []
+
+    # A non-empty retrieval is grounded by the same shared verdict.
+    non_empty = DocsSearchResult(
+        chunks=[DocsChunk(chunk_id="c1", content="vSphere maxima", source_url=None, score=0.3)]
+    )
+    assert retrieval_is_grounded(non_empty.chunks) is True
 
 
 def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> None:
@@ -833,6 +912,9 @@ def test_fanout_all_sentinel_queries_entitled_collections_and_tags_provenance(
     # Every chunk carries its source-collection provenance tag.
     seen_collections = {c["collection"] for c in body["chunks"]}
     assert seen_collections == {"vmware", "netapp"}
+    # #133: the fan-out branch computes `grounded` off the RRF-merged chunks
+    # via the same shared seam as the single-collection path.
+    assert body["grounded"] is True
     assert "backend" not in json.dumps(body)
 
 

@@ -35,6 +35,7 @@ touches the raw query beyond forwarding it to the corpus.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import structlog
@@ -179,6 +180,35 @@ class DocsSearchResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     chunks: list[DocsChunk] = Field(default_factory=list)
+
+
+def retrieval_is_grounded(chunks: Sequence[DocsChunk]) -> bool:
+    """Return whether a retrieval has anything to ground an answer on (#133).
+
+    The **single source of truth** for the groundedness verdict both
+    retrieval surfaces expose: ``search_docs`` reports it as the
+    :attr:`SearchDocsResponse.grounded` flag, and ``ask_docs`` uses the same
+    check to short-circuit to
+    :data:`~meho_backplane.docs_search.synthesis.NO_GROUNDED_ANSWER` — so the
+    two never diverge on what "grounded" means (a second, drifting threshold
+    is exactly what #133 forbids).
+
+    The verdict is **presence-based and deterministic**: grounded ⇔ retrieval
+    returned at least one chunk. This is `ask_docs`'s existing empty-evidence
+    determination (it answers ``NO_GROUNDED_ANSWER`` *without calling the
+    model* when retrieval is empty), lifted verbatim; it makes no model call
+    and reads no score, so ``search_docs`` stays pure retrieval.
+
+    What it deliberately does **not** do: judge whether *present* chunks are
+    topically relevant. A query that retrieves noise chunks at deceptively
+    high scores (the corpus ``score`` is an opaque, undocumented scale, and
+    out-of-corpus scores have been observed *higher* than in-corpus ones — so
+    no absolute floor separates them) still reports ``grounded=True`` here.
+    Distinguishing that case needs a calibrated, per-collection score floor —
+    deferred as the Option-A follow-on in #133 — and this function is the one
+    seam that refinement lands in, for both surfaces at once.
+    """
+    return len(chunks) > 0
 
 
 def build_docs_scope(

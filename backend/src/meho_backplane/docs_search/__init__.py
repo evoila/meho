@@ -83,6 +83,7 @@ from meho_backplane.docs_search.service import (
     DocsSearchResult,
     MissingDocsFilterError,
     build_docs_scope,
+    retrieval_is_grounded,
     search_docs,
 )
 from meho_backplane.docs_search.synthesis import (
@@ -130,6 +131,7 @@ __all__ = [
     "resolve_citation_link",
     "resolve_entitled_ready_collection",
     "resolve_entitled_ready_collections",
+    "retrieval_is_grounded",
     "retrieve_multi_query",
     "rrf_merge",
     "search_docs",

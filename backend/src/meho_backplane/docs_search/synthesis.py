@@ -57,7 +57,11 @@ from typing import Final, cast
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from meho_backplane.docs_search.service import DocsChunk, DocsSearchResult
+from meho_backplane.docs_search.service import (
+    DocsChunk,
+    DocsSearchResult,
+    retrieval_is_grounded,
+)
 from meho_backplane.operations.ingest import (
     StructuredJsonLlmClient,
     build_anthropic_ingest_llm_client,
@@ -407,9 +411,11 @@ async def synthesize_docs_answer(
             retrieved set. Also surfaces as ``-32603``.
     """
     chunks = list(retrieval.chunks)
-    if not chunks:
+    if not retrieval_is_grounded(chunks):
         # Empty evidence: the only answer path that produces text without
-        # calling the model, precisely so it cannot hallucinate.
+        # calling the model, precisely so it cannot hallucinate. The verdict
+        # is the shared :func:`retrieval_is_grounded` seam (#133) so this
+        # short-circuit and ``search_docs``'s ``grounded`` flag never diverge.
         _log.info("docs_ask_no_grounding", hit_count=0)
         return DocsAnswer(answer=NO_GROUNDED_ANSWER, citations=[])
 

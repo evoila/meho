@@ -725,13 +725,15 @@ def test_operations_ui_preview_invalid_params_renders_in_envelope_error() -> Non
 
 
 def test_operations_ui_preview_missing_target_name_is_inline_400() -> None:
-    """A blank target surfaces the meta-tool's missing-target-name 400 inline.
+    """A blank target surfaces the meta-tool's ``target_required`` envelope inline.
 
     The route forwards the whitespace-stripped target verbatim, so a blank /
-    whitespace-only field strips to the empty string the meta-tool rejects
-    with the ValueError the REST route maps to a hard 400 (the
-    ``{"target": {}}``-without-name contract). The BFF renders it as an
-    inline form error instead of tearing the operator out of the drawer.
+    whitespace-only field strips to the empty string the meta-tool now returns
+    as the ``target_required`` envelope (#136, was a ``ValueError``). The BFF
+    detects the target-resolution envelope and renders it as an inline form
+    error (HTTP 400, ``form_error`` marker) instead of tearing the operator out
+    of the drawer — the drawer's UX contract is preserved even though the
+    meta-tool no longer raises.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     _register_recording_gh_connector()
@@ -747,7 +749,7 @@ def test_operations_ui_preview_missing_target_name_is_inline_400() -> None:
                 "connector_id": "gh-rest-3",
                 "op_id": "POST:/repos/{owner}/{repo}/issues",
                 # Whitespace-only target -> strips to "" -> the meta-tool's
-                # missing-target-name ValueError -> the REST route's hard 400.
+                # ``target_required`` envelope -> the BFF's inline form error.
                 "target": "   ",
                 "params": "{}",
             },
@@ -755,7 +757,7 @@ def test_operations_ui_preview_missing_target_name_is_inline_400() -> None:
     assert response.status_code == 400, response.text
     body = response.text
     assert 'data-preview-status="form_error"' in body
-    assert "name" in body
+    assert "requires a target" in body
 
 
 def test_operations_ui_preview_malformed_params_json_is_inline_400() -> None:

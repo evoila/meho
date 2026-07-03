@@ -912,6 +912,9 @@ def test_fanout_all_sentinel_queries_entitled_collections_and_tags_provenance(
     # Every chunk carries its source-collection provenance tag.
     seen_collections = {c["collection"] for c in body["chunks"]}
     assert seen_collections == {"vmware", "netapp"}
+    # #133: the fan-out branch computes `grounded` off the RRF-merged chunks
+    # via the same shared seam as the single-collection path.
+    assert body["grounded"] is True
     assert "backend" not in json.dumps(body)
 
 

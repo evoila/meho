@@ -24597,14 +24597,19 @@
             },
             "type": "array",
             "title": "Chunks"
+          },
+          "grounded": {
+            "type": "boolean",
+            "title": "Grounded"
           }
         },
         "type": "object",
         "required": [
-          "chunks"
+          "chunks",
+          "grounded"
         ],
         "title": "SearchDocsResponse",
-        "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response."
+        "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response.\n\n``grounded`` is the **out-of-corpus discipline signal** (#133): ``True``\nwhen retrieval returned at least one chunk to ground on, ``False`` when it\nreturned none. A consumer must treat ``grounded=False`` as *\"the corpus\nhas no answer\"* and **not** fall back to ungrounded generation \u2014 the\nfeature's contract (*empty/low-score = not in the corpus; do not silently\nfall back to training data*). The verdict is computed server-side by the\nshared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam \u2014\nthe **same** determination ``ask_docs`` uses to short-circuit to its \"no\ngrounded answer\" reply, so the two surfaces never diverge.\n\n**Score scale + limits of this signal.** Each chunk's ``score`` is the\ncorpus's raw relevance score \u2014 an **opaque, backend-defined scale** MEHO\ndoes not normalise or threshold; do not compare it across collections or\nagainst a fixed cutoff. ``grounded`` is therefore **presence-based**, not\nrelevance-judged: a query that retrieves topically-irrelevant chunks at\nhigh scores still reports ``grounded=True``. Distinguishing that case\nneeds a calibrated per-collection score floor, deferred as the Option-A\nfollow-on (evoila-bosnia/meho-internal#133); it will refine\n``retrieval_is_grounded`` in one place for both surfaces."
       },
       "ShowTemplateResponse": {
         "properties": {

@@ -376,6 +376,8 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert len(payload["chunks"]) == 1
     chunk = payload["chunks"][0]
     assert chunk["chunk_id"] == "nsx-9.0-maximums-0007"
+    # #133: the MCP search_docs tool exposes the same grounded verdict as REST.
+    assert payload["grounded"] is True
     # The backend id never appears in the response.
     assert "backend" not in json.dumps(payload)
 

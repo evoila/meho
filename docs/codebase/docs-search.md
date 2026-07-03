@@ -478,6 +478,29 @@ audit contextvars (including `audit_collection`), runs the shared
 403, not ready → 409), then calls the service. Takes a
 `Depends(get_session)` DB session for the resolve.
 
+`SearchDocsResponse` is `{chunks: list[DocsChunk], grounded: bool}`. The
+`grounded` field (#133) is the **out-of-corpus discipline signal**: `True`
+when retrieval returned ≥1 chunk, `False` when it returned none. A consumer
+must treat `grounded=False` as *"the corpus has no answer"* and **not** fall
+back to ungrounded generation — the feature contract (*empty/low-score = not
+in the corpus; do not silently fall back to training data*). It is computed
+server-side by the shared
+[`retrieval_is_grounded`](../../backend/src/meho_backplane/docs_search/service.py)
+seam — the **same** verdict `ask_docs`'s synthesis uses to short-circuit to
+`NO_GROUNDED_ANSWER`, so the two surfaces cannot diverge. The MCP `search_docs`
+tool returns the same `grounded` key.
+
+**Score scale + what `grounded` does *not* cover.** Each chunk's `score` is
+the corpus's raw relevance score — an **opaque, backend-defined scale** MEHO
+neither normalises nor thresholds; it is not comparable across collections
+and there is no fixed cutoff. `grounded` is therefore **presence-based**, not
+relevance-judged: a query that retrieves topically-irrelevant chunks at
+high scores still reports `grounded=True` (out-of-corpus scores have been
+observed *higher* than in-corpus ones, so no absolute floor separates them).
+Catching that case needs a calibrated per-collection score floor, deferred as
+the Option-A follow-on (evoila-bosnia/meho-internal#133); it will refine
+`retrieval_is_grounded` in the one place both surfaces read.
+
 ### `POST /api/v1/ask_docs` (`meho_backplane.api.v1.ask_docs`, T2 #1917)
 
 The REST face of the **answer** pipeline — the synthesis sibling of

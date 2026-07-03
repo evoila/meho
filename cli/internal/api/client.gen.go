@@ -4981,8 +4981,29 @@ type SearchDocsRequest struct {
 // surface so the wire contract is decoupled from the corpus's. Frozen
 // so an accidental post-construction mutation surfaces as a pydantic
 // error rather than a silently-altered response.
+//
+// “grounded“ is the **out-of-corpus discipline signal** (#133): “True“
+// when retrieval returned at least one chunk to ground on, “False“ when it
+// returned none. A consumer must treat “grounded=False“ as *"the corpus
+// has no answer"* and **not** fall back to ungrounded generation — the
+// feature's contract (*empty/low-score = not in the corpus; do not silently
+// fall back to training data*). The verdict is computed server-side by the
+// shared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam —
+// the **same** determination “ask_docs“ uses to short-circuit to its "no
+// grounded answer" reply, so the two surfaces never diverge.
+//
+// **Score scale + limits of this signal.** Each chunk's “score“ is the
+// corpus's raw relevance score — an **opaque, backend-defined scale** MEHO
+// does not normalise or threshold; do not compare it across collections or
+// against a fixed cutoff. “grounded“ is therefore **presence-based**, not
+// relevance-judged: a query that retrieves topically-irrelevant chunks at
+// high scores still reports “grounded=True“. Distinguishing that case
+// needs a calibrated per-collection score floor, deferred as the Option-A
+// follow-on (evoila-bosnia/meho-internal#133); it will refine
+// “retrieval_is_grounded“ in one place for both surfaces.
 type SearchDocsResponse struct {
-	Chunks []DocsChunk `json:"chunks"`
+	Chunks   []DocsChunk `json:"chunks"`
+	Grounded bool        `json:"grounded"`
 }
 
 // ShowTemplateResponse Full template surface returned by “meho.runbook.show_template“.

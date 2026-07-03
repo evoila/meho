@@ -114,6 +114,7 @@ from meho_backplane.docs_search import (
     parse_collection_scope,
     resolve_entitled_ready_collection,
     resolve_entitled_ready_collections,
+    retrieval_is_grounded,
     retrieve_multi_query,
     search_docs,
     search_docs_fanout,
@@ -313,6 +314,11 @@ async def _search_docs_handler(
         result = await _run_search_single("search_docs", operator, arguments, query, limit)
     return {
         "chunks": [chunk.model_dump(mode="json") for chunk in result.chunks],
+        # Out-of-corpus discipline signal (#133): same shared verdict the REST
+        # search_docs response + ask_docs's no-grounded-answer short-circuit
+        # use, so the MCP tool never diverges. grounded=False ⇒ treat as "not
+        # in the corpus", do not fall back to ungrounded generation.
+        "grounded": retrieval_is_grounded(result.chunks),
     }
 
 

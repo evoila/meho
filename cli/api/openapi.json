@@ -20988,6 +20988,11 @@
             "type": "integer",
             "title": "Total Op Count"
           },
+          "ungrouped_op_count": {
+            "type": "integer",
+            "title": "Ungrouped Op Count",
+            "default": 0
+          },
           "kind": {
             "type": "string",
             "enum": [

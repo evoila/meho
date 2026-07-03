@@ -97,8 +97,13 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
-def _connector_not_ingested_404(exc: ConnectorNotIngestedError) -> HTTPException:
+def connector_not_ingested_404(exc: ConnectorNotIngestedError) -> HTTPException:
     """Map :class:`ConnectorNotIngestedError` to a structured ``404``.
+
+    The **shared** mapper for the registered-but-not-ingested 404 shape:
+    ``GET /operations/groups`` (here) and ``GET /connectors/{id}/review``
+    (#137) both route through it, so the two surfaces emit byte-identical
+    ``{message, reason, connector_id, next_step}`` and cannot drift.
 
     Both the registered-but-not-ingested case and the genuinely-unknown
     case are ``404`` on REST (no resolvable connector to dispatch), but
@@ -174,7 +179,7 @@ async def get_groups(
             {"connector_id": connector_id, "limit": limit, "cursor": cursor},
         )
     except ConnectorNotIngestedError as exc:
-        raise _connector_not_ingested_404(exc) from exc
+        raise connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -241,7 +246,7 @@ async def get_search(
             },
         )
     except ConnectorNotIngestedError as exc:
-        raise _connector_not_ingested_404(exc) from exc
+        raise connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

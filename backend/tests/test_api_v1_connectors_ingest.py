@@ -4154,3 +4154,191 @@ paths:
 
 # Silence unused-import lints on test seams reserved for sibling tasks.
 _ = (AsyncMock, patch, GroupingResult, IngestionResult)
+
+
+# ---------------------------------------------------------------------------
+# #137 — registered-but-not-ingested → structured connector_not_ingested 404
+# ---------------------------------------------------------------------------
+
+
+class _GhostReviewConnector(Connector):
+    """v2-registered class with no DB rows — the registered-but-not-ingested case."""
+
+    product = "ghostreview"
+    version = "9.0"
+    impl_id = "ghostreview-rest"
+
+    async def fingerprint(self, target, operator=None):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def probe(self, target):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def execute(self, target, op_id, params):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+
+def test_get_review_registered_not_ingested_returns_typed_404(client: TestClient) -> None:
+    """#137 AC1: a registered-but-0-ops connector → structured connector_not_ingested 404."""
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    register_connector_v2(
+        product="ghostreview",
+        version="9.0",
+        impl_id="ghostreview-rest",
+        cls=_GhostReviewConnector,
+    )
+    key, token = _operator_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/ghostreview-rest-9.0/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["reason"] == "connector_not_ingested"
+    assert detail["connector_id"] == "ghostreview-rest-9.0"
+    assert detail["next_step"] is not None
+    assert "ingest" in detail["next_step"]["verb"]
+
+
+def test_get_review_unknown_connector_keeps_plain_404(client: TestClient) -> None:
+    """#137 AC3: a genuinely-unknown connector_id keeps the plain-string 404."""
+    key, token = _operator_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/nope-not-a-connector-9.9/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 404
+    # Unknown (not class-registered) → the deliberate plain-string conflation.
+    assert isinstance(response.json()["detail"], str)
+
+
+def test_review_and_groups_same_not_ingested_shape() -> None:
+    """#137 AC2: /review and /operations/groups emit the same not_ingested reason + next_step."""
+    from fastapi import FastAPI
+
+    from meho_backplane.api.v1.operations import router as operations_router
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    register_connector_v2(
+        product="ghostreview",
+        version="9.0",
+        impl_id="ghostreview-rest",
+        cls=_GhostReviewConnector,
+    )
+    app = FastAPI()
+    app.add_middleware(AuditMiddleware)
+    app.add_middleware(RequestContextMiddleware)
+    app.include_router(connectors_ingest_router)
+    app.include_router(operations_router)
+    both = TestClient(app)
+
+    key, token = _operator_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        review = both.get(
+            "/api/v1/connectors/ghostreview-rest-9.0/review",
+            headers=_authed(token),
+        )
+        groups = both.get(
+            "/api/v1/operations/groups?connector_id=ghostreview-rest-9.0",
+            headers=_authed(token),
+        )
+    assert review.status_code == 404
+    assert groups.status_code == 404
+    r_detail = review.json()["detail"]
+    g_detail = groups.json()["detail"]
+    # Byte-identical reason + next_step (shared mapper + shared next_step builder).
+    assert r_detail["reason"] == g_detail["reason"] == "connector_not_ingested"
+    assert r_detail["next_step"] == g_detail["next_step"]
+    assert r_detail["connector_id"] == g_detail["connector_id"] == "ghostreview-rest-9.0"
+
+
+# ---------------------------------------------------------------------------
+# #125 — review total_op_count reconciles with the listing operation_count
+# ---------------------------------------------------------------------------
+
+
+async def _seed_ungrouped_op(
+    *,
+    tenant_id: UUID | None,
+    product: str = "vmware",
+    version: str = "9.0",
+    impl_id: str = "vmware-rest",
+    op_id: str = "GET:/api/v1/ungrouped/0",
+) -> None:
+    """Seed one EndpointDescriptor with a NULL group_id (excluded from review groups)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            EndpointDescriptor(
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id=op_id,
+                source_kind="ingested",
+                method="GET",
+                path="/api/v1/ungrouped/0",
+                group_id=None,
+                summary="An ungrouped op.",
+                is_enabled=False,
+            ),
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_review_total_reconciles_with_ungrouped_ops(client: TestClient) -> None:
+    """#125 AC1: total_op_count + ungrouped_op_count == listing operation_count.
+
+    Seed 2 groups x 3 ops (grouped) + 1 ungrouped descriptor. The review's
+    grouped total is 6; the ungrouped remainder is 1; the listing counts all 7.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a, group_count=2, ops_per_group=3)
+    await _seed_ungrouped_op(tenant_id=tenant_a)
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        review = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+        listing = client.get("/api/v1/connectors", headers=_authed(token))
+    assert review.status_code == 200
+    r = review.json()
+    assert r["total_op_count"] == 6
+    assert r["ungrouped_op_count"] == 1
+
+    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    op_count = listed["vmware-rest-9.0"]["operation_count"]
+    assert op_count == 7
+    # The reconciliation contract: review total + ungrouped == listing total.
+    assert r["total_op_count"] + r["ungrouped_op_count"] == op_count
+
+
+@pytest.mark.asyncio
+async def test_review_all_grouped_counts_match_listing(client: TestClient) -> None:
+    """#125 AC2: with every op grouped, review total == listing total, ungrouped == 0."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a, group_count=2, ops_per_group=3)
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        review = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+        listing = client.get("/api/v1/connectors", headers=_authed(token))
+    r = review.json()
+    assert r["ungrouped_op_count"] == 0
+    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    assert r["total_op_count"] == listed["vmware-rest-9.0"]["operation_count"] == 6

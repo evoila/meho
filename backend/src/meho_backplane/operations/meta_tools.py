@@ -89,7 +89,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import work_ref_var
-from meho_backplane.operations._errors import result_no_target, result_target_required
+from meho_backplane.operations._errors import (
+    result_ambiguous_target,
+    result_no_target,
+    result_target_required,
+)
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -101,7 +105,11 @@ from meho_backplane.operations.composite_backing import unbacked_composite_next_
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.api_schemas import NextStep
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
-from meho_backplane.targets.resolver import TargetNotFoundError, resolve_target
+from meho_backplane.targets.resolver import (
+    AmbiguousTargetError,
+    TargetNotFoundError,
+    resolve_target,
+)
 
 __all__ = [
     "SEARCH_LIMIT_MAX",
@@ -922,7 +930,10 @@ async def _resolve_target_or_error(
     * a missing / empty / ``name``-less ``target`` (the
       :func:`_normalize_target_arg` ``ValueError``) → ``target_required``;
     * a supplied name that resolves to no live target (the resolver's
-      :exc:`~meho_backplane.targets.resolver.TargetNotFoundError`) → ``no_target``.
+      :exc:`~meho_backplane.targets.resolver.TargetNotFoundError`) → ``no_target``;
+    * a supplied name that matches more than one target — an alias collision
+      (the resolver's :exc:`~meho_backplane.targets.resolver.AmbiguousTargetError`)
+      → ``ambiguous_target``.
 
     A genuinely malformed ``target`` (wrong JSON type) is rejected earlier by
     the request model as a 422 and never reaches here — that schema-vs-
@@ -945,6 +956,14 @@ async def _resolve_target_or_error(
         except TargetNotFoundError as exc:
             detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
             return None, result_no_target(
+                op_id,
+                str(detail.get("query", name)),
+                detail.get("matches", []),
+                0.0,
+            ).model_dump(mode="json")
+        except AmbiguousTargetError as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            return None, result_ambiguous_target(
                 op_id,
                 str(detail.get("query", name)),
                 detail.get("matches", []),

@@ -756,7 +756,9 @@ def _parse_params_field(params: str) -> dict[str, Any]:
 #: "blank target -> inline 400" behavior. A supplied-but-unresolvable name
 #: (``no_target``), which used to escape as a 404 that tore the operator out of
 #: the drawer, now folds into the same inline form error.
-_TARGET_RESOLUTION_ERROR_CODES: Final = frozenset({"target_required", "no_target"})
+_TARGET_RESOLUTION_ERROR_CODES: Final = frozenset(
+    {"target_required", "no_target", "ambiguous_target"}
+)
 
 
 def _target_resolution_error_message(envelope: dict[str, Any]) -> str | None:

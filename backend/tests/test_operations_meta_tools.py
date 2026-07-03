@@ -1341,6 +1341,83 @@ async def test_call_operation_empty_string_target_returns_target_required_envelo
 
 
 @pytest.mark.asyncio
+async def test_call_operation_unresolvable_target_returns_no_target_envelope(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#136: a supplied-but-unresolvable target name rides the envelope (``no_target``).
+
+    Was a route/resolver HTTP 404; now the resolver's ``TargetNotFoundError`` is
+    caught and returned as the ``no_target`` envelope so the consumer switches on
+    ``extras.error_code`` like every other resolution failure.
+    """
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.read",
+            "target": "does-not-exist",
+            "params": {},
+        },
+    )
+    assert result["status"] == "error"
+    assert result["extras"]["error_code"] == "no_target"
+    assert isinstance(result["extras"]["matches"], list)
+
+
+@pytest.mark.asyncio
+async def test_call_operation_ambiguous_target_returns_ambiguous_envelope(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#136: an alias matching >1 target rides the envelope (``ambiguous_target``).
+
+    An alias collision (two targets carry the same alias — the ``(tenant, name)``
+    unique index does not prevent it) makes the resolver raise
+    ``AmbiguousTargetError`` (HTTP 409). It is caught and returned as the
+    ``ambiguous_target`` envelope, completing the "every target-resolution
+    failure rides the envelope" contract — no 409 escapes ``/operations/call``.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        for name in ("vault-a", "vault-b"):
+            s.add(
+                TargetORM(
+                    id=uuid.uuid4(),
+                    tenant_id=_TENANT_A,
+                    name=name,
+                    aliases=["shared-alias"],  # collision: both carry it
+                    product="vault",
+                    host=f"{name}.example.com",
+                    port=8200,
+                    fqdn=None,
+                    secret_ref=None,
+                    auth_model="shared_service_account",
+                    vpn_required=False,
+                    extras={},
+                    notes=None,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.read",
+            "target": "shared-alias",
+            "params": {},
+        },
+    )
+    assert result["status"] == "error"
+    assert result["extras"]["error_code"] == "ambiguous_target"
+    assert isinstance(result["extras"]["matches"], list)
+
+
+@pytest.mark.asyncio
 async def test_call_operation_bare_string_and_dict_target_dispatch_identically(
     stub_embedding_service: AsyncMock,
 ) -> None:

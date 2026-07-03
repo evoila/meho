@@ -38,6 +38,7 @@ from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
     "result_ambiguous_connector",
+    "result_ambiguous_target",
     "result_awaiting_approval",
     "result_composite_l2_disabled",
     "result_composite_l2_missing",
@@ -156,6 +157,38 @@ def result_no_target(
         duration_ms=duration_ms,
         extras={
             "error_code": "no_target",
+            "op_id": op_id,
+            "query": query,
+            "matches": matches,
+        },
+    )
+
+
+def result_ambiguous_target(
+    op_id: str,
+    query: str,
+    matches: list[dict[str, Any]],
+    duration_ms: float,
+) -> OperationResult:
+    """A supplied ``target`` name matched more than one live target (#136).
+
+    The other arm of the target-**resolution** contract alongside
+    :func:`result_no_target`: an alias collision (or a repaired unique-index
+    violation) makes a name ambiguous. Like every resolution outcome it rides
+    the dispatcher envelope (``status="error"`` + ``extras.error_code``) rather
+    than escaping as the resolver's HTTP 409 — so a ``/operations/call`` (and
+    ``/preview``) consumer's single ``extras.error_code`` switch covers *every*
+    resolution failure, with no 409 exception to special-case. ``extras``
+    carries the colliding ``matches`` + ``query`` verbatim from the resolver's
+    409 detail, information-equivalent to the old body.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"ambiguous_target: {query!r} matches more than one target in the tenant",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "ambiguous_target",
             "op_id": op_id,
             "query": query,
             "matches": matches,

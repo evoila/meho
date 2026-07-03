@@ -127,10 +127,12 @@ exceptions), mirroring the dispatcher's never-raises contract so the REST
 route and MCP tool keep one uniform shape. Target-**resolution** failures
 ride the envelope too (#136, identical to `/call`): a missing / empty /
 `name`-less target is `extras.error_code=target_required`, a
-supplied-but-unresolvable name is `extras.error_code=no_target` (with the
-near-miss `matches`) — both HTTP 200. A malformed `target` (wrong JSON type)
-stays a request-schema `422` from the request model; that schema-vs-resolution
-boundary is the one remaining HTTP-side status.
+supplied-but-unresolvable name is `extras.error_code=no_target`, and a name
+matching more than one target (alias collision) is
+`extras.error_code=ambiguous_target` — all carry the candidate `matches` and
+are HTTP 200. A malformed `target` (wrong JSON type) stays a request-schema
+`422` from the request model; that schema-vs-resolution boundary is the one
+remaining HTTP-side status.
 
 The shared resolver `resolve_ingested_request` deliberately *raises* on a
 path-template fault — `KeyError` for an unsubstituted path var, `RuntimeError`

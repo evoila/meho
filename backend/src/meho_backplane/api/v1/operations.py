@@ -261,13 +261,15 @@ async def post_call(
 
     Schema-vs-resolution boundary (#136): every **target-resolution**
     outcome rides the envelope — a missing / empty / ``name``-less target
-    is ``extras.error_code="target_required"``, and a supplied name that
-    resolves to no live target is ``extras.error_code="no_target"`` (with
-    the near-miss ``matches``) — both HTTP 200, so a consumer switches on a
-    single ``error_code``. A genuinely malformed ``target`` (wrong JSON
-    type, e.g. ``target: 12345``) is a request-**schema** violation and is
-    correctly a 422 from the request model — that is the one remaining
-    HTTP-side status, and it is not a contract violation.
+    is ``extras.error_code="target_required"``, a supplied name that
+    resolves to no live target is ``extras.error_code="no_target"``, and a
+    name matching more than one target (alias collision) is
+    ``extras.error_code="ambiguous_target"`` — all carry the candidate
+    ``matches`` and are HTTP 200, so a consumer switches on a single
+    ``error_code``. A genuinely malformed ``target`` (wrong JSON type, e.g.
+    ``target: 12345``) is a request-**schema** violation and is correctly a
+    422 from the request model — that is the one remaining HTTP-side
+    status, and it is not a contract violation.
     """
     return await call_operation(operator, body.model_dump())
 
@@ -293,8 +295,9 @@ async def post_preview(
     ``extras.error_code``) rather than as HTTP 4xx, the same contract as
     ``/call``. Target-resolution outcomes ride the envelope identically to
     ``/call`` (#136): ``target_required`` for a missing / empty /
-    ``name``-less target, ``no_target`` for a supplied-but-unresolvable name
-    — both HTTP 200. A malformed ``target`` (wrong JSON type) stays a 422 from
+    ``name``-less target, ``no_target`` for a supplied-but-unresolvable name,
+    ``ambiguous_target`` for a name matching more than one target — all HTTP
+    200. A malformed ``target`` (wrong JSON type) stays a 422 from
     the request model (the schema-vs-resolution boundary). The body is redacted
     through the same connector-boundary pipeline the response path uses;
     nothing is written to the audit row.

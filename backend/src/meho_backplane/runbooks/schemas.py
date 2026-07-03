@@ -376,13 +376,21 @@ class EditTemplateResponse(BaseModel):
     which case :attr:`forked_from` is populated with the source's
     :class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is
     ``None``.
+
+    :attr:`status` is normally ``"draft"`` (both the in-place edit and the
+    fork mint/keep a draft). The one exception is the **no-op fork skip**
+    (#144): editing a published/deprecated version with a body byte-identical
+    to the source creates no draft and returns the *unchanged source* — so
+    ``version`` is the source version, ``forked_from`` is ``None``, and
+    ``status`` is the source's own ``"published"`` / ``"deprecated"``. The
+    non-``"draft"`` status is the signal that no new draft was created.
     """
 
     model_config = ConfigDict(frozen=True)
 
     slug: str
     version: int
-    status: Literal["draft"]
+    status: Literal["draft", "published", "deprecated"]
     forked_from: ForkInfo | None = None
 
 

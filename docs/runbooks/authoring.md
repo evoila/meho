@@ -143,6 +143,15 @@ The edit response then carries a `forked_from` block:
 against the version you forked from. It is the senior's decision input: it
 says how many operators are mid-procedure on the old version right now.
 
+**No-op edits don't fork.** If the submitted body is byte-identical to the
+source version (a re-submit that changed nothing — e.g. an accidental Edit →
+Submit of the pre-populated form), the edit is a no-op: no draft is created.
+The response then describes the *unchanged source* — `version` is the source
+version, `forked_from` is `null`, and `status` is the source's own
+`published` / `deprecated` (not `draft`). A non-`draft` status is the signal
+that no new draft was minted. A genuine change still forks `max(version) + 1`
+as above.
+
 What the fork does and does not change:
 
 - **In-flight runs keep advancing on their pinned version.** A run is pinned

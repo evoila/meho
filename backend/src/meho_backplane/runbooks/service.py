@@ -247,6 +247,30 @@ class RunbookTemplateService:
                     raise TemplateNotFoundError(
                         f"no template for slug {request.slug!r}; nothing to edit or fork"
                     )
+                source_row = await self._load_exact(
+                    session, tenant_id, request.slug, source_version
+                )
+                # ``source_row`` is non-None: ``source_version`` came from a
+                # real row via ``_resolve_latest_version`` and this session
+                # holds the read lock.
+                if source_row is not None and _body_matches(source_row, request.body):
+                    # #144: byte-identical edit of a published/deprecated
+                    # version is a no-op -- do NOT mint a redundant
+                    # ``v=max+1`` draft that differs only in metadata. Return
+                    # the unchanged source (no new row, no fork). Both the UI
+                    # editor and the REST PATCH path inherit this from here.
+                    structlog.get_logger().info(
+                        "runbook_template_edit_noop",
+                        tenant_id=str(tenant_id),
+                        slug=request.slug,
+                        version=source_version,
+                    )
+                    return EditTemplateResponse(
+                        slug=request.slug,
+                        version=source_version,
+                        status=_narrow_status(source_row.status),
+                        forked_from=None,
+                    )
                 in_flight = await _count_in_flight_runs(
                     session, tenant_id, request.slug, source_version
                 )
@@ -635,6 +659,29 @@ async def _count_in_flight_runs(
 def _steps_to_storage(steps: list[Step]) -> list[dict[str, object]]:
     """Serialise validated Pydantic steps to the ``steps`` JSONB column shape."""
     return [step.model_dump(mode="json") for step in steps]
+
+
+def _body_matches(row: RunbookTemplate, body: RunbookTemplateBody) -> bool:
+    """Whether *body* is content-identical to the persisted *row* (#144).
+
+    Compares only the author-supplied body fields — ``title`` /
+    ``description`` / ``target_kind`` / ``steps`` — excluding the metadata a
+    fork would change anyway (``version`` / ``status`` / ``created_by`` /
+    ``edited_by`` / ``edited_at``). ``steps`` is compared in the JSONB storage
+    shape (:func:`_steps_to_storage`) so the incoming validated models are
+    matched against the row exactly as stored — the same serialisation a fork
+    would persist, so equality here means the fork would be byte-identical.
+
+    When this returns ``True`` on the fork path, :meth:`update_or_fork` skips
+    the fork and returns the unchanged source, keeping a no-op edit a no-op
+    (idempotent) instead of minting a redundant draft.
+    """
+    return (
+        row.title == body.title
+        and row.description == body.description
+        and row.target_kind == body.target_kind
+        and row.steps == _steps_to_storage(body.steps)
+    )
 
 
 def _steps_from_storage(steps: list[dict[str, object]]) -> list[Step]:

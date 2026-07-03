@@ -221,6 +221,35 @@ async def test_update_or_fork_forks_from_published() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_or_fork_noop_on_identical_body_skips_fork() -> None:
+    """#144 AC1: editing a published version with a byte-identical body creates no fork.
+
+    A re-submit that changed nothing must not mint a redundant ``v=max+1`` draft
+    that differs only in metadata. The edit returns the unchanged source
+    (``forked_from=None``, source version, source status) and no new row lands.
+    """
+    service = RunbookTemplateService()
+    tenant_id = uuid.uuid4()
+    await service.create_draft(
+        tenant_id, OPERATOR, DraftTemplateRequest(slug="drain-node", body=_body())
+    )
+    await service.publish(tenant_id, PublishTemplateRequest(slug="drain-node", version=1))
+
+    resp = await service.update_or_fork(
+        tenant_id,
+        OPERATOR,
+        # Body identical to the published v1 — a no-op edit.
+        EditTemplateRequest(slug="drain-node", body=_body()),
+    )
+
+    assert resp.forked_from is None
+    assert resp.version == 1
+    assert resp.status == "published"
+    # No v2 row was minted: the latest version is still 1.
+    assert (await service.show_template(tenant_id, "drain-node")).version == 1
+
+
+@pytest.mark.asyncio
 async def test_update_or_fork_in_flight_run_count() -> None:
     """Fork reports only in_progress runs pinned to the source version."""
     service = RunbookTemplateService()
@@ -239,8 +268,11 @@ async def test_update_or_fork_in_flight_run_count() -> None:
     # An in-progress run against a different version is NOT counted.
     await _seed_run(tenant_id, "drain-node", 2, "in_progress")
 
+    # A *changed* body so the edit actually forks (a byte-identical body is now
+    # a no-op that skips the fork, #144) — this test exercises the fork path's
+    # in_flight_run_count reporting.
     resp = await service.update_or_fork(
-        tenant_id, OPERATOR, EditTemplateRequest(slug="drain-node", body=_body())
+        tenant_id, OPERATOR, EditTemplateRequest(slug="drain-node", body=_body(title="Forked v2"))
     )
 
     assert resp.forked_from is not None
@@ -360,8 +392,10 @@ async def test_list_templates_filters() -> None:
         tenant_id, OPERATOR, DraftTemplateRequest(slug="alpha", body=_body())
     )
     await service.publish(tenant_id, PublishTemplateRequest(slug="alpha", version=1))
+    # A changed body so the edit forks v2 (a byte-identical body is now a no-op
+    # that skips the fork, #144).
     await service.update_or_fork(
-        tenant_id, OPERATOR, EditTemplateRequest(slug="alpha", body=_body())
+        tenant_id, OPERATOR, EditTemplateRequest(slug="alpha", body=_body(title="alpha v2"))
     )
     await service.create_draft(tenant_id, OPERATOR, DraftTemplateRequest(slug="beta", body=_body()))
 

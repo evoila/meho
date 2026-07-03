@@ -1335,3 +1335,50 @@ async def test_draft_rejects_blank_step_body_422(blank_body: str) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
+
+
+@pytest.mark.asyncio
+async def test_patch_noop_identical_body_does_not_fork_via_route() -> None:
+    """#144 AC3: a PATCH byte-identical to the published source mints no new version.
+
+    Exercises the **real** service end-to-end through the route (``update_or_fork``
+    is NOT mocked): seed a published v1, then PATCH with an identical body. The
+    dedup lands engine-side, so the route returns the unchanged source
+    (``forked_from=null``, source version + status) and ``show`` confirms no v2.
+    """
+    tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant)
+    test_client = TestClient(_build_app())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # Seed a published v1 through the route (real service, real DB).
+        created = test_client.post(
+            "/api/v1/runbooks/templates",
+            json={"slug": "rotate-cert", "body": _template_body()},
+            headers=_authed(token),
+        )
+        assert created.status_code == 201, created.text
+        published = test_client.post(
+            "/api/v1/runbooks/templates/rotate-cert/publish",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+        assert published.status_code == 200, published.text
+        # PATCH with a byte-identical body → no-op fork skip.
+        patched = test_client.patch(
+            "/api/v1/runbooks/templates/rotate-cert",
+            json=_template_body(),
+            headers=_authed(token),
+        )
+        assert patched.status_code == 200, patched.text
+        edit = patched.json()
+        assert edit["version"] == 1
+        assert edit["forked_from"] is None
+        assert edit["status"] == "published"
+        # No v2 draft was created — the latest version is still 1.
+        shown = test_client.get(
+            "/api/v1/runbooks/templates/rotate-cert",
+            headers=_authed(token),
+        )
+        assert shown.status_code == 200, shown.text
+        assert shown.json()["version"] == 1

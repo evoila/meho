@@ -134,6 +134,13 @@ const (
 	EditOpWarningCodeUnreplacedAutoShim    EditOpWarningCode = "unreplaced_auto_shim"
 )
 
+// Defines values for EditTemplateResponseStatus.
+const (
+	EditTemplateResponseStatusDeprecated EditTemplateResponseStatus = "deprecated"
+	EditTemplateResponseStatusDraft      EditTemplateResponseStatus = "draft"
+	EditTemplateResponseStatusPublished  EditTemplateResponseStatus = "published"
+)
+
 // Defines values for EvalRequestSurface.
 const (
 	EvalRequestSurfaceAll        EvalRequestSurface = "all"
@@ -461,9 +468,9 @@ const (
 
 // Defines values for RunbooksListUiRunbooksListGetParamsStatus.
 const (
-	Deprecated RunbooksListUiRunbooksListGetParamsStatus = "deprecated"
-	Draft      RunbooksListUiRunbooksListGetParamsStatus = "draft"
-	Published  RunbooksListUiRunbooksListGetParamsStatus = "published"
+	RunbooksListUiRunbooksListGetParamsStatusDeprecated RunbooksListUiRunbooksListGetParamsStatus = "deprecated"
+	RunbooksListUiRunbooksListGetParamsStatusDraft      RunbooksListUiRunbooksListGetParamsStatus = "draft"
+	RunbooksListUiRunbooksListGetParamsStatusPublished  RunbooksListUiRunbooksListGetParamsStatus = "published"
 )
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
@@ -3333,6 +3340,14 @@ type EditOpWarningCode string
 // which case :attr:`forked_from` is populated with the source's
 // :class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is
 // “None“.
+//
+// :attr:`status` is normally “"draft"“ (both the in-place edit and the
+// fork mint/keep a draft). The one exception is the **no-op fork skip**
+// (#144): editing a published/deprecated version with a body byte-identical
+// to the source creates no draft and returns the *unchanged source* — so
+// “version“ is the source version, “forked_from“ is “None“, and
+// “status“ is the source's own “"published"“ / “"deprecated"“. The
+// non-“"draft"“ status is the signal that no new draft was created.
 type EditTemplateResponse struct {
 	// ForkedFrom Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.
 	//
@@ -3341,11 +3356,14 @@ type EditTemplateResponse struct {
 	// shape tells the senior what they are forking from -- the source
 	// version and how many runs are still pinned to it -- so they can decide
 	// whether the fork is the right move.
-	ForkedFrom *ForkInfo `json:"forked_from,omitempty"`
-	Slug       string    `json:"slug"`
-	Status     string    `json:"status"`
-	Version    int       `json:"version"`
+	ForkedFrom *ForkInfo                  `json:"forked_from,omitempty"`
+	Slug       string                     `json:"slug"`
+	Status     EditTemplateResponseStatus `json:"status"`
+	Version    int                        `json:"version"`
 }
+
+// EditTemplateResponseStatus defines model for EditTemplateResponse.Status.
+type EditTemplateResponseStatus string
 
 // EnableReadsResponse Response body for “POST /api/v1/connectors/{id}/enable-reads“ (G0.25-T7 #1749).
 //

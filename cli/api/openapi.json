@@ -22128,7 +22128,11 @@
           },
           "status": {
             "type": "string",
-            "const": "draft",
+            "enum": [
+              "draft",
+              "published",
+              "deprecated"
+            ],
             "title": "Status"
           },
           "forked_from": {
@@ -22143,7 +22147,7 @@
           "status"
         ],
         "title": "EditTemplateResponse",
-        "description": "Response for ``meho.runbook.edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``."
+        "description": "Response for ``meho.runbook.edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``.\n\n:attr:`status` is normally ``\"draft\"`` (both the in-place edit and the\nfork mint/keep a draft). The one exception is the **no-op fork skip**\n(#144): editing a published/deprecated version with a body byte-identical\nto the source creates no draft and returns the *unchanged source* \u2014 so\n``version`` is the source version, ``forked_from`` is ``None``, and\n``status`` is the source's own ``\"published\"`` / ``\"deprecated\"``. The\nnon-``\"draft\"`` status is the signal that no new draft was created."
       },
       "EnableReadsResponse": {
         "properties": {

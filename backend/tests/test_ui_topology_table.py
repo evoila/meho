@@ -460,6 +460,64 @@ def test_table_filter_by_name_substring_narrows_results() -> None:
     assert "vm-staging-01" not in body
 
 
+def test_table_empty_kind_filter_returns_all_rows() -> None:
+    """An empty ``?kind=`` ("All kinds") returns the full grid, not zero rows.
+
+    The filter bar's default option is ``<option value="">``, so picking
+    "All kinds" submits ``?kind=``. Without the empty-string coercion the
+    exact-match filter applied ``WHERE kind = ''`` and wiped the grid.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-keep")
+    _seed_node(tenant_id=_TENANT_A, kind="target", name="target-keep")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?kind=", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "vm-keep" in body
+    assert "target-keep" in body
+
+
+def test_table_empty_kind_with_name_search_still_narrows() -> None:
+    """``?q=prod&kind=`` applies the name filter only.
+
+    The filter ``<form>`` co-submits ``kind`` on every search keystroke
+    (``hx-include="closest form"``), so a name search always rides with
+    the (usually empty) ``kind``. The empty ``kind`` must be a no-op --
+    previously it zeroed every search result.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-prod-01")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-staging-01")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(
+            "/ui/topology", params={"q": "prod", "kind": ""}, headers={"HX-Request": "true"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "vm-prod-01" in body
+    assert "vm-staging-01" not in body
+
+
+def test_table_bogus_kind_filter_still_returns_no_rows() -> None:
+    """Empty != invalid: a non-existent ``?kind=`` value still filters to zero rows."""
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-keep")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?kind=not-a-kind", headers={"HX-Request": "true"})
+    assert response.status_code == 200, response.text
+    assert "vm-keep" not in response.text
+
+
 # ---------------------------------------------------------------------------
 # Cross-tenant isolation -- the table
 # ---------------------------------------------------------------------------

@@ -80,10 +80,11 @@ from __future__ import annotations
 
 import uuid
 from enum import StrEnum
-from typing import Final
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
+from pydantic import StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_raw_session
@@ -91,6 +92,7 @@ from meho_backplane.db.models import _GRAPH_NODE_KINDS
 from meho_backplane.topology.query import list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.query_filters import EMPTY_STR_TO_NONE
 from meho_backplane.ui.routes.connectors.operator import resolve_role_probe
 from meho_backplane.ui.routes.topology.graph import OverlayDirection, render_graph
 from meho_backplane.ui.routes.topology.queries import (
@@ -444,8 +446,26 @@ def build_table_router() -> APIRouter:
                 "the graph overlay branch (``view=graph&from=<name>``)."
             ),
         ),
-        kind: str | None = Query(default=None, max_length=64),
-        q: str | None = Query(default=None, max_length=256),
+        # ``kind`` / ``q`` coerce ``"" -> None`` so the filter bar's
+        # "All kinds" option (``<option value="">``) and a cleared
+        # search box mean "no filter". The form co-submits ``kind`` on
+        # every search keystroke (``hx-include="closest form"``), so
+        # without the coercion an empty ``kind`` reaches
+        # :func:`list_nodes` as an exact match on ``''`` and wipes the
+        # grid. ``max_length`` rides on the inner ``str`` branch via
+        # ``StringConstraints`` -- a bare ``Query(max_length=...)`` on
+        # the nullable field would apply the guard to the ``None`` the
+        # BeforeValidator produces and raise ``TypeError``.
+        kind: Annotated[
+            Annotated[str, StringConstraints(max_length=64)] | None,
+            EMPTY_STR_TO_NONE,
+            Query(),
+        ] = None,
+        q: Annotated[
+            Annotated[str, StringConstraints(max_length=256)] | None,
+            EMPTY_STR_TO_NONE,
+            Query(),
+        ] = None,
         limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
         view: _ViewMode = Query(default=_ViewMode.TABLE),
         selected: uuid.UUID | None = Query(default=None),

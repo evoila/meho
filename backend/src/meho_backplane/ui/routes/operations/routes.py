@@ -701,19 +701,21 @@ async def _render_preview(
         "connector_id": connector_id,
         "op_id": op_id,
         # Bare-string target shape ``_normalize_target_arg`` accepts. An empty
-        # string (blank field) raises the meta-tool's missing-target-name
-        # ValueError -- the REST route's hard 400 -- surfaced inline below.
+        # string (blank field) becomes the meta-tool's ``target_required``
+        # envelope -- surfaced inline below (#136).
         "target": target.strip(),
         "params": parsed_params,
     }
-    try:
-        envelope = await preview_operation(operator, arguments)
-    except ValueError as exc:
-        # The only ValueError the meta-tool raises is a missing target name
-        # (the dict-target-without-name case). The REST route maps it to a
-        # hard 400; here it is an inline form error so the operator stays in
-        # the drawer.
-        return _render_preview_form_error(request, connector_id, op_id, target, params, str(exc))
+    envelope = await preview_operation(operator, arguments)
+    # #136: target-resolution failures now ride the envelope (``target_required``
+    # / ``no_target``) instead of raising. Render them as the drawer's inline
+    # form error rather than a preview result, preserving the pre-#136 UX; every
+    # other envelope status renders normally below.
+    resolution_error = _target_resolution_error_message(envelope)
+    if resolution_error is not None:
+        return _render_preview_form_error(
+            request, connector_id, op_id, target, params, resolution_error
+        )
 
     context: dict[str, Any] = {
         "envelope": envelope,
@@ -745,6 +747,32 @@ def _parse_params_field(params: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError('params must be a JSON object (e.g. {"path": "secret/data/app"}).')
     return value
+
+
+#: Dispatcher envelope ``error_code``\ s for a target-**resolution** failure
+#: (#136). As of #136 the meta-tool returns these inside the envelope rather
+#: than raising ``ValueError``; the BFF renders them as an inline form error
+#: (the drawer's UX) rather than a dispatch result, preserving the pre-#136
+#: "blank target -> inline 400" behavior. A supplied-but-unresolvable name
+#: (``no_target``), which used to escape as a 404 that tore the operator out of
+#: the drawer, now folds into the same inline form error.
+_TARGET_RESOLUTION_ERROR_CODES: Final = frozenset({"target_required", "no_target"})
+
+
+def _target_resolution_error_message(envelope: dict[str, Any]) -> str | None:
+    """Return the message when *envelope* is a target-resolution failure, else ``None``.
+
+    ``None`` for a successful preview/dispatch or a non-target error (e.g.
+    ``unknown_op`` / ``no_connector``) — those render as a normal envelope in
+    the result/preview fragment. #136.
+    """
+    if envelope.get("status") != "error":
+        return None
+    extras = envelope.get("extras") or {}
+    if extras.get("error_code") in _TARGET_RESOLUTION_ERROR_CODES:
+        error = envelope.get("error")
+        return error if isinstance(error, str) else "target did not resolve"
+    return None
 
 
 def _render_preview_form_error(
@@ -863,8 +891,8 @@ async def _render_call_result(
         "connector_id": connector_id,
         "op_id": op_id,
         # Bare-string target shape ``_normalize_target_arg`` accepts. An empty
-        # string (blank field) raises the meta-tool's missing-target-name
-        # ValueError -- the REST route's hard 400 -- surfaced inline below.
+        # string (blank field) becomes the meta-tool's ``target_required``
+        # envelope -- surfaced inline below (#136).
         "target": target.strip(),
         "params": parsed_params,
     }
@@ -874,11 +902,13 @@ async def _render_call_result(
     if work_ref_value:
         arguments["work_ref"] = work_ref_value
 
-    try:
-        envelope = await call_operation(operator, arguments)
-    except ValueError as exc:
-        # The only ValueError the meta-tool raises is a missing target name.
-        return _render_call_form_error(request, connector_id, op_id, str(exc))
+    envelope = await call_operation(operator, arguments)
+    # #136: target-resolution failures ride the envelope (``target_required`` /
+    # ``no_target``) instead of raising; render them as the inline form error,
+    # preserving the pre-#136 UX. Every other envelope status renders normally.
+    resolution_error = _target_resolution_error_message(envelope)
+    if resolution_error is not None:
+        return _render_call_form_error(request, connector_id, op_id, resolution_error)
 
     context: dict[str, Any] = {
         "envelope": envelope,

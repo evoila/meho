@@ -89,6 +89,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._errors import result_no_target, result_target_required
 from meho_backplane.operations._lookup import (
     connector_class_registered,
     connector_exists,
@@ -100,7 +101,7 @@ from meho_backplane.operations.composite_backing import unbacked_composite_next_
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.api_schemas import NextStep
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
-from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.targets.resolver import TargetNotFoundError, resolve_target
 
 __all__ = [
     "SEARCH_LIMIT_MAX",
@@ -902,6 +903,68 @@ def _normalize_target_arg(
     return target_arg
 
 
+async def _resolve_target_or_error(
+    operator: Operator,
+    op_id: str,
+    target_raw: str | dict[str, Any] | None,
+    *,
+    bind_audit_target: bool,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Resolve ``call``/``preview``'s ``target`` arg, or return an error envelope (#136).
+
+    Returns ``(resolved_target, None)`` on success (``resolved_target`` is
+    ``None`` for a target-less op), or ``(None, envelope)`` when target
+    **resolution** fails. Both failure classes ride the dispatcher envelope
+    (``status="error"`` + ``extras.error_code``) so a ``/operations/call`` (and
+    ``/preview``) consumer switches on one ``error_code`` instead of parsing a
+    400/404 body:
+
+    * a missing / empty / ``name``-less ``target`` (the
+      :func:`_normalize_target_arg` ``ValueError``) → ``target_required``;
+    * a supplied name that resolves to no live target (the resolver's
+      :exc:`~meho_backplane.targets.resolver.TargetNotFoundError`) → ``no_target``.
+
+    A genuinely malformed ``target`` (wrong JSON type) is rejected earlier by
+    the request model as a 422 and never reaches here — that schema-vs-
+    resolution boundary is deliberate. ``bind_audit_target`` binds the resolved
+    ``target_id`` into structlog for the eventual audit row (``call`` does;
+    ``preview`` writes no row, so it does not).
+    """
+    try:
+        target_arg = _normalize_target_arg(target_raw)
+    except ValueError:
+        return None, result_target_required(op_id, 0.0).model_dump(mode="json")
+    if target_arg is None:
+        return None, None
+
+    name = target_arg["name"]
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            resolved_target = await resolve_target(session, operator.tenant_id, name)
+        except TargetNotFoundError as exc:
+            detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
+            return None, result_no_target(
+                op_id,
+                str(detail.get("query", name)),
+                detail.get("matches", []),
+                0.0,
+            ).model_dump(mode="json")
+        if bind_audit_target:
+            # Bind into structlog so AuditMiddleware picks up the target_id
+            # on the eventual audit row. Same shape as the targets routes.
+            structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
+
+    # Per-call ``fqdn`` override -- applied in memory only. The DB row is not
+    # touched; the override travels with the resolved Target for the lifetime
+    # of this dispatch and is read by connectors that honour vhost routing
+    # (G3.6 VCF Automation). Non-string / empty values fall through silently.
+    fqdn_override = target_arg.get("fqdn")
+    if isinstance(fqdn_override, str) and fqdn_override:
+        resolved_target.fqdn = fqdn_override
+    return resolved_target, None
+
+
 async def _call_operation_impl(
     operator: Operator,
     arguments: dict[str, Any],
@@ -927,34 +990,15 @@ async def _call_operation_impl(
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
-    target_arg = _normalize_target_arg(arguments.get("target"))
     params: dict[str, Any] = arguments.get("params") or {}
 
-    resolved_target: Any = None
-    if target_arg is not None:
-        # ``name`` is guaranteed present + non-empty by
-        # ``_normalize_target_arg``; the cast keeps mypy happy at the
-        # resolver-call site.
-        name = target_arg["name"]
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            resolved_target = await resolve_target(session, operator.tenant_id, name)
-            # Bind into structlog so AuditMiddleware picks up the target_id
-            # on the eventual audit row. Same shape as the targets routes.
-            structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
-        # Per-call ``fqdn`` override -- applied in memory only. The DB row
-        # is not touched; the override travels with the resolved Target
-        # for the lifetime of this dispatch and is read by connectors that
-        # honour vhost routing (G3.6 VCF Automation). Non-string / empty
-        # values fall through silently rather than overriding with a bad
-        # value; an explicit ``None`` override is not supported (use a
-        # fresh ``meho targets update`` to clear the column). Bare-string
-        # ``target`` callers can't reach this branch (the normaliser
-        # produces a ``name``-only dict); they must switch to the dict
-        # shape to opt into vhost override.
-        fqdn_override = target_arg.get("fqdn")
-        if isinstance(fqdn_override, str) and fqdn_override:
-            resolved_target.fqdn = fqdn_override
+    # #136: target-resolution failures ride the dispatcher envelope (a single
+    # ``extras.error_code`` for the consumer), not an HTTP 400/404.
+    resolved_target, target_error = await _resolve_target_or_error(
+        operator, op_id, arguments.get("target"), bind_audit_target=True
+    )
+    if target_error is not None:
+        return target_error
 
     # work_ref I1-T2 (#1657): bind an explicit per-op ``work_ref`` (the
     # MCP ``call_operation`` tool arg / the REST ``CallOperationBody``
@@ -1017,11 +1061,13 @@ async def call_operation(
 
     Returns the :class:`~meho_backplane.connectors.schemas.OperationResult`
     serialised via ``model_dump(mode="json")``. Errors surface inside
-    the result envelope (``status='error'`` + ``error='<code>: …'``)
+    the result envelope (``status='error'`` + ``extras.error_code``)
     rather than as exceptions — the dispatcher contract is "always
-    return a structured result". The route layer turns 4xx-class
-    errors into HTTP status codes; the meta-tool handler just returns
-    the envelope so the MCP transport keeps a uniform shape.
+    return a structured result". Target-resolution failures are enveloped
+    too (#136): a missing / empty / ``name``-less target →
+    ``target_required``, a supplied-but-unresolvable name → ``no_target``
+    (see :func:`_resolve_target_or_error`). So the meta-tool never raises
+    for operator-input faults and the MCP transport keeps a uniform shape.
     """
     return await _call_operation_impl(operator, arguments, approved=False)
 
@@ -1076,33 +1122,24 @@ async def preview_operation(
     Returns the structured envelope verbatim (``status`` of ``"ok"`` /
     ``"error"`` / ``"unavailable"``); operator-input faults (unknown op,
     invalid params, unresolvable connector) come back inside the envelope
-    rather than as exceptions, mirroring ``call_operation``. The one
-    exception the handler may raise is the missing-``target.name``
-    ``ValueError`` from :func:`_normalize_target_arg`, which the route maps
-    to a ``400``.
+    rather than as exceptions, mirroring ``call_operation``. Target-resolution
+    failures are enveloped identically (#136): ``target_required`` for a
+    missing / empty / ``name``-less target, ``no_target`` for a
+    supplied-but-unresolvable name (see :func:`_resolve_target_or_error`) —
+    so ``call`` and ``preview`` behave the same for target resolution.
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
-    target_arg = _normalize_target_arg(arguments.get("target"))
     params: dict[str, Any] = arguments.get("params") or {}
 
-    resolved_target: Any = None
-    if target_arg is not None:
-        # ``name`` is guaranteed present + non-empty by
-        # ``_normalize_target_arg``. Resolve the target so the preview
-        # reflects the same connector + ``mount_op_path`` the real dispatch
-        # would hit -- but do NOT bind the ``audit_target_id`` contextvar:
-        # a preview writes no audit row, so there is nothing to enrich.
-        name = target_arg["name"]
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            resolved_target = await resolve_target(session, operator.tenant_id, name)
-        # Per-call ``fqdn`` override -- applied in memory only, same as
-        # ``call_operation``; the resolved path the connector's
-        # ``mount_op_path`` produces can depend on it (vhost routing).
-        fqdn_override = target_arg.get("fqdn")
-        if isinstance(fqdn_override, str) and fqdn_override:
-            resolved_target.fqdn = fqdn_override
+    # #136: same target-resolution-rides-the-envelope contract as ``call``.
+    # ``bind_audit_target=False`` — a preview writes no audit row, so there is
+    # nothing to enrich.
+    resolved_target, target_error = await _resolve_target_or_error(
+        operator, op_id, arguments.get("target"), bind_audit_target=False
+    )
+    if target_error is not None:
+        return target_error
 
     envelope = await preview_dispatch(
         operator=operator,

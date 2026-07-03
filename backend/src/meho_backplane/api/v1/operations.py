@@ -255,18 +255,21 @@ async def post_call(
 
     Delegates to :func:`call_operation`. The dispatcher contract is
     "always return a structured result"; errors land in the result
-    envelope (``status='error'`` + ``error='<code>: …'``) rather than
+    envelope (``status='error'`` + ``extras.error_code``) rather than
     HTTP 4xx. The route returns 200 on a structured-error envelope so
     callers see the dispatcher's error_code in ``extras``.
 
-    The one HTTP-side gate is the target resolution: a missing-target
-    name (``{"target": {}}`` without ``"name"``) surfaces as a 400.
+    Schema-vs-resolution boundary (#136): every **target-resolution**
+    outcome rides the envelope — a missing / empty / ``name``-less target
+    is ``extras.error_code="target_required"``, and a supplied name that
+    resolves to no live target is ``extras.error_code="no_target"`` (with
+    the near-miss ``matches``) — both HTTP 200, so a consumer switches on a
+    single ``error_code``. A genuinely malformed ``target`` (wrong JSON
+    type, e.g. ``target: 12345``) is a request-**schema** violation and is
+    correctly a 422 from the request model — that is the one remaining
+    HTTP-side status, and it is not a contract violation.
     """
-    try:
-        return await call_operation(operator, body.model_dump())
-    except ValueError as exc:
-        # Missing `target.name` is the only ValueError the meta-tool raises.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await call_operation(operator, body.model_dump())
 
 
 @router.post("/preview")
@@ -288,16 +291,15 @@ async def post_preview(
     (unknown op, invalid params, unresolvable connector) land inside the
     envelope (``status="error"`` / ``status="unavailable"`` +
     ``extras.error_code``) rather than as HTTP 4xx, the same contract as
-    ``/call``. The one HTTP-side gate is target resolution: a missing-target
-    name (``{"target": {}}`` without ``"name"``) surfaces as a ``400``. The
-    body is redacted through the same connector-boundary pipeline the
-    response path uses; nothing is written to the audit row.
+    ``/call``. Target-resolution outcomes ride the envelope identically to
+    ``/call`` (#136): ``target_required`` for a missing / empty /
+    ``name``-less target, ``no_target`` for a supplied-but-unresolvable name
+    — both HTTP 200. A malformed ``target`` (wrong JSON type) stays a 422 from
+    the request model (the schema-vs-resolution boundary). The body is redacted
+    through the same connector-boundary pipeline the response path uses;
+    nothing is written to the audit row.
     """
-    try:
-        return await preview_operation(operator, body.model_dump())
-    except ValueError as exc:
-        # Missing `target.name` is the only ValueError the meta-tool raises.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await preview_operation(operator, body.model_dump())
 
 
 @router.get("/{descriptor_id}", response_model=OperationDescriptor)

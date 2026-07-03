@@ -51,6 +51,7 @@ __all__ = [
     "result_handler_unreachable",
     "result_invalid_params",
     "result_no_connector",
+    "result_no_target",
     "result_target_required",
     "result_unknown_op",
     "status_code_for_result",
@@ -121,6 +122,44 @@ def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
         error=f"target_required: {op_id!r} requires a target; none was supplied",
         duration_ms=duration_ms,
         extras={"error_code": "target_required", "op_id": op_id},
+    )
+
+
+def result_no_target(
+    op_id: str,
+    query: str,
+    matches: list[dict[str, Any]],
+    duration_ms: float,
+) -> OperationResult:
+    """A supplied ``target`` name resolved to no live target in the tenant (#136).
+
+    Target **resolution** is a domain outcome, not a transport fault: a valid
+    request naming a target that doesn't exist should ride the dispatcher
+    envelope (``status="error"`` + ``extras.error_code``), the same as
+    ``target_required`` / ``invalid_params`` / ``unknown_op`` — so a
+    ``/operations/call`` (and ``/preview``) consumer switches on a single
+    ``extras.error_code`` for every target-resolution failure instead of
+    parsing a 404 body. (The meta-tool layer catches
+    :exc:`~meho_backplane.targets.resolver.TargetNotFoundError` and returns
+    this rather than letting the HTTP-layer 404 escape.) A genuinely malformed
+    ``target`` (wrong JSON type) is still a request-schema violation and stays
+    a 422 at the request model — that boundary is deliberate.
+
+    ``extras`` carries the near-miss ``matches`` (up to 5 candidate names) and
+    the ``query`` verbatim from the resolver's 404 detail, so the envelope is
+    information-equivalent to the old ``404 {error, query, matches}`` body.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"no_target: no target matches {query!r} in the tenant",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "no_target",
+            "op_id": op_id,
+            "query": query,
+            "matches": matches,
+        },
     )
 
 

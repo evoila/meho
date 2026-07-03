@@ -9,9 +9,11 @@ Coverage matrix (G0.6-T8 / Task #399):
   meta-tool; unauthenticated -> 401.
 * ``GET /api/v1/operations/search`` rejects ``limit > 50`` at the
   Pydantic Query layer.
-* ``POST /api/v1/operations/call`` returns the dispatcher's
-  OperationResult envelope on the response body; a malformed target
-  surfaces as 400 (caught from the meta-tool's ValueError).
+* ``POST /api/v1/operations/call`` (and ``/preview``) return the dispatcher's
+  OperationResult envelope on the response body; **every target-resolution
+  failure** — empty / empty-object / unresolvable name — rides that envelope
+  (200 + ``extras.error_code`` ∈ {``target_required``, ``no_target``}), while a
+  malformed ``target`` (wrong JSON type) stays a request-schema 422 (#136).
 * ``GET /api/v1/operations/{descriptor_id}`` is gated on
   ``tenant_admin``; an OPERATOR-role token returns 403. A descriptor
   that doesn't exist returns 404.
@@ -489,22 +491,138 @@ def test_get_search_rejects_limit_over_50(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_post_call_missing_target_name_returns_400(client: TestClient) -> None:
-    """``target={}`` (no name) surfaces as 400 from the meta-tool's ValueError."""
+@pytest.mark.parametrize("surface", ["call", "preview"])
+@pytest.mark.parametrize(
+    ("target_value", "expected_code"),
+    [
+        ("", "target_required"),
+        ({}, "target_required"),
+        ("nonexistent-target", "no_target"),
+        ({"name": "nonexistent-target"}, "no_target"),
+    ],
+    ids=["empty_string", "empty_object", "nonexistent_string", "nonexistent_dict"],
+)
+def test_target_resolution_failure_rides_envelope(
+    client: TestClient,
+    surface: str,
+    target_value: object,
+    expected_code: str,
+) -> None:
+    """#136: every target-**resolution** failure on ``/call`` + ``/preview`` is a
+    200 dispatcher envelope with a switch-able ``extras.error_code`` — not a
+    400 (empty/empty-object) or 404 (unresolvable name).
+
+    A consumer error-handler is a single switch on ``extras.error_code`` (AC2):
+    no HTTP-code branching, no ``detail``-string parsing. ``/call`` and
+    ``/preview`` behave identically (AC3).
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            f"/api/v1/operations/{surface}",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": target_value,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == expected_code
+    if expected_code == "no_target":
+        # Information-equivalent to the old 404 body: near-miss candidates ride
+        # the envelope so the consumer keeps them without a 404 to parse.
+        assert isinstance(body["extras"]["matches"], list)
+
+
+@pytest.mark.parametrize("surface", ["call", "preview"])
+def test_target_type_mismatch_returns_422(client: TestClient, surface: str) -> None:
+    """#136 boundary: a malformed ``target`` (wrong JSON type) is a request-schema
+    422 from the request model — resolution rides the envelope, but a body that
+    can't be a target at all stays a 4xx. This is deliberate, not a violation.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            f"/api/v1/operations/{surface}",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": 12345,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_post_call_absent_target_rides_target_required_envelope(
+    client: TestClient,
+) -> None:
+    """#136 mode 1 (unchanged): a target-requiring op invoked with ``target`` absent
+    returns the ``target_required`` envelope through the route (200), not a 4xx.
+
+    Seeds a self-first (connector-bound) typed op — ``target=None`` short-circuits
+    to ``target_required`` at connector resolution (the dispatcher path proven by
+    ``test_dispatch_self_first_handler_no_target_returns_target_required``); this
+    asserts the route surfaces it as the envelope, consistent with the other
+    resolution failures.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,  # global row — found for any operator's tenant
+                product="ghost",
+                version="9.0",
+                impl_id="ghost-rest",
+                op_id="ghost.self.first",
+                source_kind="typed",
+                method=None,
+                path=None,
+                # self-first handler: first param is ``self`` → requires a target.
+                handler_ref="tests.test_api_v1_operations._GhostRestConnector.execute",
+                summary="Self-first op.",
+                description="Requires a target to bind its connector instance.",
+                group_id=None,
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=None,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/operations/call",
             json={
-                "connector_id": "vault-1.x",
-                "op_id": "vault.kv.read",
-                "target": {},
+                "connector_id": "ghost-rest-9.0",
+                "op_id": "ghost.self.first",
+                "target": None,
                 "params": {},
             },
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
-    assert response.status_code == 400
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "target_required"
 
 
 def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
@@ -587,30 +705,6 @@ async def test_post_call_accepts_bare_string_target(
     body = response.json()
     assert body["status"] == "error"
     assert body["extras"]["error_code"] == "unknown_op"
-
-
-def test_post_call_empty_string_target_returns_400(client: TestClient) -> None:
-    """G0.13-T2 #1132: an empty string ``target`` is rejected like an empty dict.
-
-    The handler-side ``_normalize_target_arg`` raises ``ValueError`` on
-    an empty string for the same reason it raises on an empty dict --
-    a target was supplied but it carries no name. The REST route
-    surfaces both as 400 uniformly.
-    """
-    key = make_rsa_keypair("kid-A")
-    with respx.mock as mock_router:
-        mock_discovery_and_jwks(mock_router, public_jwks(key))
-        response = client.post(
-            "/api/v1/operations/call",
-            json={
-                "connector_id": "vault-1.x",
-                "op_id": "vault.kv.read",
-                "target": "",
-                "params": {},
-            },
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
-        )
-    assert response.status_code == 400
 
 
 # ---------------------------------------------------------------------------

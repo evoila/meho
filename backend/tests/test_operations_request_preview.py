@@ -819,22 +819,24 @@ async def test_preview_operation_meta_tool_resolves_target_by_name(
 
 
 @pytest.mark.asyncio
-async def test_preview_operation_missing_target_name_raises_valueerror() -> None:
-    """A dict target without ``name`` raises ValueError (route maps to 400).
+async def test_preview_operation_missing_target_name_returns_target_required_envelope() -> None:
+    """#136: a dict target without ``name`` rides the envelope (``target_required``).
 
-    Mirrors ``call_operation``'s sole ValueError surface so the
-    ``/preview`` route's 400 mapping is the same contract as ``/call``.
+    Mirrors ``call_operation``'s target-resolution contract so ``/preview`` and
+    ``/call`` behave identically: the failure comes back inside the envelope
+    (was a ``ValueError`` the route mapped to 400).
     """
-    with pytest.raises(ValueError, match="must include a 'name' field"):
-        await preview_operation(
-            _make_operator(),
-            {
-                "connector_id": "gh-rest-3",
-                "op_id": "POST:/repos/{owner}/{repo}/issues",
-                "target": {"fqdn": "no-name-here"},
-                "params": {},
-            },
-        )
+    result = await preview_operation(
+        _make_operator(),
+        {
+            "connector_id": "gh-rest-3",
+            "op_id": "POST:/repos/{owner}/{repo}/issues",
+            "target": {"fqdn": "no-name-here"},
+            "params": {},
+        },
+    )
+    assert result["status"] == "error"
+    assert result["extras"]["error_code"] == "target_required"
 
 
 # ---------------------------------------------------------------------------

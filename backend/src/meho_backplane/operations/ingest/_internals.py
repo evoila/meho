@@ -300,9 +300,10 @@ async def count_ops_in_scope(session: AsyncSession, scope: ConnectorScope) -> in
     The review payload's ``total_op_count`` sums only ops in *rendered* groups,
     so ops with a null ``group_id`` (or in an unrendered group) are excluded
     from it. This counts the same universe the ``GET /api/v1/connectors``
-    listing does (:func:`~meho_backplane.operations.ingest.list_connectors._operation_count_by_connector`
-    — ``count(EndpointDescriptor.id)`` by the connector triple, no group join),
-    so the review can report a ``ungrouped_op_count`` that reconciles
+    listing does — the listing's
+    :func:`~meho_backplane.operations.ingest.list_connectors._operation_count_by_connector`
+    counts ``count(EndpointDescriptor.id)`` by the connector triple, no group
+    join — so the review can report a ``ungrouped_op_count`` that reconciles
     ``total_op_count + ungrouped_op_count`` to the listing's ``operation_count``
     (#125). Same scope predicate as :func:`load_ops_in_groups` minus the
     ``group_id`` filter, so the two read one consistent universe.

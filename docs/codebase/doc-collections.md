@@ -34,6 +34,33 @@ catalogue tool / REST route / CLI verb and the `initialize.instructions`
 catalogue band (T4, #1553) are documented under
 [Catalogue discovery](#catalogue-discovery-g46-t4-1553).
 
+### Ingest is out of scope by design
+
+Doc collections are **externally curated and prepared for MEHO
+elsewhere**; MEHO's role is **attach + search only**. There is
+deliberately **no operator/tenant path to ingest document content into a
+collection, and none is planned** — the corpus / ops layer owns document
+indexing (the managed-RAG bulk import), and MEHO federates the query
+afterward. An in-MEHO ingest plane would mean standing up a separate
+database + meho-knowledge API deployment, which is out of the substrate
+model (dumb substrate, #1177).
+
+The design is federation-only by construction: the only registered
+backend is `corpus-http` (federates search / probe to an external
+ops-run corpus, `meho_backplane.auth.corpus`), the `SearchBackend`
+interface is `search()` + `probe()` only — there is **no `ingest()`
+seam** (`docs_search/backends/base.py`) — and `doc_count` /
+`last_ingested_at` are **probe-read** from the backend, never
+MEHO-written.
+
+Do not confuse **attach** with **ingest**. The create surface
+(`POST /api/v1/doc_collections` / `meho docs collections create`, #1739)
+registers a *pointer* to an externally-built corpus (`backend.{type,
+ref}`) — it stands up no storage and ingests nothing. "Create a
+collection" means *attach an existing corpus*, not *populate a new one*.
+Asks to add a MEHO-side ingest route were considered and declined as
+out-of-architecture (#1864 → Initiative #2049, both closed not-planned).
+
 ## Key types
 
 ### `DocCollection` ORM (`meho_backplane.db.models`)

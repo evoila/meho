@@ -120,5 +120,14 @@ class ConnectorReviewPayload(BaseModel):
     tenant_id: UUID | None
     groups: list[ConnectorReviewGroup]
     total_op_count: int
+    # ``total_op_count`` sums only ops in the *rendered* groups above. #125:
+    # ``ungrouped_op_count`` is every other descriptor row for this connector —
+    # ops with a null ``group_id`` or in an unrendered group — so
+    # ``total_op_count + ungrouped_op_count`` reconciles exactly to the
+    # ``operation_count`` the ``GET /api/v1/connectors`` listing reports for
+    # the same connector (both count the same descriptor universe). ``0`` when
+    # every op is grouped (the common case). Additive; defaults to ``0`` so
+    # existing construction call sites keep working.
+    ungrouped_op_count: int = 0
     kind: ConnectorAuthoringKind = "ingested-shim"
     dispatchable: bool = False

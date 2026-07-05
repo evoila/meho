@@ -94,6 +94,7 @@ from meho_backplane.operations.ingest._internals import (
     audit_profile_stamp,
     bulk_enable_read_ops,
     cascade_is_enabled,
+    count_ops_in_scope,
     enable_time_auto_shim_warnings,
     load_group,
     load_groups,
@@ -503,6 +504,13 @@ class ReviewService:
             for group in groups
         ]
         kind, dispatchable = _authoring_kind_for_payload(scope, rendered_groups)
+        grouped_op_count = sum(group.op_count for group in rendered_groups)
+        # #125: count the full descriptor universe (the same one the
+        # ``GET /api/v1/connectors`` listing counts) so ops not in a rendered
+        # group aren't silently dropped from the connector's reported total.
+        # ``ungrouped_op_count`` is the reconciling remainder:
+        # ``total_op_count + ungrouped_op_count == listing.operation_count``.
+        all_op_count = await count_ops_in_scope(session, scope)
         return ConnectorReviewPayload(
             connector_id=connector_id,
             product=scope.product,
@@ -510,7 +518,8 @@ class ReviewService:
             impl_id=scope.impl_id,
             tenant_id=scope.tenant_id,
             groups=rendered_groups,
-            total_op_count=sum(group.op_count for group in rendered_groups),
+            total_op_count=grouped_op_count,
+            ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
             kind=kind,
             dispatchable=dispatchable,
         )

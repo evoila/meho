@@ -174,9 +174,14 @@ from meho_backplane.api.v1._envelope import (
     EnvelopeVersion,
     wrap_v2_envelope,
 )
+from meho_backplane.api.v1.operations import connector_not_ingested_404
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+from meho_backplane.operations._lookup import (
+    connector_class_registered,
+    connector_exists,
+    parse_connector_id,
+)
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     CatalogListResponse,
@@ -235,6 +240,10 @@ from meho_backplane.operations.ingest.api_schemas import (
     GroupingResultModel,
     IngestionResultModel,
 )
+from meho_backplane.operations.ingest.list_connectors import (
+    next_step_for_registered_connector,
+)
+from meho_backplane.operations.meta_tools import ConnectorNotIngestedError
 
 __all__ = [
     "get_llm_client_factory",
@@ -1177,6 +1186,45 @@ async def catalog_endpoint(
     return CatalogListResponse(catalog=load_catalog().entries)
 
 
+def _not_ingested_404_if_registered(connector_id: str) -> HTTPException | None:
+    """Structured ``connector_not_ingested`` 404 iff *connector_id* is a registered class (#137).
+
+    Called when :meth:`ReviewService.get_review_payload` raises
+    :class:`ConnectorNotFoundError` (no visible rows). Distinguishes a
+    registered-but-not-ingested built-in — whose class *is* in the v2 registry
+    but has zero descriptor rows — from a genuinely-unknown / cross-tenant id,
+    mirroring ``/operations/groups``'s :func:`_require_dispatchable_connector`:
+
+    * class registered → the same structured 404 ``/operations/groups`` emits
+      (:func:`connector_not_ingested_404` with the shared
+      :func:`next_step_for_registered_connector` hint) — returned here.
+    * not registered (unknown, or a tenant-curated id whose class isn't in the
+      registry) → ``None``, so the caller keeps the deliberate plain-string 404
+      (the cross-tenant conflation is unchanged). Built-in class rows are global
+      (``tenant_id IS NULL``, visible to every tenant), so "registered class +
+      no visible rows" is genuinely not-ingested, never cross-tenant-hidden.
+
+    A malformed / unrecognised ``connector_id`` parses to a triple no class
+    is registered for → ``None`` → plain 404.
+    """
+    product, version, impl_id = parse_connector_id(connector_id)
+    if not connector_class_registered(product=product, version=version, impl_id=impl_id):
+        return None
+    next_step = next_step_for_registered_connector(
+        product=product, version=version, impl_id=impl_id
+    )
+    verb = next_step.verb if next_step is not None else "meho connector ingest …"
+    return connector_not_ingested_404(
+        ConnectorNotIngestedError(
+            f"connector {connector_id!r} is registered but not yet ingested "
+            f"(no operations to review). Run `{verb}` to populate its "
+            f"operations, then retry.",
+            connector_id=connector_id,
+            next_step=next_step.model_dump(mode="json") if next_step is not None else None,
+        )
+    )
+
+
 @router.get("/{connector_id}/review", response_model=ConnectorReviewPayload)
 async def get_review_endpoint(
     connector_id: str,
@@ -1219,6 +1267,12 @@ async def get_review_endpoint(
             detail=build_connector_scope_ambiguous_detail(exc),
         ) from exc
     except ConnectorNotFoundError as exc:
+        # #137: a registered-but-not-ingested built-in gets the structured
+        # ``connector_not_ingested`` 404 (mirroring /operations/groups); a
+        # genuinely-unknown / cross-tenant id keeps the plain-string 404.
+        structured = _not_ingested_404_if_registered(connector_id)
+        if structured is not None:
+            raise structured from exc
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail=str(exc),

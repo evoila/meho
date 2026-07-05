@@ -4344,7 +4344,11 @@ type RejectResponseBody struct {
 // mutating a parsed request body surfaces as a pydantic error
 // instead of a confused-deputy bug). “extra="forbid"“ rejects
 // unknown fields at 422 so a typo (“"bodytext"“) doesn't
-// silently become a no-op.
+// silently become a no-op. A “mode="before"“ validator runs *ahead*
+// of that rejection to turn the two known cross-surface field names
+// (“ttl“ / top-level “tags“, the MCP “add_to_memory“ shape) into
+// a targeted 422 that names the correct REST field rather than the
+// opaque “extra_forbidden“ (see :data:`_CROSS_SURFACE_FIELD_HINTS`).
 //
 // “target_name“ is required when “scope“ is “user-target“ or
 // “target“; the service-level

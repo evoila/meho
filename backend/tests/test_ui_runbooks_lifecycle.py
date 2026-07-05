@@ -923,6 +923,81 @@ def test_catalog_row_button_gates_refresh_on_success() -> None:
     assert "$dispatch('runbooks-refresh')" in body
 
 
+# ---------------------------------------------------------------------------
+# D5 regression (#2139) — deprecate -> runbooks-refresh keeps the catalog full
+# ---------------------------------------------------------------------------
+
+
+def test_deprecate_then_refresh_keeps_non_deprecated_rows() -> None:
+    """End-to-end D5 (#2117 / #2139): deprecating a row does not blank the list.
+
+    Reproduces the reported defect: after a catalog-row **Deprecate**, the
+    button's ``htmx:after-request`` handler dispatches ``runbooks-refresh``,
+    which the hidden trigger in ``index.html`` turns into a
+    ``GET /ui/runbooks/list`` carrying ``hx-include="[name='status'],
+    [name='target_kind']"``. The filter ``<select>``'s "All" default and the
+    empty target-kind search box both submit ``value=""``, so the refresh
+    fetches ``/ui/runbooks/list?status=&target_kind=``.
+
+    The bug: an empty ``?target_kind=`` reached ``list_templates`` as ``""``
+    and applied ``WHERE target_kind = ''``, matching nothing -- so the refresh
+    fragment came back empty even though non-deprecated templates were still
+    present, and only a full-page reload (no query string) restored the list.
+    The fix coerces the empty filter to the no-filter sentinel on both routes
+    so the refresh fragment's query matches the full-page query.
+
+    This test drives the whole flow -- a real Deprecate POST, then the exact
+    refresh GET the client fires -- and asserts the surviving published row is
+    still rendered. It fails (empty-state fragment) against the pre-fix route
+    that lacks the empty-string coercion, and passes with it.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    doomed = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    _seed_template(tenant_id=_TENANT_A, slug="drain-node", publish=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+
+        # Deprecate one published row from the catalog (HX-Target names the
+        # per-row alert slot, so the handler returns the minimal slot fragment).
+        deprecate = client.post(
+            "/ui/runbooks/rotate-cert/deprecate",
+            data={"version": str(doomed)},
+            headers={**_csrf_kwargs(csrf)["headers"], "HX-Target": "runbook-row-alert-1"},
+            cookies=_csrf_kwargs(csrf)["cookies"],
+        )
+        assert deprecate.status_code == 200, deprecate.text
+        assert _status(_TENANT_A, "rotate-cert", doomed) == "deprecated"
+
+        # The runbooks-refresh the button dispatches: GET the list fragment with
+        # both filters submitted empty (the "All" select + empty search box), the
+        # exact hx-include shape.
+        refresh = client.get(
+            "/ui/runbooks/list",
+            params=[("status", ""), ("target_kind", "")],
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+
+    assert refresh.status_code == 200, refresh.text
+    body = refresh.text
+    # The surviving published row is still in the refreshed catalog -- the list
+    # did NOT blank out. The deprecated row remains listed too (the catalog
+    # shows the latest version per slug regardless of status), now badged
+    # deprecated rather than dropped.
+    assert "drain-node" in body, "non-deprecated row vanished from the refresh (D5)"
+    assert "rotate-cert" in body
+    assert 'aria-label="Status: deprecated"' in body
+    # Not the empty-state card.
+    assert "No runbook templates yet" not in body
+
+
 def test_detail_draft_shows_edit_affordance() -> None:
     """A draft detail exposes an in-place Edit link, not just Publish (#2117 D2).
 

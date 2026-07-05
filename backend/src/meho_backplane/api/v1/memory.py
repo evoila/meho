@@ -109,7 +109,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meho_backplane.api.v1._freetext_filter import (
     free_text_q_query,
@@ -171,6 +171,25 @@ _MEMORY_OP_IDS: Final[dict[str, str]] = {
 #: parse stage bounds the cost. 256 mirrors :mod:`meho_backplane.api.v1.kb`.
 _SLUG_MAX_LENGTH: Final[int] = 256
 
+#: Cross-surface field hints for :class:`RememberBody`. An operator who
+#: copies an ``add_to_memory`` (MCP) body into a REST request sends the
+#: MCP-surface field names (``ttl`` -- an ISO-8601 *duration*; a
+#: top-level ``tags`` array) that REST does not accept. ``extra="forbid"``
+#: would reject them with a generic ``extra_forbidden`` that names no
+#: replacement. The :meth:`RememberBody._reject_cross_surface_fields`
+#: before-validator special-cases exactly these keys so the 422 names the
+#: correct REST field. The MCP<->REST split is intentional and documented
+#: (``mcp/tools/memory.py`` TTL-semantics docstring); this is
+#: error-legibility only, not a behaviour change to accepted shapes.
+_CROSS_SURFACE_FIELD_HINTS: Final[dict[str, str]] = {
+    "ttl": (
+        "`ttl` is the MCP-surface field; on REST use `expires_at` "
+        "(ISO-8601 datetime, e.g. `2026-06-30T12:00:00+00:00`), or omit "
+        "for the scope default / `null` to persist."
+    ),
+    "tags": ("top-level `tags` is the MCP-surface shape; on REST use `metadata.tags`."),
+}
+
 #: Maximum number of memories returned by ``GET /api/v1/memory``.
 #: The service's ``list_memories`` already over-pulls to compensate
 #: for in-process filtering (``candidate_pull = max(limit * 4,
@@ -224,7 +243,11 @@ class RememberBody(BaseModel):
     mutating a parsed request body surfaces as a pydantic error
     instead of a confused-deputy bug). ``extra="forbid"`` rejects
     unknown fields at 422 so a typo (``"bodytext"``) doesn't
-    silently become a no-op.
+    silently become a no-op. A ``mode="before"`` validator runs *ahead*
+    of that rejection to turn the two known cross-surface field names
+    (``ttl`` / top-level ``tags``, the MCP ``add_to_memory`` shape) into
+    a targeted 422 that names the correct REST field rather than the
+    opaque ``extra_forbidden`` (see :data:`_CROSS_SURFACE_FIELD_HINTS`).
 
     ``target_name`` is required when ``scope`` is ``user-target`` or
     ``target``; the service-level
@@ -234,6 +257,27 @@ class RememberBody(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_cross_surface_fields(cls, data: Any) -> Any:
+        """Name the correct REST field for known MCP-surface keys.
+
+        Runs before field/extra validation (``mode="before"``) so a
+        request carrying ``ttl`` or a top-level ``tags`` array raises a
+        targeted ``ValueError`` -- which FastAPI renders as a 422 whose
+        detail names ``expires_at`` / ``metadata.tags`` -- instead of the
+        generic ``extra_forbidden`` that ``extra="forbid"`` would emit.
+        Only the two known cross-surface keys are special-cased; any
+        other unknown field falls through to ``extra_forbidden``. No
+        accepted shape, default, or semantic change -- error-legibility
+        only.
+        """
+        if isinstance(data, dict):
+            for field_name, hint in _CROSS_SURFACE_FIELD_HINTS.items():
+                if field_name in data:
+                    raise ValueError(hint)
+        return data
 
     scope: MemoryScope
     body: str = Field(min_length=1)

@@ -471,6 +471,123 @@ def test_remember_unknown_field_returns_422(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# Task #126: targeted 422 hint for cross-surface memory write fields
+# ---------------------------------------------------------------------------
+#
+# An operator who copies an ``add_to_memory`` (MCP) body into a REST
+# request sends the MCP-surface field names ``ttl`` / top-level ``tags``,
+# which REST does not accept (``extra="forbid"``). A ``mode="before"``
+# validator on :class:`RememberBody` turns those two known keys into a
+# 422 that names the correct REST field (``expires_at`` / ``metadata.tags``)
+# instead of the opaque ``extra_forbidden``. The message text is the
+# contract; a truly-unknown field still gets the generic error.
+
+
+def _detail_text(response: object) -> str:
+    """Flatten a 422 body's ``detail`` into a searchable string.
+
+    Pydantic request-validation errors render ``detail`` as a list of
+    per-error dicts (``{"type", "loc", "msg", ...}``); the ``ValueError``
+    message lands in ``msg``. ``json.dumps`` gives one string to assert
+    against regardless of the exact nesting.
+    """
+    return json.dumps(response.json()["detail"])  # type: ignore[attr-defined]
+
+
+def test_remember_ttl_field_returns_422_naming_expires_at(
+    client: TestClient,
+) -> None:
+    """AC1: a REST write carrying ``ttl`` → 422 detail names ``expires_at``."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "slug": "x", "body": "y", "ttl": 3600},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    detail = _detail_text(response)
+    assert "expires_at" in detail
+    # The hint must not be the opaque generic-only rejection.
+    assert "extra_forbidden" not in detail
+
+
+def test_remember_toplevel_tags_returns_422_naming_metadata_tags(
+    client: TestClient,
+) -> None:
+    """AC2: a top-level ``tags`` array → 422 detail names ``metadata.tags``."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "body": "y", "tags": ["a"]},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    detail = _detail_text(response)
+    assert "metadata.tags" in detail
+    assert "extra_forbidden" not in detail
+
+
+def test_remember_valid_metadata_tags_still_returns_201(
+    client: TestClient,
+) -> None:
+    """AC3: the accepted ``metadata.tags`` shape is unchanged → 201."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER, slug="tagged"),
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={
+                "scope": "user",
+                "slug": "tagged",
+                "body": "y",
+                "metadata": {"tags": ["a"]},
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    assert call_kwargs["metadata"] == {"tags": ["a"]}
+
+
+def test_remember_unrelated_unknown_field_still_generic_extra_forbidden(
+    client: TestClient,
+) -> None:
+    """AC4: an unrelated unknown field still gets the generic error.
+
+    The validator only special-cases the known cross-surface keys, so a
+    field like ``foo`` falls through to ``extra="forbid"`` and must not
+    carry a targeted ``expires_at`` / ``metadata.tags`` hint.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "body": "y", "foo": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    detail = _detail_text(response)
+    assert "extra_forbidden" in detail
+    assert "expires_at" not in detail
+    assert "metadata.tags" not in detail
+
+
 def test_remember_empty_body_returns_422(client: TestClient) -> None:
     """Empty ``body`` field fails Pydantic min_length validation."""
     tenant_a = uuid.uuid4()

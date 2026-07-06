@@ -1,0 +1,96 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Sortable ``<thead>`` for the Topology tabular surface (Initiative
+  #342 Task #880; sort-toggle fix Task #140).
+
+  Rendered in two contexts:
+    * As an ``{% include %}`` from ``table.html`` on the full-page
+      render (``oob`` unset / false) -- the initial in-place head.
+    * As a standalone out-of-band fragment from ``_table_rows.html``
+      on every HTMX sort / filter swap (``oob=true``): the
+      ``hx-swap-oob`` on the ``<thead id="topology-table-head">``
+      replaces the stale head so the recomputed ``next_dir`` links and
+      the active-column arrow track the new sort state. Without it the
+      swap replaces only the ``<tbody>`` and the head keeps emitting the
+      pre-click ``next_dir`` -- the direction can never toggle back
+      (issue #140).
+
+  htmx caveat: a bare ``<thead>`` cannot stand alone in the DOM per the
+  HTML spec, so the OOB variant is wrapped in a ``<template>`` (see
+  https://htmx.org/attributes/hx-swap-oob/). htmx unwraps the template
+  on swap, leaving a well-formed ``<thead>`` behind. The in-place
+  (full-page) render skips the wrapper -- the head sits directly inside
+  the ``<table>`` where the parser accepts it.
+
+  Context contract (all supplied by ``_render_table``'s context dict, so
+  the fragment and the full page share one shape):
+    * ``sort``               -- ``_SortColumn``: active sort column.
+    * ``direction``          -- ``_SortDirection``: active direction.
+    * ``next_direction_for`` -- closure: ``next_direction_for(col)`` ->
+                                the direction a click on ``col`` requests.
+    * ``kind_filter`` / ``name_filter`` / ``selected_id`` -- ride into
+                                every sort href so a sort click preserves
+                                the active filter + cross-link selection.
+    * ``oob``                -- bool: stamp ``hx-swap-oob`` + the
+                                ``<template>`` wrapper for the swap.
+-#}
+{% if oob %}<template>{% endif %}
+<thead id="topology-table-head"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <tr>
+    <th class="w-8">
+      <input
+        type="checkbox"
+        class="checkbox checkbox-sm"
+        aria-label="Select all visible nodes"
+        x-on:change="
+          const rows = $el.closest('table').querySelectorAll('tbody input[type=checkbox][data-node-id]');
+          if ($el.checked) {
+            rows.forEach(r => { r.checked = true; selected.add(r.dataset.nodeId); });
+          } else {
+            rows.forEach(r => { r.checked = false; selected.delete(r.dataset.nodeId); });
+          }
+          selected = new Set(selected);
+        "
+      />
+    </th>
+    {%- set columns = [
+      ("name", "Name"),
+      ("kind", "Kind"),
+      ("last_seen", "Last seen"),
+      ("first_seen", "First seen"),
+    ] -%}
+    {% for col_value, col_label in columns %}
+      {%- set next_dir = next_direction_for(col_value) -%}
+      {#- ``kind_filter`` is connector-populated text; ``name_filter``
+          is operator-typed search text. Both ride into the URL's
+          query string here and on every HTMX swap, so they must
+          be percent-encoded before interpolation. Jinja2's
+          ``urlencode`` filter (see https://jinja.palletsprojects.com/en/stable/templates/#jinja-filters.urlencode)
+          encodes the unreserved-byte set the same way
+          ``urllib.parse.quote(safe='')`` does on the Python side. -#}
+      <th>
+        <a
+          href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
+          hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
+          hx-target="#topology-table-body"
+          hx-swap="outerHTML"
+          hx-push-url="true"
+          class="link link-hover"
+          aria-label="Sort by {{ col_label }} {{ next_dir }}ending"
+        >
+          {{ col_label }}
+          {% if sort.value == col_value %}
+            <span aria-hidden="true">{% if direction.value == "asc" %}&uarr;{% else %}&darr;{% endif %}</span>
+          {% endif %}
+        </a>
+      </th>
+    {% endfor %}
+    <th>Product</th>
+    <th>Parents</th>
+    <th class="text-right">Children</th>
+    <th class="w-12"></th>
+  </tr>
+</thead>
+{% if oob %}</template>{% endif %}

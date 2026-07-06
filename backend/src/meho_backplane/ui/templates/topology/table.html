@@ -186,62 +186,11 @@
   {# ---------- Table ---------- #}
   <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100 min-w-0">
     <table class="table table-sm">
-      <thead>
-        <tr>
-          <th class="w-8">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-sm"
-              aria-label="Select all visible nodes"
-              x-on:change="
-                const rows = $el.closest('table').querySelectorAll('tbody input[type=checkbox][data-node-id]');
-                if ($el.checked) {
-                  rows.forEach(r => { r.checked = true; selected.add(r.dataset.nodeId); });
-                } else {
-                  rows.forEach(r => { r.checked = false; selected.delete(r.dataset.nodeId); });
-                }
-                selected = new Set(selected);
-              "
-            />
-          </th>
-          {%- set columns = [
-            ("name", "Name"),
-            ("kind", "Kind"),
-            ("last_seen", "Last seen"),
-            ("first_seen", "First seen"),
-          ] -%}
-          {% for col_value, col_label in columns %}
-            {%- set next_dir = next_direction_for(col_value) -%}
-            {#- ``kind_filter`` is connector-populated text; ``name_filter``
-                is operator-typed search text. Both ride into the URL's
-                query string here and on every HTMX swap, so they must
-                be percent-encoded before interpolation. Jinja2's
-                ``urlencode`` filter (see https://jinja.palletsprojects.com/en/stable/templates/#jinja-filters.urlencode)
-                encodes the unreserved-byte set the same way
-                ``urllib.parse.quote(safe='')`` does on the Python side. -#}
-            <th>
-              <a
-                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
-                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
-                hx-target="#topology-table-body"
-                hx-swap="outerHTML"
-                hx-push-url="true"
-                class="link link-hover"
-                aria-label="Sort by {{ col_label }} {{ next_dir }}ending"
-              >
-                {{ col_label }}
-                {% if sort.value == col_value %}
-                  <span aria-hidden="true">{% if direction.value == "asc" %}&uarr;{% else %}&darr;{% endif %}</span>
-                {% endif %}
-              </a>
-            </th>
-          {% endfor %}
-          <th>Product</th>
-          <th>Parents</th>
-          <th class="text-right">Children</th>
-          <th class="w-12"></th>
-        </tr>
-      </thead>
+      {#- Sortable head, rendered in-place on the full page (``oob`` unset).
+          The HTMX sort / filter swap re-emits this same partial out-of-band
+          from ``_table_rows.html`` so the recomputed ``next_dir`` links +
+          the active-column arrow track the new sort state (issue #140). -#}
+      {% include "topology/_table_head.html" %}
       {% include "topology/_table_rows.html" %}
     </table>
   </div>

@@ -9,7 +9,25 @@
   Outermost element is ``<tbody id="topology-table-body">`` so the
   HTMX ``hx-target="#topology-table-body"`` + ``hx-swap="outerHTML"``
   pair replaces the body cleanly with the new contents.
+
+  On the HTMX swap the fragment also emits the sortable ``<thead>``
+  out-of-band (``_table_head.html`` with ``oob=true``). The primary
+  ``hx-target`` swap only replaces the ``<tbody>``, leaving the head's
+  server-computed ``next_dir`` links + active-column arrow stale -- so
+  the sort direction could never toggle back (issue #140). The OOB
+  ``<thead id="topology-table-head">`` re-renders that head against the
+  new sort state on every swap.
+
+  The OOB head is emitted only on the standalone fragment render
+  (``is_fragment`` is set by ``_render_table`` for the ``HX-Request``
+  path). The full page renders the head in-place via ``table.html``,
+  which includes *this* partial for its ``<tbody>``; on that path
+  ``is_fragment`` is false so the OOB head is not double-emitted. A
+  full-page load and the last swap therefore agree on the head markup.
 -#}
+{% if is_fragment %}
+  {% with oob = true %}{% include "topology/_table_head.html" %}{% endwith %}
+{% endif %}
 <tbody id="topology-table-body">
   {% if nodes %}
     {% for node in nodes %}

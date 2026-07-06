@@ -44,6 +44,7 @@ import respx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
@@ -54,6 +55,7 @@ from meho_backplane.ui.auth import (
     UISessionMiddleware,
     build_router,
 )
+from meho_backplane.ui.auth.errors import ui_session_expired_exception_handler
 from meho_backplane.ui.auth.flow import (
     AUTHORIZATION_FLOW_TTL_SECONDS,
     PKCEVerifierStore,
@@ -63,6 +65,7 @@ from meho_backplane.ui.auth.flow import (
     get_verifier_store,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.routes import AUTHORIZATION_STATE_EXPIRED_DETAIL
 from meho_backplane.ui.auth.session_store import (
     create_session,
     load_session,
@@ -166,6 +169,11 @@ def _build_app(*, include_dummy_ui_route: bool = True) -> FastAPI:
     """
     app = FastAPI()
     app.add_middleware(UISessionMiddleware)
+    # Register the app-level HTTPException handler exactly as
+    # meho_backplane.main does, so the callback's recoverable-state
+    # HTML-redirect affordance (G0.29 #2089) is exercised under test
+    # rather than only in the wired-up production app.
+    app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
     app.include_router(build_router())
     if include_dummy_ui_route:
 
@@ -425,26 +433,72 @@ def test_callback_creates_session_and_sets_cookie() -> None:
     asyncio.run(_check_row())
 
 
+# Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The
+# recoverable-state class keeps its structured JSON body for these
+# callers (only HTML navigations get the login-restart redirect).
+_JSON_ACCEPT = {"accept": "application/json"}
+# HTML ``Accept`` -- a real browser navigating the callback URL. This
+# is the class that gets the one-click login-restart affordance.
+_HTML_ACCEPT = {"accept": "text/html,application/xhtml+xml"}
+
+
 def test_callback_rejects_unknown_state() -> None:
-    """Replay of a consumed / forged ``state`` collapses to a 400."""
+    """Replay of a consumed / forged ``state`` -> recoverable 400 (JSON caller)."""
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
         client = TestClient(_build_app(), follow_redirects=False)
         response = client.get(
             "/ui/auth/callback?code=test-code&state=not-a-real-state",
+            headers=_JSON_ACCEPT,
         )
     assert response.status_code == 400
-    assert response.json()["detail"] == "authorization_failed"
+    # Non-HTML callers keep a structured body -- now the recoverable
+    # ``authorization_state_expired`` code (distinct from an IdP decline).
+    assert response.json()["detail"] == AUTHORIZATION_STATE_EXPIRED_DETAIL
 
 
 def test_callback_rejects_missing_state() -> None:
-    """The CSRF guard fires on a missing ``state`` -- no verifier lookup possible."""
+    """Missing ``state`` -> recoverable 400 body for a JSON caller."""
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
         client = TestClient(_build_app(), follow_redirects=False)
-        response = client.get("/ui/auth/callback?code=test-code")
+        response = client.get("/ui/auth/callback?code=test-code", headers=_JSON_ACCEPT)
     assert response.status_code == 400
-    assert response.json()["detail"] == "authorization_failed"
+    assert response.json()["detail"] == AUTHORIZATION_STATE_EXPIRED_DETAIL
+
+
+def test_callback_expired_state_html_redirects_to_login() -> None:
+    """AC 1/2: an HTML navigation on expired ``state`` gets a 303 login restart.
+
+    The whole point of #2089 Leg 1: instead of the raw-JSON dead-end a
+    browser would render for ``{"detail": "..."}``, an operator who let
+    the login window lapse is bounced back to ``/ui/auth/login`` on one
+    click -- no hand-navigation, no cookie to clear (pre-session).
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/ui/auth/callback?code=test-code&state=not-a-real-state",
+            headers=_HTML_ACCEPT,
+        )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/auth/login"
+    # No dead ``meho_session`` cookie is set -- the callback runs before
+    # any session exists, so there is nothing to clear.
+    assert SESSION_COOKIE_NAME not in response.cookies
+    # Never re-cache a redirect the browser might replay stale.
+    assert response.headers.get("cache-control") == "no-store"
+
+
+def test_callback_missing_state_html_redirects_to_login() -> None:
+    """AC 1/2: a missing-``state`` HTML navigation also restarts the login flow."""
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/auth/callback?code=test-code", headers=_HTML_ACCEPT)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/ui/auth/login"
 
 
 def test_callback_propagates_idp_error_to_400() -> None:
@@ -459,15 +513,43 @@ def test_callback_propagates_idp_error_to_400() -> None:
     assert response.json()["detail"] == "authorization_failed"
 
 
+def test_callback_idp_error_html_is_not_collapsed_to_login_restart() -> None:
+    """AC 4: a genuine IdP decline is NOT swept into the "start over" affordance.
+
+    Even with an HTML ``Accept``, ``?error=access_denied`` stays a 400
+    ``authorization_failed`` JSON body -- it is distinct from the
+    recoverable expired-state class and must remain diagnosable rather
+    than looping the operator back to a login that will decline again.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/ui/auth/callback?error=access_denied&error_description=user-cancelled",
+            headers=_HTML_ACCEPT,
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "authorization_failed"
+
+
 def test_callback_502s_when_token_endpoint_unreachable() -> None:
-    """Network failure on the token endpoint surfaces as 502."""
+    """Network failure on the token endpoint surfaces as 502 (not a login restart).
+
+    AC 4: the unreachable-token-endpoint path stays a distinguishable
+    502 even for an HTML navigation -- restarting the login flow would
+    just hit the same dead token endpoint, so it must not be collapsed
+    into the recoverable "start over" affordance.
+    """
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
         mock_router.post(_TOKEN_ENDPOINT).mock(side_effect=httpx.ConnectError("boom"))
         client = TestClient(_build_app(), follow_redirects=False)
         login_response = client.get("/ui/auth/login")
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
-        response = client.get(f"/ui/auth/callback?code=test-code&state={state}")
+        response = client.get(
+            f"/ui/auth/callback?code=test-code&state={state}",
+            headers=_HTML_ACCEPT,
+        )
     assert response.status_code == 502
     assert response.json()["detail"] == "upstream_auth_provider_unreachable"
 

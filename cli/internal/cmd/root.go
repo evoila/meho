@@ -166,12 +166,11 @@ func newRootCmd() *cobra.Command {
 	// (the meho-docs add-on). One verb: `docs search` wraps the
 	// /api/v1/search_docs route (T3, #1521) for federated
 	// vendor-document retrieval. The tree compiles into every binary
-	// but is gated on the tenant-provisioned `meho-docs` capability
-	// (T1, #1519): `docs.NewRootCmd` reads the capability from the
-	// stored token's JWT claim and, when absent, marks the parent
-	// Hidden and makes every verb refuse with a typed
-	// `addon_not_provisioned` error — true absence for an
-	// unprovisioned tenant. Registered before
+	// and carries no client-side capability gate (#2109): access is
+	// decided server-side by the backplane, identically to the REST
+	// route, so the same `(query, collection, tenant)` gets the same
+	// verdict on either surface (a per-collection entitlement miss is a
+	// 403 the CLI renders as `insufficient_role`). Registered before
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `docs` parent.
 	root.AddCommand(docs.NewRootCmd())

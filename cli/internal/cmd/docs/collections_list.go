@@ -27,10 +27,9 @@ import (
 // which `--collection` keys `meho docs search` will accept.
 //
 // Unlike the lifecycle verbs (probe / enable / disable, tenant_admin),
-// `list` is a read every operator may run, so its only gate is the
-// shared `meho-docs` capability — an unprovisioned tenant gets the typed
-// `addon_not_provisioned` refusal before any network call, the same gate
-// `meho docs search` enforces.
+// `list` is a read every operator may run. There is no client-side
+// capability gate (#2109): the backplane scopes the result to the
+// collections the tenant is entitled to, server-side.
 //
 // CLI shape (mirrors `meho targets list`):
 //
@@ -46,8 +45,8 @@ import (
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape
-//   - 5   insufficient_role / addon_not_provisioned
-func newCollectionsListCmd(provisioned bool) *cobra.Command {
+//   - 5   insufficient_role
+func newCollectionsListCmd() *cobra.Command {
 	var (
 		vendor            string
 		limit             int
@@ -79,7 +78,6 @@ func newCollectionsListCmd(provisioned bool) *cobra.Command {
 				Cursor:            cursor,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
-				Provisioned:       provisioned,
 			})
 		},
 	}
@@ -103,16 +101,9 @@ type listCollectionsOptions struct {
 	Cursor            string
 	JSONOut           bool
 	BackplaneOverride string
-	// Provisioned carries the meho-docs capability gate. When false the
-	// verb refuses with the typed addon_not_provisioned error before
-	// touching the network — the same pre-flight the lifecycle verbs run.
-	Provisioned bool
 }
 
 func runCollectionList(cmd *cobra.Command, opts listCollectionsOptions) error {
-	if !opts.Provisioned {
-		return errNotProvisioned(cmd, opts.JSONOut)
-	}
 	// Fail fast on out-of-range --limit. The API clamps internally
 	// (FastAPI Query(ge=1, le=500)) but an explicit zero/negative would
 	// fall through to a 422 surprise; surface the constraint here.

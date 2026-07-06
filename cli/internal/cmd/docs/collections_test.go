@@ -13,43 +13,18 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 )
 
-func TestCollectionsCmdHiddenWhenUnprovisioned(t *testing.T) {
-	cmd := newCollectionsCmd(false)
-	if !cmd.Hidden {
-		t.Errorf("expected collections parent Hidden when unprovisioned")
+// TestCollectionsCmdAlwaysVisible asserts the collections tree carries
+// no client-side capability gate — never Hidden (#2109). Access is
+// decided server-side, identically to POST /api/v1/search_docs.
+func TestCollectionsCmdAlwaysVisible(t *testing.T) {
+	cmd := newCollectionsCmd()
+	if cmd.Hidden {
+		t.Errorf("expected collections parent always visible (no client-side capability gate)")
 	}
-}
-
-func TestRunCollectionProbeRefusesWhenUnprovisioned(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runCollectionProbe(cmd, lifecycleOptions{
-		CollectionKey: "vmware",
-		Provisioned:   false,
-	})
-	if exitCodeOf(t, err) != 5 {
-		t.Errorf("expected exit 5 (insufficient_role family); got %d", exitCodeOf(t, err))
-	}
-	if !strings.Contains(stderr.String(), "addon_not_provisioned") {
-		t.Errorf("expected addon_not_provisioned code; got %q", stderr.String())
-	}
-}
-
-func TestRunCollectionProbeRefusalIsBeforeNetwork(t *testing.T) {
-	// An unprovisioned refusal must short-circuit before any HTTP call.
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		hit = true
-	}))
-	defer srv.Close()
-
-	cmd, _, _ := newRunCmd(t)
-	_ = runCollectionProbe(cmd, lifecycleOptions{
-		CollectionKey:     "vmware",
-		Provisioned:       false,
-		BackplaneOverride: srv.URL,
-	})
-	if hit {
-		t.Errorf("expected no HTTP call for an unprovisioned refusal")
+	for _, sub := range cmd.Commands() {
+		if sub.Hidden {
+			t.Errorf("expected collections subcommand %q always visible; got Hidden", sub.Name())
+		}
 	}
 }
 
@@ -57,7 +32,6 @@ func TestRunCollectionProbeRejectsEmptyKey(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	err := runCollectionProbe(cmd, lifecycleOptions{
 		CollectionKey: "",
-		Provisioned:   true,
 	})
 	if exitCodeOf(t, err) != 4 {
 		t.Errorf("expected exit 4 (unexpected_response) for empty key; got %d", exitCodeOf(t, err))
@@ -88,7 +62,6 @@ func TestRunCollectionProbeHappyPath(t *testing.T) {
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runCollectionProbe(cmd, lifecycleOptions{
 		CollectionKey:     "vmware",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -119,7 +92,6 @@ func TestRunCollectionDisableHappyPath(t *testing.T) {
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runCollectionDisable(cmd, lifecycleOptions{
 		CollectionKey:     "vmware",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -155,7 +127,6 @@ func TestRunCollectionEnableForbiddenTransition409(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	err := runCollectionEnable(cmd, lifecycleOptions{
 		CollectionKey:     "vmware",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if exitCodeOf(t, err) != 4 {
@@ -180,7 +151,6 @@ func TestRunCollectionProbeForbiddenRole403(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	err := runCollectionProbe(cmd, lifecycleOptions{
 		CollectionKey:     "vmware",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if exitCodeOf(t, err) != 5 {

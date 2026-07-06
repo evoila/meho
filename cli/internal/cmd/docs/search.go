@@ -26,10 +26,9 @@ import (
 //	meho docs search <query> --collection all                    # fan-out across all
 //
 // Role: operator. Calls POST /api/v1/search_docs (T3, #1552) via the
-// shared authed client (bearer + 401-refresh). `provisioned` carries
-// the meho-docs capability gate resolved at command-tree-build time;
-// when false the verb refuses with a typed `addon_not_provisioned`
-// error before any flag validation or network call.
+// shared authed client (bearer + 401-refresh). There is no client-side
+// capability gate (#2109): access is decided server-side by the
+// backplane, identically to the REST route.
 //
 // --collection is the mandatory binary scope: it routes the query to a
 // backend and gates per-collection entitlement. The CLI fails fast on a
@@ -49,8 +48,9 @@ import (
 //   - 3   unreachable
 //   - 4   unexpected_response (missing --collection, out-of-range
 //     --limit, a 422/503 from the route)
-//   - 5   insufficient_role / addon_not_provisioned
-func newSearchCmd(provisioned bool) *cobra.Command {
+//   - 5   insufficient_role (read_only operator, or a per-collection
+//     entitlement miss the backplane 403s on)
+func newSearchCmd() *cobra.Command {
 	var (
 		collections       []string
 		product           string
@@ -89,7 +89,6 @@ func newSearchCmd(provisioned bool) *cobra.Command {
 				Changed:           cmd.Flags().Changed("limit"),
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
-				Provisioned:       provisioned,
 			})
 		},
 	}
@@ -128,21 +127,9 @@ type searchOptions struct {
 	Changed           bool
 	JSONOut           bool
 	BackplaneOverride string
-	// Provisioned carries the meho-docs capability gate. When false,
-	// runSearch refuses with the typed addon_not_provisioned error
-	// before touching flags or the network.
-	Provisioned bool
 }
 
 func runSearch(cmd *cobra.Command, opts searchOptions) error {
-	// Capability gate first: an unprovisioned tenant must not be able
-	// to reach the flag validation, let alone the corpus. This closes
-	// the "Hidden but still invokable" gap cobra's Hidden leaves —
-	// the command is hidden from --help AND refuses when invoked by
-	// path.
-	if !opts.Provisioned {
-		return errNotProvisioned(cmd, opts.JSONOut)
-	}
 	if opts.Query == "" {
 		return output.RenderError(
 			cmd.ErrOrStderr(),

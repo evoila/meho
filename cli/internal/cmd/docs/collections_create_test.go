@@ -15,22 +15,6 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 )
 
-func TestRunCollectionCreateRefusesWhenUnprovisioned(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runCollectionCreate(cmd, createCollectionOptions{
-		CollectionKey: "vmware",
-		Vendor:        "VMware",
-		BackendType:   "corpus-http",
-		Provisioned:   false,
-	})
-	if exitCodeOf(t, err) != 5 {
-		t.Errorf("expected exit 5 (insufficient_role family); got %d", exitCodeOf(t, err))
-	}
-	if !strings.Contains(stderr.String(), "addon_not_provisioned") {
-		t.Errorf("expected addon_not_provisioned code; got %q", stderr.String())
-	}
-}
-
 func TestBuildCreateBodyFromFlagsRequiresVendorAndBackend(t *testing.T) {
 	cases := []struct {
 		name string
@@ -140,7 +124,6 @@ func TestRunCollectionCreateHappyPath(t *testing.T) {
 		Vendor:            "VMware by Broadcom",
 		BackendType:       "corpus-http",
 		BackendRef:        `{"endpoint":"https://corpus/v1/search"}`,
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -179,7 +162,6 @@ func TestRunCollectionCreateRendersUnknownBackend422(t *testing.T) {
 		CollectionKey:     "vmware",
 		Vendor:            "VMware",
 		BackendType:       "no-such-backend",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if exitCodeOf(t, err) != 4 {
@@ -211,7 +193,6 @@ func TestRunCollectionCreateRendersConflict409(t *testing.T) {
 		CollectionKey:     "vmware",
 		Vendor:            "VMware",
 		BackendType:       "corpus-http",
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if exitCodeOf(t, err) != 4 {
@@ -223,7 +204,7 @@ func TestRunCollectionCreateRendersConflict409(t *testing.T) {
 }
 
 func TestCollectionsCreateHelpExitsZero(t *testing.T) {
-	cmd := newCollectionsCreateCmd(true)
+	cmd := newCollectionsCreateCmd()
 	cmd.SetArgs([]string{"--help"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("create --help: %v", err)

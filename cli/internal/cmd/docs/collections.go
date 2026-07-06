@@ -25,11 +25,13 @@ import (
 // `disable`, T6 #1555) mutate the doc_collections row and require
 // tenant_admin (the connector enable/disable gate).
 //
-// `provisioned` carries the meho-docs capability resolved at command-tree-
-// build time; an unprovisioned tenant gets the typed
-// `addon_not_provisioned` refusal before any network call on every verb,
-// the same gate `meho docs search` enforces.
-func newCollectionsCmd(provisioned bool) *cobra.Command {
+// There is no client-side capability gate (#2109): the tree is always
+// visible and every verb defers to server-side gating, identically to
+// `POST /api/v1/search_docs`. The backplane enforces the per-collection
+// `meho-docs:<collection>` entitlement and the tenant_admin role on the
+// lifecycle verbs, so an unentitled / under-privileged caller gets a
+// typed 403 from the route rather than a divergent client-side refusal.
+func newCollectionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "collections",
 		Short: "List, create, and probe / toggle doc collections",
@@ -46,14 +48,13 @@ func newCollectionsCmd(provisioned bool) *cobra.Command {
 			"built, and rebuilds serialize per project — `probe` surfaces " +
 			"that as the collection's status rather than hiding it behind a " +
 			"silent empty search result.",
-		Hidden:       !provisioned,
 		SilenceUsage: true,
 	}
-	cmd.AddCommand(newCollectionsListCmd(provisioned))
-	cmd.AddCommand(newCollectionsCreateCmd(provisioned))
-	cmd.AddCommand(newCollectionsProbeCmd(provisioned))
-	cmd.AddCommand(newCollectionsEnableCmd(provisioned))
-	cmd.AddCommand(newCollectionsDisableCmd(provisioned))
+	cmd.AddCommand(newCollectionsListCmd())
+	cmd.AddCommand(newCollectionsCreateCmd())
+	cmd.AddCommand(newCollectionsProbeCmd())
+	cmd.AddCommand(newCollectionsEnableCmd())
+	cmd.AddCommand(newCollectionsDisableCmd())
 	return cmd
 }
 
@@ -62,13 +63,9 @@ type lifecycleOptions struct {
 	CollectionKey     string
 	JSONOut           bool
 	BackplaneOverride string
-	// Provisioned carries the meho-docs capability gate. When false the
-	// verb refuses with the typed addon_not_provisioned error before
-	// touching the network.
-	Provisioned bool
 }
 
-func newCollectionsProbeCmd(provisioned bool) *cobra.Command {
+func newCollectionsProbeCmd() *cobra.Command {
 	var (
 		jsonOut           bool
 		backplaneOverride string
@@ -93,7 +90,6 @@ func newCollectionsProbeCmd(provisioned bool) *cobra.Command {
 				CollectionKey:     args[0],
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
-				Provisioned:       provisioned,
 			})
 		},
 	}
@@ -104,7 +100,7 @@ func newCollectionsProbeCmd(provisioned bool) *cobra.Command {
 	return cmd
 }
 
-func newCollectionsEnableCmd(provisioned bool) *cobra.Command {
+func newCollectionsEnableCmd() *cobra.Command {
 	var (
 		jsonOut           bool
 		backplaneOverride string
@@ -125,7 +121,6 @@ func newCollectionsEnableCmd(provisioned bool) *cobra.Command {
 				CollectionKey:     args[0],
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
-				Provisioned:       provisioned,
 			})
 		},
 	}
@@ -135,7 +130,7 @@ func newCollectionsEnableCmd(provisioned bool) *cobra.Command {
 	return cmd
 }
 
-func newCollectionsDisableCmd(provisioned bool) *cobra.Command {
+func newCollectionsDisableCmd() *cobra.Command {
 	var (
 		jsonOut           bool
 		backplaneOverride string
@@ -158,7 +153,6 @@ func newCollectionsDisableCmd(provisioned bool) *cobra.Command {
 				CollectionKey:     args[0],
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
-				Provisioned:       provisioned,
 			})
 		},
 	}
@@ -169,12 +163,11 @@ func newCollectionsDisableCmd(provisioned bool) *cobra.Command {
 }
 
 // gateLifecycle runs the shared pre-flight every collections verb needs:
-// the capability gate, a non-empty key, and backplane resolution. Returns
-// the resolved URL or a rendered error the caller returns directly.
+// a non-empty key and backplane resolution. Returns the resolved URL or a
+// rendered error the caller returns directly. There is no client-side
+// capability gate (#2109) — the backplane enforces entitlement + role
+// server-side, identically to the REST route.
 func gateLifecycle(cmd *cobra.Command, opts lifecycleOptions) (string, error) {
-	if !opts.Provisioned {
-		return "", errNotProvisioned(cmd, opts.JSONOut)
-	}
 	if opts.CollectionKey == "" {
 		return "", output.RenderError(
 			cmd.ErrOrStderr(),

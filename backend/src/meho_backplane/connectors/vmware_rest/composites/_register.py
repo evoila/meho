@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 13 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 14 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -21,7 +21,8 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 5 read composites (T5 / #508) pass ``safety_level="safe"`` +
+The 6 read composites (T5 / #508 shipped 5; #2080 adds
+``host.network_uplinks``) pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` /
 ``True`` defaults. The 8 write composites (T6 / #509) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
@@ -40,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
+    host_network_uplinks_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
@@ -66,6 +68,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
+    HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA,
+    HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
@@ -169,16 +173,21 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "parameters."
     ),
     "host": (
-        "Use for host-lifecycle write composites: evacuate every "
-        "VM off a host (recursive composite call into vm.migrate) "
-        "then enter maintenance, or detach a host from a DVS after "
-        "migrating its VM NICs off. Dangerous / approval-required; "
-        "the host_evacuate composite is the first production "
-        "composite that calls another composite. The right group "
-        "for 'safely take this host offline' workflows. Pair with "
-        "'networking' for the DVS-audit prerequisite to "
-        "host_detach_from_vds, and with 'cluster' / 'vm' for the "
-        "pre-flight reads."
+        "Use for host-level reads and host-lifecycle write "
+        "composites. Read: host.network_uplinks -- per host, the "
+        "physical NICs (link state + speed) and their proxy-switch / "
+        "uplink association, the one read the plain REST surface "
+        "cannot reproduce; the right group for 'are we out of "
+        "physical switch ports?' / 'which pnics back this DVS "
+        "uplink?'. Write (dangerous / approval-required): evacuate "
+        "every VM off a host (recursive composite call into "
+        "vm.migrate) then enter maintenance, or detach a host from a "
+        "DVS after migrating its VM NICs off; the host_evacuate "
+        "composite is the first production composite that calls "
+        "another composite. The right group for 'safely take this "
+        "host offline' workflows. Pair with 'networking' for the "
+        "DVS-audit prerequisite to host_detach_from_vds, and with "
+        "'cluster' / 'vm' for the pre-flight reads."
     ),
 }
 
@@ -312,6 +321,32 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
         group_key="networking",
         tags=["composite", "read-only", "networking", "portgroup"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.network_uplinks",
+        handler=host_network_uplinks_composite,
+        summary="Per host, physical NIC link state + speed and their proxy-switch uplinks.",
+        description=(
+            "Lists hosts via 'GET:/vcenter/host', then per host reads "
+            "'config.network.pnic' + 'config.network.proxySwitch' via the "
+            "vi-json PropertyCollector "
+            "'POST:/PropertyCollector/{moId}/RetrievePropertiesEx'. "
+            "Aggregates one row per host: each physical NIC's device / "
+            "MAC / driver / link state (up when the WS-API linkSpeed is "
+            "present) / speed, plus each proxy switch (the host-side "
+            "backing of a DVS) with its uplink pnic device names. The "
+            "pnic link-state / uplink mapping is the one read the plain "
+            "vSphere Automation REST surface cannot reproduce -- it "
+            "drives physical switch-port-occupancy reasoning ('are we "
+            "out of switch ports?'). Read-only -- never mutates host "
+            "network configuration."
+        ),
+        parameter_schema=HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA,
+        response_schema=HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "read-only", "host", "networking", "pnic"],
         safety_level="safe",
         requires_approval=False,
     ),
@@ -512,8 +547,9 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 13 composites total -- 5 read (T5 / #508) +
-    8 write (T6 / #509). Each composite's ``safety_level`` +
+    Scope: 14 composites total -- 6 read (T5 / #508 shipped 5;
+    #2080 adds ``host.network_uplinks``) + 8 write (T6 / #509).
+    Each composite's ``safety_level`` +
     ``requires_approval`` come from its :class:`_CompositeSpec` row:
     reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /
     ``True`` (T4's defaults).

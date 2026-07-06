@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 5 vmware-rest read-composite handler functions.
+"""Unit tests for the 6 vmware-rest read-composite handler functions.
 
 Coverage matrix (G3.1-T5 / #508 acceptance criteria):
 
@@ -40,6 +40,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
+    host_network_uplinks_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
@@ -72,6 +73,7 @@ def _prime_preflight_cache() -> Iterator[None]:
             "vmware.composite.performance.summary",
             "vmware.composite.datastore.usage",
             "vmware.composite.network.portgroup.audit",
+            "vmware.composite.host.network_uplinks",
         }
     )
     yield
@@ -838,6 +840,278 @@ async def test_network_portgroup_audit_include_disconnected_drops_power_filter()
 
 
 # ---------------------------------------------------------------------------
+# vmware.composite.host.network_uplinks
+# ---------------------------------------------------------------------------
+
+
+def _retrieve_result(pnics: list[Any], proxy_switches: list[Any]) -> dict[str, Any]:
+    """Build a RetrievePropertiesEx RetrieveResult for one host.
+
+    Mirrors the WS-API ``RetrieveResult`` shape: an ``objects`` list of
+    ``ObjectContent``, each with a ``propSet`` of ``{name, val}`` pairs
+    keyed on the requested property paths.
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": "HostSystem", "value": "host-1"},
+                "propSet": [
+                    {"name": "config.network.pnic", "val": pnics},
+                    {"name": "config.network.proxySwitch", "val": proxy_switches},
+                ],
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_lists_then_reads_props_per_host() -> None:
+    """Host listing + per-host RetrievePropertiesEx; aggregation matches the spec.
+
+    ``config.network.pnic`` flattens to device / mac / driver / link
+    state + speed; ``config.network.proxySwitch`` flattens to the DVS
+    backing with its uplink pnic device names (recovered from the
+    WS-API pnic keys).
+    """
+    listing = [
+        {"host": "host-1", "name": "esx-1"},
+        {"host": "host-2", "name": "esx-2"},
+    ]
+    props_by_host = {
+        "host-1": _retrieve_result(
+            pnics=[
+                {
+                    "device": "vmnic0",
+                    "mac": "aa:bb:cc:00:00:00",
+                    "driver": "ixgbe",
+                    "linkSpeed": {"speedMb": 10000, "duplex": True},
+                },
+                {
+                    "device": "vmnic1",
+                    "mac": "aa:bb:cc:00:00:01",
+                    "driver": "ixgbe",
+                    # No linkSpeed -> link down.
+                },
+            ],
+            proxy_switches=[
+                {
+                    "key": "key-vim.host.HostProxySwitch-1",
+                    "dvsName": "DVS-A",
+                    "dvsUuid": "50 01 aa bb",
+                    "pnic": ["key-vim.host.PhysicalNic-vmnic0"],
+                }
+            ],
+        ),
+        "host-2": _retrieve_result(pnics=[], proxy_switches=[]),
+    }
+    sequence: list[OperationResult] = [_ok_result("GET:/vcenter/host", listing)]
+    for entry in listing:
+        sequence.append(
+            _ok_result(
+                "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+                props_by_host[entry["host"]],
+            )
+        )
+    dispatch = _RecordingDispatchChild(sequence)
+
+    out = await host_network_uplinks_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+
+    # 1 listing + 2 hosts * 1 property read = 3 calls.
+    assert len(dispatch.calls) == 3
+    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/host"
+    assert dispatch.calls[0]["params"] == {}
+    # Per-host property read targets the propertyCollector singleton and
+    # requests the two host-network config paths on the specific host.
+    prop_call = dispatch.calls[1]
+    assert prop_call["op_id"] == "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+    assert prop_call["params"]["moId"] == "propertyCollector"
+    spec = prop_call["params"]["specSet"][0]
+    assert spec["propSet"][0]["type"] == "HostSystem"
+    assert spec["propSet"][0]["pathSet"] == [
+        "config.network.pnic",
+        "config.network.proxySwitch",
+    ]
+    assert spec["objectSet"][0]["obj"] == {"type": "HostSystem", "value": "host-1"}
+
+    hosts = out["hosts"]
+    assert len(hosts) == 2
+    h1 = hosts[0]
+    assert h1["id"] == "host-1"
+    assert h1["name"] == "esx-1"
+    assert h1["pnics"] == [
+        {
+            "device": "vmnic0",
+            "mac": "aa:bb:cc:00:00:00",
+            "driver": "ixgbe",
+            "link_up": True,
+            "speed_mb": 10000,
+            "duplex": True,
+        },
+        {
+            "device": "vmnic1",
+            "mac": "aa:bb:cc:00:00:01",
+            "driver": "ixgbe",
+            "link_up": False,
+            "speed_mb": None,
+            "duplex": None,
+        },
+    ]
+    assert h1["proxy_switches"] == [
+        {
+            "key": "key-vim.host.HostProxySwitch-1",
+            "dvs_name": "DVS-A",
+            "dvs_uuid": "50 01 aa bb",
+            "uplink_pnics": ["vmnic0"],
+        }
+    ]
+    assert "read_note" not in h1
+    # host-2: empty pnic/proxySwitch lists.
+    assert hosts[1]["pnics"] == []
+    assert hosts[1]["proxy_switches"] == []
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_filter_hosts_passes_through_to_listing() -> None:
+    """``filter_hosts`` flows into the host listing as ``filter.hosts``."""
+    dispatch = _RecordingDispatchChild([_ok_result("GET:/vcenter/host", [])])
+    await host_network_uplinks_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"filter_hosts": ["host-9", "host-10"]},
+        dispatch_child=dispatch,
+    )
+    assert dispatch.calls[0]["params"] == {"filter.hosts": ["host-9", "host-10"]}
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_property_read_is_best_effort_on_error() -> None:
+    """A failed per-host property read keeps the row; pnics/proxy_switches null + note.
+
+    The plain REST host listing has already identified the host by the
+    time the vi-json property read runs, so when that read errors the
+    host row is still returned -- pnics/proxy_switches nulled with a
+    ``read_note`` -- rather than the whole composite failing.
+    """
+    listing = [
+        {"host": "host-1", "name": "esx-1"},
+        {"host": "host-2", "name": "esx-2"},
+    ]
+    sequence = [
+        _ok_result("GET:/vcenter/host", listing),
+        # host-1: property read 400s -> best-effort skip.
+        _connector_error_result(
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "Client error '400 Bad Request' for url "
+            "'https://vc/sdk/vim25/PropertyCollector/propertyCollector/RetrievePropertiesEx'",
+        ),
+        # host-2: property read OK.
+        _ok_result(
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            _retrieve_result(pnics=[], proxy_switches=[]),
+        ),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await host_network_uplinks_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+
+    assert len(dispatch.calls) == 3
+    rows = out["hosts"]
+    assert len(rows) == 2
+    h1 = rows[0]
+    assert h1["id"] == "host-1"
+    assert h1["pnics"] is None
+    assert h1["proxy_switches"] is None
+    assert "read_note" in h1
+    note = h1["read_note"]
+    assert "POST:/PropertyCollector/{moId}/RetrievePropertiesEx" in note
+    assert "400 Bad Request" in note
+    # host-2: enriched normally, no note.
+    assert rows[1]["pnics"] == []
+    assert "read_note" not in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_tolerates_legacy_value_envelope() -> None:
+    """A ``{"value": ...}`` envelope on the listing and property read unwraps cleanly."""
+    sequence = [
+        _ok_result("GET:/vcenter/host", {"value": [{"host": "host-1", "name": "esx-1"}]}),
+        _ok_result(
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            {"value": _retrieve_result(pnics=[{"device": "vmnic0"}], proxy_switches=[])},
+        ),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await host_network_uplinks_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+    assert out["hosts"][0]["pnics"] == [
+        {
+            "device": "vmnic0",
+            "mac": None,
+            "driver": None,
+            "link_up": False,
+            "speed_mb": None,
+            "duplex": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_skips_malformed_listing_entries() -> None:
+    """Listing entries without a string ``host`` key are skipped silently."""
+    sequence = [
+        _ok_result(
+            "GET:/vcenter/host",
+            [
+                {"host": "host-1", "name": "good"},
+                {"name": "missing-id"},  # no ``host`` key
+                "not-a-dict",
+            ],
+        ),
+        _ok_result(
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            _retrieve_result(pnics=[], proxy_switches=[]),
+        ),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await host_network_uplinks_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+    # Only the well-formed entry produces a property read + a result row.
+    assert len(out["hosts"]) == 1
+    assert out["hosts"][0]["id"] == "host-1"
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_raises_on_listing_error() -> None:
+    """A failed host listing surfaces as ``RuntimeError``; no per-host reads fire."""
+    dispatch = _RecordingDispatchChild([_err_result("GET:/vcenter/host", "permission denied")])
+    with pytest.raises(RuntimeError, match="returned status='error'"):
+        await host_network_uplinks_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={},
+            dispatch_child=dispatch,
+        )
+    assert len(dispatch.calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # Error fan-out -- a sub-op error causes the handler to raise
 # ---------------------------------------------------------------------------
 
@@ -903,7 +1177,7 @@ async def test_event_tail_raises_on_sub_op_error() -> None:
 
 @pytest.mark.asyncio
 async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
-    """All five handlers dispatch sub-ops against ``vmware-rest-9.0`` exclusively.
+    """All six read handlers dispatch sub-ops against ``vmware-rest-9.0`` exclusively.
 
     Load-bearing for the issue body's *Why dispatch_child not direct
     httpx* contract: the connector_id is what routes the recursive
@@ -944,6 +1218,11 @@ async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
                 "GET:/vcenter/network/distributed-switches": [],
                 "GET:/vcenter/network": [],
             },
+        ),
+        (
+            host_network_uplinks_composite,
+            {},
+            {"GET:/vcenter/host": []},
         ),
     )
     for handler, params, responses in handlers:

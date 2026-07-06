@@ -604,8 +604,21 @@ async def datastore_usage_composite(
             )
         )
         detail_payload = _unwrap_value(detail)
-        capacity = detail_payload.get("capacity") if isinstance(detail_payload, dict) else None
-        free_space = detail_payload.get("free_space") if isinstance(detail_payload, dict) else None
+        detail_capacity = (
+            detail_payload.get("capacity") if isinstance(detail_payload, dict) else None
+        )
+        detail_free_space = (
+            detail_payload.get("free_space") if isinstance(detail_payload, dict) else None
+        )
+        # The per-datastore detail ``Datastore.Info`` is the primary source,
+        # but some vCenter builds (observed on 8.0.3 against the 9.0 spec,
+        # #2078) return a detail payload that omits/nulls ``capacity`` while
+        # still populating ``free_space``. The ``GET:/vcenter/datastore`` list
+        # row already carries both fields, so fall back to it when the detail
+        # value is absent -- otherwise the composite silently discards a
+        # capacity it already fetched, leaving %-full uncomputable.
+        capacity = detail_capacity if detail_capacity is not None else entry.get("capacity")
+        free_space = detail_free_space if detail_free_space is not None else entry.get("free_space")
         row: dict[str, Any] = {
             "id": ds_id,
             "name": entry.get("name"),

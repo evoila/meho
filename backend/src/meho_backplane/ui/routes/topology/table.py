@@ -243,6 +243,17 @@ async def _render_table(
         "page_title": "Topology",
         "active_surface": "topology",
         "nodes": nodes,
+        # ``is_fragment`` drives the sortable head's out-of-band re-render:
+        # on an HTMX sort / filter swap the ``_table_rows.html`` fragment
+        # emits ``_table_head.html`` with ``hx-swap-oob`` so the head's
+        # ``next_dir`` links + active-column arrow track the new sort state
+        # (issue #140). On the full page the head renders in-place via
+        # ``table.html`` and ``is_fragment`` is false so it is not
+        # double-emitted. ``oob`` is a Jinja ``StrictUndefined``-safe
+        # default so ``_table_head.html``'s ``{% if oob %}`` guard never
+        # reads an undefined name when the head is included in-place.
+        "is_fragment": is_fragment,
+        "oob": False,
         "sort": sort,
         "direction": direction,
         "kind_filter": kind or "",

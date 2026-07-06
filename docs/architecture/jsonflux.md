@@ -243,10 +243,32 @@ Read off the shipped adapter
 | `byte_threshold` | `4096` | Materialize when the serialized payload exceeds this many bytes, even if under `row_threshold`. |
 | `sample_size` | `5` | Rows surfaced inline on the `ResultHandle.sample_rows` preview and in the markdown summary. `0` returns no sample. |
 | `ttl_seconds` | `3600` | Lifetime stamped onto `ResultHandle.ttl_seconds` for the backing store. |
+| `sample_byte_budget` | settings `jsonflux_sample_byte_budget` (default `4096`) | Upper bound, in serialized JSON bytes, on the inline sample (#134). The reducer shrinks the sample — fewer rows (never below one), then truncated values as a last resort — so it fits this budget regardless of per-row object size. Resolved lazily from settings when the constructor arg is `None`. |
 
-All four are keyword-only. The defaults match v0.1-spec §4 (50 rows /
+All are keyword-only. The threshold defaults match v0.1-spec §4 (50 rows /
 4 KB). Empty collections never materialize — a 0-row handle carries no
 information a pass-through doesn't.
+
+### The inline sample is serialized once (#134)
+
+The reducer carries the bounded preview in **exactly one** place:
+`ResultHandle.sample_rows`. The compact `summary` dict it returns
+alongside the handle (mapped to `OperationResult.result`) reports the
+preview count (`sample_rows_returned`) and its serialized size
+(`sample_bytes`) but does **not** duplicate the rows. Previously the same
+`sample_rows` list was placed into *both* the handle and the summary's
+`sample` key, so a reduced `call_operation` envelope shipped two
+byte-identical copies of a large preview — measured at 91.7 % of a
+277 KB envelope for a 23-row object-heavy list op — overflowing the MCP
+result token ceiling even though the `result_query` handle worked.
+
+The preview is bounded by serialized bytes (`sample_byte_budget`), not
+only by `sample_size` rows: an object-heavy list (rows of tens of KB) is
+shrunk to fit the budget so the reduced envelope stays under a ceiling
+independent of per-row object size. The `handle.sample_rows` audit hoist
+(`sample_rows_returned`) and the connector e2e assertions that read
+`handle.sample_rows` are unchanged; the full set is untouched and stays
+reachable via the spill + `result_query`.
 
 ### `fetch_more` envelope (G0.15-T8, #1219)
 

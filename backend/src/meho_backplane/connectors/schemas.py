@@ -442,6 +442,16 @@ class ResultHandle(BaseModel):
     :attr:`FingerprintResult.extras` / :attr:`OperationResult.extras`
     pattern).
 
+    ``sample_rows`` is the **single** home of the inline preview (#134):
+    the reducer carries the bounded sample here and nowhere else. The
+    sibling inline ``OperationResult.result`` summary reports the preview
+    *count* (``sample_rows_returned``) but does not duplicate the rows, so
+    an object-heavy list op ships one bounded copy of the sample rather
+    than two. The reducer sizes ``sample_rows`` to a serialized-byte budget
+    (``jsonflux_sample_byte_budget``), not only a row count, so the preview
+    stays inline-consumable regardless of per-row object size; the full set
+    is reachable via ``result_query`` (see ``fetch_more.drill_in``).
+
     ``fetch_more`` is the G0.15-T8 self-documenting drill-in / pagination
     envelope -- every handle the reducer mints carries it so an agent
     reading the response can answer *"how do I get more rows"* without a

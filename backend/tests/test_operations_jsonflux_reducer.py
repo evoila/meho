@@ -63,9 +63,12 @@ from meho_backplane.operations import (
 )
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import (
+    _TRUNCATION_MARKER,
     JsonFluxReducer,
+    _fit_sample_to_budget,
     _query_sample,
     _sample_from_tail,
+    _serialize,
 )
 from meho_backplane.operations.reducer import PassThroughReducer, Reducer
 from meho_backplane.settings import get_settings
@@ -107,8 +110,9 @@ async def test_materialize_handle_for_large_set() -> None:
       per column, typed (``id`` → string, ``count`` → integer).
     * ``sample_rows`` is a bounded non-empty slice of real rows.
     * ``summary_md`` mentions the row count and is non-empty.
-    * the inlined summary carries ``row_count`` and the bounded
-      ``sample`` — never the full raw list.
+    * the inlined summary carries ``row_count`` and the sample *count*
+      (``sample_rows_returned``) — never the full raw list, and never a
+      duplicate copy of the sample rows (#134).
     """
     reducer = JsonFluxReducer(sample_size=5)
     rows = [{"id": f"seg-{i}", "name": f"canary-{i}", "count": i} for i in range(60)]
@@ -146,10 +150,14 @@ async def test_materialize_handle_for_large_set() -> None:
     # ttl_seconds carries the configured default.
     assert handle.ttl_seconds == 3600
 
-    # The inlined summary is the reduced view, not the raw 60-row list.
+    # The inlined summary is the reduced view, not the raw 60-row list. The
+    # inline sample is serialized once — it lives on ``handle.sample_rows``,
+    # not duplicated into the summary (#134); the summary reports its count.
     assert isinstance(reduced, dict)
     assert reduced["row_count"] == 60
-    assert len(reduced["sample"]) <= 5
+    assert "sample" not in reduced
+    assert reduced["sample_rows_returned"] == len(handle.sample_rows)
+    assert 0 < reduced["sample_rows_returned"] <= 5
     assert "results" not in reduced
 
 
@@ -200,6 +208,101 @@ async def test_materialize_handle_for_under_row_over_byte_threshold() -> None:
     assert isinstance(reduced, dict)
     assert reduced["row_count"] == 5
     assert "value" not in reduced
+
+
+# ---------------------------------------------------------------------------
+# Single-serialization + byte-bounded inline sample (#134)
+# ---------------------------------------------------------------------------
+
+
+async def test_inline_sample_lives_in_exactly_one_location() -> None:
+    """The sample is carried once — on ``handle.sample_rows``, not the summary.
+
+    #134 acceptance criterion 1: a reduced ``call_operation`` envelope must
+    not carry the inline sample in *both* ``result.sample`` and
+    ``handle.sample_rows`` as full copies. The reducer keeps the preview on
+    ``handle.sample_rows`` (the audit hoist + every connector e2e reads it
+    there) and the compact summary reports only its *count*.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    rows = [{"id": f"seg-{i}", "name": f"canary-{i}"} for i in range(60)]
+
+    reduced, handle = await reducer.reduce({"results": rows}, None)
+
+    assert handle is not None
+    # The handle carries the sample.
+    assert handle.sample_rows is not None and len(handle.sample_rows) > 0
+    # The summary does NOT duplicate it — no ``sample`` key at all.
+    assert "sample" not in reduced
+    # It reports the count instead, and the count agrees with the handle.
+    assert reduced["sample_rows_returned"] == len(handle.sample_rows)
+
+
+async def test_inline_sample_stays_under_byte_budget_independent_of_row_size() -> None:
+    """The reduced envelope size is bounded by bytes, independent of ``K`` (#134).
+
+    #134 acceptance criterion 2: given ``N`` rows each ~``K`` bytes where a
+    fixed 5-row sample would blow the budget, the serialized sample stays
+    under a fixed ceiling regardless of ``K`` — the row count shrinks as
+    ``K`` grows, never below one. Feed 8 KB and 50 KB rows and assert the
+    same ceiling holds for both while the sample row count drops.
+    """
+    budget = 4096
+
+    async def _sample_for_row_size(blob_bytes: int) -> list[dict[str, Any]]:
+        reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=budget)
+        rows = [{"id": f"row-{i}", "blob": "x" * blob_bytes} for i in range(60)]
+        _reduced, handle = await reducer.reduce({"results": rows}, None)
+        assert handle is not None and handle.sample_rows is not None
+        return [dict(row) for row in handle.sample_rows]
+
+    sample_8k = await _sample_for_row_size(8 * 1024)
+    sample_50k = await _sample_for_row_size(50 * 1024)
+
+    # Each row alone exceeds the budget, so the sample shrinks to a single
+    # row whose oversized ``blob`` is truncated to fit — but never empty.
+    for sample in (sample_8k, sample_50k):
+        assert len(sample) >= 1
+        serialized = len(_serialize(sample))
+        assert serialized <= budget, (
+            f"serialized sample ({serialized} bytes) must stay under the "
+            f"{budget}-byte budget regardless of per-row size"
+        )
+    # A larger per-row size cannot produce a larger serialized sample.
+    assert len(_serialize(sample_50k)) <= budget
+    assert len(_serialize(sample_8k)) <= budget
+
+
+def test_fit_sample_to_budget_drops_rows_then_truncates() -> None:
+    """``_fit_sample_to_budget`` shrinks by rows first, then truncates values.
+
+    Three regimes, all bounded by the budget:
+
+    * a sample already under budget is returned unchanged;
+    * a multi-row sample over budget drops rows down toward one;
+    * a single row over budget has its oversized string values truncated
+      (marked with :data:`_TRUNCATION_MARKER`) rather than dropped to zero.
+    """
+    # Under budget — unchanged.
+    small = [{"k": "v"}, {"k": "w"}]
+    assert _fit_sample_to_budget(small, 4096) == small
+
+    # Multi-row over budget — rows drop, result fits, never below one.
+    fat_rows = [{"id": i, "blob": "x" * 2000} for i in range(5)]
+    fitted = _fit_sample_to_budget(fat_rows, 4096)
+    assert 1 <= len(fitted) < len(fat_rows)
+    assert len(_serialize(fitted)) <= 4096
+
+    # A single row larger than the whole budget — truncated, not emptied.
+    huge = [{"id": "only", "blob": "x" * 20000}]
+    clipped = _fit_sample_to_budget(huge, 4096)
+    assert len(clipped) == 1
+    assert clipped[0]["id"] == "only"
+    assert clipped[0]["blob"].endswith(_TRUNCATION_MARKER)
+    assert len(_serialize(clipped)) <= 4096
+
+    # Empty input stays empty.
+    assert _fit_sample_to_budget([], 4096) == []
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +409,10 @@ async def test_reduce_tail_op_samples_most_recent_lines() -> None:
 
     assert handle is not None
     assert handle.total_rows == 495
-    # The inline sample is the five MOST-RECENT lines, chronological.
-    sample_values = [row["value"] for row in reduced["sample"]]
+    # The inline sample lives once on ``handle.sample_rows`` (#134) and is
+    # the five MOST-RECENT lines, chronological.
+    assert handle.sample_rows is not None
+    sample_values = [dict(row)["value"] for row in handle.sample_rows]
     assert sample_values == [
         "line-490",
         "line-491",
@@ -315,9 +420,9 @@ async def test_reduce_tail_op_samples_most_recent_lines() -> None:
         "line-493",
         "line-494",
     ]
-    # The handle's sample_rows preview agrees with the inlined summary.
-    assert handle.sample_rows is not None
-    assert [dict(row)["value"] for row in handle.sample_rows] == sample_values
+    # The summary reports the preview count, not a duplicate copy.
+    assert "sample" not in reduced
+    assert reduced["sample_rows_returned"] == len(handle.sample_rows)
 
 
 async def test_reduce_without_ordering_hint_keeps_oldest_first_sample() -> None:
@@ -330,10 +435,11 @@ async def test_reduce_without_ordering_hint_keeps_oldest_first_sample() -> None:
     lines = [f"line-{i:03d}" for i in range(495)]
     payload = {"lines": lines}
 
-    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.logs"})
+    _reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.logs"})
 
     assert handle is not None
-    sample_values = [row["value"] for row in reduced["sample"]]
+    assert handle.sample_rows is not None
+    sample_values = [dict(row)["value"] for row in handle.sample_rows]
     assert sample_values == [
         "line-000",
         "line-001",
@@ -707,6 +813,7 @@ class _FakeStore:
     def __init__(self) -> None:
         self.spills: list[dict[str, Any]] = []
         self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._totals: dict[tuple[str, str], int] = {}
 
     async def spill(
         self,
@@ -733,7 +840,38 @@ class _FakeStore:
             }
         )
         self._rows[(str(tenant_id), str(handle_id))] = stored
+        self._totals[(str(tenant_id), str(handle_id))] = total_rows
         return bool(stored)
+
+    async def fetch_window(
+        self,
+        *,
+        tenant_id: Any,
+        operator_sub: str,
+        handle_id: Any,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        """Serve a spilled window back, mirroring the real store's contract.
+
+        Returns the ``[offset : offset+limit]`` slice plus ``total_rows`` /
+        ``stored_rows`` / ``truncated`` so a test can page the spilled
+        handle end-to-end and confirm recovery is unaffected by the inline
+        sample's byte-budgeting (#134).
+        """
+        key = (str(tenant_id), str(handle_id))
+        rows = self._rows.get(key)
+        if rows is None:
+            return None
+        stored = len(rows)
+        total = self._totals[key]
+        window = rows[max(offset, 0) : max(offset, 0) + limit] if limit > 0 else []
+        return {
+            "rows": window,
+            "total_rows": total,
+            "stored_rows": stored,
+            "truncated": stored < total,
+        }
 
 
 async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
@@ -776,6 +914,50 @@ async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
     assert drill_in.example_call["args"]["handle_id"] == str(handle.handle_id)
     assert drill_in.expires_at is not None
     assert "result_query" in drill_in.rationale
+
+
+async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:
+    """Byte-budgeting the inline sample leaves the spilled full set intact (#134).
+
+    #134 acceptance criterion 4: the recovery path is untouched. Even when
+    the inline sample is shrunk / truncated to fit the byte budget, the
+    **full** object-heavy rows are spilled verbatim; paging the handle to
+    its last row via the store returns the row byte-for-byte, with
+    ``total_rows`` correct and ``truncated=False`` (no cap applied).
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(
+        sample_size=5, sample_byte_budget=4096, store=store, max_spill_rows=10000
+    )
+    # Object-heavy rows: each ~8 KB, so the inline sample must shrink+truncate.
+    rows = [{"id": f"row-{i}", "blob": f"{i}-" + "x" * 8000} for i in range(60)]
+    context = {
+        "op_id": "k8s.apps.list",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    # The inline sample was byte-bounded (a single truncated row).
+    assert handle.sample_rows is not None
+    assert len(_serialize([dict(r) for r in handle.sample_rows])) <= 4096
+
+    # The FULL, un-truncated rows were spilled — recovery is unaffected.
+    window = await store.fetch_window(
+        tenant_id=context["tenant_id"],
+        operator_sub="op-a",
+        handle_id=handle.handle_id,
+        offset=59,
+        limit=1,
+    )
+    assert window is not None
+    assert window["total_rows"] == 60
+    assert window["truncated"] is False
+    # The last row round-trips byte-for-byte — the spill is full fidelity,
+    # NOT the truncated inline preview.
+    assert window["rows"] == [{"id": "row-59", "blob": "59-" + "x" * 8000}]
 
 
 async def test_reduce_without_tenant_skips_spill_and_stays_unavailable() -> None:
@@ -849,7 +1031,9 @@ async def test_reduce_store_rejection_reports_result_store_unavailable() -> None
 
     assert handle is not None
     assert reduced["row_count"] == 60
-    assert len(reduced["sample"]) == 5, "the inline sample must still ship"
+    assert handle.sample_rows is not None and len(handle.sample_rows) == 5, (
+        "the inline sample must still ship"
+    )
     drill_in = handle.fetch_more.drill_in
     assert drill_in.available is False
     assert drill_in.reason == "result_store_unavailable"
@@ -932,9 +1116,9 @@ async def test_k8s_logs_shape_with_tenant_context_spills_and_pages() -> None:
     assert reduced["row_count"] == 300
     assert reduced["total"] == 300
     assert reduced["source_key"] == "lines"
-    assert len(reduced["sample"]) == 5
+    assert handle.sample_rows is not None and len(handle.sample_rows) == 5
     # Tail ordering: the sample is the five most-recent lines.
-    assert reduced["sample"][-1]["value"].endswith("log line 299")
+    assert dict(handle.sample_rows[-1])["value"].endswith("log line 299")
     # The full 300 rows were spilled and the drill-in teaches the page-back.
     assert len(store.spills) == 1
     assert store.spills[0]["stored_rows"] == 300
@@ -971,7 +1155,7 @@ async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
 
     assert handle is not None
     assert reduced["row_count"] == 300
-    assert len(reduced["sample"]) == 5
+    assert handle.sample_rows is not None and len(handle.sample_rows) == 5
     drill_in = handle.fetch_more.drill_in
     assert drill_in.available is False
     assert drill_in.reason == "result_store_unavailable"

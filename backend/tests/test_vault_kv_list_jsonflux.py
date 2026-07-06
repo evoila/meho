@@ -287,9 +287,11 @@ async def test_kv_list_over_threshold_returns_sample_and_handle(
     * ``handle.sample_rows`` is a bounded non-empty slice — the seed a
       future ``result_query(handle, ...)`` pages from.
     * :attr:`OperationResult.result` carries the reduced summary
-      (``sample`` + ``total``), **not** the raw >50-key list — the
-      agent never sees the full set inline (DoD: "no agent-visible raw
-      list larger than threshold for this op").
+      (the sample *count* + ``total``), **not** the raw >50-key list —
+      the agent never sees the full set inline (DoD: "no agent-visible
+      raw list larger than threshold for this op"). The sample rows
+      themselves live once on ``handle.sample_rows`` (#134), not
+      duplicated onto the summary.
     """
     big_keys = [f"secret-{i}" for i in range(_THRESHOLD + 75)]  # 125 keys, well over
     install_fake_client(monkeypatch, keys=big_keys)
@@ -351,12 +353,18 @@ async def test_kv_list_over_threshold_returns_sample_and_handle(
     assert isinstance(result.result, dict)
     assert result.result.get("total") == len(big_keys)
     assert result.result.get("row_count") == len(big_keys)
-    assert [row["value"] for row in result.result.get("sample", [])] == big_keys[:_SAMPLE_SIZE]
+    # The sample rows are carried once on the handle (#134); the summary
+    # reports only their count, not a duplicate copy.
+    assert "sample" not in result.result, (
+        "the inline sample must not be duplicated onto the result summary (#134)"
+    )
+    assert handle.sample_rows is not None
+    assert [dict(row)["value"] for row in handle.sample_rows] == big_keys[:_SAMPLE_SIZE]
+    assert result.result.get("sample_rows_returned") == len(handle.sample_rows)
     assert "keys" not in result.result, (
         "the raw inline key list must not survive on the result envelope once a handle is produced"
     )
-    inlined_rows = result.result.get("sample", [])
-    assert len(inlined_rows) <= _THRESHOLD, (
+    assert len(handle.sample_rows) <= _THRESHOLD, (
         f"no agent-visible list larger than the threshold may be inlined; "
-        f"got {len(inlined_rows)} rows on the result envelope"
+        f"got {len(handle.sample_rows)} sample rows"
     )

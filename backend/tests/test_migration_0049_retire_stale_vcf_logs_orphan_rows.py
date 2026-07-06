@@ -413,6 +413,14 @@ def test_twin_less_long_row_preserved(
     is present. A twin-less long row is left for ``0038``'s rewrite (the
     write-side path); deleting it would lose the only copy of that
     operation.
+
+    Pinned to ``0049``'s own revision (not ``head``): this asserts
+    ``0049``'s intermediate contract. Migration ``0052`` (#2068)
+    deliberately supersedes it -- for an in-split long product the short
+    target is a registered connector class, so a "twin-less" in-split row
+    is not the sole *live* representation and ``0052`` retires it. Running
+    to ``head`` would therefore (correctly) delete this row; pinning keeps
+    the ``0049``-level assertion honest and revision-scoped.
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "0048")
@@ -432,7 +440,7 @@ def test_twin_less_long_row_preserved(
         group_key="system",
     )
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0049")
 
     for table, row_id in (
         ("endpoint_descriptor", lone_descriptor),

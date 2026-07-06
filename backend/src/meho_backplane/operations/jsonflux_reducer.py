@@ -159,6 +159,20 @@ _TABLE = "result"
 #: (``results``), SDDC Manager (``elements``), Vault KV (``keys``).
 _ENVELOPE_KEYS = ("value", "results", "elements", "keys", "items", "data")
 
+#: Pagination / HATEOAS metadata keys the largest-list fallback (case 3)
+#: must NOT count as a real collection field. Vendors ship these list- or
+#: object-valued siblings *alongside* the actual collection: vROps /
+#: VCF-operations wraps ``resourceList`` next to a ``links`` HATEOAS array
+#: and a ``pageInfo`` cursor block. They are transport metadata, not
+#: coordinate fields of a detail object, so excluding them before the
+#: single-vs-multi-list decision keeps a paginated collection payload
+#: (``{resourceList, pageInfo, links}``) classified as ONE real list field
+#: (still reduced) while a genuine dict-of-arrays detail object
+#: (``k8s.pod.info``: ``containers`` / ``container_statuses`` / ``volumes`` /
+#: ``conditions`` — none of them metadata) still counts >1 real list field
+#: and passes through verbatim (#2113 / #2184).
+_METADATA_LIST_KEYS = frozenset({"links", "_links", "pageInfo", "page_info"})
+
 #: Column name used when a list-of-scalars is normalized into row dicts.
 _SCALAR_COLUMN = "value"
 
@@ -570,15 +584,49 @@ def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
     Returns ``(envelope_key, rows)`` where ``envelope_key`` is the dict
     key the list was found under (``None`` for a bare top-level list)
     and ``rows`` is the list itself, or ``(None, None)`` when *payload*
-    carries no list-shaped collection.
+    carries no *paginable* list-shaped collection.
 
     Resolution order:
 
     1. A bare top-level ``list`` → ``(None, payload)``.
     2. A ``dict`` whose first matching :data:`_ENVELOPE_KEYS` value is a
        list → ``(key, value)``.
-    3. A ``dict`` with no known envelope key → its largest list value,
-       if any (covers vendors that wrap under a non-standard key).
+    3. A ``dict`` with no known envelope key and **exactly one** *real*
+       list-valued field (:data:`_METADATA_LIST_KEYS` excluded) → that
+       list (covers vendors — ``k8s.logs``, and other flat-dict list ops —
+       that wrap a single collection under a non-standard key next to
+       scalar siblings, and paginated shapes like vROps'
+       ``{resourceList, pageInfo, links}`` where the only non-metadata
+       list is the collection).
+
+    Single-object detail exemption (#2113)
+    --------------------------------------
+    A ``dict`` with no known envelope key that carries **more than one**
+    *real* list-valued field is a *dict-of-arrays detail object*, not a
+    paginable collection: the sibling arrays are coordinate fields of one
+    object (``k8s.pod.info``'s ``containers`` / ``container_statuses`` /
+    ``volumes`` / ``conditions``), not pages of a single set. The
+    pre-#2113 largest-list fallback picked whichever array happened to be
+    longest (``conditions``, 5 all-``True`` rows) and discarded every
+    sibling, silently dropping the operationally critical
+    ``container_statuses``. Such payloads return ``(None, None)`` and pass
+    through verbatim — the byte-threshold check still bounds a genuinely
+    huge detail object, but it can never be truncated to a single
+    arbitrary sub-array. The single-list case (2) is untouched, so real
+    flat-dict list ops (``k8s.logs``) still reduce as before.
+
+    HATEOAS / pagination metadata is not a collection field (#2184)
+    ---------------------------------------------------------------
+    The single-vs-multi-list count in case 3 skips
+    :data:`_METADATA_LIST_KEYS` (``links`` / ``_links`` / ``pageInfo`` /
+    ``page_info``). Without the exclusion vROps' paginated
+    ``{resourceList: [...], pageInfo: {...}, links: [{...}]}`` counted two
+    list fields (``resourceList`` + the HATEOAS ``links`` array), fell into
+    the multi-list detail exemption, and shipped a genuine large collection
+    UNREDUCED with ``handle=None``. Metadata keys never carry the payload's
+    rows, so excluding them restores single-real-list detection for
+    paginated collections while leaving the pod-info detail object (whose
+    arrays are all real coordinate fields) at >1 and still exempt.
     """
     if isinstance(payload, list):
         return None, payload
@@ -590,13 +638,20 @@ def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
         if isinstance(value, list):
             return key, value
 
-    largest_key: str | None = None
-    largest: list[Any] | None = None
-    for key, value in payload.items():
-        if isinstance(value, list) and (largest is None or len(value) > len(largest)):
-            largest_key, largest = key, value
-    if largest is not None:
-        return largest_key, largest
+    # Count only *real* list fields — transport metadata (HATEOAS ``links``,
+    # a ``pageInfo`` cursor) is not a collection, so it must not tip a
+    # paginated single-collection payload into the multi-list detail
+    # exemption (#2184).
+    list_fields = [
+        (key, value)
+        for key, value in payload.items()
+        if isinstance(value, list) and key not in _METADATA_LIST_KEYS
+    ]
+    if len(list_fields) == 1:
+        return list_fields[0]
+    # Zero lists → no collection. More than one real list → a dict-of-arrays
+    # detail object (#2113); pass through verbatim rather than materialize
+    # one arbitrary sub-array and drop its siblings.
     return None, None
 
 

@@ -670,6 +670,68 @@ def test_graph_selected_id_round_trips_into_data_island() -> None:
     assert payload == str(node_id)
 
 
+def test_graph_selected_id_round_trips_into_show_in_table_link() -> None:
+    """``?selected=<id>`` round-trips into the "Show in table" header link (AC#4).
+
+    On arrival at ``?view=graph&selected=<id>`` the server-rendered
+    "Show in table" cross-link must already carry ``&selected=<id>`` so
+    a click takes the operator to the matching table row without a JS
+    round-trip. The client-side ``updateTableLink`` keeps it in sync on
+    subsequent taps, but the *arrival* link is a server concern.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    node_id = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-target")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/topology?view=graph&selected={node_id}")
+    assert response.status_code == 200, response.text
+    assert "/ui/topology?view=table" in response.text
+    assert f"&selected={node_id}" in response.text
+
+
+def test_graph_controller_registers_layoutstop_before_running_layout() -> None:
+    """The ``?selected`` cross-link handler is attached before the initial layout.
+
+    Regression for #142: the select/center/open-drawer logic is a
+    ``cy.one("layoutstop", ...)`` listener. An ``animate:false``
+    cose-bilkent pass emits ``layoutstop`` synchronously inside the
+    ``layout.run()`` turn, so the listener MUST be registered *before*
+    the initial layout runs -- otherwise it never fires and arriving
+    at ``?view=graph&selected=<id>`` renders the graph without
+    selecting/centering/opening the node's drawer.
+
+    The pre-fix code passed ``layout: layoutOptions("cose-bilkent",
+    false)`` into the ``cytoscape({...})`` constructor (which runs the
+    layout synchronously during construction) and only attached the
+    ``cy.one("layoutstop", ...)`` listener afterwards. This test pins
+    two load-bearing source properties of the served controller:
+
+    * the constructor no longer carries an inline ``layout:`` option
+      (the layout is run explicitly afterwards), and
+    * the ``cy.one("layoutstop"`` registration precedes the
+      ``cy.layout(...).run()`` call in source order.
+    """
+    source = (static_root_dir() / "src" / "app" / "topology-graph.js").read_text(
+        encoding="utf-8",
+    )
+    # The constructor must not carry an inline ``layout:`` key -- that
+    # is what ran the layout synchronously before any listener attached.
+    assert "layout: layoutOptions(" not in source, (
+        "the cytoscape constructor must not run the layout inline; run it "
+        "explicitly after the ?selected layoutstop listener is attached (#142)"
+    )
+    # The layoutstop cross-link listener must be registered before the
+    # explicit initial ``cy.layout(...).run()`` call.
+    listener_pos = source.index('cy.one("layoutstop"')
+    run_pos = source.index('cy.layout(layoutOptions("cose-bilkent", false)).run()')
+    assert listener_pos < run_pos, (
+        "the ?selected layoutstop listener must be attached before the initial "
+        "cy.layout(...).run() so the synchronous animate:false layoutstop is caught (#142)"
+    )
+
+
 def test_graph_without_selection_emits_empty_island() -> None:
     """The selected-id island is empty when no ``?selected=`` is present."""
     _seed_tenant_row(_TENANT_A, "tenant-a")

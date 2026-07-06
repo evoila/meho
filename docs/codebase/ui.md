@@ -1344,7 +1344,17 @@ two surfaces.
   `/ui/topology?view=graph&selected=<id>`. The graph route emits the
   id into `#topology-graph-selected`; `topology-graph.js` reads it,
   centers the matching node on the first `layoutstop`, selects it,
-  and opens the same drawer.
+  and opens the same drawer. The `cy.one("layoutstop", ...)` cross-link
+  listener is registered **before** the initial `cy.layout(...).run()`
+  — the controller constructs Cytoscape *without* an inline `layout:`
+  option and runs the layout explicitly afterwards. This ordering is
+  load-bearing: an `animate:false` cose-bilkent pass emits `layoutstop`
+  synchronously inside the `run()` turn, so a listener attached after
+  the layout had already run (the pre-#142 shape, where `layout:` sat
+  on the constructor) never fired and the arriving node was never
+  selected/centered/opened. The "Show in table" header link is
+  server-rendered with `&selected=<id>` on arrival, so it round-trips
+  the selection back without waiting on the client.
 
 Both directions preserve active filters (`kind`, `q`) so the toggle
 keeps operator state.

@@ -294,6 +294,14 @@ def test_graph_full_page_renders_cytoscape_mount() -> None:
     assert "<title>Topology" in body
     # Cytoscape mount div.
     assert 'id="cy"' in body
+    # Issue #141: the graph mount + node drawer share a grid so the
+    # drawer lands beside the 600px graph on ``lg:`` viewports instead
+    # of stacking off-screen below it (same fix as the table surface).
+    assert "lg:grid-cols-[1fr_28rem]" in body
+    assert 'id="node-drawer"' in body
+    # Narrow-viewport scroll-into-view handler on swap.
+    assert "hx-on::after-swap" in body
+    assert "scrollIntoView" in body
     # The vendored layout-plugin chain is wired in load-bearing order
     # (see VENDOR.md "Cytoscape layout plugins"); each src appears
     # exactly once.
@@ -742,7 +750,15 @@ def test_drawer_route_still_serves_node_detail_for_graph_tap() -> None:
         client = _authenticated_client(session_id)
         response = client.get(f"/ui/topology/node/{node_id}")
     assert response.status_code == 200, response.text
-    assert "vm-drawer-test" in response.text
+    body = response.text
+    assert "vm-drawer-test" in body
+    # Issue #141: on the graph surface the swapped-in drawer fragment must
+    # carry ``self-start`` on its root ``<aside id="node-drawer">`` so it
+    # sits as a short card at the top of its grid column instead of
+    # stretching to the full 600px graph height after the ``outerHTML``
+    # swap replaces the placeholder.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
 
 
 # ---------------------------------------------------------------------------

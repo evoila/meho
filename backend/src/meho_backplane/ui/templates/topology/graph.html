@@ -222,27 +222,49 @@
     </label>
   </div>
 
+  {# ---------- Graph + drawer grid ----------
+     Same layout fix as the table surface (issue #141): the ``#cy``
+     Cytoscape mount and the ``#node-drawer`` slot share one grid so
+     the drawer lands *beside* the 600px graph on ``lg:`` viewports
+     instead of stacking below it (off-screen, hiding the
+     Annotate-edge affordance). ``lg:grid-cols-[1fr_28rem]`` gives the
+     graph the flexible column and the drawer a fixed 28rem sidebar;
+     narrower viewports stack them.
+
+     ``hx-on::after-swap`` scrolls the drawer into view when the
+     node-tap swap settles it in on a stacked (narrow) layout; it is a
+     harmless no-op on ``lg:`` where the drawer already sits beside the
+     graph. The node-tap handler in ``topology-graph.js`` issues the
+     ``htmx.ajax`` GET into ``#node-drawer`` (inside this wrapper), so
+     the ``htmx:afterSwap`` event bubbles up to here. -#}
+  <div
+    class="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_28rem]"
+    hx-on::after-swap="if (event.detail.target && event.detail.target.id === 'node-drawer') event.detail.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })"
+  >
   {# ---------- Cytoscape mount ----------
-     Fixed-ish height so the layout has room. The ``aria-label`` is
-     the screen-reader hint; Cytoscape itself is canvas-rendered so
-     the graph is not directly keyboard-accessible (operators use the
-     table view for that). -#}
+     Fixed-ish height so the layout has room. ``min-w-0`` lets the
+     canvas shrink to its grid column instead of forcing the column
+     wide. The ``aria-label`` is the screen-reader hint; Cytoscape
+     itself is canvas-rendered so the graph is not directly
+     keyboard-accessible (operators use the table view for that). -#}
   <div
     id="cy"
-    class="rounded-box border border-base-300 bg-base-100"
+    class="rounded-box border border-base-300 bg-base-100 min-w-0"
     style="height: 600px; min-height: 480px;"
     role="img"
     aria-label="Topology graph -- click a node to open its detail drawer"
   ></div>
 
   {# ---------- Drawer slot ----------
-     Same id as the table view so the drawer fragment URL contract
-     stays identical across surfaces; the node-tap handler in
-     topology-graph.js issues ``htmx.ajax`` GET
-     ``/ui/topology/node/<id>`` into this slot. -#}
+     Second cell of the grid opened above. Same id as the table view so
+     the drawer fragment URL contract stays identical across surfaces;
+     the node-tap handler in topology-graph.js issues ``htmx.ajax`` GET
+     ``/ui/topology/node/<id>`` into this slot. ``self-start`` keeps a
+     short detail card at the top of its column rather than stretched to
+     the full graph height. -#}
   <aside
     id="node-drawer"
-    class="card bg-base-100 border-base-300 border shadow-sm"
+    class="card bg-base-100 border-base-300 border shadow-sm self-start"
     aria-live="polite"
     aria-label="Node detail drawer"
   >
@@ -250,6 +272,7 @@
       Click a node in the graph to inspect it.
     </div>
   </aside>
+  </div>
 
   {# ---------- Data island wrapper (G10.5-T3 #882) ----------
      The wrapper carries the HTMX polling trigger

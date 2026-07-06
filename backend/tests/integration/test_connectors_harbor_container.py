@@ -107,10 +107,7 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGrou
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-from meho_backplane.operations.approval_queue import (
-    approve_request,
-    resume_dispatch_after_approval,
-)
+from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.tenancy import ensure_tenant
@@ -488,18 +485,30 @@ async def _create_robot_via_approve_resume(
     ``requires_approval=True`` (#147), so a lone dispatch parks at
     ``awaiting_approval`` instead of executing. This helper reproduces the
     production flow the unit lane exercises over HTTP ``/decide``
-    (:mod:`tests.test_broadcast_credential_mint_dispatch`), but calls the
-    shared service-layer functions ``/decide`` itself calls
-    (``approve_request`` + ``resume_dispatch_after_approval``) — avoiding an
-    OIDC/JWKS mock against a suite that must reach the live Harbor container.
+    (:mod:`tests.test_broadcast_credential_mint_dispatch`): it commits the
+    real approval via the shared service-layer function ``approve_request``
+    (the same one ``/decide`` calls) and then re-dispatches with
+    ``_approved=True`` against the live target — avoiding an OIDC/JWKS mock
+    against a suite that must reach the live Harbor container.
 
     Steps: dispatch as *requester_sub* → assert ``awaiting_approval`` +
     ``approval_request_id`` → approve as a **distinct** *approver_sub*
     (the requester≠approver guard, ``approval_allow_self_approval=False``
     by default, enforces real four-eyes) → resume re-dispatch with
-    ``_approved=True`` (via the committed approval). Returns the resumed
-    :class:`~meho_backplane.connectors.schemas.OperationResult` (``status``
-    ``"ok"`` on success, carrying the minted ``secret``).
+    ``_approved=True`` against the **live** ``target`` object. Returns the
+    resumed :class:`~meho_backplane.connectors.schemas.OperationResult`
+    (``status`` ``"ok"`` on success, carrying the minted ``secret``).
+
+    The resume deliberately re-dispatches against the live ``_HarborTarget``
+    fixture (mirroring the unit lane
+    :mod:`tests.test_broadcast_credential_mint_dispatch`) rather than
+    ``resume_dispatch_after_approval``. The latter re-hydrates the ``Target``
+    from its persisted DB row and re-resolves the connector by product/version;
+    the live container connector binding (base_url override + injected
+    credentials) lives on the fixture instance, not on a plain DB row, so a
+    DB-rehydrated resume resolves ``no_connector``. The committed approval is
+    the authorization; ``_approved=True`` skips the gate and executes against
+    the live Harbor container.
     """
     requester = _make_operator(sub=requester_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
     parked = await dispatch(
@@ -515,10 +524,17 @@ async def _create_robot_via_approve_resume(
     approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        request = await approve_request(session, request_id, operator=approver)
+        await approve_request(session, request_id, operator=approver)
         await session.commit()
 
-    return await resume_dispatch_after_approval(operator=approver, request=request, params=None)
+    return await dispatch(
+        operator=requester,
+        connector_id=HARBOR_CONNECTOR_ID,
+        op_id="harbor.robot.create",
+        target=target,
+        params={"name": name, "project": project, "duration": duration},
+        _approved=True,
+    )
 
 
 _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")

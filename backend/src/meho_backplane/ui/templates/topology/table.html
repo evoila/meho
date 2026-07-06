@@ -163,78 +163,50 @@
     </div>
   </form>
 
+  {# ---------- Table + drawer grid ----------
+     The table and the ``#node-drawer`` slot share one grid so the
+     drawer lands *beside* the table on ``lg:`` viewports instead of
+     stacking ~1300px below it (issue #141: the "View" button swapped
+     the drawer off-screen, hiding the Annotate-edge affordance with
+     it). ``lg:grid-cols-[1fr_28rem]`` gives the table the flexible
+     column and the drawer a fixed 28rem sidebar; on narrower
+     viewports the single-column grid stacks table over drawer.
+
+     ``hx-on::after-swap`` handles the narrow-viewport case: when a
+     row's "View" swap settles the drawer fragment in (target
+     ``#node-drawer``, which lives inside this wrapper, so the
+     ``htmx:afterSwap`` event bubbles up to here), scroll it into view.
+     On ``lg:`` the drawer is already beside the table, so the scroll
+     is a harmless no-op; on a stacked layout it brings the freshly
+     rendered detail into the viewport. -#}
+  <div
+    class="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_28rem]"
+    hx-on::after-swap="if (event.detail.target && event.detail.target.id === 'node-drawer') event.detail.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })"
+  >
   {# ---------- Table ---------- #}
-  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100 min-w-0">
     <table class="table table-sm">
-      <thead>
-        <tr>
-          <th class="w-8">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-sm"
-              aria-label="Select all visible nodes"
-              x-on:change="
-                const rows = $el.closest('table').querySelectorAll('tbody input[type=checkbox][data-node-id]');
-                if ($el.checked) {
-                  rows.forEach(r => { r.checked = true; selected.add(r.dataset.nodeId); });
-                } else {
-                  rows.forEach(r => { r.checked = false; selected.delete(r.dataset.nodeId); });
-                }
-                selected = new Set(selected);
-              "
-            />
-          </th>
-          {%- set columns = [
-            ("name", "Name"),
-            ("kind", "Kind"),
-            ("last_seen", "Last seen"),
-            ("first_seen", "First seen"),
-          ] -%}
-          {% for col_value, col_label in columns %}
-            {%- set next_dir = next_direction_for(col_value) -%}
-            {#- ``kind_filter`` is connector-populated text; ``name_filter``
-                is operator-typed search text. Both ride into the URL's
-                query string here and on every HTMX swap, so they must
-                be percent-encoded before interpolation. Jinja2's
-                ``urlencode`` filter (see https://jinja.palletsprojects.com/en/stable/templates/#jinja-filters.urlencode)
-                encodes the unreserved-byte set the same way
-                ``urllib.parse.quote(safe='')`` does on the Python side. -#}
-            <th>
-              <a
-                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
-                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
-                hx-target="#topology-table-body"
-                hx-swap="outerHTML"
-                hx-push-url="true"
-                class="link link-hover"
-                aria-label="Sort by {{ col_label }} {{ next_dir }}ending"
-              >
-                {{ col_label }}
-                {% if sort.value == col_value %}
-                  <span aria-hidden="true">{% if direction.value == "asc" %}&uarr;{% else %}&darr;{% endif %}</span>
-                {% endif %}
-              </a>
-            </th>
-          {% endfor %}
-          <th>Product</th>
-          <th>Parents</th>
-          <th class="text-right">Children</th>
-          <th class="w-12"></th>
-        </tr>
-      </thead>
+      {#- Sortable head, rendered in-place on the full page (``oob`` unset).
+          The HTMX sort / filter swap re-emits this same partial out-of-band
+          from ``_table_rows.html`` so the recomputed ``next_dir`` links +
+          the active-column arrow track the new sort state (issue #140). -#}
+      {% include "topology/_table_head.html" %}
       {% include "topology/_table_rows.html" %}
     </table>
   </div>
 
   {# ---------- Drawer slot ----------
-     T1 lands the slot; row "view" buttons swap the drawer fragment
-     into it. The drawer renders to the right of the table on
-     ``lg:`` viewports via Tailwind grid + col-span; on smaller
-     viewports it stacks below.
+     Second cell of the grid opened above: on ``lg:`` viewports it
+     renders to the right of the table; on smaller viewports it stacks
+     below (single-column grid). ``self-start`` keeps the drawer from
+     stretching to the full table height so a short detail card sits at
+     the top of its column. Row "view" buttons swap the drawer fragment
+     into this slot (``hx-target="#node-drawer"``, ``hx-swap="outerHTML"``);
+     the fragment carries the same ``id`` so the swap is stable.
   -#}
   <aside
     id="node-drawer"
-    class="card bg-base-100 border-base-300 border shadow-sm"
+    class="card bg-base-100 border-base-300 border shadow-sm self-start"
     aria-live="polite"
     aria-label="Node detail drawer"
   >
@@ -242,6 +214,7 @@
       Select a row's <em>view</em> button to inspect a node.
     </div>
   </aside>
+  </div>
 </section>
 {% endblock %}
 

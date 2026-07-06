@@ -20,9 +20,11 @@ ships the `holodeck.about` canary op, the password-default + key-fallback
 auth via the inherited `SshConnector._auth_config`, the fingerprint, the
 probe, and the `_pwsh.py` PowerShell-over-SSH helper. G3.8-T2 (#854) adds
 the 7 read ops (`config.show`, `pod.list`, `pod.info`, `service.list`,
-`k8s.exec`, `logs.tail`, `networking.show`) for a final total of 8 ops
+`k8s.exec`, `logs.tail`, `networking.show`) for a total of 8 ops
 registered under `connector_id="holodeck-ssh-9.0"`. G3.8-T3 (#855) ships
-the CLI verbs + E2E acceptance suite + onboarding doc.
+the CLI verbs + E2E acceptance suite + onboarding doc. G3.18-T1 (#2153)
+appends `holodeck.disk.usage` — root-fs `df` + `du` on a fixed growth-dir
+set for pre-eviction disk diagnosis — bringing the total to 9 ops.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -34,16 +36,20 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   `_run_command`, and `aclose()` from the adapter. T1 shipped `fingerprint`,
   `probe`, `execute`, `about`. T2 (#854) adds the 7 read-op bound-method
   shims: `config_show`, `pod_list`, `pod_info`, `service_list`, `k8s_exec`,
-  `logs_tail`, `networking_show`.
+  `logs_tail`, `networking_show`. G3.18-T1 (#2153) adds `disk_usage`.
 
 - **Read-op handlers + parsers** (`ops_read.py`) — `holodeck_config_show`,
   `holodeck_pod_list`, `holodeck_pod_info`, `holodeck_service_list`,
-  `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`.
-  Pure parsers: `parse_kubectl_command` (verb-safelist enforcement),
-  `parse_logs_tail_output` (GNU `tail` `==> path <==` header split),
-  `parse_networking_payload` (four-section composer). `KubectlSafetyError`
-  is the `ValueError` subclass the dispatcher's error envelope picks up
-  when a mutating verb slips through.
+  `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`,
+  `holodeck_disk_usage`. Pure parsers: `parse_kubectl_command`
+  (verb-safelist enforcement), `parse_logs_tail_output` (GNU `tail`
+  `==> path <==` header split), `parse_networking_payload` (four-section
+  composer), `parse_disk_usage_output` (root-fs `df -B1` + per-dir
+  `du -sb` composer with per-section `ok`). `GROWTH_DIRS` is the fixed
+  code constant (`/var/backups`, `/holodeck-runtime`) the disk-usage op
+  measures — no operator path parameter. `KubectlSafetyError` is the
+  `ValueError` subclass the dispatcher's error envelope picks up when a
+  mutating verb slips through.
 
 - **`_pwsh.py` — the novel primitive.** Houses `encode_pwsh_command(script)`
   (UTF-16LE-base64 per the `-EncodedCommand` convention), `pwsh_run(connector,
@@ -138,9 +144,9 @@ Four-stage health check; each stage maps to a distinct
 
 The probe does not mutate state. `Get-Service` is read-only on Photon.
 
-### Read ops (T2 surface)
+### Read ops (T2 surface + G3.18-T1 disk.usage)
 
-The seven T2 read ops route through the dispatcher's standard
+The read ops route through the dispatcher's standard
 `call_operation` path. Each registers via `register_typed_operation()` with
 `safety_level="safe"`, `requires_approval=False`, and an
 `llm_instructions.when_to_use` blob that includes the SSH-only transport
@@ -239,6 +245,19 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   ok}, dhcp: {leases_text, ok}}`. Each sub-section's `ok` flips false
   when its sub-command failed or produced empty output, so a single-
   component failure doesn't blank the whole response.
+
+- **`holodeck.disk.usage`** (group `diagnostics`, G3.18-T1 #2153). Runs
+  `df -B1 /` for root-fs total/used/available bytes plus `du -sb` on each
+  dir in the fixed `GROWTH_DIRS` constant (`/var/backups`,
+  `/holodeck-runtime`). Returns `{root_fs: {total_bytes, used_bytes,
+  avail_bytes, percent_used, ok}, growth_dirs: [{path, used_bytes, ok},
+  ...]}`. `percent_used` is computed from the byte counts (not `df`'s
+  rounded `Use%`). Failure isolation mirrors `networking.show`: each
+  sub-command runs through `_safe_run_text` (SSH/OSError → `""`) and
+  `parse_disk_usage_output` flips only the empty entry's `ok`. The op
+  takes **no path parameter** — the measured dirs are a code constant, so
+  it can never become an arbitrary `du`. This is the complete
+  pre-eviction disk signal for the 74 GB root fs (VCF-9.x backup fill).
 
 ### Write ops (G3.18-T2 surface, approval-gated)
 

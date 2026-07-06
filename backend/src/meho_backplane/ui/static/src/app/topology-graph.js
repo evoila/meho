@@ -281,14 +281,19 @@
     const selectedId = typeof selectedRaw === "string" && selectedRaw.length > 0 ? selectedRaw : null;
     const pathNodeIds = readJsonIsland("topology-graph-path-nodes") || [];
 
+    // Construct WITHOUT the ``layout`` option so no layout runs during
+    // ``cytoscape({...})``. The initial layout is run explicitly below,
+    // AFTER the ``?selected`` cross-link ``layoutstop`` listener is
+    // attached. A constructor-supplied ``layout`` with ``animate:false``
+    // completes synchronously inside the constructor call (cose-bilkent
+    // repositions nodes via cytoscape's non-animated ``layoutPositions``,
+    // which emits ``layoutstop`` in the same tick), so any listener
+    // attached on the returned instance would miss it -- the cross-link
+    // handler never fired (#142).
     const cy = window.cytoscape({
       container: container,
       elements: elements,
       style: buildStyle().concat(buildOverlayStyle()),
-      // Initial render uses the default layout shape -- fit-to-canvas
-      // + randomized starting positions so cose-bilkent finds a clean
-      // arrangement for first-seen data.
-      layout: layoutOptions("cose-bilkent", false),
       wheelSensitivity: 0.2,
       minZoom: 0.1,
       maxZoom: 4,
@@ -336,9 +341,12 @@
 
     // Cross-link from the table: if the page arrived with
     // ``?selected=<id>``, center + visually select that node + open
-    // its drawer once the layout is settled. ``layoutstop`` fires
-    // after the initial cose-bilkent pass so the node has a final
-    // position to center on.
+    // its drawer once the layout is settled. The listener MUST be
+    // registered BEFORE the initial layout runs (below): a
+    // ``animate:false`` cose-bilkent pass emits ``layoutstop`` in the
+    // same synchronous turn as ``layout.run()``, so a listener attached
+    // afterwards would never fire (#142). ``layoutstop`` gives the node
+    // a final position to center on.
     if (selectedId) {
       cy.one("layoutstop", function () {
         const node = cy.getElementById(selectedId);
@@ -349,6 +357,13 @@
         }
       });
     }
+
+    // Run the initial layout now that every init-time listener --
+    // including the ``?selected`` cross-link ``layoutstop`` handler
+    // above -- is attached. Same shape as the old constructor
+    // ``layout`` option: fit-to-canvas + randomized starting positions
+    // so cose-bilkent finds a clean arrangement for first-seen data.
+    cy.layout(layoutOptions("cose-bilkent", false)).run();
 
     // ----- G10.5-T3 (#882) polling-refresh handler -----
     //

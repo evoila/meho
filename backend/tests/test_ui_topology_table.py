@@ -341,6 +341,15 @@ def test_table_full_page_renders_seeded_nodes() -> None:
     assert 'hx-target="#node-drawer"' in body
     # The drawer placeholder slot is in place for the swap.
     assert 'id="node-drawer"' in body
+    # Issue #141: the table + drawer share a grid so the drawer lands
+    # beside the table on ``lg:`` viewports instead of stacking
+    # off-screen below it. The comment at table.html once promised this
+    # grid but the markup was absent; assert it is now present.
+    assert "lg:grid-cols-[1fr_28rem]" in body
+    # And the narrow-viewport scroll-into-view handler is wired so a
+    # stacked drawer is brought into view on swap.
+    assert "hx-on::after-swap" in body
+    assert "scrollIntoView" in body
     # CSRF cookie set by the route.
     assert CSRF_COOKIE_NAME in response.cookies
 
@@ -423,6 +432,170 @@ def test_table_sort_by_unknown_column_returns_422() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/topology?sort=bogus")
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Sort head OOB re-render -- the swap must refresh the <thead> so the
+# direction can toggle back (issue #140)
+# ---------------------------------------------------------------------------
+
+
+def test_full_page_head_is_rendered_in_place_not_oob() -> None:
+    """The full-page head renders in-place -- no ``hx-swap-oob`` / ``<template>``.
+
+    The OOB variant is fragment-only. On a browser navigation the head
+    sits directly inside the ``<table>``, so it must not carry the
+    ``hx-swap-oob`` attribute or the ``<template>`` wrapper (which htmx
+    only unwraps on a swap; served in-place it would hide the head).
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-head")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The head has a stable id (the OOB swap target) but is NOT itself OOB
+    # on the full page, and is NOT wrapped in a <template>.
+    assert 'id="topology-table-head"' in body
+    assert "hx-swap-oob" not in body
+    assert "<template>" not in body
+
+
+def test_htmx_swap_reemits_thead_out_of_band() -> None:
+    """An HTMX sort swap re-emits the ``<thead>`` as a template-wrapped OOB swap.
+
+    Issue #140: the swap targets only ``#topology-table-body``; without an
+    out-of-band head re-render the header keeps the pre-click ``next_dir``
+    links + arrow, so the direction can never toggle back. htmx cannot
+    OOB-swap a bare ``<thead>`` (it can't stand alone in the DOM per the
+    HTML spec), so the fragment wraps it in a ``<template>``
+    (https://htmx.org/attributes/hx-swap-oob/).
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-oob")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(
+            "/ui/topology?sort=name&direction=asc", headers={"HX-Request": "true"}
+        )
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Fragment carries both the tbody (primary swap) and the OOB head.
+    assert '<tbody id="topology-table-body">' in body
+    assert "<template>" in body
+    assert 'id="topology-table-head"' in body
+    assert 'hx-swap-oob="true"' in body
+
+
+def test_htmx_swap_head_reflects_next_direction_for_active_column() -> None:
+    """The OOB head's active-column link flips ``next_dir`` after each swap.
+
+    AC #1 (toggle) is server-driven: the ``next_dir`` baked into the
+    active column's ``hx-get`` is what the *next* click requests. When the
+    current sort is ``name asc`` the head must offer ``direction=desc`` for
+    ``name``; when it is ``name desc`` it must offer ``direction=asc``.
+    Because the head is now re-emitted on every swap, that toggle is no
+    longer frozen at the first-render value.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-toggle")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        asc_swap = client.get(
+            "/ui/topology?sort=name&direction=asc", headers={"HX-Request": "true"}
+        )
+        desc_swap = client.get(
+            "/ui/topology?sort=name&direction=desc", headers={"HX-Request": "true"}
+        )
+    assert asc_swap.status_code == 200, asc_swap.text
+    assert desc_swap.status_code == 200, desc_swap.text
+    # Currently asc -> the name column's next click requests desc.
+    assert "sort=name&direction=desc" in asc_swap.text
+    # Currently desc -> the name column's next click requests asc (toggle back).
+    assert "sort=name&direction=asc" in desc_swap.text
+
+
+def test_htmx_swap_head_arrow_tracks_direction() -> None:
+    """The active column's arrow shows ↑ for asc and ↓ for desc (AC #2).
+
+    The arrow lives in the ``<thead>``. Before the fix it was frozen at
+    the first render; now the OOB head re-render tracks the live
+    direction on every swap.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-arrow")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        asc_swap = client.get(
+            "/ui/topology?sort=name&direction=asc", headers={"HX-Request": "true"}
+        )
+        desc_swap = client.get(
+            "/ui/topology?sort=name&direction=desc", headers={"HX-Request": "true"}
+        )
+    # The arrows are literal HTML entities in the template text (``&uarr;``
+    # / ``&darr;``), so they ride into the response verbatim -- Jinja only
+    # autoescapes ``{{ }}`` expressions, not literal template markup.
+    assert "&uarr;" in asc_swap.text, "expected up-arrow for ascending sort"
+    assert "&uarr;" not in desc_swap.text, "descending sort must not show up-arrow"
+    assert "&darr;" in desc_swap.text, "expected down-arrow for descending sort"
+
+
+def test_htmx_swap_different_column_resets_to_asc() -> None:
+    """Clicking a different column resets that column to asc (AC #3).
+
+    ``_next_direction`` resets any non-active column to ``asc``. When the
+    current sort is ``name`` the ``kind`` column's link must request
+    ``direction=asc`` (a fresh sort), regardless of ``name``'s current
+    direction. The OOB head re-render carries this reset on every swap.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-reset")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # Sort by name descending; the kind column must still reset to asc.
+        swap = client.get("/ui/topology?sort=name&direction=desc", headers={"HX-Request": "true"})
+    assert swap.status_code == 200, swap.text
+    assert "sort=kind&direction=asc" in swap.text, "a different column must reset to ascending"
+    # And the active-column arrow is on ``name`` (desc), not ``kind``:
+    # the down-arrow appears exactly once (the single active column).
+    assert swap.text.count("&darr;") == 1
+
+
+def test_full_reload_matches_last_swap_head() -> None:
+    """A full-page reload reflects the same direction/arrow as the last swap (AC #4).
+
+    The full-page head and the OOB fragment head are the same partial
+    (``_table_head.html``) rendered from the same context, so a browser
+    reload of the swap's URL produces the identical active-column link +
+    arrow the OOB swap left in place.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-reload")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        swap = client.get("/ui/topology?sort=name&direction=desc", headers={"HX-Request": "true"})
+        full = client.get("/ui/topology?sort=name&direction=desc")
+    assert swap.status_code == 200, swap.text
+    assert full.status_code == 200, full.text
+    # Both agree on the active column's next-direction link (toggle back to asc)...
+    assert "sort=name&direction=asc" in swap.text
+    assert "sort=name&direction=asc" in full.text
+    # ...and on the active-direction arrow (down for descending).
+    assert "&darr;" in swap.text
+    assert "&darr;" in full.text
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +751,14 @@ def test_drawer_renders_node_properties_and_edges() -> None:
         response = client.get(f"/ui/topology/node/{child_id}")
     assert response.status_code == 200, response.text
     body = response.text
+    # Issue #141: the swapped-in fragment root -- not just the
+    # placeholder in table.html -- must carry ``self-start``. The
+    # ``hx-swap="outerHTML"`` swap replaces the placeholder with this
+    # fragment's ``<aside id="node-drawer">``, so if ``self-start`` lived
+    # only on the placeholder the post-swap drawer would revert to
+    # stretching the full grid-column height. Pin it on the fragment.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
     # Node identity surfaces.
     assert "vm-on-host-1" in body
     assert str(child_id) in body
@@ -648,7 +829,14 @@ def test_drawer_returns_404_for_unknown_node() -> None:
         client = _authenticated_client(session_id)
         response = client.get(f"/ui/topology/node/{uuid.uuid4()}")
     assert response.status_code == 404, response.text
-    assert "Node not found" in response.text
+    body = response.text
+    assert "Node not found" in body
+    # Issue #141: the not-found fragment swaps into ``#node-drawer`` via
+    # the same ``outerHTML`` swap as the happy path, so its root must also
+    # carry ``self-start`` to render as a top-aligned card rather than a
+    # full-column-height error panel.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
 
 
 def test_drawer_isolates_other_tenants_node_id() -> None:

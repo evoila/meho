@@ -1164,8 +1164,9 @@ the template.
 
 | Template | Purpose |
 | -------- | ------- |
-| `topology/table.html` | Full-page surface. Extends `base.html`; renders the filter bar + sortable column headers + the multi-row checkbox `<tbody>` + the `#node-drawer` slot. Alpine.js holds the selection state (`x-data="{ selected: new Set() }"`) so a future bulk-action button reads selection without a template rewrite. |
-| `topology/_table_rows.html` | `<tbody>` fragment swapped in by HTMX on a sort / filter change. Idempotent shape — re-rendered standalone on an HTMX request or included from the full page on a browser nav. |
+| `topology/table.html` | Full-page surface. Extends `base.html`; renders the filter bar + the sortable `<thead>` (via `{% include topology/_table_head.html %}`) + the multi-row checkbox `<tbody>` + the `#node-drawer` slot. Alpine.js holds the selection state (`x-data="{ selected: new Set() }"`) so a future bulk-action button reads selection without a template rewrite. |
+| `topology/_table_head.html` | Sortable `<thead id="topology-table-head">` partial. Rendered in-place from `table.html` on the full page (`oob` false) and re-emitted **out-of-band** from `_table_rows.html` on every HTMX swap (`oob` true, wrapped in a `<template>` per the htmx table-element caveat). The OOB re-render refreshes the server-computed `next_dir` sort links + active-column arrow so the direction toggles back on repeated clicks (issue #140) — without it the swap replaced only the `<tbody>` and the head stayed frozen at the pre-click direction. |
+| `topology/_table_rows.html` | `<tbody id="topology-table-body">` fragment swapped in by HTMX on a sort / filter change. Idempotent shape — re-rendered standalone on an HTMX request or included from the full page on a browser nav. On the standalone (`is_fragment`) render it also emits the OOB `_table_head.html` head alongside the body so the header sort state stays live. |
 | `topology/_drawer.html` | Drawer fragment with node properties (id, kind, name, target_id, first_seen, last_seen, discovered_by, raw JSON), outgoing + incoming edges, recent operations on the node's target (empty for inner graph nodes with no `target_id`), and the "Show dependents" link handing off to T2/T3's graph view. |
 | `topology/_drawer_not_found.html` | 404 drawer fragment for an unknown / cross-tenant node id. Same outer `aside#node-drawer` shape so the HTMX `outerHTML` swap remains semantically consistent. |
 
@@ -1344,7 +1345,17 @@ two surfaces.
   `/ui/topology?view=graph&selected=<id>`. The graph route emits the
   id into `#topology-graph-selected`; `topology-graph.js` reads it,
   centers the matching node on the first `layoutstop`, selects it,
-  and opens the same drawer.
+  and opens the same drawer. The `cy.one("layoutstop", ...)` cross-link
+  listener is registered **before** the initial `cy.layout(...).run()`
+  — the controller constructs Cytoscape *without* an inline `layout:`
+  option and runs the layout explicitly afterwards. This ordering is
+  load-bearing: an `animate:false` cose-bilkent pass emits `layoutstop`
+  synchronously inside the `run()` turn, so a listener attached after
+  the layout had already run (the pre-#142 shape, where `layout:` sat
+  on the constructor) never fired and the arriving node was never
+  selected/centered/opened. The "Show in table" header link is
+  server-rendered with `&selected=<id>` on arrival, so it round-trips
+  the selection back without waiting on the client.
 
 Both directions preserve active filters (`kind`, `q`) so the toggle
 keeps operator state.

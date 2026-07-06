@@ -59,8 +59,10 @@ import pytest
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.holodeck.ops_read import (
+    GROWTH_DIRS,
     READ_OPS,
     KubectlSafetyError,
+    parse_disk_usage_output,
     parse_kubectl_command,
     parse_logs_tail_output,
     parse_networking_payload,
@@ -1062,13 +1064,178 @@ async def test_networking_show_isolates_sub_command_failures() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_disk_usage_output (G3.18-T1 #2153)
+# ---------------------------------------------------------------------------
+
+
+_DF_ROOT_OK = (
+    "Filesystem     1B-blocks         Used    Available Use% Mounted on\n"
+    "/dev/md2    467909804032  58598952960 385467109376  14% /\n"
+)
+
+
+def test_parse_disk_usage_root_fs_byte_counts_and_percent() -> None:
+    payload = parse_disk_usage_output(
+        df_root_text=_DF_ROOT_OK,
+        dir_usages=[
+            ("/var/backups", "40000000000\t/var/backups\n"),
+            ("/holodeck-runtime", "12345\t/holodeck-runtime\n"),
+        ],
+    )
+    root = payload["root_fs"]
+    assert root["ok"] is True
+    assert root["total_bytes"] == 467909804032
+    assert root["used_bytes"] == 58598952960
+    assert root["avail_bytes"] == 385467109376
+    # percent computed off the byte counts, not df's rounded Use%.
+    assert root["percent_used"] == round((58598952960 / 467909804032) * 100.0, 2)
+
+
+def test_parse_disk_usage_growth_dirs_carry_used_bytes_and_ok() -> None:
+    payload = parse_disk_usage_output(
+        df_root_text=_DF_ROOT_OK,
+        dir_usages=[
+            ("/var/backups", "40000000000\t/var/backups\n"),
+            ("/holodeck-runtime", "12345\t/holodeck-runtime\n"),
+        ],
+    )
+    dirs = {d["path"]: d for d in payload["growth_dirs"]}
+    assert dirs["/var/backups"]["used_bytes"] == 40000000000
+    assert dirs["/var/backups"]["ok"] is True
+    assert dirs["/holodeck-runtime"]["used_bytes"] == 12345
+    assert dirs["/holodeck-runtime"]["ok"] is True
+    # Order + count mirror the input tuple.
+    assert [d["path"] for d in payload["growth_dirs"]] == [
+        "/var/backups",
+        "/holodeck-runtime",
+    ]
+
+
+def test_parse_disk_usage_failed_du_does_not_blank_the_others() -> None:
+    """A single empty du output flips only that entry's ok -- isolation contract."""
+    payload = parse_disk_usage_output(
+        df_root_text=_DF_ROOT_OK,
+        dir_usages=[
+            ("/var/backups", ""),  # du failed (missing dir / SSH error)
+            ("/holodeck-runtime", "12345\t/holodeck-runtime\n"),
+        ],
+    )
+    assert payload["root_fs"]["ok"] is True
+    dirs = {d["path"]: d for d in payload["growth_dirs"]}
+    assert dirs["/var/backups"]["ok"] is False
+    assert dirs["/var/backups"]["used_bytes"] is None
+    assert dirs["/holodeck-runtime"]["ok"] is True
+    assert dirs["/holodeck-runtime"]["used_bytes"] == 12345
+
+
+def test_parse_disk_usage_empty_df_flips_root_ok_false() -> None:
+    payload = parse_disk_usage_output(
+        df_root_text="",
+        dir_usages=[("/var/backups", "40000000000\t/var/backups\n")],
+    )
+    root = payload["root_fs"]
+    assert root["ok"] is False
+    assert root["total_bytes"] is None
+    assert root["percent_used"] is None
+    # Growth dir still resolves independently.
+    assert payload["growth_dirs"][0]["ok"] is True
+
+
+def test_parse_disk_usage_non_numeric_du_flips_entry_false() -> None:
+    payload = parse_disk_usage_output(
+        df_root_text=_DF_ROOT_OK,
+        dir_usages=[("/var/backups", "du: cannot access '/var/backups'\n")],
+    )
+    entry = payload["growth_dirs"][0]
+    assert entry["ok"] is False
+    assert entry["used_bytes"] is None
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shim -- disk_usage (G3.18-T1 #2153)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_reports_root_fs_and_growth_dirs() -> None:
+    connector = HolodeckConnector()
+    # Sub-command order: df -B1 /, then du -sb per GROWTH_DIRS entry.
+    sequence = [
+        _proc(stdout=_DF_ROOT_OK),
+        _proc(stdout="40000000000\t/var/backups\n"),
+        _proc(stdout="12345\t/holodeck-runtime\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.disk_usage(_TARGET, {})
+    assert result["root_fs"]["ok"] is True
+    assert result["root_fs"]["total_bytes"] == 467909804032
+    dirs = {d["path"]: d for d in result["growth_dirs"]}
+    assert set(dirs) == set(GROWTH_DIRS)
+    assert dirs["/var/backups"]["used_bytes"] == 40000000000
+    assert dirs["/holodeck-runtime"]["used_bytes"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_runs_df_and_du_no_path_param() -> None:
+    """The op issues df on / and du on the fixed GROWTH_DIRS -- no operator path."""
+    connector = HolodeckConnector()
+    sequence = [
+        _proc(stdout=_DF_ROOT_OK),
+        _proc(stdout="40000000000\t/var/backups\n"),
+        _proc(stdout="12345\t/holodeck-runtime\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        # Extra params must be ignored -- there is no path parameter.
+        await connector.disk_usage(_TARGET, {"path": "/etc"})
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    assert issued[0] == "df -B1 /"
+    assert issued[1] == "du -sb /var/backups"
+    assert issued[2] == "du -sb /holodeck-runtime"
+    # /etc (operator input) never reaches a command.
+    assert not any("/etc" in cmd for cmd in issued)
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_isolates_failed_sub_command() -> None:
+    connector = HolodeckConnector()
+    sequence = [
+        _proc(stdout=_DF_ROOT_OK),
+        OSError("du: no such dir"),  # /var/backups du fails
+        _proc(stdout="12345\t/holodeck-runtime\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.disk_usage(_TARGET, {})
+    assert result["root_fs"]["ok"] is True
+    dirs = {d["path"]: d for d in result["growth_dirs"]}
+    assert dirs["/var/backups"]["ok"] is False
+    assert dirs["/holodeck-runtime"]["ok"] is True
+
+
+def test_disk_usage_op_is_safe_read_only_no_path_param() -> None:
+    """AC: safe / no-approval / read-only tag / empty param schema (no path)."""
+    op = next(o for o in HOLODECK_OPS if o.op_id == "holodeck.disk.usage")
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags
+    assert op.parameter_schema.get("additionalProperties") is False
+    assert op.parameter_schema.get("properties") == {}
+
+
+def test_disk_usage_growth_dirs_are_the_expected_constant() -> None:
+    assert GROWTH_DIRS == ("/var/backups", "/holodeck-runtime")
+
+
+# ---------------------------------------------------------------------------
 # HOLODECK_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-#: The read-op ids (T1 canary + 7 T2 reads). The G3.18-T2 (#2154)
-#: approval-gated write ops are asserted separately in
-#: ``test_connectors_holodeck_write.py``.
+#: The 9 read-op ids (T1 canary + 7 T2 reads + G3.18-T1 disk.usage).
+#: The G3.18-T2 (#2154) approval-gated write ops are asserted
+#: separately in ``test_connectors_holodeck_write.py``.
 _READ_OP_IDS: frozenset[str] = frozenset(
     {
         "holodeck.about",
@@ -1079,13 +1246,14 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "holodeck.k8s.exec",
         "holodeck.logs.tail",
         "holodeck.networking.show",
+        "holodeck.disk.usage",
     }
 )
 
 
-def test_holodeck_ops_has_eleven_entries() -> None:
-    """T1 canary (about) + 7 T2 read ops + 3 G3.18-T2 write ops = 11 total."""
-    assert len(HOLODECK_OPS) == 11
+def test_holodeck_ops_has_twelve_entries() -> None:
+    """T1 canary (about) + 7 T2 read ops + G3.18-T1 disk.usage + 3 G3.18-T2 write ops = 12 total."""
+    assert len(HOLODECK_OPS) == 12
 
 
 def test_holodeck_ops_about_remains_at_index_zero() -> None:
@@ -1156,7 +1324,7 @@ def test_holodeck_ops_llm_instructions_mention_ssh_transport() -> None:
 
 
 def test_holodeck_ops_group_keys_include_new_groups() -> None:
-    """T2 read groups + the G3.18-T2 (#2154) approval-gated write groups."""
+    """T2 read groups + G3.18-T1 diagnostics + the G3.18-T2 (#2154) approval-gated write groups."""
     group_keys = {op.group_key for op in HOLODECK_OPS if op.group_key}
     assert {
         "identity",
@@ -1166,6 +1334,8 @@ def test_holodeck_ops_group_keys_include_new_groups() -> None:
         "k8s",
         "logs",
         "networking",
+        # G3.18-T1 (#2153) read-op diagnostics group (holodeck.disk.usage).
+        "diagnostics",
         # G3.18-T2 (#2154) write groups (``-write`` suffix avoids collision).
         "k8s-write",
         "backups-write",
@@ -1296,6 +1466,7 @@ def test_connector_has_all_t2_handler_methods() -> None:
         "k8s_exec",
         "logs_tail",
         "networking_show",
+        "disk_usage",
     )
     for attr in expected_attrs:
         assert callable(getattr(HolodeckConnector, attr, None)), (

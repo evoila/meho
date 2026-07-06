@@ -87,8 +87,6 @@ from __future__ import annotations
 from typing import Any, Final, cast
 from uuid import UUID
 
-import structlog
-
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     AgentAnnouncementEvent,
@@ -103,8 +101,6 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
-
-_log = structlog.get_logger(__name__)
 
 
 #: How many most-recent entries the resource returns per read. Pinned

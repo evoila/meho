@@ -288,7 +288,11 @@ async def register_harbor_robot_operations(
             "Classified credential_mint: the broadcast collapses to aggregate-only "
             "so the secret never appears in the SSE feed. "
             "Non-idempotent — never auto-retried by the HttpConnector "
-            "tenacity decorator. safety_level=caution."
+            "tenacity decorator. safety_level=caution. "
+            "requires_approval=True: minting a robot credential is privilege "
+            "issuance, so it is four-eyes-gated (a second operator must approve) "
+            "for every principal kind — the non-agent policy gate keys on "
+            "requires_approval, not safety_level (#147)."
         ),
         parameter_schema=_HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_CREATE_RESPONSE_SCHEMA,
@@ -296,7 +300,15 @@ async def register_harbor_robot_operations(
         when_to_use=_HARBOR_ROBOT_WHEN_TO_USE,
         tags=["write", "credential-mint"],
         safety_level="caution",
-        requires_approval=False,
+        # Four-eyes on privilege issuance (#147). ``harbor.robot.create`` mints
+        # a fresh robot credential in its response — a credential_mint op. The
+        # non-agent policy gate (``_non_agent_verdict``) keys the verdict solely
+        # on ``requires_approval`` (not ``safety_level``), so leaving this
+        # ``False`` let a human ``tenant_admin`` mint a credential end-to-end
+        # with no second-operator approval — the credential-mint arm of the
+        # four-eyes bypass #128 set out to close. Flip to True so the dispatch
+        # parks at ``awaiting_approval`` and a second operator must approve.
+        requires_approval=True,
         llm_instructions=_HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
@@ -320,6 +332,15 @@ async def register_harbor_robot_operations(
         when_to_use=_HARBOR_ROBOT_WHEN_TO_USE,
         tags=["write", "destructive"],
         safety_level="caution",
+        # Left ungated (#147). ``harbor.robot.delete`` is a ``caution``-class
+        # ``write`` (suffix-classified) that revokes access — it does NOT mint
+        # or return any credential, so it is not part of the credential-mint
+        # bypass this Task closes. It mirrors the bind9 precedent (#129), which
+        # four-eyes-gated only the ``dangerous`` config-replacement ops and left
+        # ``caution`` ops default-allow for humans. Revoking a robot is
+        # recoverable (re-mint via ``harbor.robot.create``), so it does not clear
+        # the four-eyes bar. Gating it would also break the deliberate
+        # full-detail-broadcast contrast the credential_mint tests pin.
         requires_approval=False,
         llm_instructions=_HARBOR_ROBOT_DELETE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,

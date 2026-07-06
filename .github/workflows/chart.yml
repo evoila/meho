@@ -414,7 +414,7 @@ jobs:
         # Required by docker/build-push-action to use buildkit. Same
         # version digest image.yml pins for the same action so the
         # two lanes converge on a single buildx version.
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
       - name: Restore fastembed model cache (#1623)
         # Restore-only: the unit lane (ci.yml "Cache fastembed model") owns the

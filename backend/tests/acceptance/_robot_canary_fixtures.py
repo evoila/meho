@@ -351,8 +351,10 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _robot_credentials_loader(_target: HetznerRobotTargetLike) -> dict[str, str]:
-    """Stub credentials loader — bypasses the not-yet-wired Vault read."""
+async def _robot_credentials_loader(
+    _target: HetznerRobotTargetLike, _operator: Operator
+) -> dict[str, str]:
+    """Stub credentials loader — bypasses the live operator-context Vault read."""
     return {"username": "robot-canary-user", "password": "robot-canary-pw"}
 
 

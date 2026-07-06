@@ -29,11 +29,15 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
   `auth_model`. No `sso_realm` field — Hetzner Robot Basic auth sends
   `username:password` directly with no realm suffix.
 - **`HetznerRobotCredentialsLoader`** (`session.py`) — async callable type
-  resolving a target to `{"username": ..., "password": ...}`. Injectable on
-  connector construction for tests and pre-G0.3 production deploys.
-- **`load_credentials_from_vault`** (`session.py`) — default loader, stubbed
-  `NotImplementedError` until Goal #214 lands the operator-context Vault
-  read path.
+  resolving a `(target, operator)` pair to `{"username": ..., "password": ...}`.
+  Injectable on connector construction for tests and integration deploys.
+- **`load_credentials_from_vault`** (`session.py`) — default loader.
+  Performs the **live** operator-context KV-v2 read by delegating to the
+  shared `_shared/vault_creds.load_basic_credentials` helper (#2079) — the
+  same read harbor / vmware / sddc use. The Webservice-user credential is
+  read under the operator's Vault identity; a system-initiated call
+  (`raw_jwt=""`) fails closed with `VaultCredentialsReadError` rather than
+  falling back.
 - **`ROBOT_CORE_GROUPS`** (`core_ops.py`) — 4 curated `RobotCoreGroup`
   entries with operator-reviewed `when_to_use` hints spanning the read-only
   core: `robot-about`, `robot-servers`, `robot-networking`, `robot-ssh-keys`.
@@ -125,16 +129,36 @@ Vault path as `{"username": ..., "password": ...}`.
 - `tenacity>=9.0` — base class retry logic (401 excluded from retry predicate)
 - `structlog` — structured logging
 
+## Spec ingest (#2079)
+
+The connector shell registers empty (`operation_count=0`); ingesting a spec
+fills the `endpoint_descriptor` table. Because the Robot Webservice publishes
+no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
+
+- **`operations/ingest/specs/hetzner_robot_minimal.yaml`** — OpenAPI 3.0
+  covering list/get servers, vSwitch get + membership, per-server firewall
+  get/set, reverse DNS, and the `server_addon` order. The GET op_ids
+  (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
+  `GET:/vswitch/{id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) match the
+  `ROBOT_CORE_OPS` strings so the ingested rows and the curated read core
+  agree.
+- Ingest via `meho connector ingest --product hetzner --version 2026.04
+  --impl hetzner-rest --spec <this-file>`. The ingest guard defers to the
+  registered `HetznerRobotConnector` for the triple rather than scaffolding a
+  `GenericRestConnector` shim, so the ingested ops resolve to the hand-coded
+  connector (not `no_connector`). Coverage:
+  `tests/test_connectors_hetzner_robot_ingest.py`.
+
 ## Known issues / out of scope
 
-- Vault credential read stub: `load_credentials_from_vault` raises
-  `NotImplementedError` until Goal #214 lands. Inject a loader at
-  construction time for production deploys until then.
 - Env-gated automated canary: the full spec ingest against
   `IngestionPipelineService` with a real LLM stub is a follow-up to T8
   requiring the Robot spec reachable from CI.
 - Writes: server reset, vSwitch mutation, cancellation, rDNS edits are out of
-  scope for G3.7 v0.2. The `_post_form` helper is the write-path foundation.
+  scope for the read-only core. The write ops are declared in the shipped
+  minimal spec so the ingested corpus covers the full wrapper surface, but
+  only the curated read ops are enabled; the `_post_form` helper is the
+  write-path foundation for the G3.x write-surface curation.
 - Hetzner Cloud (the second Hetzner product): out of scope.
 
 ## References
@@ -142,6 +166,7 @@ Vault path as `{"username": ..., "password": ...}`.
 - Hetzner Robot Webservice docs: https://robot.hetzner.com/doc/webservice/en.html
 - G3.7-T7 skeleton issue: https://github.com/evoila/meho/issues/846
 - G3.7-T8 core-ops issue: https://github.com/evoila/meho/issues/849
+- Spec-ingest + Vault-auth wiring: https://github.com/evoila/meho/issues/2079
 - Canary runbook: [`docs/cross-repo/g37-hetzner-canary.md`](../cross-repo/g37-hetzner-canary.md)
 - Precedent: `connectors/harbor/core_ops.py` (apply_harbor_core_curation pattern)
 - Precedent: `connectors/harbor/connector.py` (HTTP Basic + loader + fingerprint/probe)

@@ -102,7 +102,7 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: HetznerRobotTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: HetznerRobotTargetLike, _operator: Operator) -> dict[str, str]:
     return {"username": "webservice-user", "password": "stub-password"}
 
 
@@ -140,16 +140,48 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is HetznerRobotConnector
 
 
-def test_default_credentials_loader_raises_until_g214_lands() -> None:
-    import asyncio
+@pytest.mark.asyncio
+async def test_default_loader_delegates_to_shared_vault_basic_read() -> None:
+    """The default loader delegates to the shared operator-context Vault read.
 
+    #2079 un-stubbed :func:`load_credentials_from_vault`: it now performs the
+    live operator-context KV-v2 read via the shared
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+    helper — the same read harbor / vmware / sddc use. Patch that helper and
+    assert the loader forwards ``(target, operator)`` to it verbatim and
+    returns its ``{"username", "password"}`` result.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from meho_backplane.connectors.hetzner_robot import session as robot_session
+
+    operator = _make_operator(raw_jwt="operator-jwt")
+    with patch.object(
+        robot_session,
+        "load_basic_credentials",
+        new=AsyncMock(return_value={"username": "ws-user", "password": "ws-pw"}),
+    ) as shared_read:
+        creds = await robot_session.load_credentials_from_vault(_TARGET_A, operator)
+
+    assert creds == {"username": "ws-user", "password": "ws-pw"}
+    shared_read.assert_awaited_once_with(_TARGET_A, operator)
+
+
+@pytest.mark.asyncio
+async def test_default_loader_fails_closed_for_system_operator() -> None:
+    """A system-initiated read (empty ``raw_jwt``) fails closed, never falls back.
+
+    The shared helper's fail-closed guard rejects an operator-less call before
+    Vault is touched: background/scheduled work carries ``raw_jwt=""`` and
+    cannot perform an operator-context read. The default loader surfaces that
+    as :class:`VaultCredentialsReadError` rather than a silent fallback.
+    """
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.hetzner_robot.session import load_credentials_from_vault
 
-    async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
-
-    asyncio.run(_check())
+    system_operator = _make_operator(raw_jwt="")
+    with pytest.raises(VaultCredentialsReadError):
+        await load_credentials_from_vault(_TARGET_A, system_operator)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +312,9 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
     """Second auth_headers call against the same target does NOT re-invoke the loader."""
     call_count = 0
 
-    async def _counting_loader(_target: HetznerRobotTargetLike) -> dict[str, str]:
+    async def _counting_loader(
+        _target: HetznerRobotTargetLike, _operator: Operator
+    ) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "webservice-user", "password": "stub-password"}
@@ -304,7 +338,9 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     """Two targets get two distinct credential cache entries; no cross-target leakage."""
     call_log: list[str] = []
 
-    async def _tracking_loader(target: HetznerRobotTargetLike) -> dict[str, str]:
+    async def _tracking_loader(
+        target: HetznerRobotTargetLike, _operator: Operator
+    ) -> dict[str, str]:
         call_log.append(target.name)
         return {"username": f"svc-{target.name}", "password": "pass"}
 
@@ -347,7 +383,9 @@ async def test_same_name_targets_in_different_tenants_get_distinct_credentials()
     )
     call_log: list[str] = []
 
-    async def _tracking_loader(target: HetznerRobotTargetLike) -> dict[str, str]:
+    async def _tracking_loader(
+        target: HetznerRobotTargetLike, _operator: Operator
+    ) -> dict[str, str]:
         call_log.append(str(target.tenant_id))
         return {"username": f"svc-{target.tenant_id}", "password": "pass"}
 
@@ -379,8 +417,8 @@ async def test_same_name_targets_in_different_tenants_get_distinct_credentials()
 
 @pytest.mark.asyncio
 async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
-    async def _bad_loader(_target: HetznerRobotTargetLike) -> dict[str, str]:
-        return {"username": "webservice-user"}  # type: ignore[return-value]
+    async def _bad_loader(_target: HetznerRobotTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "webservice-user"}
 
     connector = HetznerRobotConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"password") as exc_info:
@@ -392,8 +430,8 @@ async def test_loader_missing_password_key_raises_runtime_error_naming_target() 
 
 @pytest.mark.asyncio
 async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
-    async def _bad_loader(_target: HetznerRobotTargetLike) -> dict[str, str]:
-        return {"password": "stub-password"}  # type: ignore[return-value]
+    async def _bad_loader(_target: HetznerRobotTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"password": "stub-password"}
 
     connector = HetznerRobotConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"username") as exc_info:

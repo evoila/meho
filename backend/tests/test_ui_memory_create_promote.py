@@ -46,7 +46,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import patch as _patch
+from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -54,6 +56,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -67,7 +70,11 @@ from meho_backplane.memory._internal import (
 )
 from meho_backplane.memory.schemas import MemoryScope, kind_for_scope
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
+from meho_backplane.ui.auth import (
+    SESSION_COOKIE_NAME,
+    UISessionMiddleware,
+    ui_session_expired_exception_handler,
+)
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
@@ -75,6 +82,7 @@ from meho_backplane.ui.auth.flow import (
 )
 from meho_backplane.ui.auth.session_store import (
     create_session,
+    load_session,
     reset_fernet_cache_for_testing,
 )
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
@@ -99,6 +107,7 @@ from tests._oidc_jwt_helpers import (
 from tests._oidc_jwt_helpers import (
     public_jwks as _public_jwks,
 )
+from tests.conftest import mint_token as _mint_token_with_ttl
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -166,6 +175,16 @@ def _build_app() -> FastAPI:
     app.add_middleware(AuditMiddleware)
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(UISessionMiddleware)
+    # The #1694 app-level handler maps a `401 session_expired` on a
+    # `/ui/*` path to a `302 -> /ui/auth/login` for HTML requests (and
+    # keeps the structured JSON body for fetch callers), exactly as
+    # `meho_backplane.main` registers it. Wiring it here lets the
+    # refresh-failure tests below assert the real login-redirect
+    # contract the memory write path inherits through the seam. It is
+    # inert for every other test: only `session_expired` on `/ui/*`
+    # matches; all other HTTPExceptions delegate to FastAPI's stock
+    # handler byte-for-byte.
+    app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
     app.mount(
         "/ui/static",
         StaticFiles(directory=str(static_root_dir()), check_dir=False),
@@ -293,6 +312,97 @@ def _authenticated_client(
 def _csrf_headers(token: str) -> dict[str, str]:
     """Return the headers a state-changing HTMX request carries."""
     return {"X-CSRF-Token": token, "HX-Request": "true"}
+
+
+#: The Keycloak token endpoint the BFF refresh grant POSTs to. Derived
+#: from the same fixture issuer the JWKS stub uses so a discovery lookup
+#: routes here. Absent from `_mock_discovery_and_jwks` (which only stubs
+#: discovery + JWKS), so the refresh-path tests below stub it explicitly.
+_TOKEN_ENDPOINT = f"{_DEFAULT_ISSUER}/protocol/openid-connect/token"
+
+
+def _mint_expired_access_token(keypair: Any, *, sub: str, tenant_id: uuid.UUID) -> str:
+    """Mint an access token whose ``exp`` is 120 s in the past.
+
+    The offset clears the chassis JWT chain's default ``exp`` leeway
+    (30 s), so ``verify_jwt_for_audience`` classifies it as
+    ``token_expired`` -- the exact 401 the reactive refresh leg
+    (:func:`verify_access_token_with_refresh`) catches. Uses the
+    ``conftest`` minter (aliased ``_mint_token_with_ttl``) because the
+    ``_oidc_jwt_helpers`` minter hard-codes ``exp = now + 3600`` with no
+    knob; both share the same fixture issuer + audience, so the token is
+    otherwise identical to the happy-path one.
+    """
+    return _mint_token_with_ttl(
+        keypair,
+        sub=sub,
+        tenant_id=str(tenant_id),
+        tenant_role=TenantRole.OPERATOR.value,
+        expires_in=-120,
+    )
+
+
+def _refresh_grant_response(access_token: str) -> httpx.Response:
+    """Build a well-formed RFC 6749 § 6 refresh-grant token response."""
+    return httpx.Response(
+        200,
+        json={
+            "access_token": access_token,
+            "refresh_token": "refresh-token-rotated",
+            "expires_in": 300,
+            "token_type": "Bearer",
+        },
+    )
+
+
+def _mock_token_endpoint(
+    mock: respx.MockRouter,
+    *,
+    response: httpx.Response,
+) -> Any:
+    """Stub OIDC discovery to advertise the token endpoint + stub the grant.
+
+    ``_mock_discovery_and_jwks`` publishes a discovery document without a
+    ``token_endpoint``, so the refresh path (which reads it off discovery)
+    cannot resolve the grant URL. Overriding the discovery route with one
+    that carries ``token_endpoint`` -- and mocking that endpoint -- lets
+    the refresh leg run. Returns the token route so the caller can assert
+    its ``call_count`` (the "exactly one refresh, no retry" contract).
+    """
+    # `_fetch_discovery_doc` requires BOTH `authorization_endpoint` and
+    # `token_endpoint`; the base `_mock_discovery_and_jwks` stub carries
+    # neither, so override the discovery route with a complete doc. respx
+    # resolves the most-recently-registered matching route, so this wins.
+    mock.get(f"{_DEFAULT_ISSUER}/.well-known/openid-configuration").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "issuer": _DEFAULT_ISSUER,
+                "authorization_endpoint": f"{_DEFAULT_ISSUER}/protocol/openid-connect/auth",
+                "token_endpoint": _TOKEN_ENDPOINT,
+                "jwks_uri": f"{_DEFAULT_ISSUER}/protocol/openid-connect/certs",
+            },
+        ),
+    )
+    return mock.post(_TOKEN_ENDPOINT).mock(return_value=response)
+
+
+def _load_session_tokens(session_id: uuid.UUID) -> tuple[str, str]:
+    """Return the ``(access_token, refresh_token)`` currently on the row.
+
+    Reads the decrypted pair back through :func:`load_session` so the
+    refresh-and-retry test can prove the tokens rotated (RFC 9700 § 4.14
+    one-time-use) -- not merely that the request succeeded.
+    """
+
+    async def _do() -> tuple[str, str]:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            decrypted = await load_session(session, session_id)
+            assert decrypted is not None, "session row vanished under the refresh test"
+            return decrypted.access_token, decrypted.refresh_token
+
+    return asyncio.run(_do())
 
 
 def _stub_embedding_service() -> Any:
@@ -867,6 +977,253 @@ def test_create_forged_header_still_rejected_after_poll_returns_403() -> None:
         mock.stop()
     assert response.status_code == 403, response.text
     assert response.json()["detail"] == "csrf_token_invalid"
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
+
+
+# ---------------------------------------------------------------------------
+# Create submit -- expired-token refresh / redirect seam (#2088)
+# ---------------------------------------------------------------------------
+#
+# The memory write path resolves the operator through
+# `resolve_ui_operator`, which routes the stored access token through
+# the shared `load_fresh_session` + `verify_access_token_with_refresh`
+# refresh-on-401 seam (G0.25 #1694, adopted memory-wide by #2056). The
+# root-cause triage on #2088 confirmed the code fix already shipped in
+# #2056; the residual the ticket's acceptance criteria pin is the
+# memory-router-specific behavioural coverage the #2056 sweep left to a
+# single agents-console probe. These tests supply it against the real
+# `POST /ui/memory/create` write path (and one sibling write handler),
+# so a future regression on the memory router -- a resolver reverting to
+# a bare `verify_jwt_for_audience` -- fails here instead of silently
+# 401-ing the operator's browser.
+#
+# The scenario the reporter hit: a session whose row outlives the
+# access token (the sliding-extension window) presents an expired token.
+# Pre-#2056 the resolver 401-ed with the raw `token_expired` detail,
+# which `errors.py` deliberately does NOT intercept, so it leaked to the
+# browser as `{"detail":"token_expired"}` -- a silent HTMX no-op. Post-
+# fix the seam either refreshes-and-retries (live refresh token) or
+# fails closed to `session_expired`, which `errors.py` maps to a login
+# redirect (HTML) or the structured body (fetch) -- never the raw
+# `token_expired`, never a silent no-op.
+
+
+def test_create_submit_expired_token_refreshes_and_persists() -> None:
+    """AC #2: expired access token + live refresh -> refresh-and-retry -> 204.
+
+    The session row holds an access token whose ``exp`` is 120 s in the
+    past (beyond the JWT chain's leeway), but a valid refresh token. The
+    create POST must silently refresh once through Keycloak, retry the
+    verification against the rotated token, and persist the memory --
+    with the row's token pair rotated per RFC 9700 § 4.14, and exactly
+    one token-endpoint POST (no retry storm).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    fresh_access = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    expired_access = _mint_expired_access_token(keypair, sub=_OP_A, tenant_id=_TENANT_A)
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=expired_access, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    token_route = _mock_token_endpoint(mock, response=_refresh_grant_response(fresh_access))
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "survives an expired token", "slug": "post-idle"},
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert response.headers.get("HX-Redirect") == "/ui/memory"
+    # The write landed despite the expired token at request start.
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 1
+    # Exactly one refresh grant -- single attempt, no retry.
+    assert token_route.call_count == 1
+    # The row rotated in place (one-time-use refresh-token semantics).
+    access, refresh = _load_session_tokens(session_id)
+    assert access == fresh_access
+    assert refresh == "refresh-token-rotated"
+
+
+def test_create_submit_refresh_unavailable_redirects_html_to_login() -> None:
+    """AC #3 (HTML): refresh fails -> 302 /ui/auth/login, never raw token_expired.
+
+    The refresh token is expired / revoked, so Keycloak answers the
+    grant with ``invalid_grant``. The seam fails closed to
+    ``session_expired``, which the app-level handler maps to a login
+    redirect carrying ``return_to`` for an HTML ``Accept`` -- the
+    documented recovery path, not a silent no-op and not the raw
+    ``token_expired`` body the reporter saw. The dead session cookie is
+    cleared on the way out.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    expired_access = _mint_expired_access_token(keypair, sub=_OP_A, tenant_id=_TENANT_A)
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=expired_access, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    token_route = _mock_token_endpoint(
+        mock,
+        response=httpx.Response(400, json={"error": "invalid_grant"}),
+    )
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "lost to an expired session"},
+                headers={**_csrf_headers(csrf), "accept": "text/html,application/xhtml+xml"},
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 302, response.text
+    location = response.headers["location"]
+    assert location.startswith("/ui/auth/login?return_to=")
+    # The return_to round-trips the original write path (percent-encoded)
+    # so the operator lands back where they were after re-auth.
+    return_to = parse_qs(urlparse(location).query)["return_to"][0]
+    assert return_to == "/ui/memory/create"
+    assert "Max-Age=0" in response.headers["set-cookie"]
+    assert token_route.call_count == 1
+    # The write never happened.
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
+
+
+def test_create_submit_refresh_unavailable_keeps_json_shape_for_fetch() -> None:
+    """AC #3 (fetch): refresh fails -> 401 session_expired, never raw token_expired.
+
+    A fetch/HTMX caller without an HTML ``Accept`` gets the structured
+    ``session_expired`` body (with the dead cookie cleared), not the raw
+    ``token_expired`` the upstream API emitted -- so the client can key a
+    re-login on the stable ``session_expired`` code. Asserts the raw
+    ``token_expired`` never reaches the browser on this path.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    expired_access = _mint_expired_access_token(keypair, sub=_OP_A, tenant_id=_TENANT_A)
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=expired_access, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    _mock_token_endpoint(mock, response=httpx.Response(400, json={"error": "invalid_grant"}))
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "fetch caller"},
+                headers={**_csrf_headers(csrf), "accept": "application/json"},
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 401, response.text
+    assert response.json() == {"detail": "session_expired"}
+    # The contract the ticket pins: the raw upstream code is never leaked.
+    assert response.json()["detail"] != "token_expired"
+    assert "Max-Age=0" in response.headers["set-cookie"]
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
+
+
+def test_delete_handler_expired_token_refreshes_and_serves() -> None:
+    """AC #4: the sibling DELETE write handler inherits the refresh seam.
+
+    Every memory write handler shares ``_resolve_operator_dep`` ->
+    ``resolve_ui_operator``, so the fix repairs them all at once. This
+    pins the ``_delete_handler`` path (``DELETE /ui/memory/<scope>/<slug>``)
+    against the expired-but-refreshable scenario: it must refresh once
+    and complete the delete, not 401 mid-session. Regression guard for
+    the "same fix covers the siblings" acceptance criterion.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_memory(
+        tenant_id=_TENANT_A,
+        scope=MemoryScope.USER,
+        slug="stale-note",
+        body="delete me",
+        user_sub=_OP_A,
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    fresh_access = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    expired_access = _mint_expired_access_token(keypair, sub=_OP_A, tenant_id=_TENANT_A)
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=expired_access, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    token_route = _mock_token_endpoint(mock, response=_refresh_grant_response(fresh_access))
+    try:
+        response = client.delete(
+            "/ui/memory/user/stale-note",
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    # The delete handler returns 204 + HX-Redirect on success.
+    assert response.status_code == 204, response.text
+    assert response.headers.get("HX-Redirect") == "/ui/memory"
+    assert token_route.call_count == 1
+    # The delete completed: the row is gone.
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
+
+
+def test_create_submit_wrong_audience_401_is_not_swallowed_by_login_bounce() -> None:
+    """AC #5: a non-expiry 401 keeps its raw detail -- no login redirect.
+
+    The seam refreshes only on ``token_expired``; every other 401 code
+    (signature, audience, identity mismatch) propagates untouched so a
+    genuine misconfiguration stays diagnosable and is not masked behind
+    a login bounce. Here the stored token is validly signed but carries
+    the wrong ``aud`` claim, so the JWT chain reports ``invalid_audience``
+    (deterministic, unlike a kid-not-found which classifies as
+    ``invalid_token``). The response must carry that detail verbatim
+    (401 JSON) even for an HTML ``Accept`` -- NOT a 302 login redirect
+    and NOT ``session_expired`` -- and no refresh is attempted.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    # Correctly signed (kid is in the JWKS, exp far in the future) but the
+    # audience does not match `KEYCLOAK_AUDIENCE` -- a clean, non-expiry
+    # validation failure the refresh leg must NOT intercept.
+    wrong_audience_access = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+        audience="some-other-client",
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=wrong_audience_access, operator_sub=_OP_A
+    )
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    # Stub the token endpoint to a hard failure so a spurious refresh
+    # attempt (the regression this guards) would surface as a call here;
+    # the assertion below proves it stays at zero.
+    token_route = _mock_token_endpoint(mock, response=httpx.Response(400, json={"error": "nope"}))
+    try:
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "misconfig probe"},
+                headers={**_csrf_headers(csrf), "accept": "text/html,application/xhtml+xml"},
+            )
+    finally:
+        mock.stop()
+    # A wrong-audience failure is a 401 with its own detail -- not a
+    # redirect, not session_expired, and no refresh was attempted.
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"] == "invalid_audience"
+    assert token_route.call_count == 0
     assert _count_documents(_TENANT_A, MemoryScope.USER) == 0
 
 

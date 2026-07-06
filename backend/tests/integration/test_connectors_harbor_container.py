@@ -788,13 +788,16 @@ async def test_robot_create_credential_mint_classification(
     assert "id" in result.result, "harbor.robot.create result must include 'id'"
     assert "name" in result.result, "harbor.robot.create result must include 'name'"
 
-    # The executed (post-approval) op audits under the approver identity —
-    # the park writes an ``APPROVAL`` / ``approval.request`` row (not keyed
-    # on the op-id), so filtering on ``path == "harbor.robot.create"`` +
-    # the approver sub selects exactly the one executed dispatch row.
+    # The executed (post-approval) op audits under the *requester* identity:
+    # the resume re-dispatches as the original requester with ``_approved=True``
+    # (the committed approval is the authorization), so the executed dispatch
+    # row is keyed on the requester sub. The park writes a separate
+    # ``approval.request`` row (not keyed on the op-id), so filtering on
+    # ``path == "harbor.robot.create"`` + the requester sub selects exactly
+    # the one executed dispatch row.
     await _assert_audited(
         "harbor.robot.create",
-        operator_sub="e2e-robot-create-approver",
+        operator_sub="e2e-robot-create",
         expected_op_class="credential_mint",
         expected_source_kind="typed",
         events=captured_events,

@@ -48,6 +48,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     datastore_usage_composite,
     event_tail_composite,
     host_network_uplinks_composite,
+    host_vsan_health_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
     register_vmware_composite_operations,
@@ -68,6 +69,7 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.usage",
     "vmware.composite.network.portgroup.audit",
     "vmware.composite.host.network_uplinks",
+    "vmware.composite.host.vsan_health",
 )
 
 
@@ -91,6 +93,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.host.network_uplinks": (
         "meho_backplane.connectors.vmware_rest.composites._read.host_network_uplinks_composite"
     ),
+    "vmware.composite.host.vsan_health": (
+        "meho_backplane.connectors.vmware_rest.composites._read.host_vsan_health_composite"
+    ),
 }
 
 
@@ -101,6 +106,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.datastore.usage": "storage",
     "vmware.composite.network.portgroup.audit": "networking",
     "vmware.composite.host.network_uplinks": "host",
+    "vmware.composite.host.vsan_health": "host",
 }
 
 
@@ -181,10 +187,10 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 14 total: 6 reads
-    # (T5 #508 shipped 5; #2080 adds host.network_uplinks) + 8 writes
-    # (T6 #509).
-    assert stub_embedding_service.encode_one.call_count == 14
+    # Embedding service called once per composite -- 15 total: 7 reads
+    # (T5 #508 shipped 5; #2080 adds host.network_uplinks; #2135 adds
+    # host.vsan_health) + 8 writes (T6 #509).
+    assert stub_embedding_service.encode_one.call_count == 15
 
 
 @pytest.mark.asyncio
@@ -267,7 +273,7 @@ async def test_handler_ref_round_trips_to_module_level_dotted_path(
 async def test_group_resolution_lands_each_composite_in_its_named_group(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The 6 read composites resolve to their named ``group_key`` (host.network_uplinks -> host)."""
+    """The 7 read composites resolve to their named ``group_key`` (vsan_health -> host)."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -398,6 +404,9 @@ async def test_response_schema_persists_for_every_composite(
     )
     assert "hosts" in dict(uplinks_resp["properties"])
 
+    vsan_resp: dict[str, Any] = dict(by_op["vmware.composite.host.vsan_health"].response_schema)
+    assert {"cluster", "overall_health", "groups"} <= set(dict(vsan_resp["properties"]))
+
 
 @pytest.mark.asyncio
 async def test_tags_include_composite_and_read_only(
@@ -436,15 +445,15 @@ async def test_tags_include_composite_and_read_only(
 async def test_register_vmware_composite_operations_is_idempotent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 6 read rows persist; embedding stays at 14.
+    """Running the registrar twice -> 7 read rows persist; embedding stays at 15.
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
-    persist after the combined registrar (6 reads + 8 writes / T6).
+    persist after the combined registrar (7 reads + 8 writes / T6).
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 14
+    assert first_count == 15
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding
@@ -462,7 +471,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
             .scalars()
             .all()
         )
-    assert len(rows) == 6
+    assert len(rows) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +529,7 @@ def test_all_handlers_are_module_level_coroutine_functions() -> None:
         datastore_usage_composite,
         network_portgroup_audit_composite,
         host_network_uplinks_composite,
+        host_vsan_health_composite,
     ):
         assert inspect.iscoroutinefunction(handler), f"{handler!r} is not a coroutine function"
         assert "<locals>" not in handler.__qualname__

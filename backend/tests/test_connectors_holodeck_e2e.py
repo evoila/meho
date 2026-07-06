@@ -499,22 +499,34 @@ async def holodeck_e2e(
 
 
 def test_holodeck_ops_registration_count() -> None:
-    """All 9 Holodeck ops are registered in HOLODECK_OPS."""
+    """All 9 read ops + 3 G3.18-T2 write ops = 12 ops registered in HOLODECK_OPS.
+
+    ``EXPECTED_OP_IDS`` enumerates the 9 read ops (about + 7 T2 reads +
+    ``holodeck.disk.usage``); the 3 approval-gated write ids are asserted in
+    ``test_connectors_holodeck_write.py``.
+    """
     op_ids = {op.op_id for op in HOLODECK_OPS}
     missing = set(EXPECTED_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(HOLODECK_OPS) == 9, f"Expected 9 ops, got {len(HOLODECK_OPS)}"
+    assert len(HOLODECK_OPS) == 12, f"Expected 12 ops, got {len(HOLODECK_OPS)}"
 
 
-def test_holodeck_ops_all_safe_and_no_approval_required() -> None:
-    """All read ops carry safety_level='safe' and requires_approval=False."""
+def test_holodeck_read_ops_all_safe_and_no_approval_required() -> None:
+    """Every read op (EXPECTED_OP_IDS) carries safety_level='safe' and no approval.
+
+    The G3.18-T2 (#2154) write ops are dangerous / requires_approval=True and
+    are asserted in ``test_connectors_holodeck_write.py``.
+    """
+    read_ids = set(EXPECTED_OP_IDS)
     for op in HOLODECK_OPS:
+        if op.op_id not in read_ids:
+            continue
         assert op.safety_level == "safe", f"{op.op_id} should be safe"
         assert not op.requires_approval, f"{op.op_id} should not require approval"
 
 
 def test_holodeck_ops_all_have_llm_instructions() -> None:
-    """All 9 ops carry non-empty llm_instructions for agent discoverability."""
+    """All 12 ops carry non-empty llm_instructions for agent discoverability."""
     for op in HOLODECK_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions
@@ -531,7 +543,7 @@ def test_holodeck_ops_all_carry_ssh_only_transport_note() -> None:
 
     The exact phrase to look for is "Holodeck has no REST API"; the
     shared :data:`SSH_TRANSPORT_NOTE` constant guarantees consistency
-    across all 9 ops.
+    across all 12 ops.
     """
     canonical_phrase = "Holodeck has no REST API"
     pwsh_phrase = "PowerShell-over-SSH"

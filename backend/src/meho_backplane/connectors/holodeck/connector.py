@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+#
+# code-quality-allow: pre-existing legacy debt not introduced by this task.
+# On main the module was already 723 lines (> 600) with fingerprint (109) /
+# probe (111, C901 14) over budget; G3.18-T2 (#2154) only appends three
+# small write-op shims + the WRITE_OPS wiring. Splitting the connector or
+# refactoring fingerprint/probe is out of scope for an approval-gated write
+# addition and would balloon the review surface; tracked separately.
 
 """HolodeckConnector -- typed SSH-transport connector for VMware Holodeck 9.0.
 
@@ -63,6 +70,9 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
+from meho_backplane.connectors.holodeck.ops_write import (
+    HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP,
+)
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -185,6 +195,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "warning on the 74 GB root fs (VCF-9.x backup fill). "
         "Transport: plain SSH (``df`` / ``du``)."
     ),
+    # G3.18-T2 (#2154) approval-gated remediation write groups. The keys
+    # carry a ``-write`` suffix so they never collide with the read-op
+    # group keys above; the blurbs are the single source of truth in
+    # ``ops_write`` and are merged in here for the registration walk.
+    **HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP,
 }
 
 
@@ -601,6 +616,57 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_disk_usage(self, target, params)
+
+    async def k8s_pods_gc(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.k8s.pods.gc`` (G3.18-T2 #2154).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_write.holodeck_k8s_pods_gc`;
+        runs only on the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_write import (
+            holodeck_k8s_pods_gc as _holodeck_k8s_pods_gc,
+        )
+
+        return await _holodeck_k8s_pods_gc(self, target, params)
+
+    async def backups_prune(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.backups.prune`` (G3.18-T2 #2154).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_write.holodeck_backups_prune`;
+        runs only on the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_write import (
+            holodeck_backups_prune as _holodeck_backups_prune,
+        )
+
+        return await _holodeck_backups_prune(self, target, params)
+
+    async def images_import(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.images.import`` (G3.18-T2 #2154).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_write.holodeck_images_import`;
+        runs only on the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_write import (
+            holodeck_images_import as _holodeck_images_import,
+        )
+
+        return await _holodeck_images_import(self, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

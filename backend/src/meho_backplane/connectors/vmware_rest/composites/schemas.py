@@ -415,13 +415,17 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                     "capacity": {
                         "type": ["integer", "null"],
                         "description": (
-                            "Total capacity in bytes; ``null`` when the detail payload omits it."
+                            "Total capacity in bytes; sourced from the per-datastore "
+                            "detail payload, falling back to the listing row when the "
+                            "detail omits it. ``null`` only when neither carries it."
                         ),
                     },
                     "free_space": {
                         "type": ["integer", "null"],
                         "description": (
-                            "Free space in bytes; ``null`` when the detail payload omits it."
+                            "Free space in bytes; sourced from the per-datastore detail "
+                            "payload, falling back to the listing row when the detail "
+                            "omits it. ``null`` only when neither carries it."
                         ),
                     },
                     "vm_count": {

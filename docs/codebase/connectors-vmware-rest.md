@@ -378,6 +378,17 @@ recording the failing sub-op, its status, and the underlying error.
 The response schema marks `vm_count`/`vm_names` as nullable and adds the
 optional `enrichment_note` key (present only on a skipped row).
 
+`capacity`/`free_space` are read from the per-datastore detail payload
+with a **list-row fallback** (#2078): some vCenter builds (observed on an
+8.0.3 vCenter against the 9.0 spec) return a detail `Datastore.Info` that
+populates `free_space` but omits `capacity`, while the
+`GET:/vcenter/datastore` listing row carries both. The row-builder takes
+the detail value when present and falls back to `entry.get(...)` on the
+already-fetched listing row otherwise, so `capacity`/`free_space` are
+`null` only when neither source carries them — the composite no longer
+discards a capacity it already had, which is what made `%`-full
+uncomputable off the composite alone.
+
 ### Bubbling a sub-op's structured error (#1908)
 
 `CompositeSubOpError` folds the failed sub-op's most diagnostic line

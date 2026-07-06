@@ -508,6 +508,97 @@ async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() ->
 
 
 @pytest.mark.asyncio
+async def test_datastore_usage_capacity_falls_back_to_list_row_when_detail_omits_it() -> None:
+    """Detail without ``capacity`` (live 8.0.3 shape) -> capacity from the list row (#2078).
+
+    Some vCenter builds return a per-datastore detail ``Datastore.Info``
+    that populates ``free_space`` but omits ``capacity`` entirely. The
+    ``GET:/vcenter/datastore`` list row carries both fields, so the
+    composite must fall back to the list-row ``capacity`` rather than
+    silently emitting ``capacity: null`` (which leaves %-full
+    uncomputable, the whole reason to reach for the composite).
+    """
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 1000},
+    ]
+    sequence = [
+        _ok_result("GET:/vcenter/datastore", listing),
+        # Detail carries free_space but NO ``capacity`` key at all.
+        _ok_result("GET:/vcenter/datastore/{datastore}", {"free_space": 400, "type": "VMFS"}),
+        _ok_result("GET:/vcenter/vm", [{"name": "vm-a"}]),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+    row = out["datastores"][0]
+    # capacity sourced from the list row; free_space from the detail read.
+    assert row["capacity"] == 1000
+    assert row["free_space"] == 400
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_capacity_null_when_neither_detail_nor_list_carry_it() -> None:
+    """Neither detail nor list row carries ``capacity`` -> row ``capacity`` is null (#2078).
+
+    The fallback is best-effort: with no source for capacity the row must
+    still be schema-valid (``capacity`` typed ``["integer", "null"]``) and
+    the aggregation must not crash.
+    """
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+    ]
+    sequence = [
+        _ok_result("GET:/vcenter/datastore", listing),
+        # Detail lacks capacity; list row lacks capacity -> null, no crash.
+        _ok_result("GET:/vcenter/datastore/{datastore}", {"free_space": 400}),
+        _ok_result("GET:/vcenter/vm", []),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+    row = out["datastores"][0]
+    assert row["capacity"] is None
+    assert row["free_space"] == 400
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_detail_capacity_wins_over_list_row() -> None:
+    """When the detail payload supplies ``capacity``, the detail value wins (#2078).
+
+    Guards the fallback against regressing the primary path: the list row
+    carries a stale/different capacity, but the detail read is the source
+    of truth whenever it provides the field.
+    """
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 1000},
+    ]
+    sequence = [
+        _ok_result("GET:/vcenter/datastore", listing),
+        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 100, "free_space": 40}),
+        _ok_result("GET:/vcenter/vm", []),
+    ]
+    dispatch = _RecordingDispatchChild(sequence)
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        dispatch_child=dispatch,
+    )
+    row = out["datastores"][0]
+    # Detail's 100 wins over the list row's 1000.
+    assert row["capacity"] == 100
+    assert row["free_space"] == 40
+
+
+@pytest.mark.asyncio
 async def test_datastore_usage_filter_names_passes_through_to_listing() -> None:
     """``filter_names`` flows into the listing sub-op as ``filter.names``."""
     sequence = [_ok_result("GET:/vcenter/datastore", [])]

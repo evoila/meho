@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — target-destination SSRF guard (create/update + connect)
+
+- **Targets can no longer be pointed at non-public addresses unless the
+  deployment explicitly allowlists them** (evoila-bosnia/meho-internal#153):
+  `POST`/`PATCH /api/v1/targets` now reject a `host`/`fqdn` that is — or
+  resolves to — a private, loopback, link-local (including
+  `169.254.0.0/16` cloud-metadata), ULA, multicast, unspecified, or
+  otherwise reserved address with a structured 422 that never echoes the
+  resolved IP; and the HTTP connector transport re-screens the
+  **resolved** address immediately before every dispatch (closing the
+  DNS-rebind window between create and connect), refusing with a
+  structured `connector_error` before any request or credential leaves
+  the backplane. The rejection classes mirror the existing OpenAPI
+  spec-fetch guard. **Deployment impact (action likely required):** MEHO
+  deployments register on-prem appliances on RFC 1918 space as a matter
+  of course — set the new `MEHO_TARGET_SSRF_ALLOWLIST` env var (comma-
+  separated CIDR ranges, bare IPs, and/or hostname literals, e.g.
+  `10.0.0.0/8,192.168.0.0/16,vcenter.lab.internal`) to opt your trusted
+  internal ranges back in. The allowlist is range-scoped — everything
+  outside it stays blocked, so the guard is never globally disabled.
+  Existing target rows are unaffected at rest (reads/lists still work);
+  the guard bites on the next create, update, or dispatch.
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

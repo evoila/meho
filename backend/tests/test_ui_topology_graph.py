@@ -750,7 +750,15 @@ def test_drawer_route_still_serves_node_detail_for_graph_tap() -> None:
         client = _authenticated_client(session_id)
         response = client.get(f"/ui/topology/node/{node_id}")
     assert response.status_code == 200, response.text
-    assert "vm-drawer-test" in response.text
+    body = response.text
+    assert "vm-drawer-test" in body
+    # Issue #141: on the graph surface the swapped-in drawer fragment must
+    # carry ``self-start`` on its root ``<aside id="node-drawer">`` so it
+    # sits as a short card at the top of its grid column instead of
+    # stretching to the full 600px graph height after the ``outerHTML``
+    # swap replaces the placeholder.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
 
 
 # ---------------------------------------------------------------------------

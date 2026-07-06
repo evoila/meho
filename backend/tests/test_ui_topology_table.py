@@ -587,6 +587,14 @@ def test_drawer_renders_node_properties_and_edges() -> None:
         response = client.get(f"/ui/topology/node/{child_id}")
     assert response.status_code == 200, response.text
     body = response.text
+    # Issue #141: the swapped-in fragment root -- not just the
+    # placeholder in table.html -- must carry ``self-start``. The
+    # ``hx-swap="outerHTML"`` swap replaces the placeholder with this
+    # fragment's ``<aside id="node-drawer">``, so if ``self-start`` lived
+    # only on the placeholder the post-swap drawer would revert to
+    # stretching the full grid-column height. Pin it on the fragment.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
     # Node identity surfaces.
     assert "vm-on-host-1" in body
     assert str(child_id) in body
@@ -657,7 +665,14 @@ def test_drawer_returns_404_for_unknown_node() -> None:
         client = _authenticated_client(session_id)
         response = client.get(f"/ui/topology/node/{uuid.uuid4()}")
     assert response.status_code == 404, response.text
-    assert "Node not found" in response.text
+    body = response.text
+    assert "Node not found" in body
+    # Issue #141: the not-found fragment swaps into ``#node-drawer`` via
+    # the same ``outerHTML`` swap as the happy path, so its root must also
+    # carry ``self-start`` to render as a top-aligned card rather than a
+    # full-column-height error panel.
+    assert 'id="node-drawer"' in body
+    assert "self-start" in body
 
 
 def test_drawer_isolates_other_tenants_node_id() -> None:

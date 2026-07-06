@@ -163,8 +163,28 @@
     </div>
   </form>
 
+  {# ---------- Table + drawer grid ----------
+     The table and the ``#node-drawer`` slot share one grid so the
+     drawer lands *beside* the table on ``lg:`` viewports instead of
+     stacking ~1300px below it (issue #141: the "View" button swapped
+     the drawer off-screen, hiding the Annotate-edge affordance with
+     it). ``lg:grid-cols-[1fr_28rem]`` gives the table the flexible
+     column and the drawer a fixed 28rem sidebar; on narrower
+     viewports the single-column grid stacks table over drawer.
+
+     ``hx-on::after-swap`` handles the narrow-viewport case: when a
+     row's "View" swap settles the drawer fragment in (target
+     ``#node-drawer``, which lives inside this wrapper, so the
+     ``htmx:afterSwap`` event bubbles up to here), scroll it into view.
+     On ``lg:`` the drawer is already beside the table, so the scroll
+     is a harmless no-op; on a stacked layout it brings the freshly
+     rendered detail into the viewport. -#}
+  <div
+    class="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_28rem]"
+    hx-on::after-swap="if (event.detail.target && event.detail.target.id === 'node-drawer') event.detail.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })"
+  >
   {# ---------- Table ---------- #}
-  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100 min-w-0">
     <table class="table table-sm">
       <thead>
         <tr>
@@ -227,14 +247,17 @@
   </div>
 
   {# ---------- Drawer slot ----------
-     T1 lands the slot; row "view" buttons swap the drawer fragment
-     into it. The drawer renders to the right of the table on
-     ``lg:`` viewports via Tailwind grid + col-span; on smaller
-     viewports it stacks below.
+     Second cell of the grid opened above: on ``lg:`` viewports it
+     renders to the right of the table; on smaller viewports it stacks
+     below (single-column grid). ``self-start`` keeps the drawer from
+     stretching to the full table height so a short detail card sits at
+     the top of its column. Row "view" buttons swap the drawer fragment
+     into this slot (``hx-target="#node-drawer"``, ``hx-swap="outerHTML"``);
+     the fragment carries the same ``id`` so the swap is stable.
   -#}
   <aside
     id="node-drawer"
-    class="card bg-base-100 border-base-300 border shadow-sm"
+    class="card bg-base-100 border-base-300 border shadow-sm self-start"
     aria-live="polite"
     aria-label="Node detail drawer"
   >
@@ -242,6 +265,7 @@
       Select a row's <em>view</em> button to inspect a node.
     </div>
   </aside>
+  </div>
 </section>
 {% endblock %}
 

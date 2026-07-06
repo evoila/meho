@@ -341,6 +341,15 @@ def test_table_full_page_renders_seeded_nodes() -> None:
     assert 'hx-target="#node-drawer"' in body
     # The drawer placeholder slot is in place for the swap.
     assert 'id="node-drawer"' in body
+    # Issue #141: the table + drawer share a grid so the drawer lands
+    # beside the table on ``lg:`` viewports instead of stacking
+    # off-screen below it. The comment at table.html once promised this
+    # grid but the markup was absent; assert it is now present.
+    assert "lg:grid-cols-[1fr_28rem]" in body
+    # And the narrow-viewport scroll-into-view handler is wired so a
+    # stacked drawer is brought into view on swap.
+    assert "hx-on::after-swap" in body
+    assert "scrollIntoView" in body
     # CSRF cookie set by the route.
     assert CSRF_COOKIE_NAME in response.cookies
 

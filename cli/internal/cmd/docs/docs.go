@@ -15,34 +15,28 @@
 //     before the round-trip. --product / --version are optional
 //     refinements within the collection.
 //
-// Gating — true-absence-when-unprovisioned (option B, the
-// compiled-in fallback). The `meho docs` tree compiles into every
-// CLI binary, but its visibility is gated on the tenant-provisioned
-// `meho-docs` capability (T1, #1519). The capability is carried in
-// the operator's JWT `capabilities` claim (the same claim the MCP
-// registry filters tool visibility on). The CLI reads that claim
-// from the stored bearer token at command-tree-build time and:
+// Gating — server-side only, CLI ↔ REST parity (#2109). The `meho
+// docs` tree compiles into every CLI binary and is always visible; it
+// carries no client-side capability pre-check. Access is decided by
+// the backplane exactly as it is for `POST /api/v1/search_docs`: the
+// per-collection `meho-docs:<collection>` entitlement is enforced
+// server-side (a miss is a 403 `not_entitled` the CLI renders as
+// `insufficient_role`). The CLI is a thin shell over the same route
+// the REST surface exposes, so the same `(query, collection, tenant)`
+// gets the same verdict on either surface.
 //
-//   - shows `meho docs` in `meho --help` only when the tenant has
-//     the `meho-docs` capability, and
-//   - refuses any invocation with a typed, non-zero
-//     "add-on not provisioned" error otherwise.
-//
-// Why decode the claim client-side rather than build a discovery
-// route: the server-driven discovery channel
-// (`discovery.Fetch` → GET /api/v1/commands) is anonymous by design
-// (it never imports internal/api or internal/auth, and it fetches
-// before login has produced a token), and its `Register` only grafts
-// *stub* commands ("not yet implemented locally") — it cannot toggle
-// the visibility of a real, compiled-in implementation per tenant. A
-// tenant-filtered manifest would contradict the discovery channel's
-// anonymous contract and require a new authenticated backend route +
-// an OpenAPI snapshot regen. The client-side claim probe is purely a
-// UX affordance: the real security boundary stays server-side (the
-// route's RBAC plus the corpus federation), so a forged capability
-// claim still cannot reach the corpus. Reading an *unverified* claim
-// to decide whether to *show* a command is safe precisely because the
-// gate never grants access on its own.
+// Why no client-side capability gate: an earlier shape read the bare
+// `meho-docs` capability out of the stored JWT and hid / refused the
+// whole tree when it was absent (option B). That gate had no
+// counterpart on the REST route (which never checks the bare
+// capability — only the per-collection one), so the two surfaces
+// diverged: a tenant entitled to a collection via REST could still hit
+// `addon_not_provisioned` on the CLI. The operator decision on #2109
+// was option A — reconcile to one server-gated op — so the client-side
+// pre-check is gone and the server is the single gate. A forged claim
+// never mattered here anyway: the CLI gate was only a visibility
+// affordance; the backplane RBAC + corpus federation always enforced
+// the real boundary.
 //
 // Like the sibling kb verb tree (G0.12-T9 #1267), every call drives
 // the generated `api.ClientWithResponses` surface directly:
@@ -54,7 +48,6 @@ package docs
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,163 +58,35 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// Capability is the tenant-provisioned capability key that gates the
-// `meho docs` tree. It is the same key the backend's
-// `_extract_capabilities` surfaces on `Operator.capabilities` and
-// the MCP registry filters `search_docs` visibility on (T1, #1519),
-// kept as a single source of truth so the CLI gate and the server
-// gate agree on the string.
-const Capability = "meho-docs"
-
-// NewRootCmd returns the `meho docs` parent command, gated on the
-// `meho-docs` capability. The command tree compiles into every CLI
-// binary; `provisioned` (resolved from the stored token's JWT
-// capabilities claim) decides whether the parent is visible in
-// `meho --help` and whether its verbs run or refuse.
-//
-// When the tenant lacks the capability the parent is marked Hidden
-// and every leaf RunE short-circuits to a typed
-// `addon_not_provisioned` error (exit 5, the same family as
-// insufficient_role) before any network call. This makes the
-// command genuinely non-runnable for an unprovisioned tenant rather
-// than silently usable, while keeping the gate a UX affordance —
-// the server still enforces the real boundary.
+// NewRootCmd returns the `meho docs` parent command. The command tree
+// compiles into every CLI binary and is always visible: there is no
+// client-side capability gate (#2109). Access is decided server-side
+// by the backplane, identically to `POST /api/v1/search_docs` — the
+// per-collection `meho-docs:<collection>` entitlement is enforced on
+// the route, so an unentitled collection surfaces as a 403 the CLI
+// renders as `insufficient_role`, not a client-side refusal.
 func NewRootCmd() *cobra.Command {
-	provisioned := tenantHasDocsCapability()
-	return newRootCmdWithGate(provisioned)
-}
-
-// newRootCmdWithGate builds the `meho docs` tree with the capability
-// gate forced to a known value. Split out so tests can drive both the
-// provisioned and unprovisioned shapes without seeding a token whose
-// claim decodes to a specific capability set.
-func newRootCmdWithGate(provisioned bool) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "docs",
-		Short: "Search the meho-docs vendor-document add-on (provisioned tenants only)",
+		Short: "Search the meho-docs vendor-document add-on",
 		Long: "Operate the meho-docs add-on — backplane-federated " +
-			"retrieval over the external vendor-document corpus. The " +
-			"add-on is a tenant-provisioned capability: when it is not " +
-			"provisioned for your tenant, `meho docs` is hidden from " +
-			"`meho --help` and every verb refuses with a typed " +
-			"`addon_not_provisioned` error. Search routes through the " +
-			"backplane so every query is audited and the mandatory " +
-			"collection scope + per-collection entitlement are enforced " +
-			"centrally.",
-		// Hidden mirrors the absence the Initiative asks for: an
-		// unprovisioned tenant should not see the command in --help.
-		// The verb-level refusal (below) closes the "hidden but still
-		// invokable" gap cobra's Hidden alone leaves open.
-		Hidden:       !provisioned,
+			"retrieval over the external vendor-document corpus. Search " +
+			"routes through the backplane so every query is audited and " +
+			"the mandatory collection scope + per-collection entitlement " +
+			"are enforced centrally, server-side. Access is gated by the " +
+			"per-collection `meho-docs:<collection>` capability the " +
+			"backplane checks on every request — the same gate " +
+			"`POST /api/v1/search_docs` applies — so a collection you " +
+			"cannot search returns a typed 403 rather than a silent or " +
+			"divergent client-side refusal.",
 		SilenceUsage: true,
 	}
-	cmd.AddCommand(newSearchCmd(provisioned))
-	cmd.AddCommand(newCollectionsCmd(provisioned))
+	cmd.AddCommand(newSearchCmd())
+	cmd.AddCommand(newCollectionsCmd())
 	return cmd
-}
-
-// errNotProvisioned is the typed refusal a docs verb returns when the
-// tenant lacks the meho-docs capability. It surfaces as
-// `addon_not_provisioned` (exit 5, the insufficient_role family) so
-// scripts can distinguish "you can't use this add-on" from a missing
-// flag (exit 4) or a transport failure (exit 3).
-func errNotProvisioned(cmd *cobra.Command, jsonOut bool) error {
-	return output.RenderError(
-		cmd.ErrOrStderr(),
-		&output.StructuredError{
-			Code: "addon_not_provisioned",
-			Detail: "the meho-docs add-on is not provisioned for your " +
-				"tenant; ask a tenant_admin to enable the `meho-docs` " +
-				"capability",
-			Exit: output.ExitInsufficientRole,
-		},
-		jsonOut,
-	)
-}
-
-// tenantHasDocsCapability reports whether the operator's stored token
-// carries the meho-docs capability in its JWT `capabilities` claim.
-//
-// Fail-closed: any failure to resolve or decode the token (no login,
-// unreadable store, malformed JWT, absent/garbage claim) returns
-// false, so the command stays hidden + refusing rather than visible.
-// This mirrors the backend's fail-closed `_extract_capabilities`
-// posture (T1, #1519): a missing/garbage capability claim must never
-// be read as a grant.
-//
-// The claim is read **unverified** — the CLI does not hold the realm
-// signing key and does not need it. This is a visibility affordance,
-// not a security check; the backplane re-validates the JWT and the
-// corpus federation enforces the real boundary on every call.
-func tenantHasDocsCapability() bool {
-	cfg, err := auth.LoadConfig()
-	if err != nil || cfg.BackplaneURL == "" {
-		return false
-	}
-	tok, err := loadStoredToken(cfg.BackplaneURL)
-	if err != nil || tok.AccessToken == "" {
-		return false
-	}
-	caps, err := capabilitiesFromJWT(tok.AccessToken)
-	if err != nil {
-		return false
-	}
-	_, ok := caps[Capability]
-	return ok
-}
-
-// loadStoredToken is the token-load seam — split out so docs_test.go
-// can stub it deterministically (the alternative, seeding a keyring /
-// file store with a token whose JWT decodes to a specific capability
-// set, is exercised in an end-to-end test, but the seam keeps the
-// gate's claim-decode logic unit-testable in isolation).
-var loadStoredToken = func(backplaneURL string) (auth.StoredToken, error) {
-	store, err := auth.NewTokenStore()
-	if err != nil {
-		return auth.StoredToken{}, err
-	}
-	service, user := auth.KeyForBackplane(backplaneURL)
-	return store.Load(service, user)
-}
-
-// capabilitiesFromJWT decodes the `capabilities` claim out of a JWT's
-// payload segment and returns it as a set. The token is parsed
-// structurally (split on '.', base64url-decode the payload) — the
-// signature is **not** verified, by design (see
-// tenantHasDocsCapability). Returns an error on any structural
-// failure so the caller can fail closed.
-//
-// The claim is read as a JSON array of strings (the shape the
-// backend's `_extract_capabilities` accepts); a claim that is absent,
-// null, or not an array yields the empty set (no error) so a token
-// minted before the capability mapper existed simply sees no
-// capabilities rather than erroring the whole gate.
-func capabilitiesFromJWT(token string) (map[string]struct{}, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, errors.New("meho: token is not a JWT (expected 3 dot-separated segments)")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("meho: decode JWT payload: %w", err)
-	}
-	var claims struct {
-		Capabilities []string `json:"capabilities"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("meho: parse JWT claims: %w", err)
-	}
-	set := make(map[string]struct{}, len(claims.Capabilities))
-	for _, c := range claims.Capabilities {
-		if c != "" {
-			set[c] = struct{}{}
-		}
-	}
-	return set, nil
 }
 
 // errMissingAccessToken mirrors the kb verb tree's sentinel: the

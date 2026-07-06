@@ -39,7 +39,7 @@ import (
 // Exit codes mirror the sibling collections verbs (renderHTTPStatus maps
 // 422 → unexpected with the unknown-backend-type detail, 409 → unexpected
 // with the conflict detail, 403 → insufficient_role).
-func newCollectionsCreateCmd(provisioned bool) *cobra.Command {
+func newCollectionsCreateCmd() *cobra.Command {
 	var opts createCollectionOptions
 	cmd := &cobra.Command{
 		Use:   "create <collection-key>",
@@ -67,7 +67,6 @@ func newCollectionsCreateCmd(provisioned bool) *cobra.Command {
 			if len(args) == 1 {
 				opts.CollectionKey = args[0]
 			}
-			opts.Provisioned = provisioned
 			return runCollectionCreate(cmd, opts)
 		},
 	}
@@ -104,13 +103,9 @@ type createCollectionOptions struct {
 	FromFile          string
 	JSONOut           bool
 	BackplaneOverride string
-	Provisioned       bool
 }
 
 func runCollectionCreate(cmd *cobra.Command, opts createCollectionOptions) error {
-	if !opts.Provisioned {
-		return errNotProvisioned(cmd, opts.JSONOut)
-	}
 	body, buildErr := buildCreateBody(opts)
 	if buildErr != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(buildErr.Error()), opts.JSONOut)

@@ -157,35 +157,36 @@ Fetch failures (404 before G2.2 ships the endpoint, offline
 operators, etc.) degrade silently to "no extra commands" — the
 local-only `login` / `status` / `version` set stays usable.
 
-## Capability-gated commands
+## Add-on commands (server-gated)
 
 Some commands wrap a **tenant-provisioned add-on** rather than a
 core operation. `meho docs` (the meho-docs vendor-document add-on,
-G4.5) is the first: it compiles into every binary, but the tree is
-only usable when the tenant has the `meho-docs` capability.
+G4.5) is the first: it compiles into every binary and is always
+listed in `meho --help`.
 
-The gate reads the `capabilities` claim from the stored bearer JWT
-(the same claim the MCP registry filters tool visibility on) at
-command-tree-build time:
+There is **no client-side capability gate** (#2109). Access is decided
+server-side by the backplane, identically to `POST /api/v1/search_docs`
+— the CLI is a thin shell over the same route the REST surface exposes,
+so the same `(query, collection, tenant)` gets the same verdict on
+either surface. The backplane enforces the per-collection
+`meho-docs:<collection>` entitlement (and the operator / tenant_admin
+role on the lifecycle verbs); a caller that is not entitled to the
+named collection gets a typed 403 the CLI renders as
+`insufficient_role` (exit 5), rather than a divergent client-side
+refusal.
 
-- **Provisioned** (`meho-docs` in the claim) — `meho docs` is listed
-  in `meho --help` and `meho docs search …` runs.
-- **Unprovisioned** (claim absent / no login / unparseable token) —
-  `meho docs` is hidden from `meho --help` and every verb refuses
-  with a typed `addon_not_provisioned` error (exit 5) before any
-  network call. Fail-closed: anything that prevents resolving the
-  claim is treated as "not provisioned".
-
-The claim is read **unverified** — this is a visibility affordance,
-not a security check. The backplane re-validates the JWT and the
-add-on's federation enforces the real boundary on every call, so a
-forged capability claim can change what the CLI *shows* but not what
-the server *allows*.
+(An earlier shape decoded the bare `meho-docs` capability from the
+stored JWT and hid / refused the whole tree client-side. That gate had
+no counterpart on the REST route — which only checks the per-collection
+capability — so the two surfaces diverged. The operator decision on
+#2109 reconciled them to a single server-side gate.)
 
 ```bash
-# Mandatory binary scope: --product and --version (REQUIRE_FILTERS).
-meho docs search "nsx config maximums" --product vmware --version 9.0
-meho docs search "nsx config maximums" --product vmware --version 9.0 --json
+# Mandatory binary scope: --collection routes + gates per-collection
+# entitlement server-side. --product / --version are optional
+# refinements within a single collection.
+meho docs search "nsx config maximums" --collection vmware
+meho docs search "nsx config maximums" --collection vmware --json
 ```
 
 ## Generated client

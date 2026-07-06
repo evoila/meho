@@ -554,48 +554,45 @@ to retrieve. CSRF double-submit gated like the search fragment.
 The operator-facing CLI verb. `meho docs search <query> --collection <c>
 [--product <p>] [--version <v>] [--limit N] [--json]` POSTs to
 `/api/v1/search_docs` via the shared generated authed client (bearer +
-lazy 401-refresh), mirrors the route's collection gate client-side (a
-missing `--collection` is rejected before the round-trip; `--product` /
-`--version` are optional refinements), maps the 403 (not entitled) / 409
-(not ready) / 422 (unknown collection) statuses, and renders the cited
-chunks as a text table or raw JSON. It consumes the generated
-`api.SearchDocsRequest` / `api.SearchDocsResponse` / `api.DocsChunk`
-types directly — no hand-typed copies of the backend schemas.
+lazy 401-refresh), fails fast on a missing `--collection` before the
+round-trip (`--product` / `--version` are optional refinements), maps
+the 403 (not entitled) / 409 (not ready) / 422 (unknown collection)
+statuses, and renders the cited chunks as a text table or raw JSON. It
+consumes the generated `api.SearchDocsRequest` / `api.SearchDocsResponse`
+/ `api.DocsChunk` types directly — no hand-typed copies of the backend
+schemas.
 
-**Gating — true absence when unprovisioned.** The `meho docs` tree
-compiles into every CLI binary, but it is gated on the tenant's
-`meho-docs` capability (the same capability T1 gates the MCP tool on).
-The CLI reads the `capabilities` claim from the stored bearer JWT at
-command-tree-build time and:
+**Gating — server-side only, CLI ↔ REST parity (#2109).** The `meho
+docs` tree compiles into every CLI binary and is **always** visible;
+it carries **no client-side capability pre-check**. Access is decided
+server-side by the backplane, identically to `POST /api/v1/search_docs`:
+the route enforces the per-collection `meho-docs:<collection>`
+entitlement (a miss is a 403 `not_entitled` the CLI renders as
+`insufficient_role`, exit 5) and the operator / tenant_admin role. The
+CLI is a thin shell over the same route the REST surface exposes, so the
+same `(query, collection, tenant)` gets the same verdict on either
+surface — the unstated CLI ↔ REST parity contract now holds by
+construction.
 
-- shows `meho docs` in `meho --help` and runs its verbs only when the
-  claim contains `meho-docs`;
-- otherwise marks the parent `Hidden` and makes every verb refuse with
-  a typed `addon_not_provisioned` error (exit 5) before any network
-  call.
+**Why the client-side gate was removed.** An earlier shape (option B)
+read the bare `meho-docs` capability out of the stored JWT at
+command-tree-build time and, when absent, marked the tree `Hidden` and
+refused every verb with a typed `addon_not_provisioned` (exit 5) before
+any network call. That gate had **no counterpart on the REST route**:
+`POST /api/v1/search_docs` never checks the bare `meho-docs` capability
+— only the per-collection `meho-docs:<collection>` one (see
+`_resolve_collection_or_http_error` → `resolve_entitled_ready_collection`).
+So the two surfaces diverged — a tenant entitled to a collection via
+REST could still hit `addon_not_provisioned` on the CLI, and a CLI-shaped
+verification probe mis-reported a contract the REST endpoint implemented
+correctly. #2109 recorded the operator decision (option A): reconcile to
+one server-gated op. The client-side pre-check (the `Capability` const,
+`tenantHasDocsCapability`, `capabilitiesFromJWT`, `errNotProvisioned`,
+and the `provisioned` / `Provisioned` plumbing) is gone; the backplane
+is the single gate. The static `required_capability="meho-docs"` gate on
+the **MCP tool** is a separate surface (tool *visibility*) and is
+unchanged — it was never part of the REST/CLI asymmetry.
 
-The claim is decoded **unverified** — the CLI holds no realm signing
-key and needs none. This is a visibility affordance, not a security
-boundary: the backplane re-validates the JWT on every request and the
-corpus federation enforces the real boundary, so a forged claim can
-change only what the CLI *shows*, never what the server *allows*.
-Reading an unverified claim is safe precisely because the gate never
-grants access on its own; it is fail-closed (no login / unreadable
-store / malformed token → not provisioned), mirroring the backend's
-fail-closed `_extract_capabilities`.
-
-**Why not the server-driven discovery channel.** True per-tenant
-absence via `discovery.Fetch` → `GET /api/v1/commands` was the
-preferred shape on paper, but the discovery channel is anonymous by
-design (it never imports `internal/api` / `internal/auth` and fetches
-before login produces a token) and its `Register` only grafts *stub*
-commands ("not yet implemented locally") — it cannot toggle the
-visibility of a real compiled-in implementation per tenant. A
-tenant-filtered manifest would contradict that anonymous contract and
-require a new authenticated backend route plus an OpenAPI snapshot
-regen. The compiled-in + claim-probe shape achieves the same operator-
-visible outcome (absent from `--help`, non-runnable) without a backend
-change.
 ### `search_docs` MCP tool (`meho_backplane.mcp.tools.docs`, T4 #1523)
 
 The agent-facing face. Registered against the G0.5 MCP registry,

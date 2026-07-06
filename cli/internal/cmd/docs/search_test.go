@@ -6,7 +6,6 @@ package docs
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -27,24 +26,6 @@ import (
 // *float32 / *string fields on api.DocsChunk.
 func ptrFloat32(v float32) *float32 { return &v }
 func ptrStr(v string) *string       { return &v }
-
-// makeJWT builds an unsigned-looking JWT (header.payload.signature)
-// whose payload carries the given capabilities claim. The signature
-// segment is a throwaway — the CLI decodes the claim unverified, so
-// the fixture never needs a real signature.
-func makeJWT(t *testing.T, capabilities []string) string {
-	t.Helper()
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payloadJSON, err := json.Marshal(map[string]any{
-		"sub":          "operator-1",
-		"capabilities": capabilities,
-	})
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
-	return header + "." + payload + ".sig"
-}
 
 // newRunCmd returns a bare cobra.Command wired with capture buffers
 // and a bounded context — the harness for driving runSearch directly.
@@ -110,138 +91,60 @@ func exitCodeOf(t *testing.T, err error) int {
 	return ec.ExitCode()
 }
 
-// --- capability decode -----------------------------------------------
+// --- gate parity (#2109) ---------------------------------------------
 
-func TestCapabilitiesFromJWTExtractsClaim(t *testing.T) {
-	tok := makeJWT(t, []string{"meho-docs", "other-cap"})
-	caps, err := capabilitiesFromJWT(tok)
-	if err != nil {
-		t.Fatalf("capabilitiesFromJWT: %v", err)
-	}
-	if _, ok := caps["meho-docs"]; !ok {
-		t.Errorf("expected meho-docs in caps; got %v", caps)
-	}
-	if _, ok := caps["other-cap"]; !ok {
-		t.Errorf("expected other-cap in caps; got %v", caps)
-	}
-}
-
-func TestCapabilitiesFromJWTAbsentClaimIsEmptySet(t *testing.T) {
-	// A token with no capabilities claim decodes to the empty set
-	// (no error) — fail-closed without erroring the whole gate.
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"x"}`))
-	caps, err := capabilitiesFromJWT(header + "." + payload + ".sig")
-	if err != nil {
-		t.Fatalf("absent claim should not error; got %v", err)
-	}
-	if len(caps) != 0 {
-		t.Errorf("expected empty set; got %v", caps)
-	}
-}
-
-func TestCapabilitiesFromJWTRejectsNonJWT(t *testing.T) {
-	if _, err := capabilitiesFromJWT("not-a-jwt"); err == nil {
-		t.Errorf("expected error for non-JWT token")
-	}
-	if _, err := capabilitiesFromJWT("a.!!!.c"); err == nil {
-		t.Errorf("expected error for undecodable payload segment")
-	}
-}
-
-func TestTenantHasDocsCapabilityProvisioned(t *testing.T) {
-	defer stubLoadStoredToken(t, makeJWT(t, []string{"meho-docs"}), nil)()
-	defer stubConfig(t, "https://bp.example")()
-	if !tenantHasDocsCapability() {
-		t.Errorf("expected provisioned tenant to report the capability")
-	}
-}
-
-func TestTenantHasDocsCapabilityUnprovisioned(t *testing.T) {
-	defer stubLoadStoredToken(t, makeJWT(t, []string{"some-other-cap"}), nil)()
-	defer stubConfig(t, "https://bp.example")()
-	if tenantHasDocsCapability() {
-		t.Errorf("expected unprovisioned tenant to lack the capability")
-	}
-}
-
-// stubLoadStoredToken swaps loadStoredToken for a deterministic value
-// and returns a cleanup restoring the production seam.
-func stubLoadStoredToken(t *testing.T, accessToken string, err error) func() {
-	t.Helper()
-	prev := loadStoredToken
-	loadStoredToken = func(string) (auth.StoredToken, error) {
-		return auth.StoredToken{AccessToken: accessToken}, err
-	}
-	return func() { loadStoredToken = prev }
-}
-
-// stubConfig writes a config.json with the given backplane URL into a
-// temp XDG home so auth.LoadConfig resolves a non-empty URL.
-func stubConfig(t *testing.T, backplaneURL string) func() {
-	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	if err := auth.SaveConfigAt(
-		filepath.Join(dir, "meho", "config.json"),
-		auth.Config{BackplaneURL: backplaneURL},
-	); err != nil {
-		t.Fatalf("SaveConfigAt: %v", err)
-	}
-	return func() {}
-}
-
-// --- gating shape ----------------------------------------------------
-
-func TestNewRootCmdHiddenWhenUnprovisioned(t *testing.T) {
-	cmd := newRootCmdWithGate(false)
-	if !cmd.Hidden {
-		t.Errorf("expected docs parent Hidden when unprovisioned")
-	}
-}
-
-func TestNewRootCmdVisibleWhenProvisioned(t *testing.T) {
-	cmd := newRootCmdWithGate(true)
+// TestNewRootCmdAlwaysVisible asserts the `meho docs` tree carries no
+// client-side capability gate: it is never Hidden, so it appears in
+// `meho --help` regardless of the operator's capabilities. Access is
+// decided server-side, identically to POST /api/v1/search_docs (#2109).
+func TestNewRootCmdAlwaysVisible(t *testing.T) {
+	cmd := NewRootCmd()
 	if cmd.Hidden {
-		t.Errorf("expected docs parent visible when provisioned")
+		t.Errorf("expected docs parent always visible (no client-side capability gate)")
+	}
+	for _, sub := range cmd.Commands() {
+		if sub.Hidden {
+			t.Errorf("expected docs subcommand %q always visible; got Hidden", sub.Name())
+		}
 	}
 }
 
-func TestRunSearchRefusesWhenUnprovisioned(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{
-		Query:       "x",
-		Collections: []string{"vmware"},
-		Provisioned: false,
-	})
-	if err == nil {
-		t.Fatalf("expected refusal for unprovisioned tenant")
-	}
-	if got := exitCodeOf(t, err); got != output.ExitInsufficientRole {
-		t.Errorf("expected exit %d; got %d", output.ExitInsufficientRole, got)
-	}
-	if !strings.Contains(stderr.String(), "addon_not_provisioned") {
-		t.Errorf("expected addon_not_provisioned code; got %q", stderr.String())
-	}
-}
+// TestRunSearchNoClientSideGate asserts `meho docs search` no longer
+// short-circuits on a client-side capability pre-check: it proceeds to
+// the same network call the REST surface makes, so the server is the
+// single gate. Pointing at a running stub that would 403 an unentitled
+// collection, the CLI surfaces the *server's* verdict (insufficient_role
+// from the route's not_entitled 403) rather than a client-side
+// addon_not_provisioned refusal — proving CLI ↔ REST gate parity.
+func TestRunSearchNoClientSideGate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// The route's per-collection entitlement miss: a structured 403
+		// with the not_entitled detail (search_docs.py ~line 260).
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"detail":{"error":"not_entitled",`+
+			`"collection":"vmware","required_capability":"meho-docs:vmware",`+
+			`"operator_sub":"op-1","tenant_id":"t-1","message":"not entitled"}}`)
+	}))
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL, "eyJ.test.token")
 
-func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
-	// An unprovisioned refusal must short-circuit before any HTTP
-	// call. Point at an unroutable URL: if the refusal fired first,
-	// no connection is attempted and the error is the typed refusal,
-	// not an unreachable.
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query:             "x",
 		Collections:       []string{"vmware"},
-		Provisioned:       false,
-		BackplaneOverride: "http://127.0.0.1:0",
+		BackplaneOverride: srv.URL,
 	})
 	if err == nil {
-		t.Fatalf("expected refusal")
+		t.Fatalf("expected the server's 403 to surface as an error")
 	}
-	if !strings.Contains(stderr.String(), "addon_not_provisioned") {
-		t.Errorf("expected refusal before network; got %q", stderr.String())
+	// The verdict is the server's (insufficient_role from the route),
+	// NOT a client-side addon_not_provisioned pre-check.
+	if got := exitCodeOf(t, err); got != output.ExitInsufficientRole {
+		t.Errorf("expected exit %d (server 403); got %d", output.ExitInsufficientRole, got)
+	}
+	if strings.Contains(stderr.String(), "addon_not_provisioned") {
+		t.Errorf("client-side capability gate must be gone; got %q", stderr.String())
 	}
 }
 
@@ -249,7 +152,7 @@ func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
 
 func TestRunSearchRejectsEmptyQuery(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "", Collections: []string{"vmware"}, Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "", Collections: []string{"vmware"}})
 	if err == nil {
 		t.Fatalf("expected error for empty query")
 	}
@@ -260,7 +163,7 @@ func TestRunSearchRejectsEmptyQuery(t *testing.T) {
 
 func TestRunSearchRejectsMissingCollection(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "x"})
 	if err == nil {
 		t.Fatalf("expected error for missing --collection")
 	}
@@ -274,7 +177,7 @@ func TestRunSearchRejectsMissingCollection(t *testing.T) {
 
 func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Collections: []string{"vmware"}, Limit: 51, Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "x", Collections: []string{"vmware"}, Limit: 51})
 	if err == nil {
 		t.Fatalf("expected error for over-budget limit")
 	}
@@ -287,7 +190,7 @@ func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		Limit: 0, Changed: true, Provisioned: true,
+		Limit: 0, Changed: true,
 	})
 	if err == nil {
 		t.Fatalf("expected error for explicit --limit=0")
@@ -328,7 +231,7 @@ func TestRunSearchHappyPath(t *testing.T) {
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query: "nsx config maximums", Collections: []string{"vmware"}, Product: "nsx", Version: "9.0",
-		Provisioned: true, BackplaneOverride: srv.URL,
+		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
@@ -375,7 +278,7 @@ func TestRunSearchOmitsAbsentRefinements(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		Provisioned: true, BackplaneOverride: srv.URL,
+		BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
 	}
@@ -406,7 +309,7 @@ func TestRunSearchSendsLimitWhenSet(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		Limit: 25, Provisioned: true, BackplaneOverride: srv.URL,
+		Limit: 25, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -428,7 +331,7 @@ func TestRunSearchZeroHits(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
 		Query: "obscure", Collections: []string{"vmware"},
-		Provisioned: true, BackplaneOverride: srv.URL,
+		BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -460,7 +363,7 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		JSONOut: true, Provisioned: true, BackplaneOverride: srv.URL,
+		JSONOut: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -492,7 +395,7 @@ func TestRunSearchRendersAbsentScoreAsDash(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		Provisioned: true, BackplaneOverride: srv.URL,
+		BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
@@ -567,7 +470,7 @@ func assertStatusMapping(t *testing.T, status int, body string, wantExit int, wa
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query: "x", Collections: []string{"vmware"},
-		Provisioned: true, BackplaneOverride: srv.URL,
+		BackplaneOverride: srv.URL,
 	})
 	if err == nil {
 		t.Fatalf("expected error for HTTP %d", status)
@@ -583,7 +486,7 @@ func assertStatusMapping(t *testing.T, status int, body string, wantExit int, wa
 // --- command wiring --------------------------------------------------
 
 func TestSearchCmdRequiresExactlyOneArg(t *testing.T) {
-	cmd := newSearchCmd(true)
+	cmd := newSearchCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -650,7 +553,6 @@ func TestRunSearchRejectsAllMixedWithKeys(t *testing.T) {
 	err := runSearch(cmd, searchOptions{
 		Query:       "q",
 		Collections: []string{"all", "vmware"},
-		Provisioned: true,
 	})
 	if err == nil {
 		t.Fatalf("expected error mixing 'all' with explicit keys")
@@ -681,7 +583,6 @@ func TestRunSearchFanoutRendersProvenanceColumn(t *testing.T) {
 	err := runSearch(cmd, searchOptions{
 		Query:             "q",
 		Collections:       []string{"vmware", "netapp"},
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {

@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -212,10 +214,69 @@ func TestResolveAuthConfigDiscoveryFailureMentionsFlags(t *testing.T) {
 func TestLoginCommandHelpListsFlags(t *testing.T) {
 	cmd := newLoginCmd()
 	out := cmd.UsageString()
-	for _, want := range []string{"--issuer", "--client-id", "--scope"} {
+	for _, want := range []string{"--issuer", "--client-id", "--scope", "--resolve"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage missing flag %s:\n%s", want, out)
 		}
+	}
+}
+
+// TestLoginCommandHelpDocumentsResolve pins the discoverability half of
+// #2107 (AC #5): the operator-facing help (both --help usage and the
+// long text) must name the --resolve escape hatch so a dogfooder hitting
+// the split-DNS failure grepping the help output finds the workaround.
+func TestLoginCommandHelpDocumentsResolve(t *testing.T) {
+	cmd := newLoginCmd()
+	if out := cmd.UsageString(); !strings.Contains(out, "--resolve") {
+		t.Errorf("usage missing --resolve flag:\n%s", out)
+	}
+	long := cmd.Long
+	for _, want := range []string{"--resolve", "split-DNS", "curl --resolve"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("login long help should mention %q; got:\n%s", want, long)
+		}
+	}
+}
+
+// TestHintKeycloakResolutionNamesHostAndFlag is the AC #3 guard: when the
+// Keycloak host fails to resolve, the surfaced error names the Keycloak
+// host (not the backplane) and points at the --resolve knob. The message
+// must be distinct from the backplane-side auth-config discovery failure
+// (which is worded around --issuer / --client-id).
+func TestHintKeycloakResolutionNamesHostAndFlag(t *testing.T) {
+	dnsErr := &net.DNSError{Err: "no such host", Name: "kc.example.com", IsNotFound: true}
+	err := hintKeycloakResolution(dnsErr, "https://kc.example.com/realms/meho")
+	if err == nil {
+		t.Fatal("expected a wrapped error for a DNS resolution failure")
+	}
+	got := err.Error()
+	for _, want := range []string{"kc.example.com", "--resolve", "split-DNS"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error should mention %q so the operator can recover; got: %v", want, got)
+		}
+	}
+	// Distinct from the backplane discovery failure: it must NOT steer
+	// the operator at --issuer / --client-id (that's the backplane path).
+	if strings.Contains(got, "--issuer") {
+		t.Errorf("Keycloak-resolution hint should not mention --issuer (that's the backplane path); got: %v", got)
+	}
+	// The underlying DNS error stays unwrappable for callers/tests.
+	if !errors.Is(err, dnsErr) {
+		t.Errorf("hintKeycloakResolution should wrap the original error; errors.Is failed")
+	}
+}
+
+// TestHintKeycloakResolutionPassesThroughNonDNSErrors confirms the hint
+// is surgical: a non-resolution error (expired device code, timeout,
+// access_denied) is returned unchanged so the existing device-flow
+// classification still reaches the operator verbatim.
+func TestHintKeycloakResolutionPassesThroughNonDNSErrors(t *testing.T) {
+	orig := errors.New("meho: device code expired before authorisation; rerun `meho login`")
+	if got := hintKeycloakResolution(orig, "https://kc.example.com/realms/meho"); got != orig {
+		t.Errorf("non-DNS error should pass through unchanged; got: %v", got)
+	}
+	if got := hintKeycloakResolution(nil, "https://kc"); got != nil {
+		t.Errorf("nil error should pass through as nil; got: %v", got)
 	}
 }
 

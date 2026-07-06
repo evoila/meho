@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -33,6 +34,7 @@ func newLoginCmd() *cobra.Command {
 		clientIDOverride  string
 		scopes            []string
 		insecureAllowHTTP bool
+		resolveEntries    []string
 	)
 
 	cmd := &cobra.Command{
@@ -58,7 +60,16 @@ func newLoginCmd() *cobra.Command {
 			"issuer and the public device-code client_id. Pass --issuer and/or " +
 			"--client-id to skip discovery or override either half (e.g. when " +
 			"the backplane URL isn't reachable on the operator's network but " +
-			"the IdP is).",
+			"the IdP is).\n\n" +
+			"Split-DNS escape hatch: on workstations where the system resolver " +
+			"can reach the backplane host but returns NXDOMAIN for the Keycloak " +
+			"host (a common VPN split-DNS quirk), pass --resolve " +
+			"<host>:<port>:<ip> to pin that host to a known IP for the duration " +
+			"of the flow. The format mirrors `curl --resolve`; repeat the flag " +
+			"for multiple hosts. The pinned IP is only used at connect time — " +
+			"the original hostname is still sent as the TLS SNI and Host header, " +
+			"so certificate validation is unchanged. Example: " +
+			"`meho login https://<backplane> --resolve kc.example.com:443:10.0.0.5`.",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -71,6 +82,19 @@ func newLoginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Parse any --resolve host:port:ip overrides and build the
+			// HTTP client the whole flow shares. When no override is
+			// supplied this is http.DefaultClient, so the common path is
+			// unchanged; when one is, the same pinned-dial transport is
+			// threaded through auth-config discovery, OIDC discovery, and
+			// the device-code/token endpoints alike (AC #2 — the knob
+			// must reach every call site, not just discovery).
+			overrides, err := auth.ParseResolveEntries(resolveEntries)
+			if err != nil {
+				return err
+			}
+			httpClient := auth.HTTPClientWithOverrides(overrides)
 
 			// Discovery and auth-config fetches honour the ambient
 			// `cmd.Context()` deadline: those are short, bounded HTTP
@@ -91,14 +115,19 @@ func newLoginCmd() *cobra.Command {
 			// firewall) but the IdP is — meho login can still
 			// complete by skipping discovery via both --issuer and
 			// --client-id.
-			cfg, err := resolveAuthConfig(parentCtx, http.DefaultClient, backplaneURL, issuerOverride, clientIDOverride)
+			cfg, err := resolveAuthConfig(parentCtx, httpClient, backplaneURL, issuerOverride, clientIDOverride)
 			if err != nil {
 				return err
 			}
 
-			doc, err := auth.FetchDiscoveryFromRealm(parentCtx, http.DefaultClient, cfg.Issuer)
+			doc, err := auth.FetchDiscoveryFromRealm(parentCtx, httpClient, cfg.Issuer)
 			if err != nil {
-				return err
+				// OIDC discovery hits the Keycloak host, not the
+				// backplane. A DNS failure here is the split-DNS case
+				// the --resolve flag exists for; name the host that
+				// failed (distinct from the backplane-side auth-config
+				// error above) and point at the escape hatch.
+				return hintKeycloakResolution(err, cfg.Issuer)
 			}
 
 			store, err := auth.NewTokenStore()
@@ -123,13 +152,16 @@ func newLoginCmd() *cobra.Command {
 			defer cancelFlow()
 
 			result, err := auth.RunDeviceFlow(flowCtx, doc, cfg.ClientID, auth.DeviceFlowOptions{
-				HTTPClient:    http.DefaultClient,
+				HTTPClient:    httpClient,
 				Scopes:        scopes,
 				Prompter:      prompter,
 				ParentContext: parentCtx,
 			})
 			if err != nil {
-				return err
+				// The device-authorization and token endpoints also live
+				// on the Keycloak host, so the same split-DNS hint
+				// applies to a resolution failure here.
+				return hintKeycloakResolution(err, cfg.Issuer)
 			}
 
 			stored := auth.ConvertOAuthToken(result.Token, backplaneURL, result.Issuer, cfg.ClientID)
@@ -166,7 +198,37 @@ func newLoginCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&insecureAllowHTTP, "insecure-allow-http", false,
 		"permit a plaintext http:// backplane URL for a localhost backplane only "+
 			"(local-dev convenience; the bearer token is sent in the clear — never use against a remote host)")
+	cmd.Flags().StringSliceVar(&resolveEntries, "resolve", nil,
+		"pin a host to an IP for the flow, mirroring `curl --resolve <host>:<port>:<ip>` "+
+			"(split-DNS escape hatch when the Keycloak host doesn't resolve). Repeat for multiple hosts. "+
+			"TLS SNI/Host use the real hostname, so certificate validation is unaffected")
 	return cmd
+}
+
+// hintKeycloakResolution rewraps err when it was caused by DNS
+// resolution failing against the Keycloak host. The bare transport error
+// ("no such host") does not tell the operator which of the two hosts in
+// play — the backplane (which resolved fine, it's how we got the issuer)
+// or Keycloak — is unreachable, nor how to work around it. This hint
+// names the Keycloak host explicitly (distinct from the backplane-side
+// auth-config discovery failure, which is worded around --issuer /
+// --client-id) and points at the --resolve escape hatch. Any error that
+// is not a resolution failure is returned unchanged so the existing
+// device-flow classification (expired_token, access_denied, timeouts)
+// still reaches the operator verbatim.
+func hintKeycloakResolution(err error, issuer string) error {
+	if err == nil || !auth.IsHostResolutionError(err) {
+		return err
+	}
+	host := issuer
+	if u, parseErr := url.Parse(issuer); parseErr == nil && u.Host != "" {
+		host = u.Hostname()
+	}
+	return fmt.Errorf(
+		"could not resolve the Keycloak host %q (the backplane resolved fine; this is a split-DNS gap): %w; "+
+			"pass --resolve %s:443:<keycloak-ip> to pin it to a known IP for this login (mirrors `curl --resolve`)",
+		host, err, host,
+	)
 }
 
 // authConfig is what either the backplane discovery endpoint or the

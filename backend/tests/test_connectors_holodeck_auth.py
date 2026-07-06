@@ -208,7 +208,7 @@ def test_about_canary_op_remains_at_index_zero() -> None:
     """
     assert HOLODECK_OPS[0].op_id == "holodeck.about"
     assert HOLODECK_OPS[0].handler_attr == "about"
-    assert len(HOLODECK_OPS) == 8
+    assert len(HOLODECK_OPS) == 9
 
 
 # ---------------------------------------------------------------------------

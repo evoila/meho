@@ -193,6 +193,14 @@ _PLAIN_SSH_FIXTURES: dict[str, str] = {
         '  client-hostname "esxi-1";\n'
         "}\n"
     ),
+    # holodeck.disk.usage — root-fs df in bytes + du on the fixed
+    # GROWTH_DIRS (no operator path; the command strings are fixed).
+    "df -B1 /": (
+        "Filesystem     1B-blocks         Used    Available Use% Mounted on\n"
+        "/dev/sda2    79456894976  58598952960  16811528192  78% /\n"
+    ),
+    "du -sb /var/backups": "42000000000\t/var/backups\n",
+    "du -sb /holodeck-runtime": "9500000000\t/holodeck-runtime\n",
     # holodeck.k8s.exec — verbatim kubectl forward. Two fixtures here:
     # the safe `kubectl get pods` invocation that the read-only safelist
     # accepts, and an alternate `kubectl get nodes` for the second test
@@ -377,6 +385,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "holodeck.k8s.exec",
     "holodeck.logs.tail",
     "holodeck.networking.show",
+    "holodeck.disk.usage",
 )
 
 # ---------------------------------------------------------------------------
@@ -490,11 +499,11 @@ async def holodeck_e2e(
 
 
 def test_holodeck_ops_registration_count() -> None:
-    """All 8 Holodeck ops are registered in HOLODECK_OPS."""
+    """All 9 Holodeck ops are registered in HOLODECK_OPS."""
     op_ids = {op.op_id for op in HOLODECK_OPS}
     missing = set(EXPECTED_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(HOLODECK_OPS) == 8, f"Expected 8 ops, got {len(HOLODECK_OPS)}"
+    assert len(HOLODECK_OPS) == 9, f"Expected 9 ops, got {len(HOLODECK_OPS)}"
 
 
 def test_holodeck_ops_all_safe_and_no_approval_required() -> None:
@@ -505,7 +514,7 @@ def test_holodeck_ops_all_safe_and_no_approval_required() -> None:
 
 
 def test_holodeck_ops_all_have_llm_instructions() -> None:
-    """All 8 ops carry non-empty llm_instructions for agent discoverability."""
+    """All 9 ops carry non-empty llm_instructions for agent discoverability."""
     for op in HOLODECK_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions
@@ -522,7 +531,7 @@ def test_holodeck_ops_all_carry_ssh_only_transport_note() -> None:
 
     The exact phrase to look for is "Holodeck has no REST API"; the
     shared :data:`SSH_TRANSPORT_NOTE` constant guarantees consistency
-    across all 8 ops.
+    across all 9 ops.
     """
     canonical_phrase = "Holodeck has no REST API"
     pwsh_phrase = "PowerShell-over-SSH"
@@ -827,6 +836,38 @@ async def test_holodeck_e2e_networking_show_dispatches_ok(
     assert "lease 10.50.0.5" in envelope["dhcp"]["leases_text"]
 
 
+@pytest.mark.asyncio
+async def test_holodeck_e2e_disk_usage_dispatches_ok(
+    holodeck_e2e: _HolodeckE2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """holodeck.disk.usage composes root-fs df + fixed growth-dir du (G3.18-T1 #2153)."""
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "holodeck-ssh-9.0",
+            "op_id": "holodeck.disk.usage",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"holodeck.disk.usage failed: {result.get('error')}"
+    envelope = result["result"]
+    root = envelope["root_fs"]
+    assert root["ok"] is True
+    assert root["total_bytes"] == 79456894976
+    assert root["used_bytes"] == 58598952960
+    assert root["avail_bytes"] == 16811528192
+    assert root["percent_used"] == round((58598952960 / 79456894976) * 100.0, 2)
+    dirs = {d["path"]: d for d in envelope["growth_dirs"]}
+    assert set(dirs) == {"/var/backups", "/holodeck-runtime"}
+    assert dirs["/var/backups"]["used_bytes"] == 42000000000
+    assert dirs["/var/backups"]["ok"] is True
+    assert dirs["/holodeck-runtime"]["used_bytes"] == 9500000000
+    assert dirs["/holodeck-runtime"]["ok"] is True
+
+
 # ---------------------------------------------------------------------------
 # Acceptance criterion (c) — pod.list JSONFlux handle path
 # ---------------------------------------------------------------------------
@@ -965,7 +1006,7 @@ async def test_holodeck_e2e_all_ops_write_audit_rows(
     holodeck_e2e: _HolodeckE2EBundle,
     captured_events: list[Any],
 ) -> None:
-    """All 8 Holodeck ops each produce an audit row after dispatch.
+    """All 9 Holodeck ops each produce an audit row after dispatch.
 
     Dispatches every op in EXPECTED_OP_IDS and asserts that each one
     inserted at least one ``DISPATCH`` AuditLog row.

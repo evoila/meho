@@ -174,6 +174,17 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "drill-in. Transport: plain SSH for vtysh + dhcpd.leases; "
         "pwsh-over-SSH for the DNS zone summary."
     ),
+    "diagnostics": (
+        "Use for the HoloRouter's disk-pressure snapshot before a "
+        "root-fs fill evicts pods: ``holodeck.disk.usage`` returns "
+        "root-fs total/used/available bytes + percent-used plus the "
+        "byte usage of the two known growth directories "
+        "(``/var/backups``, ``/holodeck-runtime``), each with its own "
+        "``ok`` flag. Takes no path argument -- the measured dirs are "
+        "fixed in code, never operator input. Poll it for early "
+        "warning on the 74 GB root fs (VCF-9.x backup fill). "
+        "Transport: plain SSH (``df`` / ``du``)."
+    ),
 }
 
 
@@ -574,6 +585,22 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_networking_show(self, target, params)
+
+    async def disk_usage(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.disk.usage`` (G3.18-T1 #2153).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_disk_usage`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_disk_usage as _holodeck_disk_usage,
+        )
+
+        return await _holodeck_disk_usage(self, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

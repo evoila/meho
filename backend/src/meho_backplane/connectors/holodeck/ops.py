@@ -162,8 +162,9 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
 #: (``holodeck.config.show``, ``holodeck.pod.list``,
 #: ``holodeck.pod.info``, ``holodeck.service.list``,
 #: ``holodeck.k8s.exec``, ``holodeck.logs.tail``,
-#: ``holodeck.networking.show``) -- 8 ops total. The registration
+#: ``holodeck.networking.show``); G3.18-T1 (#2153) appends
+#: ``holodeck.disk.usage`` -- 9 ops total. The registration
 #: walk in :meth:`HolodeckConnector.register_operations` does not
-#: need to change between T1 and T2; only :func:`_holodeck_ops`
+#: need to change as ops are added; only :func:`_holodeck_ops`
 #: composes the merged tuple.
 HOLODECK_OPS: tuple[HolodeckOp, ...] = _holodeck_ops()

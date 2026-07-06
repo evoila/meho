@@ -134,19 +134,38 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.holodeck.connector import HolodeckConnector
 
 __all__ = [
+    "GROWTH_DIRS",
     "READ_OPS",
     "KubectlSafetyError",
     "holodeck_config_show",
+    "holodeck_disk_usage",
     "holodeck_k8s_exec",
     "holodeck_logs_tail",
     "holodeck_networking_show",
     "holodeck_pod_info",
     "holodeck_pod_list",
     "holodeck_service_list",
+    "parse_disk_usage_output",
     "parse_kubectl_command",
     "parse_logs_tail_output",
     "parse_networking_payload",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Disk-usage growth-dir constant (G3.18-T1 #2153)
+# ---------------------------------------------------------------------------
+
+#: Fixed set of HoloRouter directories the ``holodeck.disk.usage`` op
+#: measures with ``du`` alongside the root-fs ``df``. VCF-9.x fills the
+#: 74 GB root fs via backup accumulation under ``/var/backups`` plus
+#: pod-runtime growth under ``/holodeck-runtime`` (Initiative #2145);
+#: those two dirs crack ~all pre-eviction incidents. The set is a
+#: **code constant on purpose** -- the op takes no path parameter, so it
+#: can never be coerced into an arbitrary ``du`` over an operator-chosen
+#: (or attacker-chosen) path. Adding a growth dir is a code change with a
+#: review, not runtime input.
+GROWTH_DIRS: tuple[str, ...] = ("/var/backups", "/holodeck-runtime")
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +554,127 @@ def parse_networking_payload(
     }
 
 
+def _parse_df_root(df_root_text: str) -> dict[str, Any]:
+    """Parse ``df -B1 /`` byte-count output into the root-fs sub-section.
+
+    ``df -B1`` reports every column in bytes (``-B1`` = 1-byte block
+    size) so the envelope never has to reverse a human-readable suffix.
+    The expected two-line shape is::
+
+        Filesystem  1B-blocks  Used  Available Use% Mounted on
+        /dev/md2    467909804032  58598952960  385467109376  14%  /
+
+    The parser skips the header, reads the last non-empty data row
+    (a device path may soft-wrap onto its own line on very long
+    device names, in which case the counts land on the following
+    row -- taking the last row with >=4 trailing numeric-ish fields
+    is robust to that), and pulls total / used / available from the
+    1B-block columns. ``percent_used`` is computed from the byte
+    counts rather than trusting ``df``'s rounded ``Use%`` column, so
+    a scheduler polling this value sees a stable float.
+
+    Returns ``{"ok": False}`` (with null counts) when the output is
+    empty or unparseable -- mirroring the ``networking.show`` per
+    sub-section ``ok`` convention so one failed sub-command never
+    blanks the others.
+    """
+    failed: dict[str, Any] = {
+        "total_bytes": None,
+        "used_bytes": None,
+        "avail_bytes": None,
+        "percent_used": None,
+        "ok": False,
+    }
+    if not df_root_text.strip():
+        return failed
+    data_row: list[str] | None = None
+    for line in df_root_text.splitlines():
+        fields = line.split()
+        if not fields or fields[0].lower() == "filesystem":
+            continue
+        # A valid data row carries at least: device, total, used,
+        # avail, use%, mount. Require the three byte columns to be
+        # digit-only so a wrapped device-name-only line is skipped.
+        if len(fields) >= 4 and fields[1].isdigit() and fields[2].isdigit() and fields[3].isdigit():
+            data_row = fields
+    if data_row is None:
+        return failed
+    total = int(data_row[1])
+    used = int(data_row[2])
+    avail = int(data_row[3])
+    # Percent-used off the byte counts (df's Use% is rounded). Guard
+    # a zero-total (unmounted / pseudo fs) so we never divide by zero.
+    percent_used = round((used / total) * 100.0, 2) if total > 0 else None
+    return {
+        "total_bytes": total,
+        "used_bytes": used,
+        "avail_bytes": avail,
+        "percent_used": percent_used,
+        "ok": True,
+    }
+
+
+def _parse_du_bytes(path: str, du_text: str) -> dict[str, Any]:
+    """Parse ``du -sb <dir>`` output into one growth-dir sub-section.
+
+    ``du -sb`` prints a single line ``<bytes>\\t<path>``. The first
+    whitespace-delimited field is the apparent size in bytes. Empty
+    output (the sub-command failed -- ``_safe_run_text`` maps a
+    missing dir / SSH error to ``""``) or a non-numeric first field
+    yields ``ok: False`` for this entry without touching the others.
+    """
+    stripped = du_text.strip()
+    if not stripped:
+        return {"path": path, "used_bytes": None, "ok": False}
+    first_field = stripped.split()[0]
+    if not first_field.isdigit():
+        return {"path": path, "used_bytes": None, "ok": False}
+    return {"path": path, "used_bytes": int(first_field), "ok": True}
+
+
+def parse_disk_usage_output(
+    *,
+    df_root_text: str,
+    dir_usages: list[tuple[str, str]],
+) -> dict[str, Any]:
+    """Compose the ``holodeck.disk.usage`` envelope from raw command text.
+
+    Inputs:
+
+    * ``df_root_text`` -- stdout of ``df -B1 /``.
+    * ``dir_usages`` -- ``[(path, du_stdout), ...]`` in
+      :data:`GROWTH_DIRS` order; one ``du -sb`` run per growth dir.
+
+    Returns:
+
+    .. code-block:: python
+
+        {
+            "root_fs": {
+                "total_bytes": 467909804032,
+                "used_bytes": 58598952960,
+                "avail_bytes": 385467109376,
+                "percent_used": 12.52,
+                "ok": True,
+            },
+            "growth_dirs": [
+                {"path": "/var/backups", "used_bytes": 40000000000, "ok": True},
+                {"path": "/holodeck-runtime", "used_bytes": None, "ok": False},
+            ],
+        }
+
+    Each sub-section carries its own ``ok`` flag; a failed ``df`` or a
+    single failed ``du`` (empty / unparseable output) flips only that
+    entry's ``ok`` to ``False`` while the rest of the envelope stays
+    populated -- the same failure-isolation contract
+    :func:`parse_networking_payload` follows for ``networking.show``.
+    """
+    return {
+        "root_fs": _parse_df_root(df_root_text),
+        "growth_dirs": [_parse_du_bytes(path, du_text) for path, du_text in dir_usages],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handler functions (bound-method shims on HolodeckConnector)
 # ---------------------------------------------------------------------------
@@ -853,6 +993,48 @@ async def holodeck_networking_show(
         dns_zones_json=dns_zones_payload,
         dhcp_leases_text=dhcp_text,
     )
+
+
+async def holodeck_disk_usage(
+    self: HolodeckConnector,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Report root-fs usage plus the fixed growth-dir set.
+
+    Op-id: ``holodeck.disk.usage``. Runs, over the pooled SSH
+    connection:
+
+    1. ``df -B1 /`` -- root-fs total / used / available in bytes.
+    2. ``du -sb <dir>`` for each dir in :data:`GROWTH_DIRS`
+       (``/var/backups``, ``/holodeck-runtime``) -- the two known
+       VCF-9.x root-fill sources.
+
+    The op takes **no** path parameter: the growth-dir set is the
+    :data:`GROWTH_DIRS` module constant, so this can never become an
+    arbitrary ``du`` over operator-supplied input. Each dir token is
+    still ``shlex.quote``- d before interpolation as belt-and-braces
+    (the constants contain no metacharacters today, but a future edit
+    to the constant is protected from accidentally breaking the
+    quoting invariant).
+
+    Sub-command failures are isolated the way ``networking.show``
+    isolates its four sub-sections: each runs through
+    :func:`_safe_run_text` (SSH / OSError -> empty string), and
+    :func:`parse_disk_usage_output` flips only the empty entry's
+    ``ok`` to ``False`` -- a missing ``/var/backups`` never blanks
+    the root-fs numbers or the other growth dir. Read-only; issues
+    no mutating command.
+    """
+    del params  # declared empty; intentionally ignored
+
+    df_root_text = await _safe_run_text(self, target, "df -B1 /")
+    dir_usages: list[tuple[str, str]] = []
+    for path in GROWTH_DIRS:
+        du_text = await _safe_run_text(self, target, f"du -sb {shlex.quote(path)}")
+        dir_usages.append((path, du_text))
+
+    return parse_disk_usage_output(df_root_text=df_root_text, dir_usages=dir_usages)
 
 
 # ---------------------------------------------------------------------------
@@ -1434,6 +1616,82 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "routes are operator-formatted text (vtysh output); "
                 "DNS is structured (parsed JSON); DHCP is the raw "
                 "leases file."
+            ),
+        },
+    ),
+    HolodeckOp(
+        op_id="holodeck.disk.usage",
+        handler_attr="disk_usage",
+        summary="Root-fs usage plus fixed growth-dir usage for pre-eviction disk diagnosis.",
+        description=(
+            "Runs ``df -B1 /`` for the HoloRouter root filesystem plus "
+            "``du -sb`` on a fixed, code-constant set of known growth "
+            "directories (``/var/backups``, ``/holodeck-runtime``) over "
+            "the pooled SSH connection. Returns an envelope with a "
+            "``root_fs`` sub-section (total / used / available bytes + "
+            "computed ``percent_used``) and a ``growth_dirs`` list "
+            "(per-dir ``used_bytes``), each carrying its own ``ok`` flag "
+            "so one failed sub-command doesn't blank the others. Takes "
+            "no path parameter -- the growth-dir set is fixed in code, "
+            "so it can never become an arbitrary ``du``. Read-only; the "
+            "value is stable enough for a scheduler to poll for "
+            "early-warning on a filling 74 GB root fs (VCF-9.x backup "
+            "fill)."
+        ),
+        parameter_schema=_EMPTY_PARAMS,
+        response_schema={
+            "type": "object",
+            "properties": {
+                "root_fs": {
+                    "type": "object",
+                    "properties": {
+                        "total_bytes": {"type": ["integer", "null"]},
+                        "used_bytes": {"type": ["integer", "null"]},
+                        "avail_bytes": {"type": ["integer", "null"]},
+                        "percent_used": {"type": ["number", "null"]},
+                        "ok": {"type": "boolean"},
+                    },
+                },
+                "growth_dirs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "used_bytes": {"type": ["integer", "null"]},
+                            "ok": {"type": "boolean"},
+                        },
+                    },
+                },
+            },
+            "additionalProperties": True,
+        },
+        group_key="diagnostics",
+        tags=("read-only", "diagnostics", "disk", "holodeck"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Call when the operator (or a scheduler) needs the "
+                "HoloRouter's disk pressure before a root-fs fill "
+                "evicts pods: root-fs total/used/available + "
+                "percent-used, plus the byte usage of the two known "
+                "growth directories (``/var/backups``, "
+                "``/holodeck-runtime``). This is the complete "
+                "pre-eviction diagnostic signal -- pair it with "
+                "``holodeck.logs.tail`` to find what is writing. Takes "
+                "no path argument; the measured dirs are fixed in "
+                "code. " + _SSH_TRANSPORT_NOTE
+            ),
+            "parameter_hints": {},
+            "output_shape": (
+                "``{root_fs: {total_bytes, used_bytes, avail_bytes, "
+                "percent_used, ok}, growth_dirs: [{path, used_bytes, "
+                "ok}, ...]}``. All byte counts are integers "
+                "(``df -B1`` / ``du -sb`` -- 1-byte block size). "
+                "``percent_used`` is computed from the byte counts. "
+                "Each sub-section's ``ok`` flips false when its "
+                "sub-command failed or produced empty output."
             ),
         },
     ),

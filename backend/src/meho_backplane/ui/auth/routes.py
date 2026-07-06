@@ -119,6 +119,7 @@ from meho_backplane.ui.auth.session_store import (
 )
 
 __all__ = [
+    "AUTHORIZATION_STATE_EXPIRED_DETAIL",
     "LOGIN_PATH",
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_MARGIN_SECONDS",
@@ -154,6 +155,21 @@ SESSION_TTL_MARGIN_SECONDS: Final[int] = 60
 #: Default landing path when no ``?return_to`` is supplied on
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
 _DEFAULT_RETURN_TO: Final[str] = "/ui/"
+
+#: Detail code for the *recoverable* callback-state failure class --
+#: an expired/mismatched ``state``, a verifier-store miss, or authlib's
+#: :class:`MismatchingStateError` on ``GET /ui/auth/callback`` (G0.29
+#: #2089, Leg 1). Distinct from the generic ``authorization_failed``
+#: used by the genuine IdP ``?error=`` path so the app-level handler in
+#: :mod:`meho_backplane.ui.auth.errors` can map *only this class* to a
+#: one-click login restart for HTML navigations, without collapsing the
+#: IdP-declined (:func:`_raise_idp_error`) or token-endpoint-unreachable
+#: (502) paths into "start over". Like ``authorization_failed`` it
+#: names a *class* of recoverable states, not the precise sub-cause --
+#: the specific failure stays in structlog only (the
+#: ``_exchange_or_translate`` log discipline), so the body still does
+#: not telegraph what an attacker probed.
+AUTHORIZATION_STATE_EXPIRED_DETAIL: Final[str] = "authorization_state_expired"
 
 
 def compute_redirect_uri() -> str:
@@ -362,10 +378,15 @@ async def _exchange_or_translate(
             detail=MISSING_CLIENT_SECRET_DETAIL,
         ) from None
     except (OAuthFlowError, MismatchingStateError, OAuthError) as exc:
-        # State mismatch / verifier-store miss / IdP-side rejection
-        # all collapse to one 400. The specific cause goes to
-        # structlog only -- telegraphing it in the body helps an
-        # attacker probe.
+        # State mismatch / verifier-store miss / expired verifier all
+        # collapse to one 400. The specific cause goes to structlog
+        # only -- telegraphing it in the body helps an attacker probe.
+        # This class is *recoverable*: a fresh /ui/auth/login round-trip
+        # succeeds. It carries a detail distinct from the IdP-declined
+        # ``authorization_failed`` (:func:`_raise_idp_error`) so the
+        # app-level handler can offer a one-click restart on HTML
+        # navigations (G0.29 #2089) without collapsing the genuine
+        # IdP error or the token-endpoint 502 into "start over".
         log.warning(
             "ui_auth_callback_rejected",
             error_class=type(exc).__name__,
@@ -373,7 +394,7 @@ async def _exchange_or_translate(
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="authorization_failed",
+            detail=AUTHORIZATION_STATE_EXPIRED_DETAIL,
         ) from exc
     except httpx.HTTPError as exc:
         log.warning(

@@ -14,12 +14,17 @@ Initiative #341 (G10.4 Memory UI), Task #877 (T1). The chassis
   server-side; never trusts a client-supplied role hint),
 * the create / promote handlers T2 #878 will add on this same router.
 
-The dependency loads the encrypted session row (via the same
-:func:`~meho_backplane.ui.auth.session_store.load_session` the chassis
-middleware uses), decrypts the access token, and re-runs it through
-:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` to produce a
-fully-validated :class:`Operator`. The JWT chain caches the JWKS in
-process so the round-trip is local-only after the first hit.
+The dependency loads the encrypted session row through the shared
+refresh seam (:func:`~meho_backplane.ui.auth.refresh.load_fresh_session`),
+decrypts the access token, and re-runs it through
+:func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`
+(G0.25 #1694, adopted memory-wide by #2056) to produce a
+fully-validated :class:`Operator`. That seam silently refreshes once on
+the ``token_expired`` 401 and re-verifies before failing closed to
+``session_expired`` -- so an expired-but-refreshable access token on a
+memory write no longer leaks the raw ``token_expired`` body to the
+browser (#2088). The JWT chain caches the JWKS in process so the
+round-trip is local-only after the first hit.
 
 Why not store the role on the session row
 -----------------------------------------

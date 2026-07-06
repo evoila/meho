@@ -1,0 +1,460 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal, self-contained OpenAPI 3.0 description of the subset of the
+# Hetzner Robot Webservice REST API that MEHO ingests for the
+# `hetzner-rest-2026.04` connector shell (#2079, Parent goal #221).
+#
+# WHY THIS FILE EXISTS. The Hetzner Robot Webservice publishes no OpenAPI
+# document at all -- its API is documented only as HTML/Markdown at
+# https://robot.hetzner.com/doc/webservice/en.html. Without a spec the
+# `hetzner-rest-2026.04` connector registers empty (`operation_count=0`)
+# and the physical-layer infra leg (dedicated-server inventory, vSwitch
+# membership, per-server firewall, rDNS, server_addon orders) has no meho
+# path -- it stays on the local `hetzner-robot.sh` wrapper. This
+# MEHO-authored minimal spec ships as package data so
+# `meho connector ingest --product hetzner --version 2026.04
+# --impl hetzner-rest --spec <this-file>` yields dispatchable operations
+# that resolve to the hand-rolled HetznerRobotConnector.
+#
+# SCOPE. The handful of ops the local wrapper covers, per the #2079
+# acceptance criteria: list/get servers, vSwitch get + membership,
+# per-server firewall get/set, reverse DNS, and the server_addon order.
+# The read GETs (server list/get, vswitch list/get, firewall get, rdns)
+# are the ops the curated read-only core enables today
+# (connectors/hetzner_robot/core_ops.py, ROBOT_CORE_OPS); the write ops
+# (vSwitch membership POST/DELETE, firewall set, server_addon order) are
+# declared so the ingested corpus covers the full wrapper surface and the
+# G3.x write-surface curation has a descriptor to enable when it lands.
+#
+# WIRE PATHS. Robot's REST paths are flat (one resource per root segment)
+# and MUST be reproduced verbatim -- the dispatcher addresses the real
+# Webservice with the persisted `path` / `op_id` (op_id = `METHOD:path`).
+# The GET op_ids here (GET:/server, GET:/server/{server-ip},
+# GET:/vswitch, GET:/vswitch/{id}, GET:/firewall/{server-ip}, GET:/rdns)
+# match the paths cross-checked in ROBOT_CORE_OPS so the ingested rows and
+# the curated core agree on the same op_id strings.
+#
+# NO `servers` BLOCK. #1796 made the OpenAPI Server Object load-bearing --
+# the ingest parser folds a relative `servers[].url` onto every op path.
+# Robot's paths are already root-absolute (`/server`, `/vswitch`), so
+# declaring a `servers` base would double-prefix them. The base URL is the
+# per-target host (robot-ws.your-server.de) resolved at dispatch time.
+#
+# CONSTRAINTS. OpenAPI 3.0 (the parser rejects Swagger 2.0); self-contained
+# with only local `$ref`s (the parser rejects cross-document `$ref`); every
+# operation declares an `operationId`. Dry-run-parsed by the ingest test
+# with the same `parse_openapi` the live ingest uses, so a malformed spec
+# fails CI rather than 500-ing the first `--spec` ingest.
+openapi: "3.0.3"
+info:
+  title: Hetzner Robot Webservice API (MEHO minimal subset)
+  version: "2026.04"
+  description: >-
+    MEHO-authored minimal subset of the Hetzner Robot Webservice REST API.
+    Covers the dedicated-server inventory, vSwitch, per-server firewall,
+    reverse-DNS, and server_addon-order operations MEHO ingests; not a full
+    vendor spec (the vendor publishes no OpenAPI document). Authenticates
+    with HTTP Basic against the dedicated Webservice user, distinct from the
+    Robot portal login user. SPDX-License-Identifier: Apache-2.0.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+paths:
+  /server:
+    get:
+      operationId: listServers
+      summary: List dedicated servers
+      description: >-
+        List the dedicated servers owned by the account. Each entry carries
+        the server number, primary IP, product name, datacenter, and traffic
+        plan.
+      responses:
+        "200":
+          description: A list of dedicated servers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ServerEnvelope"
+  /server/{server-ip}:
+    get:
+      operationId: getServer
+      summary: Get one dedicated server
+      description: >-
+        Return the full detail of one dedicated server addressed by its
+        primary IP.
+      parameters:
+        - name: server-ip
+          in: path
+          required: true
+          description: The server's primary IP address.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerEnvelope"
+  /vswitch:
+    get:
+      operationId: listVswitches
+      summary: List vSwitches
+      description: >-
+        List the vSwitches configured on the account with their VLAN and
+        member-server assignments.
+      responses:
+        "200":
+          description: A list of vSwitches.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VswitchEnvelope"
+  /vswitch/{id}:
+    get:
+      operationId: getVswitch
+      summary: Get one vSwitch
+      description: >-
+        Return the full detail of one vSwitch by its numeric id, including
+        all member servers and their statuses.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The vSwitch numeric id.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested vSwitch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VswitchEnvelope"
+    post:
+      operationId: addVswitchServers
+      summary: Add servers to a vSwitch
+      description: >-
+        Add one or more dedicated servers to a vSwitch's VLAN membership.
+        The Robot Webservice expects the server IPs as form fields; the body
+        below is the JSON-schema view of those fields.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The vSwitch numeric id.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VswitchMembershipRequest"
+      responses:
+        "200":
+          description: Membership add accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VswitchEnvelope"
+    delete:
+      operationId: removeVswitchServers
+      summary: Remove servers from a vSwitch
+      description: >-
+        Remove one or more dedicated servers from a vSwitch's VLAN
+        membership.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The vSwitch numeric id.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VswitchMembershipRequest"
+      responses:
+        "200":
+          description: Membership remove accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VswitchEnvelope"
+  /firewall/{server-ip}:
+    get:
+      operationId: getFirewall
+      summary: Get a server's firewall
+      description: >-
+        Return the packet-filter firewall configuration applied to the
+        dedicated server addressed by its primary IP: the active status,
+        the whitelist-Hetzner-services flag, and the ordered rule set.
+      parameters:
+        - name: server-ip
+          in: path
+          required: true
+          description: The server's primary IP address.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The server's firewall configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirewallEnvelope"
+    post:
+      operationId: setFirewall
+      summary: Set a server's firewall
+      description: >-
+        Replace the packet-filter firewall configuration for the dedicated
+        server addressed by its primary IP. The Robot Webservice expects the
+        rule set as form fields; the body below is the JSON-schema view.
+      parameters:
+        - name: server-ip
+          in: path
+          required: true
+          description: The server's primary IP address.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FirewallConfig"
+      responses:
+        "200":
+          description: Firewall update accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirewallEnvelope"
+  /rdns:
+    get:
+      operationId: listRdns
+      summary: List reverse-DNS entries
+      description: >-
+        List every reverse-DNS (PTR) entry set on the account's IPs.
+      responses:
+        "200":
+          description: A list of reverse-DNS entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RdnsEnvelope"
+  /rdns/{ip}:
+    get:
+      operationId: getRdns
+      summary: Get one reverse-DNS entry
+      description: Return the reverse-DNS (PTR) entry for one IP address.
+      parameters:
+        - name: ip
+          in: path
+          required: true
+          description: The IP address whose PTR record is read.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The reverse-DNS entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RdnsEnvelope"
+  /order/server_addon/transaction:
+    post:
+      operationId: orderServerAddon
+      summary: Order a server addon
+      description: >-
+        Place an order for a server addon (e.g. an additional IP, subnet, or
+        capacity upgrade) against a dedicated server. Returns the addon
+        transaction record with its id and status.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerAddonOrderRequest"
+      responses:
+        "201":
+          description: Addon order transaction created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerAddonTransactionEnvelope"
+components:
+  schemas:
+    ServerEnvelope:
+      type: object
+      description: >-
+        The Robot Webservice wraps each server object under a ``server`` key.
+      properties:
+        server:
+          $ref: "#/components/schemas/Server"
+    Server:
+      type: object
+      description: A dedicated server inventory entry.
+      properties:
+        server_ip:
+          type: string
+        server_number:
+          type: integer
+        server_name:
+          type: string
+        product:
+          type: string
+        dc:
+          type: string
+        traffic:
+          type: string
+        status:
+          type: string
+        cancelled:
+          type: boolean
+        paid_until:
+          type: string
+    VswitchEnvelope:
+      type: object
+      description: The Robot Webservice wraps each vSwitch under a ``vswitch`` key.
+      properties:
+        vswitch:
+          $ref: "#/components/schemas/Vswitch"
+    Vswitch:
+      type: object
+      description: A vSwitch with its VLAN and member servers.
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        vlan:
+          type: integer
+        cancelled:
+          type: boolean
+        server:
+          type: array
+          items:
+            $ref: "#/components/schemas/VswitchMember"
+    VswitchMember:
+      type: object
+      description: One member server of a vSwitch.
+      properties:
+        server_ip:
+          type: string
+        server_number:
+          type: integer
+        status:
+          type: string
+    VswitchMembershipRequest:
+      type: object
+      description: The set of server IPs to add to or remove from a vSwitch.
+      properties:
+        server:
+          type: array
+          description: The primary IPs of the servers to add or remove.
+          items:
+            type: string
+      required:
+        - server
+    FirewallEnvelope:
+      type: object
+      description: The Robot Webservice wraps the firewall under a ``firewall`` key.
+      properties:
+        firewall:
+          $ref: "#/components/schemas/FirewallConfig"
+    FirewallConfig:
+      type: object
+      description: A server's packet-filter firewall configuration.
+      properties:
+        status:
+          type: string
+          description: Active status of the firewall (e.g. active, disabled).
+        whitelist_hos:
+          type: boolean
+          description: Whether Hetzner online services are whitelisted.
+        rules:
+          $ref: "#/components/schemas/FirewallRules"
+    FirewallRules:
+      type: object
+      description: The ordered inbound/outbound rule sets.
+      properties:
+        input:
+          type: array
+          items:
+            $ref: "#/components/schemas/FirewallRule"
+        output:
+          type: array
+          items:
+            $ref: "#/components/schemas/FirewallRule"
+    FirewallRule:
+      type: object
+      description: One packet-filter rule.
+      properties:
+        name:
+          type: string
+        src_ip:
+          type: string
+        dst_ip:
+          type: string
+        dst_port:
+          type: string
+        protocol:
+          type: string
+        action:
+          type: string
+    RdnsEnvelope:
+      type: object
+      description: The Robot Webservice wraps each rDNS entry under an ``rdns`` key.
+      properties:
+        rdns:
+          $ref: "#/components/schemas/Rdns"
+    Rdns:
+      type: object
+      description: A reverse-DNS (PTR) entry.
+      properties:
+        ip:
+          type: string
+        ptr:
+          type: string
+    ServerAddonOrderRequest:
+      type: object
+      description: An order for a server addon against a dedicated server.
+      properties:
+        server_number:
+          type: integer
+          description: The server the addon is ordered for.
+        product:
+          type: string
+          description: The addon product id (e.g. an additional-IP product).
+      required:
+        - server_number
+        - product
+    ServerAddonTransactionEnvelope:
+      type: object
+      description: The Robot Webservice wraps the transaction under a ``transaction`` key.
+      properties:
+        transaction:
+          $ref: "#/components/schemas/ServerAddonTransaction"
+    ServerAddonTransaction:
+      type: object
+      description: A server-addon order transaction record.
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        server_number:
+          type: integer
+        product:
+          type: string

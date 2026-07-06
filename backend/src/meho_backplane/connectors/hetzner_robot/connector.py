@@ -80,7 +80,10 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.system_operator import (
+    is_system_operator,
+    synthesise_system_operator,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.hetzner_robot.session import (
     HetznerRobotCredentialsLoader,
@@ -172,17 +175,18 @@ class HetznerRobotConnector(HttpConnector):
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
-        them, and reuses the cached values on subsequent calls.  ``operator``
-        is accepted for the shared HTTP auth surface (G3.9-T1) but unused —
-        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
-        Vault-sourced Webservice-user credential, not the operator's OIDC
-        token.  Threading the operator into Hetzner Robot's credential loader
-        is #G3.10.
+        them, and reuses the cached values on subsequent calls.  The full
+        ``operator`` is forwarded to :meth:`_load_credentials` so the live
+        default loader (#2079) reads the per-target Vault secret under the
+        operator's identity (``vault_client_for_operator(operator)``).
+        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` selects the Vault-sourced
+        Webservice-user credential once the loader has resolved it; the
+        operator's JWT only authenticates the Vault read, not the Robot
+        request itself.
 
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is anything
         other than ``shared_service_account`` or ``None``.
         """
-        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -190,23 +194,34 @@ class HetznerRobotConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        creds = await self._load_credentials(target)
+        creds = await self._load_credentials(target, operator)
         return {"Authorization": _basic_auth_header(creds["username"], creds["password"])}
 
-    async def _load_credentials(self, target: HetznerRobotTargetLike) -> dict[str, str]:
+    async def _load_credentials(
+        self, target: HetznerRobotTargetLike, operator: Operator
+    ) -> dict[str, str]:
         """Return the cached credentials for *target*, loading from Vault on first use.
 
         The lock serialises concurrent first-use callers for the same target.
         The loaded dict must contain ``"username"`` and ``"password"`` keys;
         missing keys raise :exc:`RuntimeError` naming the target and the missing
         key so operators can identify a misconfigured Vault path.
+
+        ``operator`` is forwarded to the :class:`HetznerRobotCredentialsLoader`
+        so the default loader reads the per-target Vault secret under the
+        operator's identity. The cache fast-path is closed to the synthesised
+        system operator (:func:`is_system_operator`): a system/operator-less
+        caller always runs the loader so its fail-closed guard applies, and can
+        never be served warm credentials a real operator primed but it could
+        not resolve itself (#1008). Real-operator behaviour is unchanged —
+        cold load → cache → reuse.
         """
         cache_key = target_cache_key(target)
         async with self._creds_lock:
             cached = self._creds_cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and not is_system_operator(operator):
                 return cached
-            raw = await self._credentials_loader(target)
+            raw = await self._credentials_loader(target, operator)
             try:
                 _ = raw["username"]
                 _ = raw["password"]

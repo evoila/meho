@@ -465,7 +465,7 @@ async def _register_leaf_typed_ops(stub_embedding_service: AsyncMock) -> None:
 
 
 async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> None:
-    """Register the connector, all 14 composites, and the leaf typed ops."""
+    """Register the connector, all 15 composites, and the leaf typed ops."""
     register_connector_v2(
         product="vmware",
         version="9.0",

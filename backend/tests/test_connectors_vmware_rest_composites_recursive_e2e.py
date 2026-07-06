@@ -17,7 +17,7 @@ composite, ``vmware.composite.host.evacuate`` (G3.1-T6 / #509):
 1. Register a no-op vmware connector class against
    ``(product="vmware", version="9.0", impl_id="vmware-rest")``.
 2. Register the **real** :func:`register_vmware_composite_operations`
-   runner, which lands all 14 composite rows (including ``vm.migrate``
+   runner, which lands all 15 composite rows (including ``vm.migrate``
    and ``host.evacuate``).
 3. Register the leaf typed sub-ops the recursive chain bottoms out on
    (``GET:/vcenter/vm`` listing, ``GET:/vcenter/cluster/{cluster}/drs/
@@ -367,8 +367,8 @@ async def test_host_evacuate_e2e_through_production_dispatch_builds_3_level_audi
         impl_id="vmware-rest",
         cls=_NoOpVmwareConnector,
     )
-    # Register all 14 composite rows (vm.migrate + host.evacuate are
-    # the two the test exercises; the other 12 ride along harmlessly).
+    # Register all 15 composite rows (vm.migrate + host.evacuate are
+    # the two the test exercises; the other 13 ride along harmlessly).
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Register the 4 leaf typed sub-ops the recursive chain bottoms on.
     await _register_leaf_typed_ops(stub_embedding_service)

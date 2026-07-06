@@ -35,6 +35,7 @@ from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
 )
 from meho_backplane.connectors.github.composites._register import (
+    UnbackedEnabledCompositeError,
     register_github_composite_operations,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
@@ -46,6 +47,7 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 register_typed_op_registrar(register_github_composite_operations)
 
 __all__ = [
+    "UnbackedEnabledCompositeError",
     "pr_status_summary_composite",
     "preflight_l2_dependencies",
     "register_github_composite_operations",

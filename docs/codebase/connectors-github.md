@@ -75,6 +75,22 @@ fully-backed composites never gain the marker. The MCP
 `search_operations` `outputSchema` carries the two fields so the agent
 transport sees the same shape.
 
+The listing marker keeps a *registered* composite honest, but nothing
+stopped a future composite from shipping **enabled** with no backing
+entry at all — it would then reappear on the listing as plainly enabled
+and dead-end at `composite_l2_missing` on first dispatch, exactly the
+pre-#1757 state. `_register.py`'s `_register_and_assert_composite_backings`
+closes that at **connector load** (#2050): after registering each
+composite's backing it asserts every enabled composite that dispatches
+raw L2 sub-ops has a backing whose `sub_op_ids` match the spec, raising
+`UnbackedEnabledCompositeError` otherwise. The check reads the spec's own
+`sub_op_ids` — the same `_register.py` spec ⇄ `_read.py` `_SUB_OPS_*`
+source of truth the preflight and the marker already share — so it
+asserts the *wiring*, not the DB state (legitimately empty on a fresh
+deploy before `meho connector ingest --catalog gh/3`). A composite added
+without its backing, or with a drifting sub-op tuple, fails loudly at
+import rather than regressing silently.
+
 Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
 intentionally conservative: an unexpected payload shape collapses to
 `"unknown"` rather than guessing, and `_summarize_reviews` honours

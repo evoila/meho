@@ -63,11 +63,60 @@ from meho_backplane.connectors.github.composites.schemas import (
     PR_STATUS_SUMMARY_PARAMETER_SCHEMA,
     PR_STATUS_SUMMARY_RESPONSE_SCHEMA,
 )
-from meho_backplane.operations.composite_backing import register_composite_backing
+from meho_backplane.operations.composite_backing import (
+    register_composite_backing,
+    registered_composite_backing,
+)
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
-__all__ = ["register_github_composite_operations"]
+__all__ = [
+    "UnbackedEnabledCompositeError",
+    "register_github_composite_operations",
+]
+
+
+#: Infix marking a composite-to-composite recursion sub-op
+#: (``gh.composite.*``). Such sub-ops are registered by the lifespan
+#: registrar, not catalog-ingested, so they never need a backing entry --
+#: the assertion below skips a composite whose sub-ops are *all* of this
+#: form. Kept in sync with ``composite_backing._COMPOSITE_OP_INFIX`` (the
+#: presence walk skips the same shape); raw-REST L2 primitives are
+#: ``METHOD:/path`` strings and never contain it.
+_COMPOSITE_OP_INFIX = ".composite."
+
+
+class UnbackedEnabledCompositeError(RuntimeError):
+    """An enabled gh-rest composite dispatches raw L2 sub-ops with no backing.
+
+    Raised at import time (connector load) when a composite in
+    :data:`_COMPOSITES` dispatches into raw-REST L2 sub-ops but has no
+    :func:`~meho_backplane.operations.composite_backing.register_composite_backing`
+    entry, or its registered ``sub_op_ids`` drift from the spec's.
+
+    Every composite in :data:`_COMPOSITES` is an *enabled*
+    ``endpoint_descriptor`` row (``is_enabled=True``), so it surfaces on
+    the op listing as a callable hit. When its raw L2 sub-ops are not yet
+    ingested, the only thing that keeps the listing honest -- flagging the
+    hit ``unbacked`` with the catalog-ingest ``next_step`` instead of
+    advertising a working read it can't perform -- is the backing registry
+    entry the listing consults. A composite that reaches the descriptor
+    upsert without a matching backing would regress silently to the
+    pre-#1757 "enabled-but-``composite_l2_missing``" dead-end (#2050). This
+    guard fails loudly at connector load so that regression can't ship.
+    """
+
+
+def _composite_dispatches_raw_l2(spec: _CompositeSpec) -> bool:
+    """Return ``True`` when *spec* dispatches into at least one raw L2 sub-op.
+
+    A composite whose ``sub_op_ids`` are all composite-to-composite
+    recursion (``gh.composite.*``) needs no backing: its sub-ops are
+    guaranteed by the lifespan registrar, never catalog-ingested, so the
+    listing can never mark it ``unbacked``. Only composites that hit a
+    raw-REST primitive (``METHOD:/path``) need the backing safety net.
+    """
+    return any(_COMPOSITE_OP_INFIX not in sub_op for sub_op in spec.sub_op_ids)
 
 
 # Natural-key shorthand. Every gh-rest composite registers against the
@@ -159,25 +208,69 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
 )
 
 
-# Import-time backing registration (G0.25-T6 #1757). A pure in-process
-# dict write -- no DB / embedding work -- so it runs at import (when this
-# module is first loaded, alongside the package ``__init__``'s
-# lifespan-registrar queueing), well before any request reaches the op
-# listing. This lets ``search_operations`` mark a composite ``unbacked``
-# with the catalog-ingest ``next_step`` while its L2 sub-ops are absent,
-# instead of advertising it as enabled-but-broken until the first
-# dispatch trips ``composite_l2_missing``. The ``connector_id`` +
-# ``catalog_command`` are the same values the preflight's
-# ``CompositeL2DependencyMissing`` carries, and ``sub_op_ids`` is the same
-# tuple the handler hands the preflight -- one source of truth across the
-# listing and the dispatch.
-for _spec in _COMPOSITES:
-    register_composite_backing(
-        composite_op_id=_spec.op_id,
-        connector_id=_CONNECTOR_ID,
-        sub_op_ids=_spec.sub_op_ids,
-        catalog_command=catalog_command_for_github_rest(),
-    )
+def _register_and_assert_composite_backings() -> None:
+    """Register each composite's backing, then assert the safety net holds.
+
+    Import-time (connector load). A pure in-process dict write -- no DB /
+    embedding work -- so it runs when this module is first loaded,
+    alongside the package ``__init__``'s lifespan-registrar queueing, well
+    before any request reaches the op listing.
+
+    Registration (G0.25-T6 #1757) lets ``search_operations`` mark a
+    composite ``unbacked`` with the catalog-ingest ``next_step`` while its
+    L2 sub-ops are absent, instead of advertising it as enabled-but-broken
+    until the first dispatch trips ``composite_l2_missing``. The
+    ``connector_id`` + ``catalog_command`` are the same values the
+    preflight's ``CompositeL2DependencyMissing`` carries, and
+    ``sub_op_ids`` is the same tuple the handler hands the preflight --
+    one source of truth across the listing and the dispatch.
+
+    The assertion (#2050) is the connector-load guard the listing marker
+    alone could not provide: every composite in :data:`_COMPOSITES` ships
+    *enabled* (``is_enabled=True``), so on a fresh deploy -- before any
+    ``meho connector ingest --catalog gh/3`` -- its raw L2 sub-ops are not
+    resolvable. The composite must NOT then advertise a working read it
+    can't perform; the ``unbacked`` marker keeps the listing honest, but
+    *only if* the backing was registered. This function asserts every
+    enabled composite that dispatches raw L2 sub-ops has a backing whose
+    ``sub_op_ids`` match the spec, so a future composite added without its
+    backing (or with a drifting sub-op tuple) fails loudly here rather
+    than regressing silently to the pre-#1757 dead-end. The check reads
+    the spec's own ``sub_op_ids`` -- the same single source of truth
+    (``_register.py`` spec ⇄ ``_read.py`` ``_SUB_OPS_*``) the preflight
+    and the listing marker already share -- so it asserts the wiring, not
+    the DB state (which is legitimately empty on a fresh deploy).
+    """
+    for spec in _COMPOSITES:
+        register_composite_backing(
+            composite_op_id=spec.op_id,
+            connector_id=_CONNECTOR_ID,
+            sub_op_ids=spec.sub_op_ids,
+            catalog_command=catalog_command_for_github_rest(),
+        )
+
+    for spec in _COMPOSITES:
+        if not _composite_dispatches_raw_l2(spec):
+            continue
+        backing = registered_composite_backing(spec.op_id)
+        if backing is None:
+            raise UnbackedEnabledCompositeError(
+                f"enabled composite {spec.op_id!r} dispatches raw L2 sub-ops "
+                f"{spec.sub_op_ids!r} but registered no composite backing; the op "
+                f"listing cannot mark it 'unbacked', so its first dispatch on a "
+                f"fresh deploy would dead-end at composite_l2_missing. Register "
+                f"the backing in this module's load path."
+            )
+        if backing.sub_op_ids != spec.sub_op_ids:
+            raise UnbackedEnabledCompositeError(
+                f"composite {spec.op_id!r} backing sub_op_ids {backing.sub_op_ids!r} "
+                f"drift from the spec's {spec.sub_op_ids!r}; the listing's 'unbacked' "
+                f"probe and the dispatch-time preflight would disagree on what the "
+                f"composite hits. Keep the backing and the spec on one source of truth."
+            )
+
+
+_register_and_assert_composite_backings()
 
 
 async def register_github_composite_operations(

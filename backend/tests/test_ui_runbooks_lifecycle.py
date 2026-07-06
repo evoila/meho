@@ -1112,3 +1112,111 @@ def test_detail_session_expired_redirects_admin_to_reauth() -> None:
     assert response.status_code == 302, response.text
     assert response.headers["location"].startswith("/ui/auth/login?return_to=")
     assert "Step details are restricted" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Banner-bypass truthfulness + soft-fail diagnostic (#2112)
+#
+# Finding 2's real residual (per the triage against v0.19.0): the restriction
+# banner's "A tenant administrator can see them at any time" clause IS wired
+# (``_resolve_detail_admin`` -> ``restricted=False`` + full steps). The tester
+# saw the restricted banner only because their admin role lift silently
+# soft-failed. So: (a) pin the clause truthful via the real admin path, and
+# (b) surface a diagnostic when the lift degrades so a genuine admin is never
+# silently downgraded onto the restricted banner with no signal.
+# ---------------------------------------------------------------------------
+
+
+def test_detail_admin_sees_full_steps_banner_clause_truthful() -> None:
+    """A tenant_admin sees full steps -- the banner's admin-bypass clause is truthful.
+
+    Exercises the admin path end-to-end (``_resolve_detail_admin`` ->
+    ``restricted=False`` + full ``_render_steps``). The restricted notice --
+    including the "A tenant administrator can see them at any time" clause --
+    is absent because the admin is never restricted. No wording change is
+    applied: the bypass is already wired, so the clause is accurate.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # Published so the manual-body step renders on the (unrestricted) admin view.
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The admin is NOT restricted: no opacity banner, no admin-bypass clause.
+    assert "Step details are restricted" not in body
+    assert "A tenant administrator" not in body
+    # The full steps render for the admin (the "Steps" section, not withheld).
+    assert "Steps" in body
+
+
+def test_detail_soft_failed_admin_lift_surfaces_diagnostic() -> None:
+    """A degraded admin role lift surfaces a diagnostic, not a silent downgrade.
+
+    When ``_resolve_role`` fails soft (JWKS unreachable / session-reload miss /
+    identity mismatch) it returns ``None``. A genuine plain operator instead
+    yields a non-``None`` operator, so ``None`` uniquely marks "the admin lift
+    could not complete". The restricted detail view then renders the
+    ``admin_lift_degraded`` diagnostic affordance (a note + a retry link) so a
+    real tenant_admin whose lift transiently degraded is never silently
+    dropped onto the opacity banner with no explanation (#2112).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    session_id, _jwks = _admin_session()
+
+    client = _authenticated_client(session_id)
+    # Force the soft-fail branch: the lift returns None (as it does on a
+    # transient JWKS/session hiccup or identity mismatch).
+    with patch(f"{_RB_ROUTES}._resolve_role", AsyncMock(return_value=None)):
+        response = client.get("/ui/runbooks/rotate-cert")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Fell back to the restricted view (no admin verdict)...
+    assert "Step details are restricted" in body
+    # ...but with a diagnostic, NOT a silent downgrade.
+    assert 'data-testid="admin-lift-degraded"' in body
+    assert "Admin view could not be resolved" in body
+    # The retry affordance is a same-page link (CSP-safe, re-runs the lift).
+    assert 'href="/ui/runbooks/rotate-cert' in body
+
+
+def test_detail_genuine_operator_no_soft_fail_diagnostic() -> None:
+    """A genuine operator's restricted view shows NO soft-fail diagnostic.
+
+    The discriminator is sound: a clean operator lift returns a real
+    ``Operator`` (non-``None``), so ``admin_lift_degraded`` is ``False`` and
+    the diagnostic is withheld -- only a genuinely-degraded lift (``None``)
+    surfaces it. This guards against the diagnostic leaking onto every
+    plain-operator restricted view.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    # An operator with no completed run -> restricted, but cleanly resolved.
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Step details are restricted" in body
+    # No soft-fail diagnostic for a cleanly-resolved operator.
+    assert 'data-testid="admin-lift-degraded"' not in body
+    assert "Admin view could not be resolved" not in body

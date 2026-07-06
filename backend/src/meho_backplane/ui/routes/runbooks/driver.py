@@ -81,6 +81,21 @@ on the same response -- refreshes the ``meho_csrf`` cookie (the cookie/
 header desync footgun #1693). The render layer in :mod:`.driver_render`
 owns the mint + cookie refresh.
 
+Every state-changing POST here (``/next`` / ``/abort`` / ``/reassign``)
+REQUIRES the double-submit token: the ``meho_csrf`` cookie AND an
+``X-CSRF-Token`` header (or ``csrf_token`` form field). A request missing
+either half is rejected by the middleware with ``403``
+``{"detail":"csrf_token_invalid"}`` + an ``x-csrf-rejection-reason``
+header -- BY DESIGN, before this handler runs. ``/api/v1/*`` is CSRF-exempt,
+so a raw-curl repro sending a Bearer JWT but no ``meho_csrf`` cookie gets a
+``403`` on ``/ui/.../abort`` while the same call to
+``/api/v1/.../abort`` succeeds: that differential is the CSRF gate, NOT an
+RBAC/opacity difference (this abort route is on the SAME operator floor as
+REST -- see ``_abort`` below -- and a genuine assignee RBAC denial renders
+an inline HTTP-200 fragment, never a ``403``). The run-starter CAN abort
+their own run from the browser, which carries the cookie/header. Consumer
+note + repro guidance: ``docs/codebase/ui.md`` (#2112).
+
 References
 ----------
 

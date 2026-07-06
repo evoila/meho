@@ -477,12 +477,11 @@ def test_session_expiry_handler_source_carries_401_contract() -> None:
     assert "htmx:beforeOnLoad" in source
     assert 'addEventListener("htmx:beforeOnLoad"' in source
 
-    # AC #2 -- 401-only: an early-return guard keyed on the xhr status, so a
-    # 422 (or any other status) flows through untouched. Asserting both the
-    # status read and the not-401 short-circuit pins the "don't hijack 422"
-    # contract.
+    # AC #2 -- status-scoped: the handler branches on the xhr status, so a
+    # 422 (or any other status) flows through untouched. Asserting the status
+    # read plus the explicit 401 branch pins the "don't hijack 422" contract.
     assert "event.detail.xhr" in source
-    assert "xhr.status !== 401" in source
+    assert "xhr.status === 401" in source
 
     # AC #1 -- the recovery path: cancel the dead swap, show the banner, and
     # link to the login route with the current path as ``return_to``.
@@ -490,6 +489,33 @@ def test_session_expiry_handler_source_carries_401_contract() -> None:
     assert "/ui/auth/login?return_to=" in source
     assert "encodeURIComponent" in source
     assert "Your session expired" in source
+
+
+def test_session_expiry_handler_source_carries_csrf_rejection_contract() -> None:
+    """The served handler surfaces the CSRF-rejection 403 (#2112).
+
+    A state-changing ``/ui/*`` POST whose ``meho_csrf`` double-submit cookie
+    was dropped/aged-out gets a bare ``{"detail":"csrf_token_invalid"}`` 403
+    that htmx 2.0.9 does NOT swap. The same global ``htmx:beforeOnLoad`` seam
+    surfaces a refresh banner -- but ONLY for a CSRF rejection, keyed on the
+    ``x-csrf-rejection-reason`` response header the middleware stamps, so a
+    bare RBAC 403 (``require_ui_admin``, no such header) flows through
+    untouched.
+    """
+    handler = static_src_dir() / "app" / "session-expiry.js"
+    assert handler.is_file(), f"session-expiry handler missing: {handler}"
+    source = handler.read_text(encoding="utf-8")
+
+    # Keyed on the CSRF-specific header, not the bare 403 status -- this is
+    # what keeps the net off a genuine RBAC denial.
+    assert "x-csrf-rejection-reason" in source
+    assert "xhr.status === 403" in source
+    assert "getResponseHeader" in source
+
+    # The recovery path: cancel the dead swap + a refresh banner (a fresh
+    # render re-mints the meho_csrf cookie so the retry clears the check).
+    assert "event.preventDefault()" in source
+    assert "refresh the page and retry" in source
 
 
 def test_session_expiry_handler_served_as_static_asset() -> None:

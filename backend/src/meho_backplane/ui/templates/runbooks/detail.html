@@ -17,6 +17,12 @@
     steps_rendered -- list[{step, body_html}]: pre-rendered step bodies
                       (empty when restricted)
     is_admin       -- bool: caller is tenant_admin
+    admin_lift_degraded
+                   -- bool: the tenant-admin role lift could not complete
+                      (JWKS hiccup / session-reload miss / identity
+                      mismatch); surfaces a diagnostic note on the
+                      restricted view so a genuine admin is never silently
+                      downgraded onto the opacity banner (#2112)
     code_css       -- str: pygments CSS for highlighted step-body code
 
   Template blocks:
@@ -84,6 +90,34 @@
         </p>
       </div>
     </div>
+    {% if admin_lift_degraded %}
+      {# Soft-fail diagnostic (#2112): the tenant-admin role lift could not
+         complete for this request (a transient JWKS/session hiccup or an
+         identity mismatch), so the page fell back to the operator-restricted
+         view. Without this note a genuine tenant_admin reads the banner above
+         as "the promised admin bypass doesn't exist"; here we tell them the
+         admin view failed to resolve and offer a retry (a reload re-runs the
+         role lift). #}
+      <div role="alert" class="alert alert-info mt-3" data-testid="admin-lift-degraded">
+        <span aria-hidden="true">&#9888;</span>
+        <div>
+          <h2 class="font-semibold">Admin view could not be resolved</h2>
+          <p class="text-sm">
+            If you are a tenant administrator, the elevated view failed to
+            load for this request (a transient session or identity-provider
+            hiccup) and the page fell back to the restricted view above. This
+            is not a permission change. Reload to try resolving your admin
+            view again.
+          </p>
+          {# Plain same-page link (no inline JS) so the retry works under the
+             chassis's zero-inline-script CSP posture; a fresh GET re-runs the
+             role lift in _render_detail. #}
+          <a class="btn btn-sm mt-2" href="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+            Retry admin view
+          </a>
+        </div>
+      </div>
+    {% endif %}
   {% else %}
     {# ---------- Steps ---------- #}
     <div class="space-y-4">

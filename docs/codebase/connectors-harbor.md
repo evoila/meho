@@ -136,6 +136,17 @@ Typed op handler for `harbor.robot.create`. Classified `credential_mint` by
 `classify_op` in `broadcast/events.py` — the broadcast collapses to aggregate-only
 so the minted secret never appears in the SSE stream.
 
+Registered `requires_approval=True` (#147): minting a robot credential is
+privilege issuance, so it is four-eyes-gated. The non-agent policy gate
+(`_non_agent_verdict` in `operations/_validate.py`) keys the verdict solely on
+`requires_approval` (not `safety_level`), so a human `tenant_admin` dispatch
+**parks** at `awaiting_approval` and a second operator must approve it via
+`POST /api/v1/approvals/{id}/decide` before the mint executes (the resume
+re-dispatch runs with `_approved=True`). `harbor.robot.delete` stays ungated —
+it is a `caution`-class `write` that revokes access rather than minting a
+credential, mirroring the bind9 precedent (#129) that gated only `dangerous`
+config-replacement ops.
+
 The signature carries `operator: Operator` so `dispatch_typed`
 (`operations/_branches.py`, name-keyed operator threading) passes the
 dispatched operator into the handler. The operator is forwarded to `_post_json`

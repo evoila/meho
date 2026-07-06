@@ -385,6 +385,21 @@ class Settings(BaseModel):
         genuinely larger sets raise it via
         ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
         :func:`get_settings`'s cache.
+    jsonflux_sample_byte_budget:
+        Upper bound, in serialized JSON bytes, on the inline sample the
+        JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
+        ``sample_size`` alone bounds the sample by *row count*, which lets
+        an object-heavy list op (rows of tens of KB each) overflow the MCP
+        result token ceiling even though the ``result_query`` handle works.
+        The reducer sizes the inline sample to fit this budget: it drops
+        rows (never below one) and, if a single row still exceeds the
+        budget, truncates that row's oversized field values — full fidelity
+        stays reachable via the spill + ``result_query``. Default 4096
+        mirrors ``byte_threshold`` (the bytes above which a payload
+        materializes at all): the inline preview stays roughly the size of
+        the smallest payload that would trigger reduction. Operators tune it
+        via ``JSONFLUX_SAMPLE_BYTE_BUDGET``. Read once per reduce through
+        :func:`get_settings`'s cache.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -891,6 +906,7 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
@@ -1427,6 +1443,9 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        jsonflux_sample_byte_budget=int(
+            os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),

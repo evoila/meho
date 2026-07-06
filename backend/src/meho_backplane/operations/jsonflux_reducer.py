@@ -15,6 +15,17 @@ markdown, frozen into a JSON Schema, and addressed by a
 :class:`~meho_backplane.connectors.schemas.ResultHandle` carrying a
 bounded sample so no agent ever sees the full set inline.
 
+The inline sample is serialized **exactly once** (#134). It lives only
+on :attr:`ResultHandle.sample_rows`; the compact inline ``summary`` the
+reducer returns alongside the handle carries the *count* of preview rows
+(``sample_rows_returned``) but not a second full copy of them. It is
+bounded by *serialized bytes* (``jsonflux_sample_byte_budget`` setting,
+default 4 KB), not only by row count -- an object-heavy list op whose
+rows are tens of KB each is shrunk (fewer rows, values truncated as a
+last resort) so the reduced envelope stays under a ceiling independent
+of per-row object size. The full set is untouched and stays reachable
+via the spill + ``result_query``.
+
 Why ``QueryEngine`` directly, not ``JsonFlux``
 ==============================================
 
@@ -275,18 +286,22 @@ class JsonFluxReducer:
         ttl_seconds: int = 3600,
         store: ResultHandleStore | None = None,
         max_spill_rows: int | None = None,
+        sample_byte_budget: int | None = None,
     ) -> None:
         self._row_threshold = row_threshold
         self._byte_threshold = byte_threshold
         self._sample_size = sample_size
         self._ttl_seconds = ttl_seconds
-        # ``store`` / ``max_spill_rows`` default to ``None`` so the
-        # production singleton (installed via ``set_default_reducer``)
-        # resolves both lazily at reduce time -- the store from the shared
-        # broadcast Valkey client, the cap from settings. Tests inject a
-        # fake store + explicit cap to exercise the spill path in-process.
+        # ``store`` / ``max_spill_rows`` / ``sample_byte_budget`` default
+        # to ``None`` so the production singleton (installed via
+        # ``set_default_reducer``) resolves them lazily at reduce time --
+        # the store from the shared broadcast Valkey client, the row cap
+        # and the sample byte budget from settings. Tests inject a fake
+        # store + explicit caps to exercise the spill / budget paths
+        # in-process.
         self._store = store
         self._max_spill_rows = max_spill_rows
+        self._sample_byte_budget = sample_byte_budget
 
     async def reduce(
         self,
@@ -486,6 +501,17 @@ class JsonFluxReducer:
         persisted -- the handle's drill-in branch flips to
         ``available=True`` pointing at ``result_query`` -- or the skip
         reason the unavailable branch surfaces verbatim (#1629).
+
+        The inline sample is serialized **exactly once** (#134): it lives
+        only on :attr:`ResultHandle.sample_rows` -- the audit hoist
+        (``sample_rows_returned``) and every connector e2e assertion read
+        it there -- and the inline ``summary`` no longer carries a
+        byte-identical ``sample`` copy. Before this change the same
+        ``sample_rows`` list was placed into *both* the handle and the
+        summary, so an object-heavy list op shipped two full copies of a
+        large preview and overflowed the MCP token ceiling. The sample is
+        additionally shrunk to fit :attr:`_sample_byte_budget` so its
+        serialized size is bounded independently of per-row object size.
         """
         total_rows = materialized.total_rows
         fetch_more = _build_fetch_more(
@@ -495,7 +521,9 @@ class JsonFluxReducer:
             spill_outcome=spill_outcome,
             ttl_seconds=self._ttl_seconds,
         )
-        sample_rows = materialized.sample_rows
+        sample_rows = _fit_sample_to_budget(
+            materialized.sample_rows, self._resolve_sample_byte_budget()
+        )
         handle = ResultHandle(
             handle_id=materialized.handle_id,
             summary_md=(
@@ -507,14 +535,33 @@ class JsonFluxReducer:
             ttl_seconds=self._ttl_seconds,
             fetch_more=fetch_more,
         )
-        summary = {
+        # The inline summary is the compact reduced view. It deliberately
+        # does NOT carry a ``sample`` -- the bounded preview lives once on
+        # ``handle.sample_rows`` (#134). ``sample_bytes`` records the
+        # serialized size the reducer bounded the preview to, so an agent
+        # reading the summary knows a preview exists and where to find it
+        # without re-measuring the handle.
+        summary: dict[str, Any] = {
             "row_count": total_rows,
             "total": total_rows,
-            "sample": sample_rows,
+            "sample_rows_returned": len(sample_rows),
+            "sample_bytes": len(_serialize(sample_rows)) if sample_rows else 0,
         }
         if envelope_key is not None:
             summary["source_key"] = envelope_key
         return summary, handle
+
+    def _resolve_sample_byte_budget(self) -> int:
+        """Byte budget for the inline sample, resolved lazily from settings.
+
+        Mirrors the ``_max_spill_rows`` lazy-resolution pattern: an
+        explicit constructor value (tests) wins; otherwise the production
+        singleton reads ``jsonflux_sample_byte_budget`` from settings once
+        per reduce through :func:`get_settings`'s cache.
+        """
+        if self._sample_byte_budget is not None:
+            return self._sample_byte_budget
+        return get_settings().jsonflux_sample_byte_budget
 
 
 def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
@@ -666,6 +713,79 @@ def _serialize(payload: Any) -> bytes:
         return msgspec.json.encode(payload)
     except (TypeError, msgspec.EncodeError):
         return str(payload).encode("utf-8", "replace")
+
+
+#: Marker appended to a value that :func:`_truncate_row_values` shortened,
+#: so a reader can tell the inline preview clipped a field rather than the
+#: op returning a short value. The full value is still reachable via the
+#: spilled handle + ``result_query``.
+_TRUNCATION_MARKER = "…[truncated]"
+
+
+def _fit_sample_to_budget(
+    sample_rows: list[dict[str, Any]], byte_budget: int
+) -> list[dict[str, Any]]:
+    """Shrink *sample_rows* so its serialized JSON fits *byte_budget* (#134).
+
+    ``sample_size`` bounds the sample by *row count* only, so a handful of
+    object-heavy rows (tens of KB each) still overflow the MCP token
+    ceiling. This bounds the sample by *serialized bytes* independently of
+    per-row object size, in two stages:
+
+    1. **Drop rows** from the tail until the serialized sample fits the
+       budget, but never below one row -- a reduced set must still carry a
+       real preview, and full fidelity stays reachable via the spill +
+       ``result_query``.
+    2. If a **single** row still exceeds the budget, truncate that row's
+       oversized string values (:func:`_truncate_row_values`) so even one
+       pathologically large object cannot blow the ceiling.
+
+    An empty input returns empty. The returned rows are fresh dicts (the
+    caller freezes them into the handle); the materialized ``full_rows``
+    spilled for read-back are untouched, so recovery is byte-for-byte
+    unchanged.
+    """
+    if not sample_rows:
+        return []
+    budget = max(byte_budget, 1)
+
+    rows = list(sample_rows)
+    while len(rows) > 1 and len(_serialize(rows)) > budget:
+        rows = rows[:-1]
+
+    if len(_serialize(rows)) <= budget:
+        return rows
+
+    # One row still over budget: truncate its oversized string values.
+    return [_truncate_row_values(rows[0], budget)]
+
+
+def _truncate_row_values(row: dict[str, Any], byte_budget: int) -> dict[str, Any]:
+    """Return *row* with oversized string values clipped to fit *byte_budget*.
+
+    Distributes the budget across the row's string-valued fields and clips
+    each to an equal share (leaving non-string values -- ints, nested
+    objects -- intact, since the object-heavy overflow this guards against
+    is dominated by long string blobs). Clipped values carry
+    :data:`_TRUNCATION_MARKER` so the clip is visible; the untruncated
+    value is recoverable via ``result_query``. This is the last-resort
+    branch: it only runs when a single row already exceeds the whole
+    budget, which a well-behaved op never hits.
+    """
+    string_keys = [key for key, value in row.items() if isinstance(value, str)]
+    if not string_keys:
+        return dict(row)
+    # Per-field character allowance. ``byte_budget`` is a byte bound and
+    # characters are >= 1 byte, so clipping to this many characters keeps
+    # the row's string payload under budget with headroom for the JSON
+    # structure (keys, quotes, non-string fields).
+    per_field_chars = max(byte_budget // (len(string_keys) * 2), 1)
+    truncated = dict(row)
+    for key in string_keys:
+        value = row[key]
+        if len(value.encode("utf-8")) > per_field_chars:
+            truncated[key] = value[:per_field_chars] + _TRUNCATION_MARKER
+    return truncated
 
 
 def _build_fetch_more(

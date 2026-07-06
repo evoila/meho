@@ -232,6 +232,21 @@ markdown summary, samples N rows, and returns
 `(summary_dict, ResultHandle)`. Small / scalar payloads return
 `(payload, None)` unchanged.
 
+Collection detection distinguishes a *paginable list* from a
+*dict-of-arrays detail object* (#2113). A dict with no recognized
+envelope key is only treated as a collection when it carries **exactly
+one** list-valued field (a single collection next to scalar siblings —
+`k8s.logs`'s `lines` next to `pod` / `namespace` / `truncated`). A dict
+with **more than one** list-valued field is a single detail object whose
+arrays are coordinate fields, not pages of one set (`k8s.pod.info`'s
+`containers` / `container_statuses` / `volumes` / `conditions`); it
+passes through verbatim (`(None, None)` from detection) rather than
+materializing whichever sub-array happens to be longest and discarding
+the siblings. Before #2113 the largest-list fallback picked `conditions`
+(5 all-`True` rows) for a real application pod and silently dropped
+`container_statuses` — the image / ready / restart-count / state data an
+operator actually reads.
+
 ### Constructor defaults
 
 Read off the shipped adapter

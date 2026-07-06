@@ -570,15 +570,33 @@ def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
     Returns ``(envelope_key, rows)`` where ``envelope_key`` is the dict
     key the list was found under (``None`` for a bare top-level list)
     and ``rows`` is the list itself, or ``(None, None)`` when *payload*
-    carries no list-shaped collection.
+    carries no *paginable* list-shaped collection.
 
     Resolution order:
 
     1. A bare top-level ``list`` → ``(None, payload)``.
     2. A ``dict`` whose first matching :data:`_ENVELOPE_KEYS` value is a
        list → ``(key, value)``.
-    3. A ``dict`` with no known envelope key → its largest list value,
-       if any (covers vendors that wrap under a non-standard key).
+    3. A ``dict`` with no known envelope key and **exactly one**
+       list-valued field → that list (covers vendors — ``k8s.logs``,
+       and other flat-dict list ops — that wrap a single collection
+       under a non-standard key next to scalar siblings).
+
+    Single-object detail exemption (#2113)
+    --------------------------------------
+    A ``dict`` with no known envelope key that carries **more than one**
+    list-valued field is a *dict-of-arrays detail object*, not a
+    paginable collection: the sibling arrays are coordinate fields of one
+    object (``k8s.pod.info``'s ``containers`` / ``container_statuses`` /
+    ``volumes`` / ``conditions``), not pages of a single set. The
+    pre-#2113 largest-list fallback picked whichever array happened to be
+    longest (``conditions``, 5 all-``True`` rows) and discarded every
+    sibling, silently dropping the operationally critical
+    ``container_statuses``. Such payloads return ``(None, None)`` and pass
+    through verbatim — the byte-threshold check still bounds a genuinely
+    huge detail object, but it can never be truncated to a single
+    arbitrary sub-array. The single-list case (2) is untouched, so real
+    flat-dict list ops (``k8s.logs``) still reduce as before.
     """
     if isinstance(payload, list):
         return None, payload
@@ -590,13 +608,12 @@ def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
         if isinstance(value, list):
             return key, value
 
-    largest_key: str | None = None
-    largest: list[Any] | None = None
-    for key, value in payload.items():
-        if isinstance(value, list) and (largest is None or len(value) > len(largest)):
-            largest_key, largest = key, value
-    if largest is not None:
-        return largest_key, largest
+    list_fields = [(key, value) for key, value in payload.items() if isinstance(value, list)]
+    if len(list_fields) == 1:
+        return list_fields[0]
+    # Zero lists → no collection. More than one list → a dict-of-arrays
+    # detail object (#2113); pass through verbatim rather than materialize
+    # one arbitrary sub-array and drop its siblings.
     return None, None
 
 

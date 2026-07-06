@@ -12,8 +12,9 @@ Coverage matrix (G3.1-T6 / #509 acceptance criteria):
   in ``composites/_write``.
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster``
   per the canary's stub-LLM taxonomy.
-* Combined with #508's 5 reads, the registrar produces **13 rows**
-  total -- the Definition-of-done line in #227's body.
+* Combined with #508's 5 reads plus #2080's host.network_uplinks
+  read, the registrar produces **14 rows** total -- the
+  Definition-of-done line in #227's body.
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
   with the documented required keys.
 * Module-level handler shape (no closures / partials / lambdas).
@@ -65,17 +66,19 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.patch",
 )
 
-# 5 reads (T5 / #508) -- carried over so the combined-count assertion
-# does not have to import _read constants.
+# 6 reads (T5 / #508 shipped 5; #2080 adds host.network_uplinks) --
+# carried over so the combined-count assertion does not have to import
+# _read constants.
 _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.drs_recommendations",
     "vmware.composite.event.tail",
     "vmware.composite.performance.summary",
     "vmware.composite.datastore.usage",
     "vmware.composite.network.portgroup.audit",
+    "vmware.composite.host.network_uplinks",
 )
 
-# 13 total -- the #227 G3.1 Definition-of-done line.
+# 14 total -- the #227 G3.1 Definition-of-done line.
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -159,7 +162,7 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 # ---------------------------------------------------------------------------
-# 8 write composites land alongside the 5 reads (13 total)
+# 8 write composites land alongside the 6 reads (14 total)
 # ---------------------------------------------------------------------------
 
 
@@ -184,10 +187,10 @@ async def test_register_vmware_composite_operations_inserts_eight_write_rows(
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_thirteen_composite_rows(
+async def test_full_registration_produces_fourteen_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """5 reads (#508) + 8 writes (#509) = 13 composite rows. Definition-of-done bar."""
+    """6 reads (#508 + #2080) + 8 writes (#509) = 14 composite rows. Definition-of-done bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -201,7 +204,7 @@ async def test_full_registration_produces_thirteen_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 13
+    assert len(rows) == 14
 
 
 @pytest.mark.asyncio
@@ -452,17 +455,17 @@ async def test_write_composite_tags_include_composite_and_write(
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_thirteen(
+async def test_register_vmware_composite_operations_is_idempotent_across_fourteen(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 13 rows total, embedding called 13x once."""
+    """Running the registrar twice -> 14 rows total, embedding called 14x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 13
+    assert first_count == 14
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 13.
+    # pipeline; the row count stays at 14.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -476,7 +479,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirtee
             .scalars()
             .all()
         )
-    assert len(rows) == 13
+    assert len(rows) == 14
 
 
 # ---------------------------------------------------------------------------

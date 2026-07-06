@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Read-only ``vmware.composite.*`` handler functions (5 composites).
+"""Read-only ``vmware.composite.*`` handler functions (6 composites).
 
 Each handler is a module-level ``async def`` that takes the dispatcher's
 composite-branch keyword args ``(operator, target, params,
@@ -89,6 +89,7 @@ __all__ = [
     "cluster_drs_recommendations_composite",
     "datastore_usage_composite",
     "event_tail_composite",
+    "host_network_uplinks_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
 ]
@@ -124,6 +125,20 @@ _OP_LIST_DVS = "GET:/vcenter/network/distributed-switches"
 # the handler note).
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+# Host listing (vCenter Automation REST) + per-host property read
+# (vi-json). The pnic link-state / uplink mapping the operator wants
+# lives on the Web-Services-API ``HostSystem.config.network`` object,
+# not the plain REST host summary -- so the composite lists hosts via
+# the REST resource and then reads ``config.network.pnic`` +
+# ``config.network.proxySwitch`` per host through the PropertyCollector
+# ``RetrievePropertiesEx`` vi-json method (moId ``propertyCollector``,
+# the canonical singleton).
+_OP_LIST_HOSTS = "GET:/vcenter/host"
+_OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+_PROPERTY_COLLECTOR_MOID = "propertyCollector"
+_HOST_SYSTEM_MO_TYPE = "HostSystem"
+_HOST_NET_PROP_PNIC = "config.network.pnic"
+_HOST_NET_PROP_PROXYSWITCH = "config.network.proxySwitch"
 
 # Composite op_ids -- used by the preflight cache key. Centralised here
 # so the test-side coverage assertion (every registered composite has
@@ -134,6 +149,7 @@ _COMPOSITE_OP_ID_EVENT_TAIL = "vmware.composite.event.tail"
 _COMPOSITE_OP_ID_PERFORMANCE_SUMMARY = "vmware.composite.performance.summary"
 _COMPOSITE_OP_ID_DATASTORE_USAGE = "vmware.composite.datastore.usage"
 _COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT = "vmware.composite.network.portgroup.audit"
+_COMPOSITE_OP_ID_HOST_NETWORK_UPLINKS = "vmware.composite.host.network_uplinks"
 
 # Per-composite sub-op-id tuples consumed by the L2 pre-flight check
 # (G0.14-T10 / #1151). Each tuple lists the L2 raw-REST sub-ops the
@@ -161,6 +177,10 @@ _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_DVS,
     _OP_LIST_NETWORK,
     _OP_LIST_VMS,
+)
+_SUB_OPS_HOST_NETWORK_UPLINKS: tuple[str, ...] = (
+    _OP_LIST_HOSTS,
+    _OP_RETRIEVE_PROPERTIES,
 )
 
 
@@ -804,3 +824,241 @@ async def network_portgroup_audit_composite(
             }
         )
     return {"portgroups": aggregated}
+
+
+def _pnic_device_from_key(pnic_key: str) -> str:
+    """Recover the device name from a WS-API physical-NIC key.
+
+    ``HostProxySwitch.pnic`` lists the uplink physical NICs as their
+    WS-API keys (``key-vim.host.PhysicalNic-vmnic3``), not their device
+    names. The device name is the trailing segment after the last
+    ``-``; when the string doesn't carry that shape (e.g. a bare device
+    name from a simulator) it is returned verbatim.
+    """
+    _, _, tail = pnic_key.rpartition("-")
+    return tail or pnic_key
+
+
+def _parse_pnic(pnic: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one WS-API ``PhysicalNic`` into the operator-facing row.
+
+    ``linkSpeed`` (a ``PhysicalNicLinkInfo``) is present only when the
+    link is up -- the API omits it on a down link -- so its presence is
+    the link-state signal (``link_up``), and its ``speedMb`` / ``duplex``
+    fields carry the speed. Absent link -> ``speed_mb`` / ``duplex``
+    are ``None``.
+    """
+    link_speed = pnic.get("linkSpeed")
+    link_up = isinstance(link_speed, dict)
+    speed_mb = link_speed.get("speedMb") if isinstance(link_speed, dict) else None
+    duplex = link_speed.get("duplex") if isinstance(link_speed, dict) else None
+    return {
+        "device": pnic.get("device"),
+        "mac": pnic.get("mac"),
+        "driver": pnic.get("driver"),
+        "link_up": link_up,
+        "speed_mb": speed_mb,
+        "duplex": duplex,
+    }
+
+
+def _parse_proxy_switch(proxy_switch: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one WS-API ``HostProxySwitch`` into the operator-facing row.
+
+    The proxy switch is the host-side backing of a DVS. Its ``pnic``
+    field lists the uplink physical NICs as WS-API keys; the row
+    surfaces them as device names so the operator can read which
+    physical ports back each uplink.
+    """
+    raw_uplinks = proxy_switch.get("pnic")
+    uplink_pnics: list[str] = []
+    if isinstance(raw_uplinks, list):
+        uplink_pnics = [_pnic_device_from_key(key) for key in raw_uplinks if isinstance(key, str)]
+    return {
+        "key": proxy_switch.get("key"),
+        "dvs_name": proxy_switch.get("dvsName"),
+        "dvs_uuid": proxy_switch.get("dvsUuid"),
+        "uplink_pnics": uplink_pnics,
+    }
+
+
+def _extract_host_network_props(retrieve_result: Any) -> tuple[list[Any], list[Any]]:
+    """Pull ``config.network.pnic`` + ``config.network.proxySwitch`` from RetrievePropertiesEx.
+
+    ``RetrievePropertiesEx`` returns a ``RetrieveResult`` whose
+    ``objects`` list carries one ``ObjectContent`` per queried object,
+    each with a ``propSet`` list of ``{name, val}`` pairs. For the
+    single-host query the composite issues, the first object's propSet
+    holds the two requested property paths. Returns the raw pnic and
+    proxySwitch lists (empty when absent).
+    """
+    payload = _unwrap_value(retrieve_result)
+    # RetrievePropertiesEx wraps the objects under ``objects``; a bare
+    # list (some simulators / the legacy RetrieveProperties shape) is
+    # tolerated too.
+    if isinstance(payload, dict):
+        objects = payload.get("objects", [])
+    elif isinstance(payload, list):
+        objects = payload
+    else:
+        objects = []
+    prop_by_name: dict[str, Any] = {}
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for prop in obj.get("propSet", []) or []:
+            if isinstance(prop, dict) and isinstance(prop.get("name"), str):
+                prop_by_name[prop["name"]] = prop.get("val")
+    pnics = prop_by_name.get(_HOST_NET_PROP_PNIC)
+    proxy_switches = prop_by_name.get(_HOST_NET_PROP_PROXYSWITCH)
+    return (
+        pnics if isinstance(pnics, list) else [],
+        proxy_switches if isinstance(proxy_switches, list) else [],
+    )
+
+
+def _build_retrieve_properties_params(host_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` specSet for one host's network config.
+
+    A single ``PropertyFilterSpec`` scoped directly to the host object
+    (no ContainerView / TraversalSpec) requesting the two network
+    config property paths. ``moId`` targets the ``propertyCollector``
+    singleton.
+    """
+    return {
+        "moId": _PROPERTY_COLLECTOR_MOID,
+        "specSet": [
+            {
+                "propSet": [
+                    {
+                        "type": _HOST_SYSTEM_MO_TYPE,
+                        "pathSet": [
+                            _HOST_NET_PROP_PNIC,
+                            _HOST_NET_PROP_PROXYSWITCH,
+                        ],
+                    }
+                ],
+                "objectSet": [{"obj": {"type": _HOST_SYSTEM_MO_TYPE, "value": host_moid}}],
+            }
+        ],
+        "options": {},
+    }
+
+
+async def _build_host_uplink_row(
+    host_id: str,
+    host_name: Any,
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Build one host row: identity + best-effort pnic / proxy-switch detail.
+
+    The per-host WS-API property read is best-effort -- the host is
+    already identified by the REST listing, so a failed vi-json
+    ``RetrievePropertiesEx`` call nulls the network detail and records
+    why (``read_note``) rather than sinking the whole composite.
+    """
+    row: dict[str, Any] = {"id": host_id, "name": host_name}
+    props_result = await dispatch_child(
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_RETRIEVE_PROPERTIES,
+        params=_build_retrieve_properties_params(host_id),
+    )
+    if props_result.status == "ok":
+        raw_pnics, raw_proxy_switches = _extract_host_network_props(props_result.result)
+        row["pnics"] = [_parse_pnic(p) for p in raw_pnics if isinstance(p, dict)]
+        row["proxy_switches"] = [
+            _parse_proxy_switch(ps) for ps in raw_proxy_switches if isinstance(ps, dict)
+        ]
+    else:
+        row["pnics"] = None
+        row["proxy_switches"] = None
+        row["read_note"] = (
+            f"host-network property read skipped: sub-op "
+            f"{_OP_RETRIEVE_PROPERTIES!r} returned status="
+            f"{props_result.status!r}: {_describe_sub_op_failure(props_result)}"
+        )
+    return row
+
+
+async def host_network_uplinks_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Per host: physical NICs (link state + speed) and their proxy-switch uplinks.
+
+    Op-id: ``vmware.composite.host.network_uplinks``.
+
+    Sub-ops dispatched:
+
+    1. ``GET:/vcenter/host`` -- list every host (optionally narrowed via
+       ``filter_hosts``). Load-bearing: a failure here sinks the
+       composite.
+    2. Per host: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx``
+       requesting ``config.network.pnic`` +
+       ``config.network.proxySwitch`` on that single HostSystem object.
+       This leg is **best-effort**: the plain REST host listing already
+       identifies the host, so when the WS-API property read errors (a
+       host that rejects the vi-json call, a transient auth expiry) the
+       row is still returned with ``pnics`` / ``proxy_switches`` set to
+       ``null`` and a ``read_note`` recording why, rather than failing
+       the whole composite.
+
+    The pnic link-state / uplink mapping is the one read that the plain
+    vSphere Automation REST surface cannot reproduce: pnic link state,
+    speed, and proxy-switch uplink association are Web-Services-API
+    ``HostNetworkInfo`` properties, so the composite reaches them via
+    the PropertyCollector vi-json method. This is what drives physical
+    switch-port-occupancy reasoning ("are we out of switch ports?").
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"hosts": [{"id": ..., "name": ..., "pnics": [...],
+        "proxy_switches": [...]}, ...]}``. Each pnic row carries
+        ``device`` / ``mac`` / ``driver`` / ``link_up`` / ``speed_mb`` /
+        ``duplex``; each proxy-switch row carries ``key`` / ``dvs_name``
+        / ``dvs_uuid`` / ``uplink_pnics`` (physical-NIC device names).
+        When the per-host property read is skipped, ``pnics`` and
+        ``proxy_switches`` are ``None`` and the row carries a
+        ``read_note``.
+    """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_HOST_NETWORK_UPLINKS,
+        sub_op_ids=_SUB_OPS_HOST_NETWORK_UPLINKS,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
+    filter_hosts: list[str] = list(params.get("filter_hosts") or [])
+
+    listing_params: dict[str, Any] = {}
+    if filter_hosts:
+        listing_params["filter.hosts"] = filter_hosts
+
+    listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_HOSTS,
+            params=listing_params,
+        )
+    )
+    entries = _unwrap_value(listing)
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"host_network_uplinks: expected list from {_OP_LIST_HOSTS!r}, "
+            f"got {type(entries).__name__}"
+        )
+
+    aggregated: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        host_id = entry.get("host")
+        if not isinstance(host_id, str):
+            # vSphere REST returns the moid under ``host``; absence is an
+            # upstream malformation -- skip rather than abort.
+            continue
+        aggregated.append(await _build_host_uplink_row(host_id, entry.get("name"), dispatch_child))
+    return {"hosts": aggregated}

@@ -132,6 +132,20 @@ connector-related release-notes line.
   returns a structured `dispatch_error` envelope instead of an uncaught
   exception / MCP `-32603` (#2066).
 
+### Security
+
+- Hardened the dispatch broadcast feed against classification drift.
+  Broadcast request params now run through a Tier-1 pass — a
+  secret-shaped key-name scrub plus the deterministic named-pattern
+  redactor — before the payload is built, and any secret detection
+  collapses the broadcast to aggregate-only regardless of op class, so
+  a secret-bearing op missing from the `credential_*` allowlists no
+  longer ships its raw params to co-tenant feed subscribers. A new
+  classifier-coverage test enumerates every registered typed/composite
+  operation and fails CI when an op declaring secret-shaped parameters
+  is not pinned to a `credential_*` class. Benign write broadcasts
+  keep their full mutation detail.
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

@@ -386,3 +386,7 @@ investigation. #1305 is the closing fix.
   - `XREAD` — https://valkey.io/commands/xread/
   - `XREVRANGE` — https://valkey.io/commands/xrevrange/
 - SSE / EventSource — https://html.spec.whatwg.org/multipage/server-sent-events.html.
+- Untrusted-text envelope on announcement re-serve (`dump_event_wire`
+  wrapping `activity`/`scope`/`target` on the `recent`/`watch`/
+  `tenant_feed` LLM-facing paths) —
+  [`untrusted-text-envelope.md`](./untrusted-text-envelope.md).

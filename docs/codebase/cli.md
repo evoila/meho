@@ -163,6 +163,8 @@ cli/
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
     │   ├── devicecode_test.go # httptest-driven flow + discovery tests.
+    │   ├── resolver.go        # --resolve host:port:ip parsing + pinned-dial http.Client (split-DNS escape hatch, #2107).
+    │   ├── resolver_test.go   # parse matrix + pinned-dial proof + AC#2 device-auth-POST honours-pin test.
     │   ├── store.go           # TokenStore interface + keyring/file backends.
     │   ├── store_test.go      # file-fallback round-trip + 0600-mode test.
     │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
@@ -172,8 +174,8 @@ cli/
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
-    │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence + post-login memory-migration nudge (T5 #612).
-    │   ├── login_test.go      # override-resolution + help-flag + post-login nudge tests.
+    │   ├── login.go           # `meho login` subcommand + auth-config discovery + --resolve split-DNS pin (#2107) + config persistence + post-login memory-migration nudge (T5 #612).
+    │   ├── login_test.go      # override-resolution + help-flag + --resolve help/hint (#2107) + post-login nudge tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
@@ -425,6 +427,38 @@ Authorization Grant (RFC 8628). End-to-end shape:
      other half. TLS-discovery failures additionally point at the
      "install your deployment's root CA in your system trust store"
      remediation for internal-CA deployments.
+   * **Split-DNS escape hatch (`--resolve`).** On operator
+     workstations where the system resolver reaches the backplane
+     host but returns NXDOMAIN for the Keycloak host — the normal
+     VPN split-DNS topology, where the pushed DNS forwarder knows the
+     backplane name but not the Keycloak name — `--resolve
+     <host>:<port>:<ip>` pins that host to a known IP for the
+     duration of the flow. The format and semantics mirror `curl
+     --resolve` (repeatable; per-host:port). Implemented in
+     `internal/auth/resolver.go`: `ParseResolveEntries` validates the
+     `host:port:ip` triples (port must be a valid TCP port, IP a
+     literal address; a malformed entry is a hard error, not a silent
+     skip), and `HTTPClientWithOverrides` builds an `http.Client`
+     whose cloned `http.DefaultTransport.DialContext` substitutes the
+     pinned IP at connect time. The pin only rewrites the dialled
+     address — net/http still derives the TLS SNI and `Host` header
+     from the request URL's real hostname, so certificate validation
+     is unchanged (this is exactly why `curl --resolve` is TLS-safe
+     and an SNI-rewriting resolver hack is not). The same client is
+     threaded through auth-config discovery, OIDC discovery, and the
+     device-code/token endpoints, so the pin reaches every call site,
+     not just discovery. When no `--resolve` is supplied the client is
+     `http.DefaultClient` unchanged.
+   * **Keycloak-resolution hint.** When OIDC discovery or the
+     device-auth POST fails specifically because the Keycloak host
+     doesn't resolve (`*net.DNSError`), `hintKeycloakResolution` in
+     `login.go` rewraps the opaque "no such host" error into one that
+     names the Keycloak host (distinct from the backplane-side
+     auth-config failure, which is worded around `--issuer` /
+     `--client-id`) and suggests the `--resolve` knob. Non-resolution
+     errors (expired device code, access_denied, timeouts) pass
+     through unchanged so the existing device-flow classification is
+     preserved.
 2. **OIDC discovery.** The CLI fetches
    `<issuer>/.well-known/openid-configuration` to learn the
    `device_authorization_endpoint` and `token_endpoint`. If the

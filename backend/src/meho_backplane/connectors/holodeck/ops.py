@@ -150,10 +150,16 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
     read ops from :mod:`meho_backplane.connectors.holodeck.ops_read`.
     Mirrors :func:`meho_backplane.connectors.pfsense.ops._pfsense_ops`
     and :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
+
+    G3.18-T2 (#2154) appends the 3 approval-gated remediation write ops
+    (:data:`~meho_backplane.connectors.holodeck.ops_write.WRITE_OPS`:
+    ``holodeck.k8s.pods.gc`` / ``holodeck.backups.prune`` /
+    ``holodeck.images.import``) onto the tuple -- 12 ops total.
     """
     from meho_backplane.connectors.holodeck.ops_read import READ_OPS
+    from meho_backplane.connectors.holodeck.ops_write import WRITE_OPS
 
-    return (_HOLODECK_ABOUT_OP, *READ_OPS)
+    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS)
 
 
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.

@@ -240,6 +240,50 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   when its sub-command failed or produced empty output, so a single-
   component failure doesn't blank the whole response.
 
+### Write ops (G3.18-T2 surface, approval-gated)
+
+`ops_write.py` (module `WRITE_OPS`, appended to `HOLODECK_OPS` via
+`_holodeck_ops()`) adds three **remediation** write ops. Every one registers
+`safety_level="dangerous"`, `requires_approval=True`. The `requires_approval`
+flag is the *only* thing the connector controls: the dispatcher's
+`policy_gate` routes a USER-principal dispatch of such an op to the human
+approve-queue (`awaiting_approval`) rather than executing or hard-denying it,
+and floors an agent dispatch there too. The handler bodies run only on the
+`_approved=True` resume path; the `DISPATCH` audit row is written by the
+dispatcher on that execute path (the same row every op gets).
+
+Each handler validates its inputs against a fixed allowlist and **rejects
+before composing** the command, then `shlex.quote`s every interpolated
+token — the same reject-then-compose posture as `_COMPONENT_SAFE_RE` /
+`parse_kubectl_command`. `bound_backup_path` / `bound_image_tar` are the pure
+path-bounding helpers (unit-tested directly).
+
+- **`holodeck.k8s.pods.gc`** (group `k8s-write`). Runs one
+  `kubectl delete pods --field-selector status.phase=<phase>` per requested
+  terminal phase. The only inputs are the terminal-phase set (each element
+  must be `Failed` or `Succeeded`; default both) and an optional bounded
+  `namespace` (RFC-1123 label). There is **no** name, label-selector, or
+  arbitrary-field surface, so a live phase (`Running`/`Pending`) or a named
+  pod cannot be targeted. Note: kubectl's `--field-selector` supports only
+  `=`/`==`/`!=`, not the set-based `in (...)` operator (that exists only for
+  the label `--selector`), so the issue table's `status.phase in
+  (Failed,Succeeded)` shorthand is realised as one equality delete per
+  terminal phase — same bound, valid syntax.
+- **`holodeck.backups.prune`** (group `backups-write`). Removes backup
+  artefacts under `/var/backups`, keeping the newest `keep_newest` (explicit
+  int, required). An optional `path` sub-directory is resolved via
+  `bound_backup_path`, which rejects any value that escapes `/var/backups/**`
+  (relative/absolute traversal, or the root itself). The listing runs at
+  `find -maxdepth 1` so the prune never recurses into a subtree.
+- **`holodeck.images.import`** (group `images-write`). Runs
+  `ctr -n k8s.io images import <tar>` to side-load an image so kubelet sees
+  it. `tar_path` must match `/root/containerd-images/*.tar` (single `.tar`
+  file, no nesting/traversal), validated via `bound_image_tar`.
+
+These three retire the recovery fallback where the VCF-9.x backup-fill outage
+(Initiative #2145) was fixed by hand-run local root SSH with no MEHO audit
+row.
+
 ### `execute(target, op_id, params)`
 
 Same dispatcher shim shape as bind9 and pfSense:

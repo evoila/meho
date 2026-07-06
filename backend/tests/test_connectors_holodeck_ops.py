@@ -1066,18 +1066,11 @@ async def test_networking_show_isolates_sub_command_failures() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_holodeck_ops_has_eight_entries() -> None:
-    """T1 canary (about) + 7 T2 read ops = 8 total."""
-    assert len(HOLODECK_OPS) == 8
-
-
-def test_holodeck_ops_about_remains_at_index_zero() -> None:
-    assert HOLODECK_OPS[0].op_id == "holodeck.about"
-
-
-def test_holodeck_ops_covers_expected_op_ids() -> None:
-    op_ids = {op.op_id for op in HOLODECK_OPS}
-    expected = {
+#: The read-op ids (T1 canary + 7 T2 reads). The G3.18-T2 (#2154)
+#: approval-gated write ops are asserted separately in
+#: ``test_connectors_holodeck_write.py``.
+_READ_OP_IDS: frozenset[str] = frozenset(
+    {
         "holodeck.about",
         "holodeck.config.show",
         "holodeck.pod.list",
@@ -1087,6 +1080,25 @@ def test_holodeck_ops_covers_expected_op_ids() -> None:
         "holodeck.logs.tail",
         "holodeck.networking.show",
     }
+)
+
+
+def test_holodeck_ops_has_eleven_entries() -> None:
+    """T1 canary (about) + 7 T2 read ops + 3 G3.18-T2 write ops = 11 total."""
+    assert len(HOLODECK_OPS) == 11
+
+
+def test_holodeck_ops_about_remains_at_index_zero() -> None:
+    assert HOLODECK_OPS[0].op_id == "holodeck.about"
+
+
+def test_holodeck_ops_covers_expected_op_ids() -> None:
+    op_ids = {op.op_id for op in HOLODECK_OPS}
+    expected = set(_READ_OP_IDS) | {
+        "holodeck.k8s.pods.gc",
+        "holodeck.backups.prune",
+        "holodeck.images.import",
+    }
     assert op_ids == expected
 
 
@@ -1095,16 +1107,20 @@ def test_holodeck_ops_all_have_holodeck_namespace() -> None:
         assert op.op_id.startswith("holodeck."), f"{op.op_id!r} lacks holodeck. prefix"
 
 
-def test_holodeck_ops_all_safe() -> None:
+def test_holodeck_read_ops_all_safe() -> None:
     """Every T2 read op is read-only -- safety_level='safe' is mandatory."""
     for op in HOLODECK_OPS:
+        if op.op_id not in _READ_OP_IDS:
+            continue
         assert op.safety_level == "safe", (
-            f"{op.op_id!r} has safety_level={op.safety_level!r}; every T2 op must be safe"
+            f"{op.op_id!r} has safety_level={op.safety_level!r}; every read op must be safe"
         )
 
 
-def test_holodeck_ops_all_no_approval_required() -> None:
+def test_holodeck_read_ops_all_no_approval_required() -> None:
     for op in HOLODECK_OPS:
+        if op.op_id not in _READ_OP_IDS:
+            continue
         assert op.requires_approval is False, (
             f"{op.op_id!r} should not require approval -- reads only"
         )
@@ -1140,7 +1156,7 @@ def test_holodeck_ops_llm_instructions_mention_ssh_transport() -> None:
 
 
 def test_holodeck_ops_group_keys_include_new_groups() -> None:
-    """T2 introduces the config / pod / service / k8s / logs / networking groups."""
+    """T2 read groups + the G3.18-T2 (#2154) approval-gated write groups."""
     group_keys = {op.group_key for op in HOLODECK_OPS if op.group_key}
     assert {
         "identity",
@@ -1150,6 +1166,10 @@ def test_holodeck_ops_group_keys_include_new_groups() -> None:
         "k8s",
         "logs",
         "networking",
+        # G3.18-T2 (#2154) write groups (``-write`` suffix avoids collision).
+        "k8s-write",
+        "backups-write",
+        "images-write",
     } == group_keys
 
 

@@ -1217,6 +1217,36 @@ def test_detect_collection_keeps_single_list_flat_dict_as_collection() -> None:
     assert rows == ["a", "b", "c"]
 
 
+def test_detect_collection_reduces_paginated_collection_with_hateoas_metadata() -> None:
+    """A ``{resourceList, pageInfo, links}`` payload still reduces (#2184).
+
+    Regression guard for the vROps / VCF-operations resource-list shape:
+    the single real collection (``resourceList``) is wrapped next to a
+    ``pageInfo`` cursor block and a HATEOAS ``links`` array. Both are
+    transport metadata, not coordinate fields of a detail object, so
+    ``_detect_collection`` must exclude them from the list-field count and
+    keep the payload classified as ONE real list field — otherwise
+    (pre-#2184) the extra ``links`` array tipped it into the #2113
+    multi-list detail exemption and a genuine large collection shipped
+    UNREDUCED with ``handle=None``. Locks in that a future change can't
+    silently re-break vROps pagination.
+    """
+    payload = {
+        "resourceList": [{"identifier": f"r-{i}", "name": f"vm-{i}"} for i in range(10)],
+        "pageInfo": {"totalCount": 10, "page": 0, "pageSize": 1000},
+        "links": [{"href": "/suite-api/api/resources", "rel": "SELF", "name": "current"}],
+    }
+
+    envelope_key, rows = _detect_collection(payload)
+
+    assert envelope_key == "resourceList", (
+        "the paginated resource list must be detected as the collection, not "
+        "exempted as a dict-of-arrays detail object because of the HATEOAS "
+        "``links`` metadata array"
+    )
+    assert rows == payload["resourceList"]
+
+
 def _large_application_pod(now: datetime) -> Any:
     """A real Deployment pod whose ``pod_info`` projection trips the reducer.
 

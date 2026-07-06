@@ -381,9 +381,24 @@ async def _render_detail(
     renders (never a raw 403). A missing slug 404s for an admin and
     collapses to the restricted state for an operator -- the same
     anti-enumeration posture the REST ``show`` route uses.
+
+    Soft-fail visibility (#2112). :func:`_resolve_role` returns the resolved
+    :class:`Operator` on a clean lift (admin or plain operator) and ``None``
+    ONLY on a degraded lift -- a JWKS hiccup, a session-reload miss, a
+    malformed stored token, or a token/session identity mismatch. A genuine
+    plain operator therefore always yields a non-``None`` operator, so
+    ``operator is None`` uniquely marks "the role lift could not complete"
+    -- the exact state that used to drop a genuine ``tenant_admin`` onto the
+    restricted banner with no signal (they read it as "the promised admin
+    bypass doesn't exist"). We thread that as ``admin_lift_degraded`` so the
+    restricted view can surface a diagnostic affordance (a note + a retry)
+    instead of silently downgrading. A terminal ``session_expired`` never
+    reaches here -- :func:`_resolve_role` re-raises it to the app-level
+    re-auth redirect (#2114).
     """
     operator = await _resolve_role(session)
     is_admin = operator is not None and operator.tenant_role == TenantRole.TENANT_ADMIN
+    admin_lift_degraded = operator is None
     detail = await _resolve_detail(session, slug, version, is_admin=is_admin)
     csrf_token = mint_csrf_token(str(session.session_id))
     # The fork-on-edit affordance surfaces how many runs are still pinned to a
@@ -401,6 +416,7 @@ async def _render_detail(
         "steps_rendered": detail.steps_rendered,
         "code_css": pygments_css(),
         "is_admin": is_admin,
+        "admin_lift_degraded": admin_lift_degraded,
         "in_flight_run_count": in_flight_run_count,
         "lifecycle_error": None,
         "swap_badge": False,

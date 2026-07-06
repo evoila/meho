@@ -595,6 +595,50 @@ Five things land together:
    the `hx-headers` directive on the page `<body>`; classic HTML
    forms include the value in a `csrf_token` hidden field.
 
+### CSRF requirement on every `/ui/*` state-changing POST (RESTRICTIONS)
+
+**Every state-changing `/ui/*` request** (`POST` / `PATCH` / `PUT` /
+`DELETE`) — including `POST /ui/runbooks/runs/<id>/abort`,
+`POST /ui/runbooks/<slug>/publish`, `POST /ui/connectors/registry/...`, and
+every other `/ui/*` write — **requires the double-submit CSRF token**:
+
+* the `meho_csrf` cookie (minted + refreshed on every authenticated render),
+  **and**
+* an `X-CSRF-Token` request header (HTMX injects it from the page `<body>`'s
+  `hx-headers`) **or** a `csrf_token` form field (classic-form fallback).
+
+A request missing either half is rejected with **`403`**, body
+`{"detail":"csrf_token_invalid"}`, and a machine-readable
+`x-csrf-rejection-reason` response header (`missing_token` /
+`value_mismatch` / `signature_invalid` / `no_session`). See
+[`ui/csrf.py`](../../backend/src/meho_backplane/ui/csrf.py).
+
+**`/api/v1/*` is exempt** — the CSRF middleware short-circuits on any path
+outside the `/ui/` prefix (the Bearer-JWT surface has no ambient-cookie CSRF
+vector to defend). That exemption is the source of a recurring
+false-positive bug report: a **raw-curl repro that sends a Bearer JWT but no
+`meho_csrf` cookie / `X-CSRF-Token` header** gets a `403` on
+`POST /ui/runbooks/runs/<id>/abort` while the same call to
+`POST /api/v1/runbooks/runs/<id>/abort` succeeds. The differential is the
+CSRF gate, **not** an RBAC / opacity-floor difference — the `/ui` abort route
+sits on the **same operator floor as REST** (`require_ui_session`, passing
+`caller_is_admin=probe.is_tenant_admin` to the service), and a genuine
+assignee RBAC denial there renders an inline HTTP-**200** fragment, never a
+`403` (see [`runbooks/driver.py`](../../backend/src/meho_backplane/ui/routes/runbooks/driver.py)).
+So a `403` on a `/ui/*` write is **always** a CSRF rejection.
+
+**Known-repro pointer (for consumer bug reports):** a browser driving the run
+through the driver page carries the cookie + header (both re-minted on every
+fragment render), so the run-starter **can** abort their own run from the UI.
+Reproduce against the **browser path**, not raw curl; a curl repro must set
+both the `meho_csrf` cookie and the `X-CSRF-Token` header (or the
+`csrf_token` form field) to clear the gate. Filed + resolved as
+[`evoila/meho#2112`](https://github.com/evoila/meho/issues/2112). The
+client-side [`session-expiry.js`](../../backend/src/meho_backplane/ui/static/src/app/session-expiry.js)
+safety net surfaces a "session token expired — refresh the page and retry"
+banner when a real browser hits this `403` (keyed on the
+`x-csrf-rejection-reason` header), instead of leaving a dead control.
+
 The dashboard view (`GET /ui/`) renders three components per
 Initiative #337 work-item #6:
 

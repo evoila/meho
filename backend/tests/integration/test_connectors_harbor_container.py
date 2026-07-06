@@ -101,12 +101,19 @@ from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
 )
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
+from meho_backplane.tenancy import ensure_tenant
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -135,6 +142,21 @@ _TEST_PROJECT_NAME: str = "e2e-robot-test"
 _DB_ALIAS: str = "harbor-db"
 _REDIS_ALIAS: str = "redis"
 _CORE_ALIAS: str = "harbor-core"
+
+#: Tenant every operator in this module belongs to. Pinned (not random)
+#: because ``harbor.robot.create`` now parks (#147) and the parked
+#: ``ApprovalRequest.tenant_id`` FKs to ``tenant(id)`` — a random tenant
+#: would violate ``approval_request_tenant_id_fkey``. Matches the
+#: ``_make_operator`` default so operators built without an explicit
+#: ``tenant_id`` share it. The ``harbor_e2e`` fixture seeds this row via
+#: :func:`~meho_backplane.tenancy.ensure_tenant` before any dispatch.
+_HARBOR_E2E_TENANT_ID: uuid.UUID = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+
+#: Stable id for the persisted Harbor ``Target`` the approve→resume path
+#: re-hydrates by id (``resolve_target_by_id`` is tenant-scoped, so the
+#: row's ``tenant_id`` must equal the operator's). The parked request
+#: pins ``target_id``; resume fails closed if no live row matches.
+_HARBOR_E2E_TARGET_ID: uuid.UUID = uuid.UUID("00000000-0000-0000-0000-00000000ba02")
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +317,14 @@ def _seed_harbor(base_url: str) -> None:
 
 @dataclass
 class _HarborTarget:
-    """Minimal duck-typed Target for Harbor dispatch tests."""
+    """Minimal duck-typed Target for Harbor dispatch tests.
+
+    ``id`` / ``tenant_id`` are pinned to the module constants (not random)
+    so the parked ``ApprovalRequest`` — created when ``harbor.robot.create``
+    parks (#147) — re-hydrates the persisted :class:`TargetORM` row on the
+    approve→resume path (``resolve_target_by_id`` is tenant-scoped) and its
+    ``tenant_id`` satisfies the ``tenant(id)`` FK the fixture seeds.
+    """
 
     product: str = "harbor"
     name: str = "harbor-e2e"
@@ -304,8 +333,8 @@ class _HarborTarget:
     auth_model: str = "shared_service_account"
 
     def __post_init__(self) -> None:
-        self.id = uuid.uuid4()
-        self.tenant_id = uuid.uuid4()
+        self.id = _HARBOR_E2E_TARGET_ID
+        self.tenant_id = _HARBOR_E2E_TENANT_ID
         self.preferred_impl_id: str | None = None
 
         class _FP:
@@ -372,6 +401,14 @@ async def harbor_e2e(
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 8080
 
+    # Seed the tenant row + a durable Target the approve→resume path needs.
+    # ``harbor.robot.create`` now parks (#147); the parked ``ApprovalRequest``
+    # FKs its ``tenant_id`` to ``tenant(id)`` and the resume re-hydrates the
+    # target by id (tenant-scoped). ``pg_engine`` truncated ``tenant`` +
+    # ``targets`` and re-seeded two *other* tenants, so this fixture seeds
+    # the module tenant just-in-time and persists a matching Harbor target.
+    await _seed_harbor_tenant_and_target(host, port)
+
     instance = get_or_create_connector_instance(HarborConnector)
     instance._credentials_loader = _make_credentials_loader(  # type: ignore[misc]
         "admin", _HARBOR_ADMIN_PASSWORD
@@ -399,6 +436,89 @@ def _make_credentials_loader(username: str, password: str):  # type: ignore[no-u
         return {"username": username, "password": password}
 
     return _loader
+
+
+async def _seed_harbor_tenant_and_target(host: str, port: int) -> None:
+    """Seed the module tenant + a durable Harbor ``Target`` for resume.
+
+    Idempotent: ``ensure_tenant`` is ``INSERT ... ON CONFLICT DO NOTHING``
+    and the target insert is guarded by an existence check so re-running
+    across the module's tests (module-scoped PG container, function-scoped
+    ``harbor_e2e``) does not raise a unique violation. The persisted target
+    mirrors the ``_HarborTarget`` double's identity (``id`` / ``tenant_id``
+    / ``product`` / ``name``) so the approve→resume re-hydration resolves
+    it; ``version`` is the connector version, but connector resolution on
+    resume keys on the stored ``connector_id``, so ``host`` / ``port`` here
+    are only informational — the patched instance ``_base_url`` ignores
+    them and always targets the container.
+    """
+    async with get_sessionmaker()() as session:
+        await ensure_tenant(_HARBOR_E2E_TENANT_ID, session)
+        existing = await session.get(TargetORM, _HARBOR_E2E_TARGET_ID)
+        if existing is None:
+            session.add(
+                TargetORM(
+                    id=_HARBOR_E2E_TARGET_ID,
+                    tenant_id=_HARBOR_E2E_TENANT_ID,
+                    name="harbor-e2e",
+                    product=HARBOR_PRODUCT,
+                    version=HARBOR_VERSION,
+                    host=host,
+                    port=port,
+                    aliases=[],
+                    secret_ref="harbor/harbor-e2e",
+                    auth_model="shared_service_account",
+                )
+            )
+        await session.commit()
+
+
+async def _create_robot_via_approve_resume(
+    *,
+    target: _HarborTarget,
+    requester_sub: str,
+    approver_sub: str,
+    name: str,
+    project: str,
+    duration: int,
+) -> OperationResult:
+    """Drive ``harbor.robot.create`` through the real four-eyes approve→resume.
+
+    ``harbor.robot.create`` mints a credential and is registered
+    ``requires_approval=True`` (#147), so a lone dispatch parks at
+    ``awaiting_approval`` instead of executing. This helper reproduces the
+    production flow the unit lane exercises over HTTP ``/decide``
+    (:mod:`tests.test_broadcast_credential_mint_dispatch`), but calls the
+    shared service-layer functions ``/decide`` itself calls
+    (``approve_request`` + ``resume_dispatch_after_approval``) — avoiding an
+    OIDC/JWKS mock against a suite that must reach the live Harbor container.
+
+    Steps: dispatch as *requester_sub* → assert ``awaiting_approval`` +
+    ``approval_request_id`` → approve as a **distinct** *approver_sub*
+    (the requester≠approver guard, ``approval_allow_self_approval=False``
+    by default, enforces real four-eyes) → resume re-dispatch with
+    ``_approved=True`` (via the committed approval). Returns the resumed
+    :class:`~meho_backplane.connectors.schemas.OperationResult` (``status``
+    ``"ok"`` on success, carrying the minted ``secret``).
+    """
+    requester = _make_operator(sub=requester_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    parked = await dispatch(
+        operator=requester,
+        connector_id=HARBOR_CONNECTOR_ID,
+        op_id="harbor.robot.create",
+        target=target,
+        params={"name": name, "project": project, "duration": duration},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+
+    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        request = await approve_request(session, request_id, operator=approver)
+        await session.commit()
+
+    return await resume_dispatch_after_approval(operator=approver, request=request, params=None)
 
 
 _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
@@ -623,19 +743,24 @@ async def test_robot_create_credential_mint_classification(
     harbor_e2e: tuple[_HarborTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``harbor.robot.create`` returns minted secret; broadcast is credential_mint."""
+    """``harbor.robot.create`` mints a secret; broadcast is credential_mint (#147).
+
+    ``harbor.robot.create`` now parks (``requires_approval=True``, #147), so a
+    lone dispatch never executes. The minted-secret + aggregate-only broadcast
+    contract is therefore proven through the real four-eyes approve→resume
+    flow: a lone operator parks the mint, a **second** operator approves, and
+    the committed approval drives the re-dispatch that mints against the live
+    Harbor container. The executed op's result carries the secret while its
+    broadcast collapses to aggregate-only.
+    """
     target, _ = harbor_e2e
-    operator = _make_operator(sub="e2e-robot-create")
-    result = await dispatch(
-        operator=operator,
-        connector_id=HARBOR_CONNECTOR_ID,
-        op_id="harbor.robot.create",
+    result = await _create_robot_via_approve_resume(
         target=target,
-        params={
-            "name": "e2e-ci-robot",
-            "project": _TEST_PROJECT_NAME,
-            "duration": 7,
-        },
+        requester_sub="e2e-robot-create",
+        approver_sub="e2e-robot-create-approver",
+        name="e2e-ci-robot",
+        project=_TEST_PROJECT_NAME,
+        duration=7,
     )
     assert result.status == "ok", result.error
 
@@ -647,9 +772,13 @@ async def test_robot_create_credential_mint_classification(
     assert "id" in result.result, "harbor.robot.create result must include 'id'"
     assert "name" in result.result, "harbor.robot.create result must include 'name'"
 
+    # The executed (post-approval) op audits under the approver identity —
+    # the park writes an ``APPROVAL`` / ``approval.request`` row (not keyed
+    # on the op-id), so filtering on ``path == "harbor.robot.create"`` +
+    # the approver sub selects exactly the one executed dispatch row.
     await _assert_audited(
         "harbor.robot.create",
-        operator_sub="e2e-robot-create",
+        operator_sub="e2e-robot-create-approver",
         expected_op_class="credential_mint",
         expected_source_kind="typed",
         events=captured_events,
@@ -674,18 +803,16 @@ async def test_robot_delete_classified_write(
     """``harbor.robot.delete`` removes the robot; broadcast is classified write."""
     target, _ = harbor_e2e
 
-    # Create a robot to delete.
-    creator = _make_operator(sub="e2e-robot-del-setup")
-    create_result = await dispatch(
-        operator=creator,
-        connector_id=HARBOR_CONNECTOR_ID,
-        op_id="harbor.robot.create",
+    # Create a robot to delete. ``harbor.robot.create`` parks (#147), so the
+    # setup drives the same four-eyes approve→resume flow to mint it; only
+    # then is there a robot id to delete.
+    create_result = await _create_robot_via_approve_resume(
         target=target,
-        params={
-            "name": "e2e-delete-me",
-            "project": _TEST_PROJECT_NAME,
-            "duration": 7,
-        },
+        requester_sub="e2e-robot-del-setup",
+        approver_sub="e2e-robot-del-setup-approver",
+        name="e2e-delete-me",
+        project=_TEST_PROJECT_NAME,
+        duration=7,
     )
     assert create_result.status == "ok", create_result.error
     robot_id = create_result.result["id"]

@@ -525,6 +525,6 @@ platform_admin-only and waits on the tenant selector (T4 #865).
 - Tests:
   [tests/test_scheduler.py](../../backend/tests/test_scheduler.py),
   [tests/test_scheduler_credentials.py](../../backend/tests/test_scheduler_credentials.py),
-  [tests/test_migration_0020_scheduled_trigger.py](../../backend/tests/test_migration_0020_scheduled_trigger.py),
-  [tests/test_migration_0025_scheduled_trigger.py](../../backend/tests/test_migration_0025_scheduled_trigger.py),
+  [tests/migrations/test_migration_0020_scheduled_trigger.py](../../backend/tests/migrations/test_migration_0020_scheduled_trigger.py),
+  [tests/migrations/test_migration_0025_scheduled_trigger.py](../../backend/tests/migrations/test_migration_0025_scheduled_trigger.py),
   [tests/test_db_scheduled_trigger.py](../../backend/tests/test_db_scheduled_trigger.py)

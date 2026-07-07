@@ -278,7 +278,7 @@ fires only at the hard refusal.
 - Result-shape extension: `AgentRunResult` token fields in
   `backend/src/meho_backplane/agent/run.py`
 - Tests:
-  - `backend/tests/test_migration_0031_identity_budget.py`
+  - `backend/tests/migrations/test_migration_0031_identity_budget.py`
   - `backend/tests/test_db_identity_budget.py`
   - `backend/tests/test_identity_budget_service.py`
   - `backend/tests/test_agent_run_consumption.py`

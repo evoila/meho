@@ -366,7 +366,7 @@ Settings (all in `Settings`, all opt-out via env):
 - Consumer doc: `agent-runtime-for-ops-spec.md` §P2 (the explicitly
   accepted `fail_into_audit` default).
 - Tests: `tests/test_db_agent_run.py`,
-  `tests/test_migration_0017_agent_run.py`,
+  `tests/migrations/test_migration_0017_agent_run.py`,
   `tests/test_agent_run_lifecycle.py`,
-  `tests/test_migration_0026_agent_run_lease_reaper.py`,
+  `tests/migrations/test_migration_0026_agent_run_lease_reaper.py`,
   `tests/test_agent_run_reaper.py`.

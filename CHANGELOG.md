@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Bound the `/mcp` transport and the memory/knowledge MCP tool inputs
+  against oversized payloads: `search_memory.query` and
+  `search_knowledge.query` now carry a 256-char `maxLength`,
+  `add_to_memory.body` (and its deprecated `content` alias) and
+  `add_to_knowledge.body` cap at 64 KiB — matching the operator
+  console's existing body cap — so oversized free text is refused by
+  schema validation before it reaches the retrieval substrate's
+  tsvector + embedding indexing. The `/mcp` route itself now enforces a
+  1 MiB request-body limit (`Content-Length` fast-reject plus a
+  streaming cap for chunked bodies) and returns HTTP 413 with a
+  JSON-RPC `INVALID_REQUEST` envelope instead of buffering unbounded
+  payloads.
 ### Fixed — `meho login --resolve` named-port silent no-op
 
 - `meho login --resolve <host>:<port>:<ip>` now rejects named service

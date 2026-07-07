@@ -2488,8 +2488,9 @@ paths:
 def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
     """A ``tenant_id`` that is not the caller's own tenant is rejected 403.
 
-    The service-layer guard (:meth:`IngestionPipelineService._authorize`)
-    runs before any spec fetch or DB write, so the probe needs no
+    The scope guard (:meth:`IngestionPipelineService.authorize_scope`,
+    run eagerly at the route since #2208 and re-run inside the service)
+    fires before any spec fetch or DB write, so the probe needs no
     reachable spec — the dummy https URI is never dereferenced. This is
     the cross-tenant-write hole #2085's body field must NOT open.
     """
@@ -2512,6 +2513,90 @@ def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
         )
     assert response.status_code == 403, response.text
     assert "cannot ingest into" in response.json()["detail"]
+
+
+def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
+    client: TestClient,
+) -> None:
+    """Async branch: a foreign ``tenant_id`` 403s synchronously; no job row (#2208).
+
+    Before the route-level eager :meth:`IngestionPipelineService.authorize_scope`
+    check, the async branch minted the job row and detached the
+    pipeline *before* the service-layer guard ran — the caller got a
+    202 plus a ``failed`` job scoped to the foreign tenant, which
+    their poll on ``GET /ingest/jobs/{id}`` could never see (the job
+    read gate is tenant-scoped). The fix makes both branches fail the
+    same request the same way: a synchronous 403 with the sync path's
+    exact plain-string detail, and nothing minted or detached.
+    """
+    from meho_backplane.api.v1.connectors_ingest import _background_tasks
+    from meho_backplane.operations.ingest import get_job_registry
+
+    tenant_a = uuid.uuid4()
+    other_tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+                "tenant_id": str(other_tenant),
+                # Explicit for readability — async=true is also the
+                # default, i.e. the exact shape the RDC consumer hit.
+                "async": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    # Same body shape as the sync branch: a plain-string ``detail``
+    # carrying the shared PermissionError message.
+    assert response.json() == {
+        "detail": (f"operator tenant_id={tenant_a} cannot ingest into tenant_id={other_tenant}"),
+    }
+    # The load-bearing #2208 assertions: the 403 fired BEFORE the async
+    # branch created its job row or detached the pipeline task — there
+    # is nothing to poll and nothing running. (The autouse
+    # ``_reset_ingest_job_registry`` fixture guarantees the registry
+    # started this test empty.)
+    assert get_job_registry()._jobs == {}
+    assert _background_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_service_authorize_scope_stays_defence_in_depth() -> None:
+    """The service-layer scope guard survives the #2208 route hoist.
+
+    The eager route-level check means HTTP traffic never reaches the
+    service layer with a foreign ``tenant_id`` — so this test drives
+    :meth:`IngestionPipelineService.ingest` directly (the CLI / MCP
+    siblings' path, no route gate) and proves the in-service
+    :meth:`~IngestionPipelineService.authorize_scope` re-check still
+    raises :class:`PermissionError` before any spec fetch or DB write
+    (the dummy https URI is never dereferenced; no respx mock is
+    active, so a fetch attempt would error differently).
+    """
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.operations.ingest import SpecSource
+
+    operator = Operator(
+        sub="op-direct",
+        raw_jwt="test-jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    service = IngestionPipelineService(operator=operator)
+    with pytest.raises(PermissionError, match="cannot ingest into"):
+        await service.ingest(
+            product="scopedenied",
+            version="1.0",
+            impl_id="scopedenied-rest",
+            specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+            tenant_id=uuid.uuid4(),
+        )
 
 
 def test_ingest_tenant_id_omission_semantics_documented_cross_surface() -> None:

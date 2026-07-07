@@ -8,10 +8,11 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 14 hand-authored composites
-that orchestrate cross-spec workflows: 6 read composites
-(G3.1-T5 / `#508` shipped 5; `#2080` added `host.network_uplinks`)
-and 8 write composites (G3.1-T6 / `#509`). The
+vSphere 8.5+ / ESXi 8.5+ targets, plus 15 hand-authored composites
+that orchestrate cross-spec workflows: 7 read composites
+(G3.1-T5 / `#508` shipped 5; `#2080` added `host.network_uplinks`;
+`#2135` added `host.vsan_health`) and 8 write composites
+(G3.1-T6 / `#509`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -24,12 +25,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Read composites** (`composites/_read.py`) — six module-level
+- **Read composites** (`composites/_read.py`) — seven module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
   `event_tail_composite`, `performance_summary_composite`,
   `datastore_usage_composite`, `network_portgroup_audit_composite`,
-  `host_network_uplinks_composite`). Each accepts
-  `(operator, target, params, dispatch_child)` per the
+  `host_network_uplinks_composite`, `host_vsan_health_composite`).
+  Each accepts `(operator, target, params, dispatch_child)` per the
   `DispatchChild` Protocol and orchestrates 1-3 sub-op dispatches
   back into the same `vmware-rest-9.0` connector. Registered with
   `safety_level="safe"` + `requires_approval=False` — read-only
@@ -42,6 +43,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   switch-port-occupancy reasoning); the per-host property read is
   best-effort (a failed read nulls the network detail with a
   `read_note` rather than sinking the composite).
+  `host_vsan_health_composite` (`#2135`) queries the vSAN
+  health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
+  `vsan-cluster-health-system` singleton, scoped to the target
+  cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
+  cluster-wide `overall_health` colour plus the health-test `groups`
+  list. It is likewise best-effort (a failed health-service read nulls
+  `groups` / `overall_health` with a `read_note`).
 - **Write composites** (`composites/_write.py`) — eight module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
@@ -58,8 +66,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   handles the depth-2 nesting cleanly.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 14
-  `_CompositeSpec` rows (6 read + 8 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 15
+  `_CompositeSpec` rows (7 read + 8 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -106,8 +114,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
    queued registrar -- including the composite one -- and upserts the
-   14 `vmware.composite.*` rows into `endpoint_descriptor` with
-   `source_kind="composite"` (6 reads with `safety_level="safe"` +
+   15 `vmware.composite.*` rows into `endpoint_descriptor` with
+   `source_kind="composite"` (7 reads with `safety_level="safe"` +
    `requires_approval=False`; 8 writes with `safety_level="dangerous"`
    + `requires_approval=True`).
 
@@ -176,7 +184,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 14 composites (6 reads + 8 writes) land as `source_kind="composite"`
+The 15 composites (7 reads + 8 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -231,7 +239,7 @@ caller.
 
 ### L1/L2 dispatch contract + pre-flight (G0.14-T10 / #1151)
 
-The 14 composites are the **L1** surface: hand-authored aggregators
+The 15 composites are the **L1** surface: hand-authored aggregators
 each connector ships as `source_kind='composite'` descriptors. Every
 composite's body fans out to **L2** raw-REST primitives
 (`GET:/vcenter/datastore`, `POST:/vcenter/vm/{vm}/power?action=start`,
@@ -477,7 +485,7 @@ identifier fields **plus** `preview_unavailable: true` and a
 every reviewer surface that renders `proposed_effect` verbatim (REST
 `GET /api/v1/approvals`, `meho.approvals.list` / `.get`, `meho
 approvals show`), so "blast-radius unknown" is distinguishable from a
-genuinely small action. The 6 read composites register no builder —
+genuinely small action. The 7 read composites register no builder —
 they never park.
 
 ## Dependencies
@@ -526,9 +534,9 @@ they never park.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
-- **All 14 composites shipped** — T5 (#508) ships 5 read, #2080 adds a 6th read
-  composites; T6 (#509) ships the 8 write composites. The "All ~13
-  hand-authored composites land as endpoint_descriptor rows with
+- **All 15 composites shipped** — T5 (#508) ships 5 read, #2080 adds a 6th read,
+  #2135 adds a 7th read (`host.vsan_health`); T6 (#509) ships the 8 write
+  composites. The "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.
 - **`vm.clone` task polling is wall-clock bounded** — the composite

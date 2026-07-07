@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 14 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 15 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -23,7 +23,7 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* The 6 read composites are read-only -- the registration call site
+* The 7 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
   each. The 8 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
@@ -51,6 +51,8 @@ __all__ = [
     "HOST_EVACUATE_RESPONSE_SCHEMA",
     "HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA",
     "HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA",
+    "HOST_VSAN_HEALTH_PARAMETER_SCHEMA",
+    "HOST_VSAN_HEALTH_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
@@ -279,6 +281,31 @@ HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.vsan_health`` parameter schema.
+#:
+#: Surfaces per-cluster vSAN health via the health-service vmomi method
+#: ``VsanQueryVcClusterHealthSummary`` on the
+#: ``vsan-cluster-health-system`` singleton. vSAN health is a
+#: cluster-scoped read (the ``govc vsan.health.*`` equivalent), so the
+#: composite requires the target cluster's managed-object ID.
+HOST_VSAN_HEALTH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Managed-object ID of the vSAN cluster to check (e.g. "
+                "'domain-c123'). The composite scopes the health-service "
+                "query to this ClusterComputeResource MoRef."
+            ),
+        },
+    },
+    "required": ["cluster"],
     "additionalProperties": False,
 }
 
@@ -676,6 +703,102 @@ HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["hosts"],
+}
+
+
+#: ``vmware.composite.host.vsan_health`` response schema.
+#:
+#: Captures the ``VsanClusterHealthSummary`` aggregation: the
+#: cluster-level ``overall_health`` colour plus the health-test
+#: ``groups`` list (each group with its own roll-up colour + per-check
+#: ``tests``). When the best-effort health-service read is skipped,
+#: ``overall_health`` and ``groups`` are ``null`` and a ``read_note``
+#: records why. The vSAN health-service owns the colour vocabulary
+#: (``green`` / ``yellow`` / ``red`` / ``unknown`` / ``info``); it is
+#: passed through verbatim.
+HOST_VSAN_HEALTH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "description": "Managed-object ID of the cluster the summary was read for.",
+        },
+        "overall_health": {
+            "type": ["string", "null"],
+            "description": (
+                "Cluster-wide vSAN health roll-up colour from "
+                "``VsanClusterHealthSummary.overallHealth``; ``null`` when "
+                "the best-effort health-service read was skipped (see "
+                "``read_note``)."
+            ),
+        },
+        "groups": {
+            "type": ["array", "null"],
+            "items": {
+                "type": "object",
+                "properties": {
+                    "group_id": {
+                        "type": ["string", "null"],
+                        "description": "Health-group identifier (``groupId``).",
+                    },
+                    "group_name": {
+                        "type": ["string", "null"],
+                        "description": "Human-readable group name (``groupName``).",
+                    },
+                    "group_health": {
+                        "type": ["string", "null"],
+                        "description": "Group-level roll-up colour (``groupHealth``).",
+                    },
+                    "tests": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "test_id": {
+                                    "type": ["string", "null"],
+                                    "description": "Health-test identifier (``testId``).",
+                                },
+                                "test_name": {
+                                    "type": ["string", "null"],
+                                    "description": "Human-readable test name (``testName``).",
+                                },
+                                "test_health": {
+                                    "type": ["string", "null"],
+                                    "description": "Per-test colour (``testHealth``).",
+                                },
+                                "test_short_description": {
+                                    "type": ["string", "null"],
+                                    "description": (
+                                        "Short human-readable description "
+                                        "(``testShortDescription``)."
+                                    ),
+                                },
+                            },
+                            "required": [],
+                        },
+                        "description": (
+                            "Individual health checks in this group from ``groupTests``."
+                        ),
+                    },
+                },
+                "required": ["tests"],
+            },
+            "description": (
+                "Health-test groups from ``VsanClusterHealthSummary.groups``; "
+                "``null`` when the best-effort health-service read was skipped "
+                "(see ``read_note``)."
+            ),
+        },
+        "read_note": {
+            "type": "string",
+            "description": (
+                "Present only when the health-service read was skipped; "
+                "records the failing sub-op, its status, and the underlying "
+                "error."
+            ),
+        },
+    },
+    "required": ["cluster"],
 }
 
 

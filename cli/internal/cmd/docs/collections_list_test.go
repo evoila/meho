@@ -14,7 +14,7 @@ import (
 )
 
 func TestCollectionsListRegisteredOnParent(t *testing.T) {
-	cmd := newCollectionsCmd(true)
+	cmd := newCollectionsCmd()
 	var found bool
 	for _, c := range cmd.Commands() {
 		if c.Name() == "list" {
@@ -26,39 +26,10 @@ func TestCollectionsListRegisteredOnParent(t *testing.T) {
 	}
 }
 
-func TestRunCollectionListRefusesWhenUnprovisioned(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runCollectionList(cmd, listCollectionsOptions{Provisioned: false})
-	if exitCodeOf(t, err) != 5 {
-		t.Errorf("expected exit 5 (insufficient_role family); got %d", exitCodeOf(t, err))
-	}
-	if !strings.Contains(stderr.String(), "addon_not_provisioned") {
-		t.Errorf("expected addon_not_provisioned code; got %q", stderr.String())
-	}
-}
-
-func TestRunCollectionListRefusalIsBeforeNetwork(t *testing.T) {
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		hit = true
-	}))
-	defer srv.Close()
-
-	cmd, _, _ := newRunCmd(t)
-	_ = runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       false,
-		BackplaneOverride: srv.URL,
-	})
-	if hit {
-		t.Errorf("expected no HTTP call for an unprovisioned refusal")
-	}
-}
-
 func TestRunCollectionListRejectsOutOfRangeLimit(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned: true,
-		Limit:       9000,
+		Limit: 9000,
 	})
 	if exitCodeOf(t, err) != 4 {
 		t.Errorf("expected exit 4 (unexpected_response) for out-of-range limit; got %d", exitCodeOf(t, err))
@@ -92,7 +63,6 @@ func TestRunCollectionListHappyPathTable(t *testing.T) {
 
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -120,7 +90,6 @@ func TestRunCollectionListEmptyRendersNotice(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -148,7 +117,6 @@ func TestRunCollectionListJSONOutput(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       true,
 		JSONOut:           true,
 		BackplaneOverride: srv.URL,
 	})
@@ -181,7 +149,6 @@ func TestRunCollectionListForwardsVendorAndCursor(t *testing.T) {
 
 	cmd, _, _ := newRunCmd(t)
 	if err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       true,
 		Vendor:            "NetApp",
 		Cursor:            "vmware",
 		Limit:             25,
@@ -227,7 +194,6 @@ func TestRunCollectionListForbiddenRole403(t *testing.T) {
 
 	cmd, _, _ := newRunCmd(t)
 	err := runCollectionList(cmd, listCollectionsOptions{
-		Provisioned:       true,
 		BackplaneOverride: srv.URL,
 	})
 	if exitCodeOf(t, err) != 5 {

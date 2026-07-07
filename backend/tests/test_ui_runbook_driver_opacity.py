@@ -776,7 +776,17 @@ def test_abort_valid_reason_flips_state_and_audits() -> None:
 
 
 def test_abort_missing_csrf_rejected_403() -> None:
-    """An abort POST with no CSRF token is 403 (and no abort lands)."""
+    """An abort POST with no CSRF token is a CSRF-class 403 (no abort lands).
+
+    Pins the 403 as **CSRF-class, not RBAC-class** (#2112): the run-assignee
+    IS permitted to abort their own run (``test_abort_valid_reason_flips_...``
+    proves the browser path with a valid CSRF token succeeds). The bare
+    no-CSRF POST fails only on the double-submit-cookie middleware, which
+    stamps ``x-csrf-rejection-reason: missing_token`` -- the discriminator the
+    client-side safety net keys on. A genuine assignee RBAC denial would be an
+    inline HTTP-200 fragment (``_reassigned_away``), never a 403, so a 403
+    here can only be the CSRF gate.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_template(tenant_id=_TENANT_A, slug="drain", body=_two_step_body())
     run_id = _start_run(tenant_id=_TENANT_A, slug="drain", assigned_to=_OPERATOR_SUB)
@@ -790,6 +800,9 @@ def test_abort_missing_csrf_rejected_403() -> None:
         )
 
     assert response.status_code == 403, response.text
+    # CSRF-class, not RBAC-class: the middleware stamps the rejection reason.
+    assert response.headers.get("x-csrf-rejection-reason") == "missing_token"
+    assert response.json() == {"detail": "csrf_token_invalid"}
     assert _run_row(run_id).state == "in_progress"
 
 

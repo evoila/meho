@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Read-only ``vmware.composite.*`` handler functions (6 composites).
+"""Read-only ``vmware.composite.*`` handler functions (7 composites).
 
 Each handler is a module-level ``async def`` that takes the dispatcher's
 composite-branch keyword args ``(operator, target, params,
@@ -90,6 +90,7 @@ __all__ = [
     "datastore_usage_composite",
     "event_tail_composite",
     "host_network_uplinks_composite",
+    "host_vsan_health_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
 ]
@@ -139,6 +140,21 @@ _PROPERTY_COLLECTOR_MOID = "propertyCollector"
 _HOST_SYSTEM_MO_TYPE = "HostSystem"
 _HOST_NET_PROP_PNIC = "config.network.pnic"
 _HOST_NET_PROP_PROXYSWITCH = "config.network.proxySwitch"
+# vSAN health is a health-service-only read: the plain vSphere
+# Automation REST surface exposes no vSAN health resource. It is served
+# by the dedicated ``/vsanHealth`` vmomi endpoint, whose
+# ``VsanVcClusterHealthSystem`` managed object (the singleton moId
+# ``vsan-cluster-health-system``) answers
+# ``VsanQueryVcClusterHealthSummary`` at cluster grain -- the ``govc
+# vsan.health.*`` equivalent. The method takes the target cluster's
+# MoRef and returns a ``VsanClusterHealthSummary`` carrying an
+# ``overallHealth`` colour plus a ``groups`` list of health-test groups
+# (each group -> ``groupTests`` list of individual checks).
+_OP_VSAN_QUERY_HEALTH_SUMMARY = (
+    "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary"
+)
+_VSAN_CLUSTER_HEALTH_SYSTEM_MOID = "vsan-cluster-health-system"
+_CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
 
 # Composite op_ids -- used by the preflight cache key. Centralised here
 # so the test-side coverage assertion (every registered composite has
@@ -150,6 +166,7 @@ _COMPOSITE_OP_ID_PERFORMANCE_SUMMARY = "vmware.composite.performance.summary"
 _COMPOSITE_OP_ID_DATASTORE_USAGE = "vmware.composite.datastore.usage"
 _COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT = "vmware.composite.network.portgroup.audit"
 _COMPOSITE_OP_ID_HOST_NETWORK_UPLINKS = "vmware.composite.host.network_uplinks"
+_COMPOSITE_OP_ID_HOST_VSAN_HEALTH = "vmware.composite.host.vsan_health"
 
 # Per-composite sub-op-id tuples consumed by the L2 pre-flight check
 # (G0.14-T10 / #1151). Each tuple lists the L2 raw-REST sub-ops the
@@ -182,6 +199,7 @@ _SUB_OPS_HOST_NETWORK_UPLINKS: tuple[str, ...] = (
     _OP_LIST_HOSTS,
     _OP_RETRIEVE_PROPERTIES,
 )
+_SUB_OPS_HOST_VSAN_HEALTH: tuple[str, ...] = (_OP_VSAN_QUERY_HEALTH_SUMMARY,)
 
 
 def _unwrap_value(payload: Any) -> Any:
@@ -1062,3 +1080,136 @@ async def host_network_uplinks_composite(
             continue
         aggregated.append(await _build_host_uplink_row(host_id, entry.get("name"), dispatch_child))
     return {"hosts": aggregated}
+
+
+def _parse_vsan_health_test(test: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one WS-API ``VsanClusterHealthTest`` into the operator-facing row.
+
+    A single health check inside a group: ``testId`` /``testName`` /
+    ``testHealth`` (the ``green`` / ``yellow`` / ``red`` colour) plus the
+    short human-readable description. The vSAN health-service owns the
+    inner colour vocabulary; the composite passes it through verbatim.
+    """
+    return {
+        "test_id": test.get("testId"),
+        "test_name": test.get("testName"),
+        "test_health": test.get("testHealth"),
+        "test_short_description": test.get("testShortDescription"),
+    }
+
+
+def _parse_vsan_health_group(group: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one WS-API ``VsanClusterHealthGroup`` into the operator-facing row.
+
+    A group buckets related health checks (network, physical disk,
+    cluster, data, …). ``groupHealth`` is the group-level roll-up
+    colour; ``groupTests`` is the per-check list flattened via
+    :func:`_parse_vsan_health_test`. A missing / non-list ``groupTests``
+    degrades to an empty list rather than raising -- the group-level
+    colour is still meaningful on its own.
+    """
+    raw_tests = group.get("groupTests")
+    tests = (
+        [_parse_vsan_health_test(t) for t in raw_tests if isinstance(t, dict)]
+        if isinstance(raw_tests, list)
+        else []
+    )
+    return {
+        "group_id": group.get("groupId"),
+        "group_name": group.get("groupName"),
+        "group_health": group.get("groupHealth"),
+        "tests": tests,
+    }
+
+
+def _build_vsan_query_health_params(cluster_moid: str) -> dict[str, Any]:
+    """Build the ``VsanQueryVcClusterHealthSummary`` argument set for one cluster.
+
+    ``moId`` targets the ``vsan-cluster-health-system`` singleton on the
+    ``/vsanHealth`` vmomi endpoint; ``cluster`` carries the target
+    cluster's MoRef (a ``ClusterComputeResource``). Every other
+    parameter of the method (``includeObjUuids`` / ``fields`` / …) is
+    optional and left to the health service's defaults so the read
+    returns the full summary.
+    """
+    return {
+        "moId": _VSAN_CLUSTER_HEALTH_SYSTEM_MOID,
+        "cluster": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid},
+    }
+
+
+async def host_vsan_health_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Per cluster: vSAN health-test groups + overall health status.
+
+    Op-id: ``vmware.composite.host.vsan_health``.
+
+    Sub-ops dispatched:
+
+    1. ``POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary``
+       against the ``vsan-cluster-health-system`` singleton, scoped to
+       the target cluster's MoRef. This leg is **best-effort**: the
+       cluster is already identified by the ``cluster`` param, so when
+       the health-service read errors (a cluster with vSAN disabled, a
+       ``/vsanHealth`` endpoint that rejects the vi-json call, a
+       transient auth expiry) the summary is returned with ``groups`` /
+       ``overall_health`` set to ``null`` and a ``read_note`` recording
+       why, rather than raising through ``_require_ok``.
+
+    vSAN health is the one read the plain vSphere Automation REST
+    surface cannot reproduce: the health-test-group / overall-status
+    roll-up lives on the ``/vsanHealth`` vmomi service, so the composite
+    reaches it via the ``VsanVcClusterHealthSystem`` managed object --
+    the ``govc vsan.health.*`` equivalent. It drives cluster-health
+    triage ('is vSAN healthy?' / 'which health group is red?').
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"cluster": <moid>, "overall_health": <colour|null>,
+        "groups": [{"group_id": ..., "group_name": ...,
+        "group_health": ..., "tests": [{"test_id": ...,
+        "test_name": ..., "test_health": ...,
+        "test_short_description": ...}, ...]}, ...]}``. When the
+        best-effort health-service read is skipped, ``overall_health``
+        and ``groups`` are ``null`` and the payload carries a
+        ``read_note``.
+    """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_HOST_VSAN_HEALTH,
+        sub_op_ids=_SUB_OPS_HOST_VSAN_HEALTH,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
+    cluster_moid = params["cluster"]
+
+    out: dict[str, Any] = {"cluster": cluster_moid}
+    health_result = await dispatch_child(
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_VSAN_QUERY_HEALTH_SUMMARY,
+        params=_build_vsan_query_health_params(cluster_moid),
+    )
+    if health_result.status == "ok":
+        summary = _unwrap_value(health_result.result)
+        raw_groups = summary.get("groups") if isinstance(summary, dict) else None
+        overall = summary.get("overallHealth") if isinstance(summary, dict) else None
+        out["overall_health"] = overall
+        out["groups"] = (
+            [_parse_vsan_health_group(g) for g in raw_groups if isinstance(g, dict)]
+            if isinstance(raw_groups, list)
+            else []
+        )
+    else:
+        out["overall_health"] = None
+        out["groups"] = None
+        out["read_note"] = (
+            f"vsan health-service read skipped: sub-op "
+            f"{_OP_VSAN_QUERY_HEALTH_SUMMARY!r} returned status="
+            f"{health_result.status!r}: {_describe_sub_op_failure(health_result)}"
+        )
+    return out

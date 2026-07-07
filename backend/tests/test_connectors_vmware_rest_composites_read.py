@@ -41,6 +41,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     datastore_usage_composite,
     event_tail_composite,
     host_network_uplinks_composite,
+    host_vsan_health_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
@@ -74,6 +75,7 @@ def _prime_preflight_cache() -> Iterator[None]:
             "vmware.composite.datastore.usage",
             "vmware.composite.network.portgroup.audit",
             "vmware.composite.host.network_uplinks",
+            "vmware.composite.host.vsan_health",
         }
     )
     yield
@@ -1203,6 +1205,163 @@ async def test_host_network_uplinks_raises_on_listing_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# vmware.composite.host.vsan_health
+# ---------------------------------------------------------------------------
+
+
+_VSAN_QUERY_OP = "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary"
+
+
+def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
+    """Build a ``VsanClusterHealthSummary`` payload for one cluster."""
+    return {"overallHealth": overall, "groups": groups}
+
+
+@pytest.mark.asyncio
+async def test_host_vsan_health_queries_health_summary_for_cluster() -> None:
+    """One health-service query fires, scoped to the cluster; groups + tests flatten.
+
+    ``VsanClusterHealthSummary.overallHealth`` surfaces as
+    ``overall_health``; each ``VsanClusterHealthGroup`` flattens to
+    group_id / group_name / group_health plus a per-check ``tests`` list
+    (testId / testName / testHealth / testShortDescription).
+    """
+    summary = _vsan_summary(
+        overall="green",
+        groups=[
+            {
+                "groupId": "com.vmware.vsan.health.test.network",
+                "groupName": "Network",
+                "groupHealth": "green",
+                "groupTests": [
+                    {
+                        "testId": "com.vmware.vsan.health.test.hostconnectivity",
+                        "testName": "vSAN cluster partition",
+                        "testHealth": "green",
+                        "testShortDescription": "Checks host connectivity.",
+                    },
+                ],
+            },
+            {
+                "groupId": "com.vmware.vsan.health.test.physicaldisks",
+                "groupName": "Physical disk",
+                "groupHealth": "yellow",
+                "groupTests": [],
+            },
+        ],
+    )
+    dispatch = _RecordingDispatchChild({_VSAN_QUERY_OP: summary})
+
+    out = await host_vsan_health_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "domain-c123"},
+        dispatch_child=dispatch,
+    )
+
+    assert len(dispatch.calls) == 1
+    call = dispatch.calls[0]
+    assert call["op_id"] == _VSAN_QUERY_OP
+    assert call["connector_id"] == "vmware-rest-9.0"
+    # The health query targets the vsan-cluster-health-system singleton
+    # and carries the cluster MoRef.
+    assert call["params"]["moId"] == "vsan-cluster-health-system"
+    assert call["params"]["cluster"] == {
+        "type": "ClusterComputeResource",
+        "value": "domain-c123",
+    }
+
+    assert out["cluster"] == "domain-c123"
+    assert out["overall_health"] == "green"
+    assert out["groups"] == [
+        {
+            "group_id": "com.vmware.vsan.health.test.network",
+            "group_name": "Network",
+            "group_health": "green",
+            "tests": [
+                {
+                    "test_id": "com.vmware.vsan.health.test.hostconnectivity",
+                    "test_name": "vSAN cluster partition",
+                    "test_health": "green",
+                    "test_short_description": "Checks host connectivity.",
+                },
+            ],
+        },
+        {
+            "group_id": "com.vmware.vsan.health.test.physicaldisks",
+            "group_name": "Physical disk",
+            "group_health": "yellow",
+            "tests": [],
+        },
+    ]
+    assert "read_note" not in out
+
+
+@pytest.mark.asyncio
+async def test_host_vsan_health_read_is_best_effort_on_error() -> None:
+    """A failed health-service read nulls groups/overall + records a ``read_note``.
+
+    The cluster is already identified by the ``cluster`` param, so a
+    health-service error (vSAN disabled, endpoint reject) returns the
+    payload with ``overall_health`` / ``groups`` nulled and a
+    ``read_note`` rather than raising.
+    """
+    dispatch = _RecordingDispatchChild(
+        [
+            _connector_error_result(
+                _VSAN_QUERY_OP,
+                "Client error '400 Bad Request' for url "
+                "'https://vc/vsanHealth/VsanVcClusterHealthSystem/"
+                "vsan-cluster-health-system/VsanQueryVcClusterHealthSummary'",
+            )
+        ]
+    )
+    out = await host_vsan_health_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "domain-c404"},
+        dispatch_child=dispatch,
+    )
+    assert out["cluster"] == "domain-c404"
+    assert out["overall_health"] is None
+    assert out["groups"] is None
+    assert "read_note" in out
+    note = out["read_note"]
+    assert _VSAN_QUERY_OP in note
+    assert "400 Bad Request" in note
+
+
+@pytest.mark.asyncio
+async def test_host_vsan_health_tolerates_legacy_value_envelope() -> None:
+    """A ``{"value": ...}`` envelope on the summary unwraps cleanly."""
+    dispatch = _RecordingDispatchChild(
+        [_ok_result(_VSAN_QUERY_OP, {"value": _vsan_summary(overall="red", groups=[])})]
+    )
+    out = await host_vsan_health_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "domain-c1"},
+        dispatch_child=dispatch,
+    )
+    assert out["overall_health"] == "red"
+    assert out["groups"] == []
+
+
+@pytest.mark.asyncio
+async def test_host_vsan_health_tolerates_missing_groups_key() -> None:
+    """A summary without a ``groups`` list degrades to an empty group list."""
+    dispatch = _RecordingDispatchChild([_ok_result(_VSAN_QUERY_OP, {"overallHealth": "green"})])
+    out = await host_vsan_health_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "domain-c1"},
+        dispatch_child=dispatch,
+    )
+    assert out["overall_health"] == "green"
+    assert out["groups"] == []
+
+
+# ---------------------------------------------------------------------------
 # Error fan-out -- a sub-op error causes the handler to raise
 # ---------------------------------------------------------------------------
 
@@ -1268,7 +1427,7 @@ async def test_event_tail_raises_on_sub_op_error() -> None:
 
 @pytest.mark.asyncio
 async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
-    """All six read handlers dispatch sub-ops against ``vmware-rest-9.0`` exclusively.
+    """All seven read handlers dispatch sub-ops against ``vmware-rest-9.0`` exclusively.
 
     Load-bearing for the issue body's *Why dispatch_child not direct
     httpx* contract: the connector_id is what routes the recursive
@@ -1314,6 +1473,15 @@ async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
             host_network_uplinks_composite,
             {},
             {"GET:/vcenter/host": []},
+        ),
+        (
+            host_vsan_health_composite,
+            {"cluster": "domain-c1"},
+            {
+                "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary": (
+                    {"overallHealth": "green", "groups": []}
+                )
+            },
         ),
     )
     for handler, params, responses in handlers:

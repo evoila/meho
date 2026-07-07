@@ -55,16 +55,23 @@ References
 
 from __future__ import annotations
 
+import itertools
+import re
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.resolver import get_default_policy
+
 __all__ = [
     "BroadcastEvent",
     "classify_op",
     "redact_payload",
+    "scrub_broadcast_params",
 ]
 
 
@@ -519,3 +526,177 @@ def redact_payload(
         "params": raw_params,
         "result_status": result_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 defence-in-depth for full-detail broadcasts (meho-internal #151)
+# ---------------------------------------------------------------------------
+#
+# ``classify_op`` is allowlist-driven: whether a secret-bearing write op
+# collapses to aggregate-only depends on a human having pinned it into
+# :data:`_CREDENTIAL_WRITE_OPS` / :data:`_CREDENTIAL_MINT_OPS`. A newly
+# ingested op, a mis-registered op, or a connector op added without a
+# pin falls through to the ``write`` / ``other`` class and would ship
+# its full request params to every co-tenant feed subscriber. The
+# helpers below are the classification-independent second layer: the
+# dispatch publisher runs every params dict through
+# :func:`scrub_broadcast_params` before building the payload, and
+# collapses the broadcast to aggregate-only whenever secret material
+# is detected. The static classifier-coverage test
+# (``tests/test_broadcast_classifier_coverage.py``) is the companion
+# CI layer that forces registered secret-bearing write ops to get
+# pinned; this runtime layer covers everything the static sweep cannot
+# see.
+
+#: Name-tokens that mark a param key as secret-bearing wherever they
+#: appear in the normalised (snake-cased) token list: ``password`` /
+#: ``user_password`` / ``passphrase`` / ``kubeconfig`` are secret
+#: material in any position. ``key`` alone is deliberately NOT here
+#: (``ssh_public_key`` / ``label_key`` would over-match) -- key-ish
+#: names are covered by the pair combinations below.
+_SECRET_NAME_TOKENS_ANYWHERE: Final[frozenset[str]] = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "apikey",
+        "kubeconfig",
+    }
+)
+
+#: Name-tokens that mark a key as secret-bearing only in **final**
+#: position. ``token`` / ``secret`` name the credential itself when
+#: final (``token``, ``session_token``, ``client_secret``,
+#: ``credentials``) but an *attribute or reference* of it when
+#: followed by more tokens (``token_policies`` / ``token_ttl`` on the
+#: Vault AppRole write surface, ``secret_name`` / ``secret_path`` as
+#: k8s/Vault references) -- those carry no secret material and must
+#: not collapse a vetted full-detail write broadcast to aggregate.
+_SECRET_NAME_TOKENS_FINAL: Final[frozenset[str]] = frozenset(
+    {
+        "secret",
+        "secrets",
+        "token",
+        "credential",
+        "credentials",
+    }
+)
+
+#: Adjacent token pairs that mark a key as secret-bearing when the
+#: positional rules above don't (``api_key``, ``private_key``,
+#: ``secret_id`` -- the Vault AppRole SecretID is secret material
+#: even though ``secret`` is non-final there).
+_SECRET_NAME_TOKEN_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("api", "key"),
+        ("access", "key"),
+        ("private", "key"),
+        ("encryption", "key"),
+        ("secret", "id"),
+        ("secret", "value"),
+        ("secret", "data"),
+    }
+)
+
+#: Replacement value for a secret-named param. Mirrors the Tier-1
+#: engine's ``[REDACTED:<pattern>]`` shape so feed consumers see one
+#: consistent redaction vocabulary.
+_REDACTED_PARAM: Final[str] = "[REDACTED:param_name]"
+
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _is_secret_param_name(name: str) -> bool:
+    """True when *name* is a secret-shaped param/field name.
+
+    Normalises camelCase and kebab-case to snake_case tokens, then
+    checks single tokens and adjacent pairs. Shared by the runtime
+    scrub below and the classifier-coverage test's parameter-schema
+    sweep so both layers agree on what "secret-bearing" means.
+    """
+    normalised = _CAMEL_BOUNDARY.sub("_", name).replace("-", "_").replace(".", "_").lower()
+    tokens = [token for token in normalised.split("_") if token]
+    if not tokens:
+        return False
+    if any(token in _SECRET_NAME_TOKENS_ANYWHERE for token in tokens):
+        return True
+    if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
+        return True
+    return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
+
+
+def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
+    """Replace values of secret-named keys; report whether any were found.
+
+    The Tier-1 engine matches *labelled* secret shapes inside string
+    leaves (``password=...``, ``Bearer ...``); a dict entry like
+    ``{"password": "hunter2"}`` carries no label in the leaf itself, so
+    the engine alone would pass it through verbatim. This walk is the
+    key-name-aware complement: any mapping entry whose key is
+    secret-shaped has its whole value subtree replaced (a nested value
+    under a ``credentials`` key is secret material regardless of its
+    inner structure).
+
+    Bare scalars (bool / int / float / ``None``) under a secret-shaped
+    key pass through unflagged: secret material is a string or a blob,
+    never ``bind_secret_id=true`` or ``secret_id_ttl=3600`` -- the
+    Vault AppRole config attributes that would otherwise collapse a
+    vetted full-detail write broadcast to aggregate on every dispatch.
+    """
+    if isinstance(node, Mapping):
+        found = False
+        scrubbed: dict[str, Any] = {}
+        for key, value in node.items():
+            if _is_secret_param_name(str(key)) and isinstance(value, (str, Mapping, Sequence)):
+                scrubbed[str(key)] = _REDACTED_PARAM
+                found = True
+                continue
+            child, child_found = _scrub_secret_named_keys(value)
+            scrubbed[str(key)] = child
+            found = found or child_found
+        return scrubbed, found
+    if isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray)):
+        items: list[Any] = []
+        found = False
+        for item in node:
+            child, child_found = _scrub_secret_named_keys(item)
+            items.append(child)
+            found = found or child_found
+        return items, found
+    return node, False
+
+
+def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Tier-1-scrub a broadcast params dict; report secret detection.
+
+    Returns ``(scrubbed_params, secret_detected)``. Two passes:
+
+    1. Key-name scrub (:func:`_scrub_secret_named_keys`) -- replaces the
+       value of every secret-named key (``password``, ``client_secret``,
+       ``sessionToken``, ...).
+    2. Tier-1 engine pass with the packaged default policy -- catches
+       labelled secret shapes embedded in string values (``Bearer ...``,
+       ``api_key=...``, ``Authorization:`` header dumps). The policy is
+       pinned via :func:`~meho_backplane.redaction.resolver.get_default_policy`,
+       deliberately bypassing the resolver's override table: an
+       operator-registered shadow-mode or narrowed policy must not
+       silently disable the broadcast floor.
+
+    ``secret_detected`` is ``True`` when either pass found secret
+    material; the dispatch publisher uses it to collapse the broadcast
+    to aggregate-only, so a mis/unclassified secret-bearing op never
+    ships even a redacted-shape params dict. Fail-closed: any exception
+    reports ``({}, True)`` -- on this fail-open publish path an
+    unredacted fallback would be the leak.
+    """
+    try:
+        scrubbed, found = _scrub_secret_named_keys(params)
+        result = redact(scrubbed, get_default_policy())
+        found = found or bool(result.manifest)
+        redacted = result.redacted
+        if not isinstance(redacted, dict):
+            return {}, True
+        return redacted, found
+    except Exception:  # fail-closed: never leak, never raise on the publish path
+        return {}, True

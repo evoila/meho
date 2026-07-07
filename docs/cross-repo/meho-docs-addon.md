@@ -147,10 +147,12 @@ setting `JWT_CAPABILITIES_CLAIM_NAME` (default `capabilities`).
 The capability set is a **flat list of string keys**. Two kinds of key
 matter here:
 
-- **`meho-docs`** — the **add-on key**. Gates the *surface*: a tenant
-  without it never sees `search_docs` / `ask_docs` /
-  `list_doc_collections` in `tools/list` (true absence) and `meho docs`
-  is hidden from `--help`.
+- **`meho-docs`** — the **add-on key**. Gates the *MCP tool surface*: a
+  tenant without it never sees `search_docs` / `ask_docs` /
+  `list_doc_collections` in `tools/list` (true absence). It does **not**
+  gate the CLI: `meho docs` always appears in `--help` (#2109 removed the
+  client-side CLI pre-check so the CLI and `POST /api/v1/search_docs`
+  apply the same server-side gate — see below).
 - **`meho-docs:<collection_key>`** — a **per-collection entitlement key**,
   one per collection the tenant may search (e.g. `meho-docs:vmware`).
   Reuses the same capability substrate — zero new tables; the JWT parser
@@ -634,15 +636,16 @@ Every error path collapses to **one** typed `CorpusUnavailable`, which the
 
 Prove the add-on end-to-end. The contract is: an entitled collection is
 **discoverable and returns cited chunks on a provisioned, entitled tenant;
-absent (not greyed-out) on an unprovisioned or unentitled one; and every
-query is audited under `meho.docs.*` with its collection scope**.
+absent on the MCP face (true tool absence) and server-403'd on the
+REST/CLI face for an unprovisioned or unentitled one; and every query is
+audited under `meho.docs.*` with its collection scope**.
 
 ### Present + cited chunks (provisioned, entitled tenant)
 
 CLI (operator logged in as a tenant entitled to `vmware`):
 
 ```bash
-# meho docs appears in --help only when the tenant has the add-on:
+# meho docs always appears in --help (no client-side gate; #2109):
 meho --help | grep -A1 '  docs'
 
 # The entitled collection is in the catalogue:
@@ -664,29 +667,36 @@ MCP face (an agent session against the same tenant):
   `meho://docs/vmware/{product}/{version}/{chunk_id}` returns the full
   text of a hit.
 
-### Absent (unprovisioned or unentitled tenant)
+### Unprovisioned or unentitled tenant
 
-For a tenant **without** the `meho-docs` add-on, the surface tells the
-truth — it is absent, not greyed-out:
+The **CLI** carries no client-side capability gate (#2109): `meho docs`
+always appears in `--help` and every verb runs, deferring the access
+decision to the backplane — exactly as `POST /api/v1/search_docs` does.
+So an unentitled query surfaces the **server's** verdict rather than a
+client-side refusal:
 
 ```bash
-# meho docs is hidden from --help...
-meho --help | grep -c '  docs'        # -> 0
+# meho docs is always in --help (no client-side gate):
+meho --help | grep -c '  docs'        # -> 1
 
-# ...and every verb refuses with a typed error before any network call:
+# A query for a collection the tenant is not entitled to reaches the
+# route and surfaces the server's 403 (not_entitled), rendered as
+# insufficient_role (exit 5) — the same gate REST applies:
 meho docs search "anything" --collection vmware
-# -> addon_not_provisioned (exit 5): the meho-docs add-on is not
-#    provisioned for your tenant; ask a tenant_admin to enable the
-#    `meho-docs` capability
+# -> insufficient_role (exit 5): identity <sub> (tenant <id>) is not
+#    entitled to doc collection 'vmware': missing capability
+#    'meho-docs:vmware'
 ```
 
-For a tenant **with** the add-on but **without** `meho-docs:vmware`, the
-`vmware` collection is a **true absence** in the catalogue and the band
+On the **MCP face**, the base `meho-docs` add-on key still gates *tool
+visibility*: a tenant without it never sees `search_docs` / `ask_docs` /
+`list_doc_collections` in `tools/list` (true absence). For a tenant
+**with** the add-on but **without** `meho-docs:vmware`, the `vmware`
+collection is a **true absence** in the catalogue and the band
 (`list_doc_collections` does not list it), and a direct
 `search_docs(collection="vmware")` is rejected **403** / `-32602` — the
-collection exists, but the tenant is not entitled. On the MCP face, the
-add-on tools are still in `tools/list` (the base `meho-docs` gate passes);
-only the unentitled *collection* is absent.
+collection exists, but the tenant is not entitled. That per-collection
+403 is the **same** gate the REST route and the CLI apply.
 
 ### Audit row visible (who-touched)
 

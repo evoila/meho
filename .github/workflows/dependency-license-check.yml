@@ -138,6 +138,14 @@ jobs:
         # OSI-approved (https://opensource.org/license/cnri-python). Allowing
         # the exact emitted expression keeps the gate specific rather than
         # broadening to either arm alone or to bare ``CNRI-Python``.
+        #
+        # ``MIT-0``: cffi 2.1.0 (2026-07, transitive via cryptography and
+        # friends) switched its PEP 639 expression to MIT-0 (MIT No
+        # Attribution) — MIT with the attribution requirement removed, OSI-
+        # approved (https://opensource.org/license/mit-0), strictly more
+        # permissive than MIT which this list already allows. This job
+        # fresh-installs (ignoring uv.lock), so the gate broke on every
+        # dep-touching PR the day cffi 2.1.0 released.
         run: >
           pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed tiktoken --allow-only="
           Apache Software License;
@@ -146,6 +154,7 @@ jobs:
           Apache License 2.0;
           MIT License;
           MIT;
+          MIT-0;
           BSD License;
           BSD-2-Clause;
           BSD-3-Clause;

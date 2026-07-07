@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -65,6 +66,7 @@ from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import (
     _TRUNCATION_MARKER,
     JsonFluxReducer,
+    _detect_collection,
     _fit_sample_to_budget,
     _query_sample,
     _sample_from_tail,
@@ -1160,6 +1162,288 @@ async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
     assert drill_in.available is False
     assert drill_in.reason == "result_store_unavailable"
     assert "store" in drill_in.rationale.lower()
+
+
+# ---------------------------------------------------------------------------
+# #2113 — single-object detail ops (dict-of-arrays) must not be reduced to
+# one arbitrary sub-array. ``k8s.pod.info`` returns a flat detail object
+# whose sibling arrays (containers / container_statuses / volumes /
+# conditions) are coordinate fields, NOT pages of one collection. The
+# pre-#2113 largest-list fallback materialized ``conditions`` (the longest,
+# least useful array) and silently dropped ``container_statuses``.
+# ---------------------------------------------------------------------------
+
+
+def test_detect_collection_exempts_dict_of_arrays_detail_object() -> None:
+    """A dict with >1 list-valued field is a detail object, not a collection.
+
+    Unit-level anchor for the #2113 fix at the detection boundary: the
+    ``k8s.pod.info`` shape (several sibling arrays next to scalar fields)
+    must return ``(None, None)`` so the reducer passes it through verbatim
+    instead of picking the longest array (``conditions``) and discarding
+    ``container_statuses`` / ``containers`` / ``volumes``.
+    """
+    detail = {
+        "name": "app-pod",
+        "node": "node-1",
+        "qos_class": "Burstable",
+        "containers": [{"name": "app"}],
+        "container_statuses": [{"name": "app", "ready": True}],
+        "volumes": [{"name": "cfg"}],
+        "conditions": [{"type": "Ready", "status": "True"}, {"type": "PodScheduled"}],
+    }
+
+    envelope_key, rows = _detect_collection(detail)
+
+    assert (envelope_key, rows) == (None, None), (
+        "a dict-of-arrays detail object must not be treated as a paginable "
+        "collection — no sub-array may be selected as THE collection"
+    )
+
+
+def test_detect_collection_keeps_single_list_flat_dict_as_collection() -> None:
+    """A flat dict with exactly ONE list field is still a real collection.
+
+    The k8s.logs shape (``lines`` next to scalar siblings, no envelope
+    key) must keep flowing through the largest-list fallback so genuine
+    list ops still reduce — the #2113 fix narrows the fallback to the
+    single-list case, it does not disable it.
+    """
+    payload = {"pod": "p", "namespace": "n", "lines": ["a", "b", "c"], "truncated": False}
+
+    envelope_key, rows = _detect_collection(payload)
+
+    assert envelope_key == "lines"
+    assert rows == ["a", "b", "c"]
+
+
+def test_detect_collection_reduces_paginated_collection_with_hateoas_metadata() -> None:
+    """A ``{resourceList, pageInfo, links}`` payload still reduces (#2184).
+
+    Regression guard for the vROps / VCF-operations resource-list shape:
+    the single real collection (``resourceList``) is wrapped next to a
+    ``pageInfo`` cursor block and a HATEOAS ``links`` array. Both are
+    transport metadata, not coordinate fields of a detail object, so
+    ``_detect_collection`` must exclude them from the list-field count and
+    keep the payload classified as ONE real list field — otherwise
+    (pre-#2184) the extra ``links`` array tipped it into the #2113
+    multi-list detail exemption and a genuine large collection shipped
+    UNREDUCED with ``handle=None``. Locks in that a future change can't
+    silently re-break vROps pagination.
+    """
+    payload = {
+        "resourceList": [{"identifier": f"r-{i}", "name": f"vm-{i}"} for i in range(10)],
+        "pageInfo": {"totalCount": 10, "page": 0, "pageSize": 1000},
+        "links": [{"href": "/suite-api/api/resources", "rel": "SELF", "name": "current"}],
+    }
+
+    envelope_key, rows = _detect_collection(payload)
+
+    assert envelope_key == "resourceList", (
+        "the paginated resource list must be detected as the collection, not "
+        "exempted as a dict-of-arrays detail object because of the HATEOAS "
+        "``links`` metadata array"
+    )
+    assert rows == payload["resourceList"]
+
+
+def _large_application_pod(now: datetime) -> Any:
+    """A real Deployment pod whose ``pod_info`` projection trips the reducer.
+
+    Mirrors reproduction case **B** in #2113: a populated ``env`` + multi
+    container-status + several conditions, so the serialized detail clears
+    the byte threshold. Returned via the real ``pod_info`` projection so
+    the test asserts against the documented contract, not a hand-rolled
+    dict.
+    """
+    from kubernetes_asyncio.client.models import (
+        V1Container,
+        V1ContainerState,
+        V1ContainerStateRunning,
+        V1ContainerStatus,
+        V1EnvVar,
+        V1ObjectMeta,
+        V1Pod,
+        V1PodCondition,
+        V1PodSpec,
+        V1PodStatus,
+        V1Volume,
+    )
+
+    big_env = [V1EnvVar(name=f"CONFIG_KEY_{i}", value=f"value-{i}-" + "x" * 40) for i in range(60)]
+    return V1Pod(
+        metadata=V1ObjectMeta(
+            name="payments-api-7d8f9c-x2x9z",
+            namespace="payments",
+            creation_timestamp=now - timedelta(seconds=3600),
+            labels={"app": "payments-api"},
+        ),
+        spec=V1PodSpec(
+            containers=[
+                V1Container(name="payments-api", image="registry/payments-api:2.3.1", env=big_env),
+            ],
+            volumes=[V1Volume(name="cfg"), V1Volume(name="tls")],
+            node_name="rke2-meho-03",
+        ),
+        status=V1PodStatus(
+            phase="Running",
+            pod_ip="10.0.4.7",
+            qos_class="Burstable",
+            container_statuses=[
+                V1ContainerStatus(
+                    name="payments-api",
+                    image="registry/payments-api:2.3.1",
+                    image_id="sha256:abc",
+                    ready=True,
+                    restart_count=2,
+                    state=V1ContainerState(running=V1ContainerStateRunning()),
+                )
+            ],
+            conditions=[
+                V1PodCondition(type="PodReadyToStartContainers", status="True"),
+                V1PodCondition(type="Initialized", status="True"),
+                V1PodCondition(type="Ready", status="True"),
+                V1PodCondition(type="ContainersReady", status="True"),
+                V1PodCondition(type="PodScheduled", status="True"),
+            ],
+        ),
+    )
+
+
+async def test_pod_info_above_threshold_keeps_container_statuses_inline() -> None:
+    """#2113 acceptance 1+2: a big pod's ``container_statuses`` survives reduce.
+
+    A populated application pod (case B) projected via ``pod_info`` clears
+    the 4 KB byte threshold, so the pre-fix reducer collapsed it to
+    ``source_key="conditions"`` and dropped everything else. The fix
+    exempts the dict-of-arrays detail object from list reduction, so the
+    full flat object ships inline with no handle and every sibling array
+    is retrievable.
+    """
+    from meho_backplane.connectors.kubernetes.ops_workload import pod_info
+
+    now = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+    projection = pod_info(_large_application_pod(now), now=now)
+    # Guard the premise: this projection really is over the byte threshold,
+    # so we are exercising the reducing path, not the trivial small-pod one.
+    reducer = JsonFluxReducer()
+    assert len(_serialize(projection)) > reducer._byte_threshold, (
+        "test premise: the application-pod projection must exceed the byte "
+        "threshold, otherwise it never reaches the reduction boundary"
+    )
+
+    reduced, handle = await reducer.reduce(projection, None)
+
+    # The detail object passes through verbatim — no handle, no collapse.
+    assert handle is None, "a single-object detail op must not mint a list handle"
+    assert reduced is projection
+    assert "source_key" not in reduced, (
+        "the reduced response must NOT collapse to a single sub-array's "
+        "source_key (was 'conditions' pre-#2113)"
+    )
+    # Every sibling array pod_info() projects is intact.
+    for key in ("containers", "container_statuses", "volumes", "node", "qos_class"):
+        assert key in reduced, f"sibling field {key!r} was silently discarded"
+    # container_statuses carries the per-container name/image/ready/restart/state.
+    cs = reduced["container_statuses"][0]
+    assert cs["name"] == "payments-api"
+    assert cs["image"] == "registry/payments-api:2.3.1"
+    assert cs["ready"] is True
+    assert cs["restart_count"] == 2
+    assert cs["state"] == "running"
+
+
+async def test_pod_info_below_threshold_still_returns_full_object_inline() -> None:
+    """#2113 acceptance 4: the small-pod path is unchanged (full flat object).
+
+    A trivial pod (empty env, one container, no volumes) is well under the
+    threshold, so it always passed through inline. The fix must not alter
+    that: full object, no handle.
+    """
+    from kubernetes_asyncio.client.models import (
+        V1Container,
+        V1ContainerStatus,
+        V1ObjectMeta,
+        V1Pod,
+        V1PodCondition,
+        V1PodSpec,
+        V1PodStatus,
+    )
+
+    from meho_backplane.connectors.kubernetes.ops_workload import pod_info
+
+    now = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
+    pod = V1Pod(
+        metadata=V1ObjectMeta(
+            name="mongo-0", namespace="db", creation_timestamp=now - timedelta(seconds=60)
+        ),
+        spec=V1PodSpec(
+            containers=[V1Container(name="mongo", image="mongo:8.0")], node_name="node-1"
+        ),
+        status=V1PodStatus(
+            phase="Running",
+            qos_class="BestEffort",
+            container_statuses=[
+                V1ContainerStatus(
+                    name="mongo",
+                    image="docker.io/library/mongo:8.0",
+                    image_id="sha256:def",
+                    ready=True,
+                    restart_count=0,
+                )
+            ],
+            conditions=[V1PodCondition(type="Ready", status="True")],
+        ),
+    )
+    projection = pod_info(pod, now=now)
+    reducer = JsonFluxReducer()
+    assert len(_serialize(projection)) <= reducer._byte_threshold
+
+    reduced, handle = await reducer.reduce(projection, None)
+
+    assert handle is None
+    assert reduced is projection
+    assert reduced["container_statuses"][0]["image"] == "docker.io/library/mongo:8.0"
+    assert reduced["qos_class"] == "BestEffort"
+
+
+def test_pod_info_docstring_documents_container_statuses_contract() -> None:
+    """#2113 acceptance 5: the projection contract the reduced path preserves.
+
+    The reduced-path response now exposes exactly what ``pod_info``'s
+    docstring promises (per-container statuses with readiness + restart
+    count + state). Pin the docstring so the contract this fix preserves
+    cannot silently drift away from the code that produces it.
+    """
+    from kubernetes_asyncio.client.models import (
+        V1ContainerState,
+        V1ContainerStateRunning,
+        V1ContainerStatus,
+    )
+
+    from meho_backplane.connectors.kubernetes.ops_workload import (
+        container_status_row,
+        pod_info,
+    )
+
+    doc = pod_info.__doc__ or ""
+    assert "Container statuses" in doc
+    assert "restartCount" in doc
+    # The row projection the contract names actually emits exactly the
+    # per-container fields #2113 asserts survive the reduced path.
+    row = container_status_row(
+        V1ContainerStatus(
+            name="c",
+            image="img:1",
+            image_id="sha256:x",
+            ready=True,
+            restart_count=3,
+            state=V1ContainerState(running=V1ContainerStateRunning()),
+        )
+    )
+    assert {"name", "image", "ready", "restart_count", "state"} <= row.keys()
+    assert row["restart_count"] == 3
+    assert row["state"] == "running"
 
 
 async def _set_shaped_handler(

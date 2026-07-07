@@ -232,6 +232,34 @@ markdown summary, samples N rows, and returns
 `(summary_dict, ResultHandle)`. Small / scalar payloads return
 `(payload, None)` unchanged.
 
+Collection detection distinguishes a *paginable list* from a
+*dict-of-arrays detail object* (#2113). A dict with no recognized
+envelope key is only treated as a collection when it carries **exactly
+one** *real* list-valued field (a single collection next to scalar
+siblings — `k8s.logs`'s `lines` next to `pod` / `namespace` /
+`truncated`). A dict with **more than one** *real* list-valued field is a
+single detail object whose arrays are coordinate fields, not pages of one
+set (`k8s.pod.info`'s `containers` / `container_statuses` / `volumes` /
+`conditions`); it passes through verbatim (`(None, None)` from detection)
+rather than materializing whichever sub-array happens to be longest and
+discarding the siblings. Before #2113 the largest-list fallback picked
+`conditions` (5 all-`True` rows) for a real application pod and silently
+dropped `container_statuses` — the image / ready / restart-count / state
+data an operator actually reads.
+
+The single-vs-multi count excludes pagination / HATEOAS metadata keys —
+`links`, `_links`, `pageInfo`, `page_info` (`_METADATA_LIST_KEYS`) —
+before deciding (#2184). Those siblings are transport metadata, not the
+payload's rows, so vROps / VCF-operations'
+`{resourceList: [...], pageInfo: {...}, links: [{...}]}` counts **one**
+real list field (`resourceList`) and still reduces as a collection. The
+first iteration of the #2113 fix omitted the carve-out: the HATEOAS
+`links` array made it a two-list payload, tipped it into the detail-object
+exemption, and shipped a genuine large collection (hundreds–thousands of
+monitored objects) unreduced with `handle=None`. The pod-info detail
+object is unaffected — none of its arrays are metadata keys, so it still
+counts more than one real list field and stays exempt.
+
 ### Constructor defaults
 
 Read off the shipped adapter

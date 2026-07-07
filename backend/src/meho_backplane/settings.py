@@ -581,6 +581,26 @@ class Settings(BaseModel):
         guaranteeing a daily re-auth. Must exceed
         ``ui_session_sliding_extension_seconds`` for the sliding window
         to have any effect.
+    ui_session_read_revalidation_seconds:
+        Drift threshold, in seconds, for the BFF read path's
+        access-token revalidation
+        (:func:`meho_backplane.ui.auth.revalidation.revalidate_read_session`).
+        The ``/ui/*`` read surfaces authenticate off the decrypted
+        ``web_session`` row; without revalidation a token revoked at
+        Keycloak (or a demoted role) keeps authorizing reads until the
+        row hits ``ui_session_absolute_lifetime_seconds``. The session
+        middleware therefore re-presents the stored token to the
+        JWKS-cached JWT chain whenever the session has not been
+        revalidated within this window -- an in-memory signature check
+        on a cache hit, escalating to one refresh-grant round-trip only
+        when the token is past ``exp`` (the point where IdP-side
+        revocation surfaces as ``invalid_grant`` and the operator is
+        bounced to login). Worst-case read-path revocation lag is
+        roughly ``access-token TTL + this window``. Default 300 (five
+        minutes; comparable to the typical Keycloak access-token TTL,
+        bounding total lag to ~10 minutes). ``0`` revalidates on every
+        read request -- the strictest setting; the added cost stays an
+        in-memory check per request between token expiries.
     topology_history_retention_days:
         Maximum age (in days) of ``graph_node_history`` /
         ``graph_edge_history`` rows the G9.3-T6 (#858) retention prune
@@ -961,6 +981,14 @@ class Settings(BaseModel):
     # extension. See the field docstrings above for the full rationale.
     ui_session_sliding_extension_seconds: int = Field(default=3600, ge=0)
     ui_session_absolute_lifetime_seconds: int = Field(default=43200, gt=0)
+    # BFF read-path revalidation drift threshold. The session
+    # middleware re-presents the stored access token to the JWT chain
+    # when a session has not been revalidated within this window, so a
+    # revoked / demoted IdP grant stops authorizing ``/ui/*`` reads
+    # within ~(access-token TTL + this window) instead of the absolute
+    # session lifetime. ``0`` = revalidate on every read request.
+    # See the field docstring above for the full rationale.
+    ui_session_read_revalidation_seconds: int = Field(default=300, ge=0)
     # G9.3-T6 #858 — topology history retention prune knobs. ``days=0`` is
     # the opt-out sentinel ("keep forever"); ``enabled=False`` skips the
     # background task entirely. The two flags are deliberately distinct
@@ -1496,6 +1524,9 @@ def get_settings() -> Settings:
         ),
         ui_session_absolute_lifetime_seconds=int(
             os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "43200"),
+        ),
+        ui_session_read_revalidation_seconds=int(
+            os.environ.get("UI_SESSION_READ_REVALIDATION_SECONDS", "300"),
         ),
         topology_history_retention_days=int(
             os.environ.get("TOPOLOGY_HISTORY_RETENTION_DAYS", "90"),

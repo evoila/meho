@@ -229,7 +229,7 @@ def _reset_recorder() -> None:
 
 
 async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> None:
-    """Register the connector, the 14 composites, and the listing leaves."""
+    """Register the connector, the 15 composites, and the listing leaves."""
     register_connector_v2(
         product="vmware",
         version="9.0",

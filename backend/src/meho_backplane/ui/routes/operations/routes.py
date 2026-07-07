@@ -756,8 +756,11 @@ def _parse_params_field(params: str) -> dict[str, Any]:
 #: "blank target -> inline 400" behavior. A supplied-but-unresolvable name
 #: (``no_target``), which used to escape as a 404 that tore the operator out of
 #: the drawer, now folds into the same inline form error.
+#: ``target_invalid_type`` (#2110) is included for completeness — the drawer's
+#: form field always posts a string, so it cannot trip that mode itself, but
+#: the set documents *every* target-failure ``error_code`` the meta-tool emits.
 _TARGET_RESOLUTION_ERROR_CODES: Final = frozenset(
-    {"target_required", "no_target", "ambiguous_target"}
+    {"target_required", "target_invalid_type", "no_target", "ambiguous_target"}
 )
 
 

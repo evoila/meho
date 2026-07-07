@@ -264,17 +264,18 @@ async def post_call(
     HTTP 4xx. The route returns 200 on a structured-error envelope so
     callers see the dispatcher's error_code in ``extras``.
 
-    Schema-vs-resolution boundary (#136): every **target-resolution**
-    outcome rides the envelope — a missing / empty / ``name``-less target
-    is ``extras.error_code="target_required"``, a supplied name that
-    resolves to no live target is ``extras.error_code="no_target"``, and a
-    name matching more than one target (alias collision) is
-    ``extras.error_code="ambiguous_target"`` — all carry the candidate
-    ``matches`` and are HTTP 200, so a consumer switches on a single
-    ``error_code``. A genuinely malformed ``target`` (wrong JSON type, e.g.
-    ``target: 12345``) is a request-**schema** violation and is correctly a
-    422 from the request model — that is the one remaining HTTP-side
-    status, and it is not a contract violation.
+    Target-failure contract (#136, completed by #2110 Option A): **every**
+    target-failure mode returns HTTP 200 + the dispatcher envelope — a
+    missing / empty / ``name``-less target is
+    ``extras.error_code="target_required"``, a ``target`` of a wrong JSON
+    type (e.g. ``target: 12345``) is
+    ``extras.error_code="target_invalid_type"`` (carrying
+    ``extras.received_type``), a supplied name that resolves to no live
+    target is ``extras.error_code="no_target"``, and a name matching more
+    than one target (alias collision) is
+    ``extras.error_code="ambiguous_target"`` — the resolution codes carry
+    the candidate ``matches``. No target-failure mode returns a 4xx: a
+    consumer's error handling is a single switch on ``extras.error_code``.
     """
     return await call_operation(operator, body.model_dump())
 
@@ -298,12 +299,12 @@ async def post_preview(
     (unknown op, invalid params, unresolvable connector) land inside the
     envelope (``status="error"`` / ``status="unavailable"`` +
     ``extras.error_code``) rather than as HTTP 4xx, the same contract as
-    ``/call``. Target-resolution outcomes ride the envelope identically to
-    ``/call`` (#136): ``target_required`` for a missing / empty /
-    ``name``-less target, ``no_target`` for a supplied-but-unresolvable name,
+    ``/call``. Target-failure outcomes ride the envelope identically to
+    ``/call`` (#136, completed by #2110): ``target_required`` for a missing /
+    empty / ``name``-less target, ``target_invalid_type`` for a ``target`` of
+    a wrong JSON type, ``no_target`` for a supplied-but-unresolvable name,
     ``ambiguous_target`` for a name matching more than one target — all HTTP
-    200. A malformed ``target`` (wrong JSON type) stays a 422 from
-    the request model (the schema-vs-resolution boundary). The body is redacted
+    200, no target-failure 4xx remains. The body is redacted
     through the same connector-boundary pipeline the response path uses;
     nothing is written to the audit row.
     """

@@ -2375,7 +2375,11 @@ type BudgetStatus struct {
 // with 422 “extra_forbidden“ -- a typo in “connector_id“ or an
 // unknown sibling field still fails loud. The “target“ field's
 // own union widening is orthogonal: bare-string is now a first-class
-// valid value, not an unknown field. “params“ itself is a
+// valid value, not an unknown field. A “target“ of any *other* JSON
+// type (“12345“, “true“, “[...]“) is NOT a 422 -- it rides the
+// dispatcher envelope as “target_invalid_type“ (#2110; see
+// :data:`_TargetArg`), so every target-failure mode is HTTP 200 +
+// “extras.error_code“. “params“ itself is a
 // free-form “dict“ because per-op parameter shape is enforced by
 // the descriptor's “parameter_schema“ further down the dispatch
 // path; only the meta-tool body's own fields are constrained here.
@@ -4246,9 +4250,11 @@ type PreambleInclusion struct {
 //
 // “target“ accepts the same three shapes as “call_operation“ (bare
 // string, dict “{"name": ...}“, or “None“); see
-// :class:`CallOperationBody` for the convention. “extra="forbid"“ keeps
-// a typo in “connector_id“ failing loud rather than silently previewing
-// nothing.
+// :class:`CallOperationBody` for the convention. A wrong-JSON-typed
+// “target“ rides the “target_invalid_type“ envelope instead of a 422
+// (#2110; see :data:`_TargetArg`), identical to “/call“.
+// “extra="forbid"“ keeps a typo in “connector_id“ failing loud rather
+// than silently previewing nothing.
 type PreviewOperationBody struct {
 	ConnectorId string                       `json:"connector_id"`
 	OpId        string                       `json:"op_id"`

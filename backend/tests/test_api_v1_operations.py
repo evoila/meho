@@ -10,10 +10,11 @@ Coverage matrix (G0.6-T8 / Task #399):
 * ``GET /api/v1/operations/search`` rejects ``limit > 50`` at the
   Pydantic Query layer.
 * ``POST /api/v1/operations/call`` (and ``/preview``) return the dispatcher's
-  OperationResult envelope on the response body; **every target-resolution
-  failure** — empty / empty-object / unresolvable name — rides that envelope
-  (200 + ``extras.error_code`` ∈ {``target_required``, ``no_target``}), while a
-  malformed ``target`` (wrong JSON type) stays a request-schema 422 (#136).
+  OperationResult envelope on the response body; **every target-failure
+  mode** — absent / empty / empty-object / wrong JSON type / unresolvable
+  name (string or dict shape) — rides that envelope (200 +
+  ``extras.error_code`` ∈ {``target_required``, ``target_invalid_type``,
+  ``no_target``}), invariant across typed connectors (#136 + #2110).
 * ``GET /api/v1/operations/{descriptor_id}`` is gated on
   ``tenant_admin``; an OPERATOR-role token returns 403. A descriptor
   that doesn't exist returns 404.
@@ -493,28 +494,97 @@ def test_get_search_rejects_limit_over_50(client: TestClient) -> None:
 
 @pytest.mark.parametrize("surface", ["call", "preview"])
 @pytest.mark.parametrize(
+    ("connector_id", "op_id"),
+    [
+        ("vault-1.x", "vault.kv.read"),
+        ("bind9-ssh-9.x", "bind9.zone.list"),
+        ("gcloud-rest-1.0", "gcloud.about"),
+    ],
+    ids=["vault", "bind9", "gcloud"],
+)
+@pytest.mark.parametrize(
     ("target_value", "expected_code"),
     [
         ("", "target_required"),
         ({}, "target_required"),
+        (12345, "target_invalid_type"),
         ("nonexistent-target", "no_target"),
         ({"name": "nonexistent-target"}, "no_target"),
     ],
-    ids=["empty_string", "empty_object", "nonexistent_string", "nonexistent_dict"],
+    ids=[
+        "empty_string",
+        "empty_object",
+        "wrong_json_type",
+        "nonexistent_string",
+        "nonexistent_dict",
+    ],
 )
-def test_target_resolution_failure_rides_envelope(
+def test_target_failure_rides_envelope(
     client: TestClient,
     surface: str,
+    connector_id: str,
+    op_id: str,
     target_value: object,
     expected_code: str,
 ) -> None:
-    """#136: every target-**resolution** failure on ``/call`` + ``/preview`` is a
-    200 dispatcher envelope with a switch-able ``extras.error_code`` — not a
-    400 (empty/empty-object) or 404 (unresolvable name).
+    """#136 + #2110: every supplied-target failure mode on ``/call`` +
+    ``/preview`` is a 200 dispatcher envelope with a switch-able
+    ``extras.error_code`` — not a 400 (empty/empty-object), 422 (wrong JSON
+    type), or 404 (unresolvable name). The sixth mode — ``target`` absent —
+    is covered by
+    ``test_post_call_absent_target_rides_target_required_envelope``.
 
-    A consumer error-handler is a single switch on ``extras.error_code`` (AC2):
-    no HTTP-code branching, no ``detail``-string parsing. ``/call`` and
-    ``/preview`` behave identically (AC3).
+    A consumer error-handler is a single switch on ``extras.error_code``:
+    no HTTP-code branching, no ``detail``-shape parsing. ``/call`` and
+    ``/preview`` behave identically, and the behavior is invariant across
+    typed connectors (the #2110 cross-connector matrix: target handling
+    lives in the shared meta-tool seam, ahead of any connector dispatch).
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            f"/api/v1/operations/{surface}",
+            json={
+                "connector_id": connector_id,
+                "op_id": op_id,
+                "target": target_value,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == expected_code
+    if expected_code == "no_target":
+        # Information-equivalent to the old 404 body: near-miss candidates ride
+        # the envelope so the consumer keeps them without a 404 to parse.
+        assert isinstance(body["extras"]["matches"], list)
+
+
+@pytest.mark.parametrize("surface", ["call", "preview"])
+@pytest.mark.parametrize(
+    ("target_value", "expected_type"),
+    [
+        (12345, "integer"),
+        (12.5, "number"),
+        (True, "boolean"),
+        ([{"name": "x"}], "array"),
+    ],
+    ids=["integer", "number", "boolean", "array"],
+)
+def test_target_wrong_json_type_rides_target_invalid_type_envelope(
+    client: TestClient,
+    surface: str,
+    target_value: object,
+    expected_type: str,
+) -> None:
+    """#2110 Option A: a wrong-JSON-typed ``target`` no longer 422s — it rides
+    the envelope as ``target_invalid_type``, with the offending JSON-type name
+    in ``extras.received_type`` so an agent can name what it sent. The body
+    models keep the documented ``string | object | null`` OpenAPI schema
+    (codegen unchanged) while the runtime accepts any JSON value.
     """
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
@@ -532,33 +602,28 @@ def test_target_resolution_failure_rides_envelope(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "error"
-    assert body["extras"]["error_code"] == expected_code
-    if expected_code == "no_target":
-        # Information-equivalent to the old 404 body: near-miss candidates ride
-        # the envelope so the consumer keeps them without a 404 to parse.
-        assert isinstance(body["extras"]["matches"], list)
+    assert body["error"].startswith("target_invalid_type:")
+    assert body["extras"]["error_code"] == "target_invalid_type"
+    assert body["extras"]["received_type"] == expected_type
 
 
 @pytest.mark.parametrize("surface", ["call", "preview"])
-def test_target_type_mismatch_returns_422(client: TestClient, surface: str) -> None:
-    """#136 boundary: a malformed ``target`` (wrong JSON type) is a request-schema
-    422 from the request model — resolution rides the envelope, but a body that
-    can't be a target at all stays a 4xx. This is deliberate, not a violation.
+def test_openapi_description_documents_uniform_target_envelope(surface: str) -> None:
+    """#2110 AC: the published OpenAPI description matches the implemented
+    behavior — it names every target-failure ``error_code`` (including the
+    new ``target_invalid_type``), states the HTTP-200 envelope contract, and
+    no longer claims a target-shaped 422 boundary.
     """
-    key = make_rsa_keypair("kid-A")
-    with respx.mock as mock_router:
-        mock_discovery_and_jwks(mock_router, public_jwks(key))
-        response = client.post(
-            f"/api/v1/operations/{surface}",
-            json={
-                "connector_id": "vault-1.x",
-                "op_id": "vault.kv.read",
-                "target": 12345,
-                "params": {},
-            },
-            headers={"Authorization": f"Bearer {_operator_token(key)}"},
-        )
-    assert response.status_code == 422
+    app = _build_app()
+    spec = app.openapi()
+    raw = spec["paths"][f"/api/v1/operations/{surface}"]["post"]["description"]
+    # Docstrings hard-wrap at the line width; collapse whitespace so the
+    # assertions match phrases across line breaks.
+    description = " ".join(raw.split())
+    for code in ("target_required", "target_invalid_type", "no_target", "ambiguous_target"):
+        assert code in description
+    assert "HTTP 200" in description
+    assert "422" not in description
 
 
 @pytest.mark.asyncio

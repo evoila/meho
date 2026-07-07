@@ -79,10 +79,10 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Final
+from typing import Annotated, Any, Final
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, WithJsonSchema
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
@@ -92,6 +92,7 @@ from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._errors import (
     result_ambiguous_target,
     result_no_target,
+    result_target_invalid_type,
     result_target_required,
 )
 from meho_backplane.operations._lookup import (
@@ -339,6 +340,28 @@ class OperationDescriptor(BaseModel):
     custom_notes: str | None
 
 
+#: The *documented* ``target`` shape — what a well-formed request sends and
+#: what codegen'd clients (the CLI's oapi-codegen union type) build against.
+_TARGET_DECLARED_SCHEMA: Final[dict[str, Any]] = TypeAdapter(
+    str | dict[str, Any] | None
+).json_schema()
+
+#: ``target`` field annotation for :class:`CallOperationBody` /
+#: :class:`PreviewOperationBody` (#2110). The runtime type is ``Any`` so a
+#: wrong-JSON-typed ``target`` (``12345``, ``true``, ``[...]``) passes body
+#: validation and reaches the meta-tool seam, where
+#: :func:`_normalize_target_arg` classifies it and
+#: :func:`_resolve_target_or_error` returns the ``target_invalid_type``
+#: dispatcher envelope — HTTP 200, one ``extras.error_code`` switch, no
+#: FastAPI 422 ``detail[]`` array left for consumers to special-case (the
+#: issue #2110 Option-A decision, superseding the #136 schema-vs-resolution
+#: boundary). :class:`~pydantic.WithJsonSchema` pins the *published* schema to
+#: the pre-#2110 ``anyOf [string, object, null]`` union — byte-identical
+#: OpenAPI, so generated clients keep the honest "what you should send" shape
+#: and the CLI's Go union type does not churn.
+_TargetArg = Annotated[Any, WithJsonSchema(_TARGET_DECLARED_SCHEMA)]
+
+
 class CallOperationBody(BaseModel):
     """Request body for the ``POST /api/v1/operations/call`` route.
 
@@ -381,7 +404,11 @@ class CallOperationBody(BaseModel):
     with 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an
     unknown sibling field still fails loud. The ``target`` field's
     own union widening is orthogonal: bare-string is now a first-class
-    valid value, not an unknown field. ``params`` itself is a
+    valid value, not an unknown field. A ``target`` of any *other* JSON
+    type (``12345``, ``true``, ``[...]``) is NOT a 422 -- it rides the
+    dispatcher envelope as ``target_invalid_type`` (#2110; see
+    :data:`_TargetArg`), so every target-failure mode is HTTP 200 +
+    ``extras.error_code``. ``params`` itself is a
     free-form ``dict`` because per-op parameter shape is enforced by
     the descriptor's ``parameter_schema`` further down the dispatch
     path; only the meta-tool body's own fields are constrained here.
@@ -404,7 +431,7 @@ class CallOperationBody(BaseModel):
 
     connector_id: str = Field(min_length=1)
     op_id: str = Field(min_length=1)
-    target: str | dict[str, Any] | None = None
+    target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
     work_ref: str | None = Field(default=None, min_length=1)
 
@@ -422,16 +449,18 @@ class PreviewOperationBody(BaseModel):
 
     ``target`` accepts the same three shapes as ``call_operation`` (bare
     string, dict ``{"name": ...}``, or ``None``); see
-    :class:`CallOperationBody` for the convention. ``extra="forbid"`` keeps
-    a typo in ``connector_id`` failing loud rather than silently previewing
-    nothing.
+    :class:`CallOperationBody` for the convention. A wrong-JSON-typed
+    ``target`` rides the ``target_invalid_type`` envelope instead of a 422
+    (#2110; see :data:`_TargetArg`), identical to ``/call``.
+    ``extra="forbid"`` keeps a typo in ``connector_id`` failing loud rather
+    than silently previewing nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     connector_id: str = Field(min_length=1)
     op_id: str = Field(min_length=1)
-    target: str | dict[str, Any] | None = None
+    target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -874,8 +903,44 @@ async def search_operations(
     }
 
 
+def _json_type_name(value: Any) -> str:
+    """Name *value*'s JSON type for the ``target_invalid_type`` diagnostic.
+
+    JSON-vocabulary names (``"integer"``, not ``"int"``) so the envelope
+    speaks the same language as the request body the consumer wrote.
+    ``bool`` is checked before ``int`` — Python's ``bool`` subclasses
+    ``int`` and would otherwise report as ``"integer"``.
+    """
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    return type(value).__name__
+
+
+class _InvalidTargetTypeError(Exception):
+    """``target`` is not a string, a dict, or ``None`` (#2110).
+
+    Deliberately NOT a :class:`ValueError` subclass so
+    :func:`_resolve_target_or_error`'s ``except ValueError`` arm
+    (``target_required``) cannot swallow it — the two failure modes carry
+    distinct ``error_code``\\ s.
+    """
+
+    def __init__(self, received_type: str) -> None:
+        super().__init__(
+            f"target must be a string name, an object with a 'name' field, "
+            f"or null; got {received_type}"
+        )
+        self.received_type = received_type
+
+
 def _normalize_target_arg(
-    target_arg: str | dict[str, Any] | None,
+    target_arg: Any,
 ) -> dict[str, Any] | None:
     """Normalise ``call_operation``'s ``target`` to the canonical dict shape.
 
@@ -892,10 +957,15 @@ def _normalize_target_arg(
       can be supplied via the string shape; callers that need the
       override stay on the dict.
     * ``dict`` with a non-empty ``name`` key → returned as-is.
-    * Any other shape (empty string, dict without ``name`` /
-      with empty ``name``) → ``ValueError`` with the same message the
-      pre-widening handler raised, so existing 400 callers see the
-      same surface.
+    * Empty string / dict without ``name`` / dict with empty ``name`` →
+      ``ValueError`` (the ``target_required`` envelope upstream).
+    * Any other JSON type (``12345``, ``true``, ``[...]``) →
+      :class:`_InvalidTargetTypeError` (the ``target_invalid_type``
+      envelope upstream, #2110). The REST body models pass such values
+      through deliberately (see :data:`_TargetArg`); the raw MCP
+      ``arguments`` dict always could — this arm also closes the
+      ``12345.get("name")`` :class:`AttributeError` that used to escape
+      the MCP transport as an unstructured internal error.
     """
     if target_arg is None:
         return None
@@ -903,8 +973,8 @@ def _normalize_target_arg(
         if not target_arg:
             raise ValueError("target must include a 'name' field when supplied")
         return {"name": target_arg}
-    # ``dict``-typed branch. The Pydantic union validates the type; we
-    # only enforce the "name is set" contract here.
+    if not isinstance(target_arg, dict):
+        raise _InvalidTargetTypeError(_json_type_name(target_arg))
     name = target_arg.get("name")
     if not name:
         raise ValueError("target must include a 'name' field when supplied")
@@ -914,30 +984,31 @@ def _normalize_target_arg(
 async def _resolve_target_or_error(
     operator: Operator,
     op_id: str,
-    target_raw: str | dict[str, Any] | None,
+    target_raw: Any,
     *,
     bind_audit_target: bool,
 ) -> tuple[Any, dict[str, Any] | None]:
     """Resolve ``call``/``preview``'s ``target`` arg, or return an error envelope (#136).
 
     Returns ``(resolved_target, None)`` on success (``resolved_target`` is
-    ``None`` for a target-less op), or ``(None, envelope)`` when target
-    **resolution** fails. Both failure classes ride the dispatcher envelope
+    ``None`` for a target-less op), or ``(None, envelope)`` when the target
+    fails. Every failure class rides the dispatcher envelope
     (``status="error"`` + ``extras.error_code``) so a ``/operations/call`` (and
     ``/preview``) consumer switches on one ``error_code`` instead of parsing a
-    400/404 body:
+    400/404/422 body:
 
     * a missing / empty / ``name``-less ``target`` (the
       :func:`_normalize_target_arg` ``ValueError``) → ``target_required``;
+    * a ``target`` of a wrong JSON type — not a string, an object, or null
+      (:class:`_InvalidTargetTypeError`) → ``target_invalid_type``
+      (#2110, closing the last mode that escaped as a FastAPI 422);
     * a supplied name that resolves to no live target (the resolver's
       :exc:`~meho_backplane.targets.resolver.TargetNotFoundError`) → ``no_target``;
     * a supplied name that matches more than one target — an alias collision
       (the resolver's :exc:`~meho_backplane.targets.resolver.AmbiguousTargetError`)
       → ``ambiguous_target``.
 
-    A genuinely malformed ``target`` (wrong JSON type) is rejected earlier by
-    the request model as a 422 and never reaches here — that schema-vs-
-    resolution boundary is deliberate. ``bind_audit_target`` binds the resolved
+    ``bind_audit_target`` binds the resolved
     ``target_id`` into structlog for the eventual audit row (``call`` does;
     ``preview`` writes no row, so it does not).
     """
@@ -945,6 +1016,10 @@ async def _resolve_target_or_error(
         target_arg = _normalize_target_arg(target_raw)
     except ValueError:
         return None, result_target_required(op_id, 0.0).model_dump(mode="json")
+    except _InvalidTargetTypeError as exc:
+        return None, result_target_invalid_type(op_id, exc.received_type, 0.0).model_dump(
+            mode="json"
+        )
     if target_arg is None:
         return None, None
 

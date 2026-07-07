@@ -124,15 +124,18 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
-route and MCP tool keep one uniform shape. Target-**resolution** failures
-ride the envelope too (#136, identical to `/call`): a missing / empty /
-`name`-less target is `extras.error_code=target_required`, a
+route and MCP tool keep one uniform shape. Target failures
+ride the envelope too (#136, completed by #2110; identical to `/call`): a
+missing / empty / `name`-less target is `extras.error_code=target_required`,
+a `target` of a wrong JSON type (e.g. `target: 12345`) is
+`extras.error_code=target_invalid_type` (carrying `extras.received_type`), a
 supplied-but-unresolvable name is `extras.error_code=no_target`, and a name
 matching more than one target (alias collision) is
-`extras.error_code=ambiguous_target` — all carry the candidate `matches` and
-are HTTP 200. A malformed `target` (wrong JSON type) stays a request-schema
-`422` from the request model; that schema-vs-resolution boundary is the one
-remaining HTTP-side status.
+`extras.error_code=ambiguous_target` — the resolution codes carry the
+candidate `matches`, and every mode is HTTP 200. The body models keep the
+documented `string | object | null` schema for codegen while accepting any
+JSON value at runtime (`_TargetArg` in `operations/meta_tools.py`), so no
+target-failure mode returns a 4xx.
 
 The shared resolver `resolve_ingested_request` deliberately *raises* on a
 path-template fault — `KeyError` for an unsubstituted path var, `RuntimeError`

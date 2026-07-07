@@ -40,7 +40,7 @@ The substrate has three consumer-facing surfaces, all dispatching through `query
 
 | Route | Filter shape | Notes |
 |---|---|---|
-| `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration`. Client-supplied `tenant_id` is silently dropped by Pydantic's default `extra="ignore"`. | Full-filter surface. |
+| `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration`. Client-supplied `tenant_id` (or any other unknown field) is rejected at 422 `extra_forbidden` — `AuditQueryRequest` sets `extra="forbid"` (G0.9-T2 #729). | Full-filter surface. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param → `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` defaults to `"24h"`. | Pre-canned shortcut — operator can never see another operator's `my-recent` through this route. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Cross-tenant lookups → 404 (never 403, so existence never leaks). | Single-row fetch. |
@@ -62,9 +62,20 @@ Hand-built `inputSchema` (not `AuditQueryFilters.model_json_schema()`) because t
 The tenant-scoping invariant is enforced redundantly at two layers:
 
 1. **Substrate** — `query_audit(filters, *, tenant_id, session)` takes `tenant_id` as a mandatory keyword-only argument. `AuditQueryFilters` has no `tenant_id` field at all. The first SQL WHERE clause is always `audit_log.tenant_id = :tenant_id`; the LEFT JOIN to `targets` for `target_name` denormalization is *also* scoped on `Target.tenant_id`, so a cross-tenant `target_id` (allowed today because `audit_log.target_id` keeps no FK in v0.2 per the soft-FK discipline) resolves to `target_name=None` rather than leaking the other tenant's target name.
-2. **Surface** — every route, every CLI verb, every MCP handler pulls `tenant_id` from `operator.tenant_id` (the JWT claim resolved by `verify_jwt_and_bind` / `verify_mcp_jwt_and_bind`) and passes it into the substrate. The REST POST body's Pydantic model has no `tenant_id` field, so a client-supplied value is silently dropped. The MCP tool's `inputSchema` has `additionalProperties: false`, so an agent that tries to smuggle `tenant_id` is rejected by the dispatcher's jsonschema layer with `-32602` before reaching the handler.
+2. **Surface** — every route, every CLI verb, every MCP handler pulls `tenant_id` from `operator.tenant_id` (the JWT claim resolved by `verify_jwt_and_bind` / `verify_mcp_jwt_and_bind`) and passes it into the substrate. The REST POST body's Pydantic model has no `tenant_id` field, and a client-supplied value (like any unknown field) is rejected at 422 `extra_forbidden` per the model's `extra="forbid"` config (G0.9-T2 #729). The MCP tool's `inputSchema` has `additionalProperties: false`, so an agent that tries to smuggle `tenant_id` is rejected by the dispatcher's jsonschema layer with `-32602` before reaching the handler.
 
 There is no admin escape hatch. Cross-tenant queries are structurally impossible, by design and by code. The `show` route surfaces 404 (not 403) for cross-tenant audit-ids so a probing operator cannot even distinguish "row doesn't exist" from "row exists in another tenant".
+
+### Tenant-broadcast read surfaces ([#2084](https://github.com/evoila/meho/issues/2084))
+
+Within a tenant, the audit ledger is deliberately **not** principal-scoped. `POST /api/v1/audit/query` — with or without a `principal` filter — and `GET /api/v1/audit/show/{audit_id}` return rows for **every** principal in the calling tenant. Any `operator` or `tenant_admin` in the tenant reads all principals' audit rows (the RBAC gate on these routes is `operator`-minimum; `read_only` gets 403), and there is **no per-principal role check** on `query` / `show`: filtering on another operator's `principal` sub is a supported forensic lookup, not an escalation. Only `GET /api/v1/audit/my-recent` is self-scoped — it pins `filters.principal = operator.sub` from the JWT, so it never returns another principal's rows.
+
+This tenant-broadcast visibility is by design, on the same shelf as the `who-touched` shortcut (which likewise surfaces every principal that touched a target) and the aggregate-only broadcast posture above — and the same category-2 doc-resolution shape as the kb same-slug cross-principal write semantics (#1327, [`docs/codebase/kb.md`](../codebase/kb.md)): a forensics surface has to be readable cross-principal for the operator investigating an incident, and the principals a tenant contains (operators, the service account, `system:*` writers) are mutually trusted within that tenant. Two boundaries still hold:
+
+- **Cross-tenant isolation stays enforced.** The substrate's first WHERE clause is always `audit_log.tenant_id = :tenant_id`, and `show` surfaces 404 (never 403) on a foreign `audit_id` — see the module and `show` docstrings in [`api/v1/audit.py`](../../backend/src/meho_backplane/api/v1/audit.py).
+- **`params_hash` scrubbing keeps payloads protected.** Dispatch audit rows carry a SHA-256 hash of the canonicalised operation params ([`operations/_validate.py::compute_params_hash`](../../backend/src/meho_backplane/operations/_validate.py)); the raw params never land on the audit row in v0.2. A row visible cross-principal therefore reveals *that* an operation ran (op_id, target, status), never its sensitive argument values — the tenant-broadcast behavior is not a payload leak.
+
+If a finer role gradation lands (e.g. a `tenant_member` with limited audit visibility), this scoping decision is revisited at that point.
 
 ## Cursor pagination
 

@@ -1837,6 +1837,7 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 	ImplId       *string `json:"impl_id,omitempty"`
 	Mode         *string `json:"mode,omitempty"`
 	Product      *string `json:"product,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//
@@ -3751,7 +3752,10 @@ type IngestKbRequest struct {
 // omit-equals-global semantics the MCP sibling
 // “meho.connector.ingest“ documents. The operator's own tenant
 // UUID targets their tenant-curated namespace; any other UUID is
-// rejected 403 by :meth:`IngestionPipelineService._authorize`.
+// rejected with a synchronous 403 on both the sync and async
+// branches by :meth:`IngestionPipelineService.authorize_scope`
+// (checked eagerly at the route before the async job row is
+// created, #2208, and again inside the service as defence-in-depth).
 // Before #2085 the REST route resolved omission to the *caller's
 // tenant*, diverging from the MCP surface — a consumer pasting the
 // MCP-documented body into REST silently minted a tenant-scoped
@@ -35831,7 +35835,10 @@ type IngestEndpointApiV1ConnectorsIngestPostResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *IngestResponse
 	JSON202      *IngestJobHandle
-	JSON422      *HTTPValidationError
+	JSON403      *struct {
+		Detail *string `json:"detail,omitempty"`
+	}
+	JSON422 *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -47402,6 +47409,15 @@ func ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp *http.Response) (*
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest struct {
+			Detail *string `json:"detail,omitempty"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

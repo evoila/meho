@@ -107,6 +107,33 @@ connector-related release-notes line.
   subtree — the `approval.request` root with the decision and the
   executed dispatch as its children — and the executed row honestly
   records which session asked for it.
+### Added — tenant-scope affordance on the CLI + UI ingest on-ramps
+
+- **`meho connector ingest` gains `--tenant-id` and the
+  `/ui/connectors/registry` ingest modal gains a Write-scope select**
+  (#2209): both human on-ramps can now target a tenant-curated ingest
+  without hand-crafting raw REST/MCP bodies. Omitting the flag (or
+  picking "Global") keeps the built-in / global scope — the
+  omit-equals-global contract the REST route + MCP tool share since
+  #2085; the UI derives the tenant UUID server-side from the
+  authenticated operator, and the CLI validates the UUID locally
+  before any request leaves the machine.
+### Fixed — async ingest rejects a foreign tenant_id synchronously
+
+- **`POST /api/v1/connectors/ingest` with `async: true` and a foreign
+  `tenant_id` now returns a synchronous 403 — the same status and body
+  shape as the sync branch — instead of `202 Accepted` plus a `failed`
+  job the caller could never poll** (#2208; hardens the #2085 / PR
+  #2204 write-scope semantics): the route runs the shared tenant-scope
+  predicate (`IngestionPipelineService.authorize_scope`) eagerly,
+  before the async branch mints its job row, so no job is created and
+  no pipeline is detached for an unauthorised write scope. Previously
+  the job row was minted under the *requested* foreign tenant, making
+  the poll on `GET /api/v1/connectors/ingest/jobs/{id}` 404
+  cross-tenant — "authz denied" was indistinguishable from "pipeline
+  crashed". The service-layer guard remains as defence-in-depth for
+  the CLI / MCP siblings; the 403 response is now declared in the
+  route's OpenAPI response map (CLI snapshot + Go client regenerated).
 
 ### Fixed — operations/call target failures all ride the 200 envelope
 

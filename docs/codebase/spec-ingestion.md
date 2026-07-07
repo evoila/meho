@@ -1215,8 +1215,11 @@ drives it) accepts an optional body `tenant_id` with the same
 semantics as the MCP tool `meho.connector.ingest`'s argument —
 omitted or `null` targets the built-in / global scope (`tenant_id IS
 NULL`, tenant_admin only), the operator's own tenant UUID targets
-their tenant-curated namespace, and any other UUID is rejected 403
-by `IngestionPipelineService._authorize`. Under the previous #1699
+their tenant-curated namespace, and any other UUID is rejected with
+a synchronous 403 by `IngestionPipelineService.authorize_scope` —
+run eagerly at the REST route on both the sync and async branches
+(before the async job row is created, #2208) and re-run inside
+`ingest()` as defence-in-depth. Under the previous #1699
 contract the REST route hard-coded the caller's JWT tenant, so a
 consumer following the MCP-documented "omit for global" body
 silently minted a caller-tenant shadow copy of an existing global
@@ -1230,7 +1233,13 @@ namespaces are isolated). All surfaces document the shared contract
 description, the MCP tool description, and the registered-row
 `next_step` rationale); the cross-surface parity is pinned by
 `test_omitted_tenant_id_resolves_global_on_both_surfaces`
-in `tests/test_api_v1_connectors_ingest.py`.
+in `tests/test_api_v1_connectors_ingest.py`. The two human
+on-ramps expose the scope affordance since #2209: the CLI verb's
+`--tenant-id` flag (omit = global; parsed locally so a typo'd UUID
+fails before the request) and the `/ui/connectors/registry` ingest
+modal's Write-scope select (`global`/`tenant` discriminator; the BFF
+derives the UUID from the authenticated operator, never from the
+client).
 
 **Shared scope resolution (`get_review_payload` + `enable_reads`,
 G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path
@@ -1551,7 +1560,15 @@ domain-error → HTTP-status mapping documented at the route
 (`UpstreamNotSpecError` → 422, `VersionMismatchError` → 422,
 `LlmClientUnavailable` → 503, etc.) is only available on this path;
 the async path surfaces those failures via `error_class` on the
-polling response instead.
+polling response instead. One deliberate exception: a foreign body
+`tenant_id` is rejected with a synchronous 403 on **both** branches
+(#2208) — the route runs the shared scope predicate
+(`IngestionPipelineService.authorize_scope`) eagerly, before the
+async branch creates its job row. Without the eager check the async
+branch returned 202 + a `failed` job minted under the *foreign*
+scope, which the caller's poll could never see (the job read gate
+is tenant-scoped), making "authz denied" indistinguishable from
+"pipeline crashed".
 
 **Job storage is process-local.** The `IngestJobRegistry` keeps
 in-memory rows in an `OrderedDict` behind an `asyncio.Lock`,

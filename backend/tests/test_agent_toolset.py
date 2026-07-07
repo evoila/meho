@@ -38,7 +38,9 @@ from pydantic_ai import ModelRetry, RunContext
 import meho_backplane.agent.toolset as toolset_mod
 from meho_backplane.agent.toolset import (
     META_TOOL_NAMES,
+    RUNBOOK_EXECUTION_META_TOOL_NAMES,
     resolve_agent_tools,
+    toolset_admits_runbook_execution,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 
@@ -320,6 +322,41 @@ def test_unknown_spec_keys_are_ignored() -> None:
     spec = {"meta_tools": ["call_operation"], "future_field": {"x": 1}}
     tools = resolve_agent_tools(spec, _make_operator())
     assert _tool_names(tools) == {"call_operation"}
+
+
+# ---------------------------------------------------------------------------
+# Runbook-execution capability (#2077)
+# ---------------------------------------------------------------------------
+
+
+def test_meta_tool_catalog_has_no_runbook_execution_tool() -> None:
+    """The agent↔runbook contract the run-start guard rests on, pinned.
+
+    Runbook execution (``meho.runbook.start`` / ``meho.runbook.next``) is an
+    operator MCP surface — confirm-gated steps require a human answer — so
+    the agent meta-tool catalog must not (and does not) expose it. A future
+    task adding an agent-executable runbook tool must also list it in
+    ``RUNBOOK_EXECUTION_META_TOOL_NAMES`` so the guard admits definitions
+    that carry it; this test keeps the two sets in lock-step.
+    """
+    assert RUNBOOK_EXECUTION_META_TOOL_NAMES <= META_TOOL_NAMES
+    assert not any("runbook" in name for name in META_TOOL_NAMES)
+    assert not RUNBOOK_EXECUTION_META_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        None,  # T1 default surface (call_operation + list_operation_groups)
+        {},  # the persisted default toolset (the #2077 repro shape)
+        {"meta_tools": ["call_operation", "search_operations"]},
+        {"meta_tools": []},
+        {"meta_tools": "not-a-list"},  # mis-shaped spec answers fail-closed
+    ],
+)
+def test_no_toolset_admits_runbook_execution_today(spec: Any) -> None:
+    """With an empty capability catalog every spec answers ``False``."""
+    assert toolset_admits_runbook_execution(spec) is False
 
 
 # ---------------------------------------------------------------------------

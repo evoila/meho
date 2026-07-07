@@ -236,6 +236,67 @@ connection drives one run's lifetime. The run is recorded on a durable
 `agent_run` row (every frame's `data:` carries the `run_id`), so the
 poll-after-stream contract the issue intends still holds.
 
+### Run-start guards — refuse a doomed loop before the model call
+
+Two typed pre-flight guards in `agent/invocation.py` fail a run *closed*
+before the loop (and any model call) starts. Both follow the same shape:
+the durable `agent_run` row is created first (so the refusal is observable
+in the runs table and via `poll`, like any other terminal run), then the
+row is finalised `failed` with a machine-classifiable error prefix — never
+a raised exception across the boundary, and never a launched loop.
+
+- **Scheduled no-input (#1505,** `SCHEDULED_RUN_NO_INPUT_CLASS`**)** — a
+  scheduled trigger fired with an empty / whitespace-only prompt would
+  reach the provider as an empty `messages` array and come back as an
+  opaque 400; instead the row fails typed with a
+  `scheduled_run_no_input:`-prefixed error. Scheduled path only.
+- **Unexecutable runbook reference (#2077,**
+  `UNEXECUTABLE_RUNBOOK_CLASS`**)** — a prompt (system prompt *or* run
+  inputs) that *instructs* the agent to execute a runbook can never be
+  satisfied: the agent meta-tool catalog contains **no** runbook-execution
+  tool (`meho.runbook.start` / `meho.runbook.next` are operator MCP tools,
+  and confirm-gated steps require a human answer by design). Without the
+  guard the loop reached the model with no way to act, took **zero** tool
+  calls, and reported `succeeded` with a hallucinated explanation ("the
+  agent `<slug>` is not available in this tenant") — misleading run-outcome
+  telemetry the operator then chases. The guard applies to all three entry
+  points (`run`, `run_scheduled` via `_launch_scheduled_run`, and
+  `stream_events`, where it surfaces as one terminal `error` frame plus
+  the failed row).
+
+  Detection (`find_runbook_instruction` in `agent/run.py`) matches
+  instruct-shaped references only — an imperative verb (use / run /
+  execute / follow / start / apply / perform / invoke) followed by
+  `runbook [template] [<slug>]` or `<slug> runbook`. Every raw regex hit
+  is then dispositioned against three false-positive guards before it can
+  refuse the run: a **negation** guard (a verb preceded in the same clause
+  by not / never / don't / avoid / without / cannot / …n't is a
+  prohibition, not an instruction), a **third-person-subject** guard
+  (operators / users / we / they / people directly before the verb is
+  prose about someone else acting), and a **noun-compound** guard (a bare
+  unquoted, non-slug-structured word right after `runbook` — templates /
+  syntax / steps / linter / review — heads a noun compound *about*
+  runbooks, unless it is a clause-continuation word like *to* / *then*,
+  which keeps "use a runbook to remediate" an unnamed instruction). All
+  hits in all texts are scanned (`finditer`), so a rejected mention cannot
+  mask a real later instruction. A bare English word only counts as a
+  *named* slug when quoted or slug-structured (digit / dot / hyphen).
+  This is a best-effort boundary guard, not a parser: a phrasing it
+  misses degrades to the old behaviour; a phrasing it catches turns a
+  fabricated success into an honest typed failure.
+
+  Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
+  is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an
+  (intentionally empty) subset of the meta-tool catalog. A future
+  agent-executable runbook tool must be listed there for the guard to
+  admit definitions that carry it — and would still have to respect the
+  human-confirm contract on `verify.type: confirm` steps.
+
+Callers probe the refusal on the run outcome object
+(`error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)` /
+`SCHEDULED_RUN_NO_INPUT_CLASS`), not by parsing free text; `output` stays
+`NULL` on refused runs.
+
 ### Server-side sync timeout
 
 `agent_sync_timeout_seconds` (settings; default 30s, `AGENT_SYNC_TIMEOUT_SECONDS`)

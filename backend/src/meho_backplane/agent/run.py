@@ -83,6 +83,7 @@ flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -117,6 +118,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SCHEDULED_RUN_NO_INPUT_CLASS",
+    "UNEXECUTABLE_RUNBOOK_CLASS",
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
@@ -129,7 +131,9 @@ __all__ = [
     "ModelFactory",
     "PydanticAgentRun",
     "ScheduledRunNoInputError",
+    "UnexecutableRunbookReferenceError",
     "default_model_factory",
+    "find_runbook_instruction",
     "prompt_is_effectively_empty",
 ]
 
@@ -142,6 +146,170 @@ _log = structlog.get_logger(__name__)
 #: ``"messages: at least one message is required"`` text every supported
 #: backend would otherwise surface). See :class:`ScheduledRunNoInputError`.
 SCHEDULED_RUN_NO_INPUT_CLASS = "scheduled_run_no_input"
+
+
+#: Machine-readable classification tag prefixed onto the ``agent_run.error``
+#: column when a run is refused because its prompt instructs the agent to
+#: execute a runbook it has no tool to execute (#2077). Greppable in logs
+#: and in the runs table — and stable enough for a caller to probe the run
+#: outcome object (``error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)``) instead
+#: of parsing free text. See :class:`UnexecutableRunbookReferenceError`.
+UNEXECUTABLE_RUNBOOK_CLASS = "unexecutable_runbook_reference"
+
+#: Instruct-shaped runbook references (#2077). Two phrase orders are
+#: covered, both anchored on an imperative verb so a prompt that merely
+#: *mentions* runbooks ("answer questions about runbook authoring") does
+#: not trip the guard:
+#:
+#: * ``<verb> [the] runbook [template] [<slug>]`` — the observed repro
+#:   shape (``"use runbook <runbook-slug>"``); the slug is optional so a
+#:   generic "follow the runbook" instruction still fails closed.
+#: * ``<verb> [the] <slug> runbook`` — the reversed English form
+#:   ("run the disk-cleanup runbook").
+#:
+#: The slug alternative mirrors the runbook template slug contract
+#: (:data:`meho_backplane.kb.schemas.SLUG_PATTERN`, reused by
+#: :mod:`meho_backplane.runbooks.schemas`), matched case-insensitively
+#: because prompts are free prose. A raw hit is only a *candidate*:
+#: :func:`find_runbook_instruction` dispositions each one against the
+#: negation / third-person-subject / noun-compound guards below, so
+#: prohibitions ("never run a runbook yourself"), descriptive prose
+#: ("we run a runbook review process"), and runbook-headed noun compounds
+#: ("use runbook templates") do not refuse the run. This is a best-effort
+#: boundary guard, not a parser: a phrasing it misses degrades to today's
+#: behaviour, a phrasing it catches turns a hallucinated success into an
+#: honest typed failure.
+_RUNBOOK_INSTRUCTION_RE: re.Pattern[str] = re.compile(
+    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s+(?:(?:the|a|an)\s+)?"
+    r"(?:"
+    r"runbook\b(?:\s+template\b)?"
+    r"(?:(?:\s*:\s*|\s+)(?P<q1>[`'\"]?)(?P<slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q1))?"
+    r"|"
+    r"(?P<q2>[`'\"]?)(?P<pre_slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q2)\s+runbook\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: A captured slug token only counts as a *named* runbook when it is quoted
+#: (`` `x` `` / ``'x'`` / ``"x"``) or slug-structured (contains a digit, dot,
+#: or hyphen — the consumer runbook convention, e.g.
+#: ``vcenter-9.0-snapshot-revert``). A bare English word after the
+#: instruction is prose, not a name.
+_SLUG_STRUCTURE_RE: re.Pattern[str] = re.compile(r"[0-9.\-]")
+
+#: Negators that flip an instruct verb into a prohibition ("never run a
+#: runbook yourself", "do not execute runbook steps", "don't / can't /
+#: shouldn't ..."). A candidate whose verb is preceded by one of these in
+#: the same clause is rejected — refusing a run because its prompt
+#: *forbids* runbook execution would invert the prompt's meaning.
+#: The ``n't`` arm covers the contracted family (don't / can't / won't /
+#: mustn't / shouldn't) with either a straight or curly (U+2019)
+#: apostrophe — prompts are free prose and smart quotes are common.
+_NEGATION_RE: re.Pattern[str] = re.compile(
+    r"\b(?:not|never|avoid|without|cannot|\w+n['\u2019]t)\b", re.IGNORECASE
+)
+
+#: Clause boundaries for the negation / subject look-behind. Commas are
+#: deliberately *not* boundaries: over-reaching a negation across a comma
+#: merely degrades to the old (pre-guard) behaviour, while under-reaching
+#: it deterministically refuses a run whose prompt forbade execution.
+_CLAUSE_BOUNDARIES = ".;:!?\n"
+
+#: Explicit third-person subjects directly before the instruct verb turn
+#: it into descriptive prose about *someone else* acting ("operators use
+#: the runbook to remediate", "we run a runbook review process") — not an
+#: instruction to this agent, whose prompts address it imperatively or as
+#: "you".
+_THIRD_PERSON_SUBJECTS = frozenset({"operators", "users", "we", "they", "people"})
+
+#: The last word of the clause fragment preceding a candidate's verb (only
+#: when the fragment actually ends in a word — a trailing punctuation mark
+#: means the verb opens its own clause and has no subject token).
+_PRECEDING_WORD_RE: re.Pattern[str] = re.compile(r"([a-z]+)\s*$", re.IGNORECASE)
+
+#: A bare (unquoted, non-slug-structured) word right after ``runbook``
+#: usually makes it a noun compound headed by that word ("runbook
+#: templates" / "syntax" / "steps" / "linter" / "review ...") — talking
+#: *about* runbooks, not instructing one. These continuation words are the
+#: exception: they end the noun phrase with ``runbook`` as its head, so the
+#: candidate stays an (unnamed) execution instruction — "use a runbook
+#: *to* remediate", "follow the runbook, *then* report".
+_CLAUSE_CONTINUATIONS = frozenset(
+    {"to", "and", "then", "now", "first", "please", "when", "if", "before", "after"}
+)
+
+
+def _clause_fragment_before(text: str, start: int) -> str:
+    """The fragment of *text*'s clause that precedes offset *start*."""
+    fragment = text[:start]
+    cut = max(fragment.rfind(boundary) for boundary in _CLAUSE_BOUNDARIES)
+    return fragment[cut + 1 :]
+
+
+def _instructed_runbook(text: str, match: re.Match[str]) -> str | None:
+    """Disposition one raw regex hit against the false-positive guards.
+
+    Returns the named slug (lowercased), ``""`` for a genuine but unnamed
+    execution instruction, or ``None`` when the hit is prose (negated,
+    third-person, or a runbook-headed noun compound) and must not refuse
+    the run.
+    """
+    clause = _clause_fragment_before(text, match.start())
+    if _NEGATION_RE.search(clause):
+        return None
+    subject = _PRECEDING_WORD_RE.search(clause)
+    if subject is not None and subject.group(1).lower() in _THIRD_PERSON_SUBJECTS:
+        return None
+    pre_slug = match.group("pre_slug")
+    if pre_slug is not None:
+        # "<verb> [the] <word> runbook" — ``runbook`` is the head noun, so
+        # this is an execution instruction whether or not <word> is a
+        # structured slug ("follow the maintenance runbook").
+        if match.group("q2") or _SLUG_STRUCTURE_RE.search(pre_slug):
+            return pre_slug.lower()
+        return ""
+    slug = match.group("slug")
+    if slug is None:
+        # Clause-final / punctuation-terminated: "follow the runbook."
+        return ""
+    if match.group("q1") or _SLUG_STRUCTURE_RE.search(slug):
+        return slug.lower()
+    if slug.lower() in _CLAUSE_CONTINUATIONS:
+        return ""
+    # Bare word after "runbook" heads a noun compound ("runbook templates").
+    return None
+
+
+def find_runbook_instruction(*texts: str) -> str | None:
+    """Return the runbook a prompt instructs the agent to execute, if any.
+
+    Scans each of *texts* (the definition's system prompt and the run's
+    user inputs) for an instruct-shaped runbook reference — see
+    :data:`_RUNBOOK_INSTRUCTION_RE` for the covered phrase shapes and
+    :func:`_instructed_runbook` for the guards that keep negated,
+    third-person, and noun-compound mentions from refusing the run.
+    Returns the referenced slug (lowercased), ``""`` when the instruction
+    names no specific runbook ("follow the runbook"), or ``None`` when no
+    text instructs runbook execution.
+
+    Every raw hit in every text is dispositioned (not just the first), so
+    a rejected earlier mention ("help users run the runbook linter")
+    cannot mask a real later instruction ("... then use runbook
+    disk-cleanup-1").
+
+    Detection is deliberately independent of whether the referenced
+    runbook *exists*: the failure being guarded (#2077) is "the agent has
+    no tool that can execute any runbook", which holds for present and
+    absent slugs alike. The caller intersects this with
+    :func:`~meho_backplane.agent.toolset.toolset_admits_runbook_execution`
+    before refusing the run.
+    """
+    for text in texts:
+        for match in _RUNBOOK_INSTRUCTION_RE.finditer(text):
+            found = _instructed_runbook(text, match)
+            if found is not None:
+                return found
+    return None
 
 
 def prompt_is_effectively_empty(inputs: str) -> bool:
@@ -254,6 +422,45 @@ class ScheduledRunNoInputError(AgentRunError):
             f"{SCHEDULED_RUN_NO_INPUT_CLASS}: scheduled run for agent "
             f"{agent!r} has no usable user prompt (empty inputs); a "
             "scheduled trigger must supply a non-empty prompt",
+        )
+
+
+class UnexecutableRunbookReferenceError(AgentRunError):
+    """A run's prompt instructs runbook execution the agent cannot perform.
+
+    Raised (as a value — the invocation surface stringifies it onto the
+    ``agent_run.error`` column) when the run-start guard (#2077) finds an
+    instruct-shaped runbook reference in the system prompt or inputs while
+    the definition's toolset resolves **no** runbook-execution tool. Without
+    the guard such a run reaches the model with no way to act, takes zero
+    tool calls, and reports ``succeeded`` with a confabulated explanation
+    (the observed repro hallucinated *"the agent <slug> is not available in
+    this tenant"*) — a misleading outcome the operator then chases.
+
+    The message is prefixed with :data:`UNEXECUTABLE_RUNBOOK_CLASS` so the
+    refusal is machine-classifiable on the run outcome object, mirroring
+    :class:`ScheduledRunNoInputError` / :data:`SCHEDULED_RUN_NO_INPUT_CLASS`
+    (#1505). It also spells out *why* the path is closed rather than built:
+    runbook steps are confirm-gated by design (``meho.runbook.next``: only
+    the human operator may answer), so autonomous completion would violate
+    the runbook contract even if a tool existed.
+
+    Subclass of :class:`AgentRunError` so any caller that only handles the
+    seam's uniform failure type still classifies this refusal correctly.
+    """
+
+    def __init__(self, *, agent: str, runbook: str | None) -> None:
+        self.agent = agent
+        self.runbook = runbook or None
+        named = f" {runbook!r}" if runbook else ""
+        super().__init__(
+            f"{UNEXECUTABLE_RUNBOOK_CLASS}: no available tool to execute "
+            f"runbook{named}; agent {agent!r} was instructed to execute a "
+            "runbook but its toolset resolves no runbook-execution tool. "
+            "Runbooks are operator-driven — confirm-gated steps must be "
+            "answered by a human operator (meho.runbook.next) — so the run "
+            "is refused before any model call instead of degrading to a "
+            "fabricated answer."
         )
 
 

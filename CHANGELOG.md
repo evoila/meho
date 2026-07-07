@@ -107,6 +107,77 @@ connector-related release-notes line.
   separately scoped work), and the endorsed single-operator posture
   remains the agent-requester recipe, not the flag.
 
+### Fixed — approval-gated dispatches reconstruct on the session-replay surface
+
+- **`GET /api/v1/audit/sessions/{id}/replay` now sees approval-gated
+  chains** (#2086): the park → decide → execute audit rows carried
+  neither an `agent_session_id` anchor nor a `parent_audit_id`
+  back-link (the approve/resume surfaces run on a different task than
+  the parking dispatch, so the session contextvars were gone by
+  decision time), leaving the whole chain invisible to replay
+  (`{root: [], row_count: 0}`) even with
+  `MCP_REQUIRE_SESSION_ID=enforced`. The parked `approval_request` row
+  now persists the originating session id and the parking audit row's
+  id (migration `0053`, same durability mold as `work_ref` / #1659);
+  the decision audit rows and `resume_dispatch_after_approval`'s
+  re-dispatch re-hydrate both, so an approved chain replays as one
+  subtree — the `approval.request` root with the decision and the
+  executed dispatch as its children — and the executed row honestly
+  records which session asked for it.
+### Fixed — agent runs fail closed on unexecutable runbook instructions
+
+- **An agent run whose prompt instructs execution of a runbook no longer
+  reports `succeeded` on a zero-tool-call no-op with a hallucinated
+  explanation** (#2077): the agent meta-tool catalog contains no
+  runbook-execution tool (`meho.runbook.*` are operator MCP verbs, and
+  `confirm`-gated steps require a human answer by design), so the run now
+  fails typed at run start — before any model call — with a
+  machine-classifiable `unexecutable_runbook_reference:`-prefixed error on
+  the run outcome (`meho.agents.run`, `GET /agents/runs/{handle}`, and one
+  terminal `error` SSE frame on the events stream). Prompts that merely
+  mention runbooks are unaffected; a future agent-executable runbook tool
+  hooks in via `RUNBOOK_EXECUTION_META_TOOL_NAMES`.
+### Fixed — MCP async ingest rejects a foreign tenant_id eagerly
+
+- **`meho.connector.ingest` with `async: true` and a foreign
+  `tenant_id` now returns an immediate structured JSON-RPC `-32602`
+  denial — the same envelope and message as the sync MCP path —
+  instead of a success-shaped job handle plus a `failed` job the
+  caller could never poll** (#2214; the MCP twin of REST #2208): the
+  tool handler runs the shared tenant-scope predicate
+  (`IngestionPipelineService.authorize_scope`) eagerly, before the
+  inline/async branch split, so no job row is minted and no pipeline
+  task is detached for an unauthorised write scope. The denial rides
+  the MCP error envelope (there is no HTTP-403 on that transport) and
+  carries the same diagnostic string as the REST 403 `detail`.
+  Previously the async path minted the job under the *requested*
+  foreign tenant — unpollable via the tenant-scoped
+  `meho.connector.ingest_status` gate — and the sync path's
+  `PermissionError` degraded to an opaque `-32603 "internal error:
+  PermissionError"`. The service-layer guard remains as
+  defence-in-depth; no REST/OpenAPI change (MCP-only).
+
+### Fixed — operator console surfaces the topology no-populator coverage gap
+
+- **The console's topology refresh partial now renders the #2093
+  coverage-gap signal**: when a refreshed target's connector ships no
+  topology populator (`no_populator_for_product` set on the
+  `RefreshResult`), the result fragment shows a warning callout naming
+  the product and listing the registered products that do ship a
+  populator — matching the CLI note — instead of bare all-zero counts
+  that read as a clean no-op. Server-rendered Jinja conditional only;
+  no route, HTMX, or OpenAPI change. (#2210)
+### Added — tenant-scope affordance on the CLI + UI ingest on-ramps
+
+- **`meho connector ingest` gains `--tenant-id` and the
+  `/ui/connectors/registry` ingest modal gains a Write-scope select**
+  (#2209): both human on-ramps can now target a tenant-curated ingest
+  without hand-crafting raw REST/MCP bodies. Omitting the flag (or
+  picking "Global") keeps the built-in / global scope — the
+  omit-equals-global contract the REST route + MCP tool share since
+  #2085; the UI derives the tenant UUID server-side from the
+  authenticated operator, and the CLI validates the UUID locally
+  before any request leaves the machine.
 ### Fixed — async ingest rejects a foreign tenant_id synchronously
 
 - **`POST /api/v1/connectors/ingest` with `async: true` and a foreign

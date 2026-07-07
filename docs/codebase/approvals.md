@@ -612,6 +612,42 @@ Two rows per request lifecycle (the synchronous-audit invariant):
 | Request | `approval.request` | `202` | `create_pending_request` |
 | Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
 
+### Session-replay lineage (#2086)
+
+The park → decide → execute chain reconstructs as **one subtree** on the
+G8.2 replay surface (`GET /api/v1/audit/sessions/{id}/replay`), which
+anchors on `audit_log.agent_session_id` and walks `parent_audit_id`.
+Before #2086 every row in the chain carried NULLs for both, so an
+approval-gated dispatch was invisible to replay (`{root: [],
+row_count: 0}`) even with `MCP_REQUIRE_SESSION_ID=enforced` — the
+approve/resume surfaces run on a *different task* (the approver's
+request) than the parking dispatch, so the session contextvars bound at
+the parking boundary are gone by decision time.
+
+The fix follows the `work_ref` durability mold (#1659): persist at park,
+re-hydrate later. Two columns on `approval_request` (migration `0053`):
+
+- `agent_session_id` — the parking session, resolved at
+  `create_pending_request` time by
+  `operations/_audit.py::resolve_agent_session_id()`:
+  `agent_session_id_var` (agent-run loop) first, then the MCP
+  transport's `mcp_session_id` structlog contextvar (a direct operator
+  dispatch over MCP). NULL outside any session.
+- `request_audit_id` — the `approval.request` audit row's id
+  (pre-generated so it can land on the row in the same transaction).
+
+`approval_queue._write_audit_row` reads both off the row (never the
+approver's contextvars): the request row anchors on the session with no
+parent (chain root); decision rows anchor on the same session and
+parent-link to `request_audit_id`. `resume_dispatch_after_approval`
+re-binds `agent_session_id_var` + `parent_audit_id_var` (token-scoped,
+alongside `work_ref_var`) around the `dispatch(..., _approved=True)`, so
+the executed op's DISPATCH row anchors in the originating session and
+back-links to the parking row. Net result: >= 3 session-anchored rows
+per approved chain, tree shape `approval.request` → {`approval.decision`,
+`<op_id>`}. Pre-0053 rows keep NULLs and simply stay out of replay (the
+pre-fix behaviour).
+
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent
@@ -649,6 +685,7 @@ fail-open semantics on broadcast outage.
 - `cli/internal/cmd/approvals/` — CLI verbs.
 - `backend/alembic/versions/0023_create_approval_request.py` — schema.
 - `backend/alembic/versions/0036_add_approval_request_params.py` — `params` column for direct-op approve re-dispatch (#1503).
+- `backend/alembic/versions/0053_add_approval_request_session_lineage.py` — `agent_session_id` + `request_audit_id` lineage columns for session replay (#2086).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): broadcast subscription + re-dispatch on approval.
 - `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).

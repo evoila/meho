@@ -95,8 +95,11 @@ from meho_backplane.agent.run import (
     BudgetExceededError,
     PydanticAgentRun,
     ScheduledRunNoInputError,
+    UnexecutableRunbookReferenceError,
+    find_runbook_instruction,
     prompt_is_effectively_empty,
 )
+from meho_backplane.agent.toolset import toolset_admits_runbook_execution
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.agent_token import get_client_credentials_token
@@ -363,6 +366,33 @@ def _log_decision(
             tenant_id=str(operator.tenant_id),
             tier=decision.tier.value if decision.tier is not None else None,
         )
+
+
+def _unexecutable_runbook_instruction(
+    definition: AgentDefinition,
+    inputs: str,
+) -> str | None:
+    """Return the runbook reference that makes this run unexecutable, or ``None``.
+
+    The #2077 run-start guard predicate: when the definition's system prompt
+    or the run's *inputs* instructs the agent to execute a runbook
+    (:func:`~meho_backplane.agent.run.find_runbook_instruction`) **and** the
+    definition's toolset resolves no runbook-execution tool
+    (:func:`~meho_backplane.agent.toolset.toolset_admits_runbook_execution` —
+    today the agent meta-tool catalog contains none), the run can never
+    satisfy its instruction: the observed failure mode is a zero-tool-call
+    loop that reports ``succeeded`` with a hallucinated explanation.
+
+    Returns the referenced slug (``""`` when the instruction names no
+    specific runbook) so the refusal can name it, or ``None`` when the run
+    may proceed.
+    """
+    instruction = find_runbook_instruction(definition.system_prompt, inputs)
+    if instruction is None:
+        return None
+    if toolset_admits_runbook_execution(definition.toolset):
+        return None
+    return instruction
 
 
 def _split_model_id(model_id: str) -> tuple[str, str]:
@@ -842,6 +872,16 @@ class AgentInvoker:
             run_id, lease_owner = await self._create_run_row(
                 operator, entry, provider=provider, model=model
             )
+            # Unexecutable-runbook guard (#2077): a prompt instructing the
+            # agent to execute a runbook can never be satisfied — the agent
+            # meta-tool catalog has no runbook-execution tool — and the
+            # observed failure mode is a zero-tool-call run that reports
+            # ``succeeded`` with a hallucinated explanation. Fail the run
+            # typed *before* launching the doomed loop; the row is created
+            # first so the refusal is observable like any other terminal run.
+            runbook = _unexecutable_runbook_instruction(definition, inputs)
+            if runbook is not None:
+                return await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
             task = self._launch_run(
                 run_id,
                 definition,
@@ -863,18 +903,41 @@ class AgentInvoker:
         if async_mode:
             return AgentRunOutcome(run_id=run_id, status=AgentRunStatus.RUNNING)
 
+        return await self._await_bounded_sync_outcome(
+            operator,
+            run_id,
+            task,
+            timeout_seconds=settings.agent_sync_timeout_seconds,
+            timeout_log_event="agent_invoke_converted_to_async",
+        )
+
+    async def _await_bounded_sync_outcome(
+        self,
+        operator: Operator,
+        run_id: uuid.UUID,
+        task: asyncio.Task[None],
+        *,
+        timeout_seconds: float,
+        timeout_log_event: str,
+    ) -> AgentRunOutcome:
+        """Await *task* up to *timeout_seconds*; convert to async on timeout.
+
+        The shared sync-wait tail of :meth:`run` and
+        :meth:`_launch_scheduled_run`. The shield means the timeout abandons
+        the *wait*, not the run — the loop keeps going in the background and
+        stays pollable / reapable. On completion the durable row (the source
+        of truth) is polled for the terminal outcome; on timeout the
+        still-running handle is returned flagged ``converted_to_async``
+        (logged under *timeout_log_event* so the two call sites stay
+        distinguishable in logs).
+        """
         try:
-            # Shield so the timeout abandons the *wait*, not the run — the
-            # loop keeps going in the background and stays pollable.
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=settings.agent_sync_timeout_seconds,
-            )
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
         except TimeoutError:
             _log.info(
-                "agent_invoke_converted_to_async",
+                timeout_log_event,
                 run_id=str(run_id),
-                timeout=settings.agent_sync_timeout_seconds,
+                timeout=timeout_seconds,
             )
             return AgentRunOutcome(
                 run_id=run_id,
@@ -1073,6 +1136,44 @@ class AgentInvoker:
             error=error,
         )
 
+    async def _refuse_unexecutable_runbook(
+        self,
+        run_id: uuid.UUID,
+        name: str,
+        operator: Operator,
+        runbook: str,
+    ) -> AgentRunOutcome:
+        """Finalise an already-created run ``failed`` for an unexecutable runbook (#2077).
+
+        Mirrors :meth:`_refuse_scheduled_no_input`: the run row exists (so
+        the refusal is observable in the runs table and via ``poll``), but
+        the loop is never launched and no model call is made — the run
+        therefore completes with **zero** tool-call dispatches, verifiable
+        via the audit log. The row is finalised ``failed`` with a
+        :data:`~meho_backplane.agent.run.UNEXECUTABLE_RUNBOOK_CLASS`-tagged
+        error, so callers probe the outcome object's ``error`` prefix rather
+        than parsing free text — the honest terminal state the model would
+        otherwise confabulate away.
+
+        *runbook* is the slug the prompt referenced (``""`` when the
+        instruction named no specific runbook).
+        """
+        error = str(UnexecutableRunbookReferenceError(agent=name, runbook=runbook or None))
+        _log.warning(
+            "agent_run_unexecutable_runbook",
+            run_id=str(run_id),
+            agent=name,
+            runbook=runbook or None,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        await self._finalize_run(run_id, output=None, error=error)
+        return AgentRunOutcome(
+            run_id=run_id,
+            status=AgentRunStatus.FAILED,
+            error=error,
+        )
+
     async def _launch_scheduled_run(
         self,
         name: str,
@@ -1114,6 +1215,11 @@ class AgentInvoker:
         # same as any other terminal scheduled run.
         if prompt_is_effectively_empty(inputs):
             return await self._refuse_scheduled_no_input(run_id, name, operator)
+        # Unexecutable-runbook guard (#2077) — same shape as the direct
+        # :meth:`run` path: fail typed before the doomed loop launches.
+        runbook = _unexecutable_runbook_instruction(definition, inputs)
+        if runbook is not None:
+            return await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
         # No actor_delegation: the agent is the subject, not an actor on behalf
         # of a human, so actor_sub stays NULL.
         task = self._launch_run(
@@ -1131,33 +1237,15 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
-        try:
-            # Bound the wait so a hung/approval-gated run cannot block the
-            # serial scheduler tick (and strand its advisory lock) until a
-            # pod restart (#1502). Shield so the timeout abandons the *wait*,
-            # not the run — the loop keeps going in the background and stays
-            # pollable / reapable; the reaper owns reclaiming an abandoned run.
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=settings.agent_sync_timeout_seconds,
-            )
-        except TimeoutError:
-            _log.info(
-                "agent_scheduled_converted_to_async",
-                run_id=str(run_id),
-                timeout=settings.agent_sync_timeout_seconds,
-            )
-            return AgentRunOutcome(
-                run_id=run_id,
-                status=AgentRunStatus.RUNNING,
-                converted_to_async=True,
-            )
-        view = await self.poll(operator, run_id)
-        return AgentRunOutcome(
-            run_id=run_id,
-            status=view.status,
-            output=view.output,
-            error=view.error,
+        # Bound the wait so a hung/approval-gated run cannot block the
+        # serial scheduler tick (and strand its advisory lock) until a
+        # pod restart (#1502); the reaper owns reclaiming an abandoned run.
+        return await self._await_bounded_sync_outcome(
+            operator,
+            run_id,
+            task,
+            timeout_seconds=settings.agent_sync_timeout_seconds,
+            timeout_log_event="agent_scheduled_converted_to_async",
         )
 
     def _launch_run(
@@ -1336,6 +1424,23 @@ class AgentInvoker:
         run_id, lease_owner = await self._create_run_row(
             operator, entry, provider=provider, model=model
         )
+
+        # Unexecutable-runbook guard (#2077) — same refusal as :meth:`run`,
+        # surfaced stream-shaped: one terminal ``error`` frame (so the SSE
+        # consumer sees how the run ended) and the durable row finalised
+        # ``failed`` with the machine-classifiable error. No heartbeat /
+        # contextvar binds are needed: the loop never starts.
+        runbook = _unexecutable_runbook_instruction(definition, inputs)
+        if runbook is not None:
+            outcome = await self._refuse_unexecutable_runbook(run_id, name, operator, runbook)
+            yield (
+                run_id,
+                AgentRunEvent(
+                    kind=AgentRunEventKind.ERROR,
+                    data={"error": outcome.error},
+                ),
+            )
+            return
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None

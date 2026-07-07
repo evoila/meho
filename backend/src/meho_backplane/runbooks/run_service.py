@@ -779,17 +779,9 @@ class RunbookRunService:
                     pinned = await _load_pinned_template_or_none(session, tenant_id, *key)
                     template_cache[key] = pinned.steps if pinned is not None else []
                 steps = template_cache[key]
-                if row.state == "in_progress" and steps:
-                    step_states = await _load_step_states(session, row.run_id)
-                    current_step_id = self._current_step_id_or_none(row, step_states)
-                    position = (
-                        _position_from_step_id(steps, current_step_id)
-                        if current_step_id is not None
-                        else None
-                    )
-                else:
-                    current_step_id = None
-                    position = None
+                current_step_id, current_step_state, position = await self._project_current_step(
+                    session, row, steps
+                )
                 summaries.append(
                     RunSummary(
                         run_id=row.run_id,
@@ -802,11 +794,45 @@ class RunbookRunService:
                         completed_at=row.completed_at,
                         abandoned_at=row.abandoned_at,
                         current_step_id=current_step_id,
+                        current_step_state=current_step_state,
                         position=position,
                         work_ref=row.work_ref,
                     )
                 )
             return summaries
+
+    async def _project_current_step(
+        self,
+        session: AsyncSession,
+        row: RunbookRun,
+        steps: list[Step],
+    ) -> tuple[str | None, Literal["in_progress", "failed"] | None, StepPosition | None]:
+        """Project ``(current_step_id, current_step_state, position)`` for the list view.
+
+        Terminal runs (and runs whose pinned template row is gone) have
+        no current step — all three are ``None``. For an ``in_progress``
+        run the persisted per-step state is surfaced alongside the id
+        (#2119): ``_current_step_id_or_none`` only ever selects a step
+        whose ``runbook_run_step_states.state`` is ``in_progress`` or
+        ``failed``, so the state narrowing here is exhaustive over the
+        states the projection can encounter. The step's *state* is not
+        step *content* — the Initiative #1198 opacity floor (no bodies,
+        no adjacent steps) is untouched.
+        """
+        if row.state != "in_progress" or not steps:
+            return None, None, None
+        step_states = await _load_step_states(session, row.run_id)
+        current_step_id = self._current_step_id_or_none(row, step_states)
+        if current_step_id is None:
+            return None, None, None
+        current_step_state: Literal["in_progress", "failed"] = (
+            "failed" if step_states[current_step_id].state == _STEP_FAILED else "in_progress"
+        )
+        return (
+            current_step_id,
+            current_step_state,
+            _position_from_step_id(steps, current_step_id),
+        )
 
     async def get_current_step(
         self,

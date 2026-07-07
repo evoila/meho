@@ -281,6 +281,8 @@ def _run_summary(
     assigned_to: str = "op-operator",
     state: str = "in_progress",
     template_slug: str = "rotate-cert",
+    current_step_id: str | None = None,
+    current_step_state: str | None = None,
 ) -> RunSummary:
     return RunSummary(
         run_id=run_id if run_id is not None else uuid.uuid4(),
@@ -290,6 +292,8 @@ def _run_summary(
         target="node-1",
         state=state,  # type: ignore[arg-type]
         started_at=datetime(2026, 5, 1, 11, 0, tzinfo=UTC),
+        current_step_id=current_step_id,
+        current_step_state=current_step_state,  # type: ignore[arg-type]
     )
 
 
@@ -999,6 +1003,42 @@ def test_list_runs_envelope_v2_unified_shape(client: TestClient) -> None:
     assert body["items"][0]["started_at"] == "2026-05-01T11:00:00Z"
     assert body["next_cursor"] is None
     assert "runs" not in body
+
+
+def test_list_runs_surfaces_current_step_state_on_the_wire(client: TestClient) -> None:
+    """#2119: the per-step ``failed`` state rides the GET response body.
+
+    The route's ``response_model`` is the keyed
+    :class:`RunbookListRunsResponse`; this pins that the new
+    ``current_step_state`` projection is not silently dropped by the
+    response-model serialisation — an operator polling
+    ``GET /api/v1/runbooks/runs`` sees the failed step without making
+    another mutation. The DB-backed truth of the projection (a ``no``
+    / ``escalate`` answer marks the step ``failed``) is covered in
+    ``tests/test_runbooks_run_service.py``.
+    """
+    key, token = _operator_token(sub="op-operator")
+    fake_list = AsyncMock(
+        return_value=[
+            _run_summary(
+                assigned_to="op-operator",
+                current_step_id="step-1",
+                current_step_state="failed",
+            )
+        ]
+    )
+    with (
+        respx.mock as mock_router,
+        patch(f"{_SERVICE_ROUTE}.list_runs", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/runbooks/runs", headers=_authed(token))
+
+    assert response.status_code == 200
+    (run,) = response.json()["runs"]
+    assert run["state"] == "in_progress"
+    assert run["current_step_id"] == "step-1"
+    assert run["current_step_state"] == "failed"
 
 
 def test_list_runs_cross_tenant_isolation(client: TestClient) -> None:

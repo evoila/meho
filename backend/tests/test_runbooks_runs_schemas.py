@@ -273,7 +273,34 @@ def test_run_summary_optional_position_null_for_completed() -> None:
     # Terminal-state runs carry no current step.
     assert summary.position is None
     assert summary.current_step_id is None
+    assert summary.current_step_state is None
     assert summary.abandoned_at is None
+
+
+def test_run_summary_current_step_state_closed_vocabulary() -> None:
+    """``current_step_state`` accepts only the states the projection emits.
+
+    ``list_runs`` only ever surfaces the step the run is *on* — a step
+    in ``in_progress`` (healthy) or ``failed`` (verify did not pass;
+    abort is the only forward path, #2119). ``pending`` / ``verified``
+    steps are never the current step, so the literal excludes them.
+    """
+    base: dict[str, object] = {
+        "run_id": str(uuid.uuid4()),
+        "template_slug": "rotate-creds",
+        "template_version": 1,
+        "assigned_to": "op-alice",
+        "target": "vault-prod-01",
+        "state": "in_progress",
+        "started_at": "2026-05-28T11:00:00+00:00",
+        "current_step_id": "step-1",
+    }
+    for allowed in ("in_progress", "failed"):
+        parsed = RunSummary.model_validate({**base, "current_step_state": allowed})
+        assert parsed.current_step_state == allowed
+
+    with pytest.raises(ValidationError):
+        RunSummary.model_validate({**base, "current_step_state": "verified"})
 
 
 # ---------------------------------------------------------------------------

@@ -1406,6 +1406,103 @@ async def test_list_runs_tenant_isolation() -> None:
     assert rows_a[0].run_id != rows_b[0].run_id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["no", "escalate"])
+async def test_list_runs_surfaces_failed_step_state_without_mutation(answer: str) -> None:
+    """#2119 AC: a ``no`` / ``escalate`` verify answer is readable via ``list_runs``.
+
+    Start a run, answer the first step's confirm verify with *answer*
+    (``no`` and the escalated-to-``failed`` ``escalate`` path both
+    transition the step to ``failed``), then read the run through the
+    list projection with **no mutation in between**. The failed step
+    state must be visible — previously the only way to discover it was
+    to fire another ``next_step`` and parse the resulting 400.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    with pytest.raises(PreviousStepFailedError):
+        await run_service.next_step(
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(
+                last_verified=False,
+                verify_response=ConfirmVerifyResponse(type="confirm", answer=answer),  # type: ignore[arg-type]
+            ),
+        )
+
+    # Read surface only — no further next/abort call before this.
+    rows = await run_service.list_runs(
+        tenant_id, OPERATOR, caller_is_admin=False, filter_=ListRunsFilter()
+    )
+    assert len(rows) == 1
+    summary = rows[0]
+    assert summary.run_id == start.run_id
+    assert summary.state == "in_progress"
+    assert summary.current_step_id == "step-1"
+    assert summary.current_step_state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_list_runs_current_step_state_in_progress_for_healthy_run() -> None:
+    """A freshly started run projects ``current_step_state='in_progress'``."""
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    rows = await run_service.list_runs(
+        tenant_id, OPERATOR, caller_is_admin=False, filter_=ListRunsFilter()
+    )
+    assert len(rows) == 1
+    assert rows[0].current_step_id == "step-1"
+    assert rows[0].current_step_state == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_list_runs_current_step_state_none_for_terminal_run() -> None:
+    """Terminal runs carry no current step, so ``current_step_state`` is ``None``."""
+    tenant_id = uuid.uuid4()
+    single_step = RunbookTemplateBody(
+        title="one",
+        description="terminal step-state projection",
+        steps=[_manual_step("only")],
+    )
+    await _seed_published_template(tenant_id, "d", body=single_step)
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+    completed = await run_service.next_step(
+        tenant_id,
+        OPERATOR,
+        start.run_id,
+        NextStepRequest(
+            last_verified=True,
+            verify_response=ConfirmVerifyResponse(type="confirm", answer="yes"),
+        ),
+    )
+    assert isinstance(completed, RunCompletedResponse)
+
+    rows = await run_service.list_runs(
+        tenant_id, OPERATOR, caller_is_admin=False, filter_=ListRunsFilter()
+    )
+    assert len(rows) == 1
+    assert rows[0].state == "completed"
+    assert rows[0].current_step_id is None
+    assert rows[0].current_step_state is None
+
+
 # ---------------------------------------------------------------------------
 # can_show_template_post_completion
 # ---------------------------------------------------------------------------

@@ -429,16 +429,30 @@ class ListRunsFilter(BaseModel):
 class RunSummary(BaseModel):
     """List-view projection returned by ``meho.runbook.list_runs``.
 
-    Run-level state only: no step contents are exposed. The
-    step-by-step content is opaque-by-construction (only
-    ``meho.runbook.next`` ever returns a step body, and only one step at a
-    time), so :attr:`current_step_id` is the *id* of the step the
-    run is currently on -- enough for a UI to render "step 3:
-    drain-node" -- but not the body.
+    Run-level state plus the current step's *state* -- no step
+    contents are exposed. The step-by-step content is
+    opaque-by-construction (only ``meho.runbook.next`` ever returns a
+    step body, and only one step at a time), so :attr:`current_step_id`
+    is the *id* of the step the run is currently on -- enough for a UI
+    to render "step 3: drain-node" -- but not the body.
 
-    :attr:`current_step_id` and :attr:`position` are ``None`` for
-    runs in terminal state (``completed`` / ``abandoned``); a
-    terminal-state run has no "current" step.
+    :attr:`current_step_state` is the persisted
+    ``runbook_run_step_states.state`` of that step (#2119). A
+    ``"no"`` / ``"escalate"`` answer to a ``confirm`` verify (or a
+    mismatched ``operation_call`` verify) transitions the step to
+    ``failed`` -- a state that previously was only discoverable by
+    making *another* ``next`` mutation and parsing the 400. Surfacing
+    it here lets operators / monitoring poll the list surface and see
+    "this run is stuck on a failed step; the only forward path is
+    abort" without mutating anything. The step's state is not step
+    *content*, so the Initiative #1198 opacity floor is untouched.
+    The escalate-vs-no distinction stays in the persisted
+    ``verify_response`` (out of scope per #2119).
+
+    :attr:`current_step_id`, :attr:`current_step_state`, and
+    :attr:`position` are ``None`` for runs in terminal state
+    (``completed`` / ``abandoned``); a terminal-state run has no
+    "current" step.
 
     :attr:`completed_at` and :attr:`abandoned_at` are mutually
     exclusive (and both ``None`` for ``in_progress`` runs); the
@@ -462,5 +476,6 @@ class RunSummary(BaseModel):
     completed_at: datetime | None = None
     abandoned_at: datetime | None = None
     current_step_id: str | None = None
+    current_step_state: Literal["in_progress", "failed"] | None = None
     position: StepPosition | None = None
     work_ref: str | None = None

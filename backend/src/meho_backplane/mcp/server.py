@@ -507,6 +507,58 @@ def _error_response(
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
+#: Maximum accepted ``/mcp`` request-body size in bytes. Sized with
+#: ample headroom over the largest legitimate payload — the 64 KiB
+#: ``add_to_memory`` / ``add_to_knowledge`` body cap plus JSON-RPC
+#: envelope + JSON string-escaping overhead — while bounding the
+#: worst-case per-request buffer the transport will allocate before
+#: schema validation runs (same 1 MiB class as
+#: :data:`meho_backplane.connectors.kubernetes.ops_logs.MAX_BODY_BYTES`).
+_MAX_REQUEST_BODY_BYTES: Final[int] = 1024 * 1024
+
+
+async def _read_body_capped(request: Request) -> bytes | JSONResponse:
+    """Read the request body, rejecting payloads over :data:`_MAX_REQUEST_BODY_BYTES`.
+
+    Two rejection arms, both HTTP 413 + a JSON-RPC INVALID_REQUEST
+    envelope (id ``null`` — the body was never parsed, so there is no
+    id to echo):
+
+    * A ``Content-Length`` header declaring an over-cap size rejects
+      before any body byte is read.
+    * Bodies without a trustworthy declared length (chunked transfer,
+      or a lying header) are consumed incrementally via
+      ``request.stream()`` and rejected as soon as the running total
+      crosses the cap — the transport never buffers more than one
+      chunk past the limit, which is the point of the guard: an
+      oversized payload must not be materialised in memory just to be
+      refused by schema validation downstream.
+
+    On success returns the fully-buffered body bytes.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > _MAX_REQUEST_BODY_BYTES:
+        return _oversize_body_response()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX_REQUEST_BODY_BYTES:
+            return _oversize_body_response()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _oversize_body_response() -> JSONResponse:
+    """HTTP 413 + JSON-RPC INVALID_REQUEST envelope for an over-cap body."""
+    _log.warning("mcp_request_body_too_large", max_bytes=_MAX_REQUEST_BODY_BYTES)
+    return _error_response(
+        None,
+        INVALID_REQUEST,
+        f"invalid request: body exceeds {_MAX_REQUEST_BODY_BYTES} bytes",
+        status_code=413,
+    )
+
 
 def _coerce_request_id(payload: dict[str, Any]) -> JsonRpcId:
     """Best-effort extract the ``id`` from a malformed request payload.
@@ -957,6 +1009,8 @@ async def mcp_dispatch(
     able and the cognitive complexity stays under the project's
     SonarCloud threshold:
 
+    * :func:`_read_body_capped` — bounded body read; over-cap payloads
+      are refused with HTTP 413 before any parsing.
     * :func:`_parse_request_body` — body → ``dict`` or transport error.
     * :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`
       — envelope shape validation.
@@ -975,7 +1029,9 @@ async def mcp_dispatch(
     # and for the call-time role re-check on tools/call / resources/read.
     # Built-in lifecycle handlers (initialize, ping, notifications/
     # initialized) accept the parameter but don't read it.
-    raw_body = await request.body()
+    raw_body = await _read_body_capped(request)
+    if isinstance(raw_body, JSONResponse):
+        return raw_body
     parsed = _parse_request_body(raw_body)
     if isinstance(parsed, JSONResponse):
         return parsed

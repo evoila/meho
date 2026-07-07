@@ -238,6 +238,36 @@ The redaction helper is `redacted_audit_uri(template)` in
 contextvar pattern rather than special-casing the dispatcher per
 resource.
 
+## Request-size bounds
+
+The `/mcp` transport bounds every request body at
+`_MAX_REQUEST_BODY_BYTES` (1 MiB, `mcp/server.py`). The dispatch
+pipeline reads the body through `_read_body_capped` rather than
+`request.body()`: an over-cap declared `Content-Length` rejects before
+any byte is read, and bodies without a trustworthy declared length
+(chunked transfer) are consumed incrementally via `request.stream()`
+and rejected as soon as the running total crosses the cap. Both arms
+return HTTP 413 with a JSON-RPC `INVALID_REQUEST` envelope
+(`id: null` — the body was never parsed).
+
+Below the transport cap, free-text tool inputs carry `maxLength` caps
+in their `inputSchema` so oversized strings are refused by the
+dispatcher's JSON-Schema gate (`-32602`) before they reach the
+retrieval substrate's tsvector + embedding indexing:
+
+* `search_memory.query` / `search_knowledge.query` — 256 chars
+  (`_MAX_QUERY_CHARS`), the same class as the other tool slices'
+  free-text caps.
+* `add_to_memory.body` (and its deprecated `content` alias) /
+  `add_to_knowledge.body` — 64 KiB (`_MAX_BODY_CHARS`), aligned with
+  the operator console's `BODY_MAX_LENGTH` so a body writable through
+  the UI is writable through MCP and vice versa.
+
+The transport cap is deliberately sized with headroom above the
+largest legitimate tool payload (64 KiB body + envelope + JSON
+escaping) so the schema-level caps, not the transport, are the
+operative limit for well-formed calls.
+
 ## Dependencies
 
 * `structlog` — every MCP log line goes through

@@ -90,7 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — /ui/memory tag-datalist URL rewrite on page load
+### Security — /health least-privilege split (OPERATOR gate + liveness probe)
+
+- **`GET /api/v1/health` (the federation-proof deep check) is now
+  gated at `TenantRole.OPERATOR`**, and a new cheap liveness probe
+  ships at **`GET /api/v1/health/live`** for low-privilege /
+  monitoring callers (evoila-bosnia/meho-internal#159). Every
+  `/api/v1/health` call drives a live Vault JWT/OIDC credential
+  federation plus a KV v2 secret read under the caller's identity;
+  it previously required only a valid JWT, so the lowest-trust
+  `read_only` rank (what monitoring principals are expected to hold)
+  could trigger that Vault round-trip on every poll. A `read_only`
+  caller now receives 403 `insufficient_role` *before* any Vault
+  interaction; `operator` / `tenant_admin` callers (the CLI `meho
+  status` audience, the install smoke) see the exact same response
+  as before. **Migration for `read_only` monitoring callers**: poll
+  `GET /api/v1/health/live` instead — valid JWT (any tenant role),
+  returns `{operator, db}` (identity + DB-migration liveness), no
+  `vault` field, and its code path never touches Vault or the
+  dispatcher (pinned by a source-level guard test). Kubernetes
+  liveness/readiness probes are unaffected — they target the
+  unauthenticated `/healthz` / `/ready` chassis routes. The MCP
+  `meho.status` tool is unchanged (explicitly out of scope here).
+  OpenAPI snapshot + generated CLI client regenerated for the new
+  route.
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.
 

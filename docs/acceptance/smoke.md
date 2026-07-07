@@ -54,6 +54,16 @@ the federation chain depends on:
 | 4 | **Vault** | The same `/api/v1/health` call exercises a Vault JWT/OIDC round-trip — the backplane forwards the operator's JWT to Vault, Vault verifies against the configured Keycloak trust, returns a Vault token bound to the operator, and the backplane reads `secret/meho/test/federation` under that token. Verifies the federation chain. | [`#25`](https://github.com/evoila-bosnia/meho-internal/issues/25) — Vault JWT federation (G2.2) |
 | 5 | **DB-migration state** | The chassis's `db_migration_probe()` reports `alembic_version == head`. Optional cluster-side cross-check: `kubectl get job -l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=<release>` shows `succeeded=1`, OR the helm release status is `deployed` (when the Job was GC'd by the hook-succeeded delete-policy). Verifies the migration-runner contract. | [`#29`](https://github.com/evoila-bosnia/meho-internal/issues/29) — migration runner + CI guard (G2.3-T3) |
 
+**Role requirement.** `GET /api/v1/health` is gated at
+`TenantRole.OPERATOR` (least-privilege hardening: every call
+federates a live per-operator Vault credential). The smoke operator's
+token must carry `tenant_role` of `operator` or `tenant_admin`; a
+`read_only` token receives 403 `insufficient_role` and the smoke
+fails at leg #2. Low-privilege monitoring principals that only need a
+process/DB liveness signal poll `GET /api/v1/health/live` instead
+(valid JWT, any role — no Vault interaction, no `vault.*` fields in
+the response).
+
 The five legs share **one** authenticated `/api/v1/health` request —
 legs #2, #3, #4, and #5 all parse fields off the response of that
 single request. This is deliberate: each smoke run writes exactly one

@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — topology refresh returns structured errors instead of a bare 500
+
+- `POST /api/v1/topology/refresh/{target_name}` no longer returns a bare
+  `500 text/plain "Internal Server Error"` when no registered connector
+  supports the target's `product` (e.g. a legacy pre-standardization
+  `kubernetes` slug where the connector registers as `k8s`): the route
+  now maps the refresh service's connector-resolution exceptions to
+  structured JSON — `NoMatchingConnector` → **422
+  `no_matching_connector`** (with the offending `product` and the
+  resolver message) and `AmbiguousConnectorResolution` → **409
+  `ambiguous_connector`** (with the `(product, version, impl_id)`
+  candidates so the caller can set `target.preferred_impl_id` and
+  retry). Both error envelopes are declared in the OpenAPI spec so the
+  generated CLI/SDK pick them up. The sibling silent-no-op case (a
+  resolvable connector without topology support returning all-zero
+  counts) is tracked separately in #2093. (#2092)
 ### Breaking changes — REST connector-ingest omitted `tenant_id` now targets the global scope
 
 - **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.

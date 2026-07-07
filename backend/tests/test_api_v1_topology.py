@@ -17,6 +17,11 @@ Coverage matrix (G9.1-T5 / Task #453 acceptance criteria):
   kinds, not an unhandled 500.
 * **refresh** — wraps the T3 service; the resolved target is passed
   through; the :class:`RefreshResult` is returned verbatim.
+* **refresh resolver failures → structured 4xx** — #2092:
+  :class:`NoMatchingConnector` out of the service surfaces as 422
+  ``no_matching_connector`` and :class:`AmbiguousConnectorResolution`
+  as 409 ``ambiguous_connector`` with candidates, not a bare
+  ``text/plain`` 500 from FastAPI's default handler.
 * **RBAC** — every route requires ``operator`` minimum; ``read_only``
   gets 403.
 * **Unauthenticated** — every route returns 401 without a token.
@@ -49,6 +54,7 @@ from meho_backplane.api.v1.topology import router as topology_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors import AmbiguousConnectorResolution
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.middleware import RequestContextMiddleware
@@ -516,6 +522,82 @@ def test_refresh_wraps_service_and_returns_result(client: TestClient) -> None:
     # resolve_target is tenant-scoped to the JWT's tenant_id.
     assert resolve.call_args.args[1] == _TENANT_ID
     assert resolve.call_args.args[2] == "vc-1"
+
+
+def test_refresh_no_matching_connector_returns_structured_422(client: TestClient) -> None:
+    """A product no connector supports maps to 422, not a bare 500 (#2092).
+
+    Only ``resolve_target`` is patched — the *real*
+    ``refresh_target_topology`` runs and raises
+    :class:`NoMatchingConnector` out of the raising
+    ``resolve_connector`` (the ``kubernetes`` legacy slug is not a
+    registered product; ``KubernetesConnector`` self-registers as
+    ``k8s``), proving the route's mapping catches the exception the
+    service actually raises. Pre-#2092 this leaked through FastAPI's
+    default handler as ``500 text/plain "Internal Server Error"``.
+    """
+    key, token = _token(TenantRole.OPERATOR)
+
+    class _FakeTarget:
+        id = uuid.uuid4()
+        name = "rke2-legacy"
+        product = "kubernetes"
+        fingerprint = None
+        preferred_impl_id = None
+
+    resolve = AsyncMock(return_value=_FakeTarget())
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.resolve_target", resolve),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post("/api/v1/topology/refresh/rke2-legacy", headers=_authed(token))
+    # Explicitly not the pre-fix shape: bare 500 + text/plain body.
+    assert resp.status_code != 500
+    assert resp.text != "Internal Server Error"
+    assert resp.status_code == 422, resp.text
+    assert resp.headers["content-type"].startswith("application/json")
+    detail = resp.json()["detail"]
+    assert detail["error"] == "no_matching_connector"
+    assert detail["product"] == "kubernetes"
+    assert "kubernetes" in detail["message"]
+
+
+def test_refresh_ambiguous_connector_returns_409_with_candidates(client: TestClient) -> None:
+    """A resolver tie maps to 409 ``ambiguous_connector`` + candidates (#2092)."""
+    key, token = _token(TenantRole.OPERATOR)
+
+    class _FakeTarget:
+        id = uuid.uuid4()
+        name = "vc-1"
+        product = "vmware-rest"
+
+    candidates = [
+        ("vmware-rest", "8", "vmware-rest"),
+        ("vmware-rest", "8", "vmware-rest-alt"),
+    ]
+    resolve = AsyncMock(return_value=_FakeTarget())
+    refresh = AsyncMock(
+        side_effect=AmbiguousConnectorResolution(
+            "resolution ambiguous after tie-break ladder", candidates=candidates
+        )
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.resolve_target", resolve),
+        patch("meho_backplane.api.v1.topology.refresh_target_topology", refresh),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post("/api/v1/topology/refresh/vc-1", headers=_authed(token))
+    assert resp.status_code == 409, resp.text
+    assert resp.headers["content-type"].startswith("application/json")
+    detail = resp.json()["detail"]
+    assert detail["error"] == "ambiguous_connector"
+    assert detail["product"] == "vmware-rest"
+    assert detail["candidates"] == [
+        {"product": "vmware-rest", "version": "8", "impl_id": "vmware-rest"},
+        {"product": "vmware-rest", "version": "8", "impl_id": "vmware-rest-alt"},
+    ]
 
 
 # ---------------------------------------------------------------------------

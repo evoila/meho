@@ -32,7 +32,7 @@ import pytest
 #: a module rather than via ``subprocess`` so failure messages render
 #: as proper pytest tracebacks; the subprocess invocation is exercised
 #: separately by :func:`test_cli_invocation_returns_nonzero_on_violation`.
-_REPO_ROOT: pathlib.Path = pathlib.Path(__file__).resolve().parents[2]
+_REPO_ROOT: pathlib.Path = pathlib.Path(__file__).resolve().parents[3]
 _SCRIPT_PATH: pathlib.Path = _REPO_ROOT / "scripts" / "ci" / "check_migration_compat.py"
 
 

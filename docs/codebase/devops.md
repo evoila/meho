@@ -1182,12 +1182,16 @@ the verifier's exit code becomes the wrapper's exit code.
 The rollback contract is the **cluster-level** half of the
 forward-compat assurance Goal #11 DoD bullet 3 promises; the
 **unit-level** half lives at
-[`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py)
-(Task #30, Initiative #26) and runs on every PR via
-[`.github/workflows/migration-compat.yml`](../../.github/workflows/migration-compat.yml).
+[`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py)
+(Task #30, Initiative #26) and runs on migration-touching PRs via the
+`python-migration-tests` job in
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) (relocated
+out of the every-PR unit lane by #2140; a broken chain still fails
+every PR via the unit lane's `alembic upgrade head` fixture, so only
+the deep per-migration assertions defer to migration PRs).
 Together they assert "the N image runs cleanly against the N+1
-schema" at two layers: testcontainers in CI (fast, every PR) and
-real `helm rollback` against the lab (slow, Goal-closing milestone).
+schema" at two layers: testcontainers in CI (fast, on migration-touching
+PRs) and real `helm rollback` against the lab (slow, Goal-closing milestone).
 
 ## References
 
@@ -1200,7 +1204,7 @@ real `helm rollback` against the lab (slow, Goal-closing milestone).
 - Task #56 (G2.8-T2) — `smoke.sh` federation-chain acceptance contract + verifier (`docs/acceptance/smoke.md`, `scripts/acceptance/smoke.sh`)
 - Task #57 (G2.8-T3) — `helm rollback` end-to-end acceptance contract + verifier (`docs/acceptance/rollback.md`, `scripts/acceptance/rollback-verify.sh`, `scripts/acceptance/synthetic-n-plus-1.sql`)
 - Task #58 (G2.8-T4) — 5-consecutive-merged-PR green-smoke counter contract + `targets.yaml` `rdc-meho` schema (`docs/acceptance/green-counter.md`, `docs/cross-repo/targets-yaml.md`, `docs/cross-repo/issue-58-consumer-ticket-body.md`, README badge placeholder); consumer-side counter implementation + `targets.yaml` entry tracked on `claude-rdc-hetzner-dc`
-- Task #30 (G2.3-T4) — unit-level forward-compat regression test (`backend/tests/test_migration_rollback.py`)
+- Task #30 (G2.3-T4) — unit-level forward-compat regression test (`backend/tests/migrations/test_migration_rollback.py`)
 - Helm `helm rollback` reference: https://helm.sh/docs/helm/helm_rollback/
 - Helm chart hooks reference: https://helm.sh/docs/topics/charts_hooks/
 - GitHub Actions OIDC: https://docs.github.com/en/actions/concepts/security/openid-connect

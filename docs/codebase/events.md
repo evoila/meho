@@ -273,7 +273,7 @@ Both gated via env vars (defaults shown in parens):
     ticks, sum of processed == N exactly
   - `test_restart_durability_drains_unprocessed_rows` — publish →
     simulate kill → restart → tick drains the row
-- [backend/tests/test_migration_0026_event_outbox.py](backend/tests/test_migration_0026_event_outbox.py)
+- [backend/tests/migrations/test_migration_0027_event_outbox.py](backend/tests/migrations/test_migration_0027_event_outbox.py)
   — schema + index migration round-trip
 
 ## References

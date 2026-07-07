@@ -117,8 +117,8 @@ The `actor_sub` discriminator distinguishes the three sources:
 
 Both migrations are idempotent on replay:
 
-- `0018`: upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/test_alembic_seed_rdc_conventions.py`](../../backend/tests/test_alembic_seed_rdc_conventions.py) (SQLite) and `TestSeedRdcInternalConventionsPgIdempotency` in [`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py) (PG).
-- `0028`: cleanup narrows on the seed marker (matches zero rows on a replay where the cleanup already ran) + upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/test_alembic_seed_0028_supersede.py`](../../backend/tests/test_alembic_seed_0028_supersede.py) (SQLite) and `TestSupersedeDefaultConventionsPgIdempotency` in `test_migration_rollback.py` (PG).
+- `0018`: upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/migrations/test_alembic_seed_rdc_conventions.py`](../../backend/tests/migrations/test_alembic_seed_rdc_conventions.py) (SQLite) and `TestSeedRdcInternalConventionsPgIdempotency` in [`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py) (PG).
+- `0028`: cleanup narrows on the seed marker (matches zero rows on a replay where the cleanup already ran) + upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/migrations/test_alembic_seed_0028_supersede.py`](../../backend/tests/migrations/test_alembic_seed_0028_supersede.py) (SQLite) and `TestSupersedeDefaultConventionsPgIdempotency` in `test_migration_rollback.py` (PG).
 
 ## Reversibility
 

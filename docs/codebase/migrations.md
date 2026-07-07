@@ -104,7 +104,7 @@ then passed to `_uuid_param` to get the dialect-correct bind value.
 
 ### Drift guard
 
-`backend/tests/test_alembic_uuid_param_consistency.py` contains an AST-based
+`backend/tests/migrations/test_alembic_uuid_param_consistency.py` contains an AST-based
 scanner that runs on every CI push and fails when any migration uses
 `str(<uuid-ish>)` as a dict value in a bind parameter context. It also
 contains a parametrised audit that checks each migration file individually
@@ -247,6 +247,6 @@ avoid "event loop already running" errors.
 - `backend/alembic/versions/0038_backfill_endpoint_descriptor_product_splits.py`:
   the canonical collision-guarded backfill-rewrite (correlated `NOT EXISTS`
   twin check on a partial-unique natural key, documented no-op downgrade).
-- `backend/tests/test_alembic_uuid_param_consistency.py`: drift-guard test.
-- `backend/tests/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
-- `backend/tests/test_migration_compat.py`: additive-only CI guard tests.
+- `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
+- `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
+- `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.

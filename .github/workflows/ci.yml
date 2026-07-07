@@ -109,6 +109,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
+  changes:
+    name: Detect migration-related changes
+    # Emits `migrations=true` when a PR touches migration-related files,
+    # so the required `python-migration-tests` job runs only then. On
+    # push / merge_group it emits `true` unconditionally, so the required
+    # check is never left Pending on a non-PR event.
+    #
+    # WHY a `changes`-job + job-level `if:` and NOT `on.paths` (#2140):
+    # GitHub treats a job skipped by its own `if:` as **Success** (it
+    # satisfies a required status check), whereas a whole workflow
+    # skipped by a path filter stays **Pending** and blocks merge. For a
+    # *required* test check the `if:` gate is the only shape that skips
+    # cleanly. There is no in-repo precedent — chart.yml uses
+    # `on.pull_request.paths` (fine for a publish workflow, wrong here).
+    #
+    # Same fork-PR guard as the other jobs; the dependent test job's
+    # `if:` re-checks head.repo too.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners-ci
+    timeout-minutes: 5
+    outputs:
+      migrations: ${{ steps.detect.outputs.migrations }}
+    steps:
+      - name: Checkout
+        # fetch-depth: 0 so the PR base commit is present for the
+        # three-dot diff below (the default shallow fetch would not
+        # reach the merge-base).
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Detect migration-related changes
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "non-PR event (${{ github.event_name }}) -> migrations=true"
+            echo "migrations=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          # Files that make the migration suite meaningful to run: the
+          # alembic tree, the relocated migration test suite, the db
+          # migrate/migrations modules under test, the compat script, and
+          # the workflows that define this gate.
+          changed="$(git diff --name-only "${base}"...HEAD)"
+          if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/check_migration_compat\.py$|\.github/workflows/(ci|migration-compat)\.yml$)'; then
+            echo "migration-related change detected -> migrations=true"
+            echo "migrations=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no migration-related change -> migrations=false"
+            echo "migrations=false" >> "$GITHUB_OUTPUT"
+          fi
+
   python-lint-test:
     name: Python (ruff + mypy + pytest)
     # Fork-PR guard: never execute project code from a fork on the
@@ -416,7 +469,7 @@ jobs:
           # ~15-18min) with creep-detection headroom, under the 25-min timeout.
           budget_s=1320
           start=$(date +%s)
-          uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+          uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration --ignore=tests/migrations tests/
           dur=$(( $(date +%s) - start ))
           echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = no-cov -n 3 wall; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
@@ -696,6 +749,66 @@ jobs:
         # job is ~6min and its container-heavy fixtures under xdist
         # are unverified — out of scope for the perf change.
         run: uv run pytest -x tests/integration/
+
+  python-migration-tests:
+    name: Python (database migrations)
+    # Runs the relocated backend/tests/migrations/ suite: per-migration
+    # data-transform assertions, the alembic upgrade/downgrade round-trip,
+    # and the 3 pgvector-container forward-compat rollback tests. The
+    # required unit lane (python-lint-test) now --ignore=tests/migrations,
+    # so this job carries the deep per-migration coverage — but only on
+    # migration-touching PRs, gated by the `changes` job.
+    #
+    # Safety net: the unit lane's session-scoped `_schema_template_db`
+    # fixture still runs `alembic upgrade head` on every PR, so a broken
+    # migration chain still fails every PR via fixture setup; only the
+    # deep per-migration behavioural assertions defer to this job.
+    #
+    # REQUIRED CHECK: register the check context "Python (database
+    # migrations)" in branches/main branch protection (manual ops step,
+    # not code — #2140 acceptance item B.3).
+    needs: changes
+    # Run on any non-PR event (push / merge_group — never leave a required
+    # check Pending), OR a same-repo PR that touched migration files. A
+    # no-migration same-repo PR (and every fork PR) skips this job via
+    # `if:`, which reports Success and satisfies the required check.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.migrations == 'true')
+    runs-on: meho-runners-ci
+    timeout-minutes: 30
+    env:
+      # The 3 forward-compat rollback tests spin up pgvector via
+      # testcontainers; route the pull through the Harbor proxy cache like
+      # the sibling jobs (never `:latest`).
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Docker Hub login (for testcontainers pulls)
+        # Authenticated pulls avoid the shared-NAT Docker Hub anonymous
+        # rate limit when the rollback tests spin up pgvector/pgvector:pg16.
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Pytest (database migrations)
+        run: uv run pytest tests/migrations/
 
   go-lint-test:
     name: Go (golangci-lint + go test)

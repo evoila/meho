@@ -33,11 +33,13 @@ N+1 schema" — is asserted at two layers:
 
 | Layer | Where it lives | What it proves |
 | --- | --- | --- |
-| **Unit-test** | [`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py) (Task #30, Initiative #26) | The backplane *code* tolerates a schema ahead of it. testcontainers spin up `pgvector/pgvector:pg16` (image overridable via `MEHO_TEST_PGVECTOR_IMAGE`; pgvector required because migration `0003` runs `CREATE EXTENSION vector`), alembic upgrade head to revision N, apply a synthetic N+1 additive migration ([`backend/tests/fixtures/synthetic_n_plus_1.py`](../../backend/tests/fixtures/synthetic_n_plus_1.py)), make an authenticated `GET /api/v1/health` through the revision-N FastAPI app, assert the audit row landed AND the N+1 columns hold their server-side defaults (the negative assertion: revision-N code did not write them). Runs on every PR via `migration-compat.yml`. |
+| **Unit-test** | [`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py) (Task #30, Initiative #26) | The backplane *code* tolerates a schema ahead of it. testcontainers spin up `pgvector/pgvector:pg16` (image overridable via `MEHO_TEST_PGVECTOR_IMAGE`; pgvector required because migration `0003` runs `CREATE EXTENSION vector`), alembic upgrade head to revision N, apply a synthetic N+1 additive migration ([`backend/tests/fixtures/synthetic_n_plus_1.py`](../../backend/tests/fixtures/synthetic_n_plus_1.py)), make an authenticated `GET /api/v1/health` through the revision-N FastAPI app, assert the audit row landed AND the N+1 columns hold their server-side defaults (the negative assertion: revision-N code did not write them). Runs on migration-touching PRs (and every `push`/`merge_group`) via the `python-migration-tests` job in `.github/workflows/ci.yml` — #2140 relocated it out of the every-PR unit lane. |
 | **Cluster** | This contract + [`scripts/acceptance/rollback-verify.sh`](../../scripts/acceptance/rollback-verify.sh) (Task #57, Initiative #54) | The *running deployment* tolerates a real `helm rollback` against a Kubernetes cluster after a real `helm upgrade` applied a real additive migration. Verifier asserts `helm history` shows a rollback action, the running Pod is the N image, the schema still carries the N+1 columns, and the public surface (`/healthz`, `/version`, `/api/v1/health`) serves traffic correctly post-rollback. |
 
-The split is intentional: the unit-test gates every PR fast and cheap;
-the cluster exercise gates the Goal #11 closing milestone end-to-end.
+The split is intentional: the unit-test gates migration-touching PRs
+fast and cheap (a broken chain still fails every PR via the unit lane's
+`alembic upgrade head` fixture); the cluster exercise gates the Goal #11
+closing milestone end-to-end.
 A regression in the code's forward-compat property fails CI in seconds
 without waiting on the expensive lab deploy.
 
@@ -162,11 +164,11 @@ assertion fails-loud with the exact mismatch.
 | --- | --- | --- |
 | **RDC operator** | Runs the full deploy → upgrade → rollback exercise from the operator workstation (with VPN + Vault session + kubeconfig). Captures `helm history`, `kubectl describe`, the verifier's transcript. | Per Goal #11 closing-criteria — once for the acceptance milestone. Re-runs after every backplane change that touches the audit middleware or alters `audit_log` |
 | **`evoila/meho` maintainer** | Reviews the captured run on issue #57 (or the linked workflow artefact), confirms checks #1a/#1/#2/#3/#4/#5 are green, ticks the DoD bullet on Goal #11 | Once per Goal-closing review |
-| **CI (per-PR unit-level)** | Runs `backend/tests/test_migration_rollback.py` on every PR via the central CI matrix. Catches the *code-side* forward-compat regression before the deploy ever happens | Every PR against `main`; gated as a required check by branch protection |
+| **CI (unit-level)** | Runs `backend/tests/migrations/test_migration_rollback.py` via the `python-migration-tests` job in `.github/workflows/ci.yml`. Catches the *code-side* forward-compat regression before the deploy ever happens | Migration-touching PRs against `main` (and every `push`/`merge_group`); gated as a required check by branch protection — the job skips (→ success) on non-migration PRs, where the unit lane's `alembic upgrade head` fixture still guards a broken chain. Relocated out of the every-PR unit lane by #2140 |
 
-The two layers — unit-level on every PR, cluster-level at the closing
-milestone — together compose the forward-compat assurance Goal #11
-DoD bullet 3 promises.
+The two layers — unit-level on migration-touching PRs, cluster-level at
+the closing milestone — together compose the forward-compat assurance
+Goal #11 DoD bullet 3 promises.
 
 ## What the consumer-side rollback exercise script needs to do
 
@@ -272,7 +274,7 @@ the exercise + writes the closing artefact.
   [#57 — helm rollback verified end-to-end with non-trivial schema diff](https://github.com/evoila-bosnia/meho-internal/issues/57)
 - Predecessor (unit-level proof):
   [#30 — forward-compat regression test (testcontainers)](https://github.com/evoila-bosnia/meho-internal/issues/30)
-  / [`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py)
+  / [`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py)
 - Predecessor (additive-only migration discipline):
   [#29 — migration runner entrypoint + CI guard rejecting destructive migration patterns](https://github.com/evoila-bosnia/meho-internal/issues/29)
 - Predecessor (cold-deploy install): [Task #55 — `install.sh` cold-deploy](https://github.com/evoila-bosnia/meho-internal/issues/55) / [PR #189](https://github.com/evoila/meho/pull/189)

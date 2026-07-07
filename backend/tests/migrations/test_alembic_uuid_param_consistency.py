@@ -60,8 +60,8 @@ from typing import Any
 import pytest
 
 #: Directory containing the migration files to audit.
-#: parents[0] = backend/tests, parents[1] = backend
-_VERSIONS_DIR: Path = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+#: parents[0] = backend/tests/migrations, parents[1] = backend/tests, parents[2] = backend
+_VERSIONS_DIR: Path = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 
 # ---------------------------------------------------------------------------
 # AST-based scanner

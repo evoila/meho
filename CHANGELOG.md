@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `meho login --resolve` named-port silent no-op
+
+- `meho login --resolve <host>:<port>:<ip>` now rejects named service
+  ports (e.g. `kc.example.com:https:10.0.0.5`) loudly at parse time:
+  the override map is keyed by the numeric dial address, so a named
+  port previously passed validation (`net.LookupPort`) but keyed the
+  map as `host:https` — never matching the dial address, silently
+  ignoring the pin, and violating the flag's fail-loud contract. The
+  port must now be strictly numeric (1-65535). An IPv6-literal *host*
+  (unrepresentable in the front-split `host:port:ip` format) also gets
+  an explicit error instead of a misleading port/IP validation
+  failure, and the parser docs now describe the actual front-split
+  behaviour. Follow-up to the PR #2181 review. (#2107)
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

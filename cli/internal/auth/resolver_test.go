@@ -29,6 +29,8 @@ func TestParseResolveEntries(t *testing.T) {
 		{"ipv4", []string{"kc.example.com:443:10.0.0.5"}, "kc.example.com:443", "10.0.0.5"},
 		{"ipv6-bare", []string{"kc.example.com:443:::1"}, "kc.example.com:443", "::1"},
 		{"ipv6-bracketed", []string{"kc.example.com:443:[2001:db8::1]"}, "kc.example.com:443", "2001:db8::1"},
+		{"numeric-port-low", []string{"kc.example.com:1:10.0.0.5"}, "kc.example.com:1", "10.0.0.5"},
+		{"numeric-port-high", []string{"kc.example.com:65535:10.0.0.5"}, "kc.example.com:65535", "10.0.0.5"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,7 +72,19 @@ func TestParseResolveEntriesRejectsMalformed(t *testing.T) {
 	}{
 		{"no-colons", "kc.example.com", "host:port:ip"},
 		{"only-one-colon", "kc.example.com:443", "host:port:ip"},
-		{"bad-port", "kc.example.com:notaport:10.0.0.5", "valid TCP port"},
+		{"bad-port", "kc.example.com:notaport:10.0.0.5", "numeric TCP port"},
+		// A named service would pass net.LookupPort but key the override
+		// map as "host:https", which never matches the numeric dial
+		// address — the pin would be silently ignored. It must be
+		// rejected loudly at parse time instead.
+		{"named-port", "kc.example.com:https:10.0.0.5", "not a numeric TCP port"},
+		{"port-zero", "kc.example.com:0:10.0.0.5", "range 1-65535"},
+		{"port-out-of-range", "kc.example.com:65536:10.0.0.5", "range 1-65535"},
+		{"negative-port", "kc.example.com:-1:10.0.0.5", "numeric TCP port"},
+		// The format is front-split (host = everything before the first
+		// colon), so an IPv6 literal cannot appear in the host position;
+		// it gets an explicit error, not a confusing port/IP one.
+		{"ipv6-literal-host", "[::1]:443:10.0.0.5", "IPv6-literal hosts are not supported"},
 		{"bad-ip", "kc.example.com:443:not-an-ip", "valid IP"},
 		{"empty-host", ":443:10.0.0.5", "host is empty"},
 		{"empty-ip", "kc.example.com:443:", "ip is empty"},

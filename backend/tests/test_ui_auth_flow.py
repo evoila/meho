@@ -65,6 +65,10 @@ from meho_backplane.ui.auth.flow import (
     get_verifier_store,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.middleware import require_ui_session
+from meho_backplane.ui.auth.revalidation import (
+    reset_read_revalidation_cache_for_testing,
+)
 from meho_backplane.ui.auth.routes import AUTHORIZATION_STATE_EXPIRED_DETAIL
 from meho_backplane.ui.auth.session_store import (
     create_session,
@@ -115,6 +119,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
+    reset_read_revalidation_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
@@ -122,6 +127,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
+    reset_read_revalidation_cache_for_testing()
 
 
 def _mock_oidc_metadata(
@@ -791,6 +797,232 @@ def test_middleware_does_not_touch_non_ui_paths() -> None:
         response = client.get("/api/probe")
     assert response.status_code == 200
     assert response.json() == {"out": "of-scope"}
+
+
+# ---------------------------------------------------------------------------
+# Read-path token revalidation -- drift-gated revocation-lag bound
+# ---------------------------------------------------------------------------
+
+
+_TOKEN_ENDPOINT_URL = f"{DEFAULT_ISSUER}/protocol/openid-connect/token"
+_JWKS_URL = f"{DEFAULT_ISSUER}/protocol/openid-connect/certs"
+
+
+def _seed_session_with_token(access_token: str) -> uuid.UUID:
+    """Insert a live ``web_session`` row holding *access_token*."""
+
+    async def _seed() -> uuid.UUID:
+        from datetime import timedelta
+
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            decrypted = await create_session(
+                session,
+                operator_sub="op-77",
+                tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+                access_token=access_token,
+                refresh_token="refresh-token-1",
+                lifetime=timedelta(hours=1),
+            )
+            return decrypted.id
+
+    return asyncio.run(_seed())
+
+
+def _build_read_probe_app() -> FastAPI:
+    """The BFF app plus a read probe gated exactly like production reads.
+
+    The probe declares ``Depends(require_ui_session)`` -- the dependency
+    every read-render ``/ui/*`` GET handler uses -- so the revalidation
+    tests exercise the same middleware + dependency chain as the real
+    read surfaces, not just the bare middleware passthrough.
+    """
+    from fastapi import Depends
+
+    from meho_backplane.ui.auth import UISessionContext
+
+    app = _build_app(include_dummy_ui_route=False)
+
+    @app.get("/ui/read-probe")
+    async def read_probe(
+        ctx: UISessionContext = Depends(require_ui_session),
+    ) -> dict[str, str]:
+        return {"operator": ctx.operator_sub}
+
+    return app
+
+
+def _pin_revalidation_threshold(monkeypatch: pytest.MonkeyPatch, seconds: str) -> None:
+    monkeypatch.setenv("UI_SESSION_READ_REVALIDATION_SECONDS", seconds)
+    get_settings.cache_clear()
+
+
+def test_read_path_redirects_when_stored_token_fails_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored token that fails the JWT chain bounces the read to login.
+
+    Threshold 0 = strict revalidate-every-request mode, so the very
+    first GET past the middleware presents the (structurally invalid)
+    stored token to the chain and must redirect -- not render.
+    """
+    _pin_revalidation_threshold(monkeypatch, "0")
+    session_id = _seed_session_with_token("not-a-jwt")
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        # The JWT chain warms the JWKS cache before classifying the
+        # malformed token, so discovery + JWKS must resolve.
+        _mock_oidc_metadata(mock_router, jwks=public_jwks(make_rsa_keypair("kid-reval-0")))
+        client = TestClient(_build_read_probe_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        response = client.get("/ui/read-probe")
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+
+
+def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IdP-side revocation surfaces within the documented lag window.
+
+    A revoked-but-unexpired JWT still verifies (revocation does not
+    invalidate an issued signature), so the read path notices at the
+    first revalidation past the token's ``exp``: the reactive refresh
+    presents the refresh grant, Keycloak answers ``invalid_grant``,
+    and the operator is redirected to login instead of getting the
+    previous behaviour -- authorized renders until the 12 h absolute
+    session lifetime.
+    """
+    from structlog.testing import capture_logs
+
+    _pin_revalidation_threshold(monkeypatch, "0")
+    key = make_rsa_keypair("kid-reval-1")
+    expired = mint_token(key, sub="op-77", expires_in=-120)
+    session_id = _seed_session_with_token(expired)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=public_jwks(key))
+        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+        with capture_logs() as captured:
+            client = TestClient(_build_read_probe_app(), follow_redirects=False)
+            client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+            response = client.get("/ui/read-probe")
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+    assert token_route.call_count == 1
+    failed = [e for e in captured if e["event"] == "ui_read_session_revalidation_failed"]
+    assert len(failed) == 1
+    assert failed[0]["session_id"] == str(session_id)
+    # No token material in any captured event.
+    assert expired not in repr(captured)
+
+
+def test_read_path_expired_token_refreshes_silently_and_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A merely-expired token refreshes through the reactive leg -> 200.
+
+    The revalidation must not log active operators out every token
+    TTL: an expired-but-refreshable token rotates silently (RFC 9700
+    one-time-use pair) and the read renders.
+    """
+    _pin_revalidation_threshold(monkeypatch, "0")
+    key = make_rsa_keypair("kid-reval-2")
+    expired = mint_token(key, sub="op-77", expires_in=-120)
+    fresh = mint_token(key, sub="op-77")
+    session_id = _seed_session_with_token(expired)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=public_jwks(key))
+        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": fresh,
+                    "refresh_token": "refresh-token-2",
+                    "expires_in": 300,
+                    "token_type": "Bearer",
+                },
+            ),
+        )
+        client = TestClient(_build_read_probe_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        response = client.get("/ui/read-probe")
+
+    assert response.status_code == 200
+    assert response.json() == {"operator": "op-77"}
+    assert token_route.call_count == 1
+
+    async def _check_rotated() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            rotated = await load_session(session, session_id)
+            assert rotated is not None
+            assert rotated.access_token == fresh
+            assert rotated.refresh_token == "refresh-token-2"
+
+    asyncio.run(_check_rotated())
+
+
+def test_read_path_revalidation_hits_cached_jwks_no_outbound_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid token revalidates against the cached JWKS -- zero IdP calls.
+
+    Even in strict revalidate-every-request mode, per-request cost is
+    one in-memory signature check: the JWKS document is fetched once
+    (cache warm-up) and the token endpoint is never contacted while
+    the access token is unexpired.
+    """
+    _pin_revalidation_threshold(monkeypatch, "0")
+    key = make_rsa_keypair("kid-reval-3")
+    valid = mint_token(key, sub="op-77")
+    session_id = _seed_session_with_token(valid)
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        jwks_route = mock_router.get(_JWKS_URL).mock(
+            return_value=httpx.Response(200, json=public_jwks(key)),
+        )
+        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+        client = TestClient(_build_read_probe_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        first = client.get("/ui/read-probe")
+        second = client.get("/ui/read-probe")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # One JWKS warm-up fetch, then cache hits; no refresh round-trips.
+    assert jwks_route.call_count == 1
+    assert token_route.call_count == 0
+
+
+def test_read_path_within_drift_window_skips_revalidation() -> None:
+    """Inside the drift window the read path never touches the token.
+
+    Under the default threshold (300 s) the first sight of a session
+    seeds the anchor -- the token was validated at creation by the
+    callback -- and immediate follow-up reads render without a JWT
+    decode. This pins the amortisation contract: the per-request hot
+    path inside the window stays token-free, and the documented lag
+    window (token TTL + threshold) is the trade for it.
+    """
+    session_id = _seed_session_with_token("not-a-jwt")
+
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_read_probe_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        first = client.get("/ui/read-probe")
+        second = client.get("/ui/read-probe")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
 
 
 # ---------------------------------------------------------------------------

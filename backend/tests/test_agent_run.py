@@ -583,9 +583,30 @@ async def test_read_only_identity_gets_no_tools_in_loop(
         ("you summarize incident reports", None),
         ("run the tests and report", None),
         ("the runbook was used yesterday", None),
+        # Prohibitions: a negated instruct verb forbids execution — refusing
+        # here would claim the agent "was instructed to execute a runbook",
+        # the opposite of the prompt (iter-1 review, B1).
+        ("never run a runbook yourself; escalate to an operator", None),
+        ("do not execute runbook steps without approval", None),
+        ("don't execute the runbook without operator approval", None),
+        # Runbook-headed noun compounds: talking ABOUT runbook artifacts,
+        # not instructing execution (iter-1 review, B1).
+        ("You help operators use runbook templates effectively", None),
+        ("explain how to use runbook syntax", None),
+        ("help users run the runbook linter", None),
+        # Third-person prose: someone ELSE acts, not this agent (iter-1
+        # review, B1).
+        ("we run a runbook review process every week", None),
+        ("operators use the runbook to remediate", None),
+        # A rejected earlier mention must not mask a real later instruction
+        # (finditer scan, iter-1 review, B1).
+        (
+            "help users run the runbook linter, then use runbook disk-cleanup-1",
+            "disk-cleanup-1",
+        ),
     ],
 )
-def test_find_runbook_instruction_detects_instruct_shapes(
+async def test_find_runbook_instruction_detects_instruct_shapes(
     text: str,
     expected: str | None,
 ) -> None:
@@ -593,7 +614,7 @@ def test_find_runbook_instruction_detects_instruct_shapes(
     assert find_runbook_instruction(text) == expected
 
 
-def test_find_runbook_instruction_scans_every_text() -> None:
+async def test_find_runbook_instruction_scans_every_text() -> None:
     """The reference may live in the system prompt OR the run inputs."""
     assert (
         find_runbook_instruction("you are helpful", "please execute runbook disk-cleanup")

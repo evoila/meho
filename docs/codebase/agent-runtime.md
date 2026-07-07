@@ -267,13 +267,23 @@ a raised exception across the boundary, and never a launched loop.
   Detection (`find_runbook_instruction` in `agent/run.py`) matches
   instruct-shaped references only — an imperative verb (use / run /
   execute / follow / start / apply / perform / invoke) followed by
-  `runbook [template] [<slug>]` or `<slug> runbook` — so a prompt that
-  merely *mentions* runbooks does not trip it. A bare English word after
-  the instruction only counts as a *named* slug when quoted or
-  slug-structured (digit / dot / hyphen). This is a best-effort boundary
-  guard, not a parser: a phrasing it misses degrades to the old behaviour;
-  a phrasing it catches turns a fabricated success into an honest typed
-  failure.
+  `runbook [template] [<slug>]` or `<slug> runbook`. Every raw regex hit
+  is then dispositioned against three false-positive guards before it can
+  refuse the run: a **negation** guard (a verb preceded in the same clause
+  by not / never / don't / avoid / without / cannot / …n't is a
+  prohibition, not an instruction), a **third-person-subject** guard
+  (operators / users / we / they / people directly before the verb is
+  prose about someone else acting), and a **noun-compound** guard (a bare
+  unquoted, non-slug-structured word right after `runbook` — templates /
+  syntax / steps / linter / review — heads a noun compound *about*
+  runbooks, unless it is a clause-continuation word like *to* / *then*,
+  which keeps "use a runbook to remediate" an unnamed instruction). All
+  hits in all texts are scanned (`finditer`), so a rejected mention cannot
+  mask a real later instruction. A bare English word only counts as a
+  *named* slug when quoted or slug-structured (digit / dot / hyphen).
+  This is a best-effort boundary guard, not a parser: a phrasing it
+  misses degrades to the old behaviour; a phrasing it catches turns a
+  fabricated success into an honest typed failure.
 
   Capability (`toolset_admits_runbook_execution` in `agent/toolset.py`)
   is intersected explicitly: `RUNBOOK_EXECUTION_META_TOOL_NAMES` is an

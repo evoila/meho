@@ -115,6 +115,127 @@ connector-related release-notes line.
   gets a generic Vault-authorization shape; other hvac errors fall
   through to `connector_error` unchanged. (#2091)
 
+### Security
+
+- The MCP `tools/call` argument gate now asserts the `format` keywords
+  declared in tool `inputSchema`s (`uuid`, `date-time`): the
+  jsonschema validation call passes
+  `format_checker=Draft202012Validator.FORMAT_CHECKER` (with the new
+  `rfc3339-validator` dependency registering the `date-time` checker),
+  so a malformed UUID or non-RFC-3339 timestamp is rejected as JSON-RPC
+  `-32602` "Invalid params" before any tool handler runs — previously
+  `format` was annotation-only and such values reached in-handler
+  parsers, surfacing as `-32603` "Internal error" and defeating agent
+  self-correction. In-handler UUID/timestamp re-parses stay in place as
+  defense-in-depth.
+### Security — CI supply-chain input pinning + Go CVE scanning
+
+- **Pinned the release/CI supply-chain inputs that still floated, and
+  added Go dependency CVE scanning** (#155): the GoReleaser build used
+  by the signed CLI release pipeline is pinned to the exact patch
+  `v2.15.4` (was `~> v2`, i.e. "latest v2.x at run time"), matching
+  `cli/Makefile`'s `GORELEASER_VERSION` so CI releases and the local
+  `make release-dry-run` use the identical GoReleaser build; the
+  testcontainers VCSim image is pinned to the `v0.55.1` release tag
+  (was `:latest`) in all three CI jobs, matching the pinning
+  convention of the sibling pgvector/valkey/Vault test images; and the
+  `go-lint-test` CI job now runs `govulncheck ./...` (pinned
+  `golang.org/x/vuln@v1.5.0`) against the `cli/` module, so known CVEs
+  reachable from the CLI's call graph fail CI instead of going
+  unnoticed. Workflow + docs only — no runtime code change.
+### Security — untrusted-content envelope on stored agent text
+
+- Agent-authored stored text is now re-served to LLM-facing read
+  surfaces inside a positional guard/delimiter envelope
+  (`<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>`, mirroring the
+  tenant-conventions preamble wrapper): broadcast announcement
+  `activity`/`scope`/`target` on `meho.broadcast.recent`,
+  `meho.broadcast.watch` and the `meho://tenant/{tenant_id}/feed`
+  resource, plus the full Markdown `body` on the `meho://kb/{slug}` and
+  `meho://memory/{scope}/{slug}` resources. The delimiters are never
+  derived from the wrapped content, so stored text containing the
+  closing-delimiter literal cannot escape the block, and the three
+  resource descriptions now advertise the served free-text as
+  agent-authored, untrusted, and not a system directive. The
+  tenant-feed resource additionally serves agent announcements (it
+  previously skipped them as malformed). Structural hardening only —
+  no content filtering or detection, stored rows unchanged.
+  (evoila-bosnia/meho-internal#154)
+### Security — target-destination SSRF guard (create/update + connect)
+
+- **Targets can no longer be pointed at non-public addresses unless the
+  deployment explicitly allowlists them** (evoila-bosnia/meho-internal#153):
+  `POST`/`PATCH /api/v1/targets` now reject a `host`/`fqdn` that is — or
+  resolves to — a private, loopback, link-local (including
+  `169.254.0.0/16` cloud-metadata), ULA, multicast, unspecified, or
+  otherwise reserved address with a structured 422 that never echoes the
+  resolved IP; and the HTTP connector transport re-screens the
+  **resolved** address immediately before every dispatch (closing the
+  DNS-rebind window between create and connect), refusing with a
+  structured `connector_error` before any request or credential leaves
+  the backplane. The rejection classes extend the existing OpenAPI
+  spec-fetch guard with a `not is_global` posture, so every
+  non-globally-routable address — including carrier-grade NAT
+  `100.64.0.0/10` — is blocked. Both layers screen the
+  **httpx-normalized dialed host**, never the raw string: a `host`
+  value carrying URL structure cannot screen as one destination and
+  dial another — values embedding credentials, a query, or a fragment
+  are refused outright, while path- or port-bearing values (the GitHub
+  connector's documented `owner/repo` host shapes stay valid) are
+  screened on the host component they actually dial.
+  **Deployment impact (action likely required):** MEHO
+  deployments register on-prem appliances on RFC 1918 space as a matter
+  of course — set the new `MEHO_TARGET_SSRF_ALLOWLIST` env var (comma-
+  separated CIDR ranges, bare IPs, and/or hostname literals, e.g.
+  `10.0.0.0/8,192.168.0.0/16,vcenter.lab.internal`) to opt your trusted
+  internal ranges back in. The allowlist is range-scoped — everything
+  outside it stays blocked, so the guard is never globally disabled.
+  Existing target rows are unaffected at rest (reads/lists still work);
+  the guard bites on the next create, update, or dispatch.
+### Security
+
+- Bound the `/mcp` transport and the memory/knowledge MCP tool inputs
+  against oversized payloads: `search_memory.query` and
+  `search_knowledge.query` now carry a 256-char `maxLength`,
+  `add_to_memory.body` (and its deprecated `content` alias) and
+  `add_to_knowledge.body` cap at 64 KiB — matching the operator
+  console's existing body cap — so oversized free text is refused by
+  schema validation before it reaches the retrieval substrate's
+  tsvector + embedding indexing. The `/mcp` route itself now enforces a
+  1 MiB request-body limit (`Content-Length` fast-reject plus a
+  streaming cap for chunked bodies) and returns HTTP 413 with a
+  JSON-RPC `INVALID_REQUEST` envelope instead of buffering unbounded
+  payloads.
+### Fixed — `meho login --resolve` named-port silent no-op
+
+- `meho login --resolve <host>:<port>:<ip>` now rejects named service
+  ports (e.g. `kc.example.com:https:10.0.0.5`) loudly at parse time:
+  the override map is keyed by the numeric dial address, so a named
+  port previously passed validation (`net.LookupPort`) but keyed the
+  map as `host:https` — never matching the dial address, silently
+  ignoring the pin, and violating the flag's fail-loud contract. The
+  port must now be strictly numeric (1-65535). An IPv6-literal *host*
+  (unrepresentable in the front-split `host:port:ip` format) also gets
+  an explicit error instead of a misleading port/IP validation
+  failure, and the parser docs now describe the actual front-split
+  behaviour. Follow-up to the PR #2181 review. (#2107)
+
+### Security — operator-console read-session token revalidation
+
+- The operator console's `/ui/*` read path now re-validates the
+  session's stored access token against the JWKS-cached JWT chain on a
+  drift-gated cadence (`UI_SESSION_READ_REVALIDATION_SECONDS`, default
+  300; `0` = every request), instead of authenticating reads off the
+  decrypted session row alone for the session's full absolute lifetime.
+  Past the threshold, an expired token silently refreshes through the
+  existing RFC 9700 rotation seam and a token the IdP no longer honours
+  (refresh grant rejected, signature/audience failure) bounces the
+  operator to login — bounding IdP-side revocation and role-demotion
+  lag on read renders to roughly the access-token TTL plus the
+  threshold. On a JWKS cache hit the added per-request cost is zero
+  outbound calls; long-lived SSE streams honour the same check on
+  (re)connect.
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.
@@ -156,6 +277,32 @@ connector-related release-notes line.
   path params fails ingest loudly. `preview_operation` on such an op now
   returns a structured `dispatch_error` envelope instead of an uncaught
   exception / MCP `-32603` (#2066).
+
+### Security
+
+- Hardened the dispatch broadcast feed against classification drift.
+  Broadcast request params now run through a Tier-1 pass — a
+  secret-shaped key-name scrub plus the deterministic named-pattern
+  redactor — before the payload is built, and any secret detection
+  collapses the broadcast to aggregate-only regardless of op class, so
+  a secret-bearing op missing from the `credential_*` allowlists no
+  longer ships its raw params to co-tenant feed subscribers. A new
+  classifier-coverage test enumerates every registered typed/composite
+  operation and fails CI when an op declaring secret-shaped parameters
+  is not pinned to a `credential_*` class. Benign write broadcasts
+  keep their full mutation detail.
+
+- Hardened Tier-1 redaction at the connector boundary and the dispatch
+  error path. The `authorization_header` / `bearer_token` / `api_key`
+  named patterns now capture a labelled secret's value to its natural
+  delimiter (whitespace / closing quote / end of blob) instead of
+  stopping at the first punctuation byte, so punctuated values are
+  redacted whole. The `operations/_errors.py` result builders now run
+  every free-text diagnostic (`exception_message`, `upstream_message`,
+  `detail`, and the summary tails built from them) through the Tier-1
+  redactor **before** the 256-char cap, so a credential embedded in a
+  stringified connector exception or upstream error body no longer
+  reaches the response/audit envelope in cleartext.
 
 ## [0.19.0] - 2026-06-22
 

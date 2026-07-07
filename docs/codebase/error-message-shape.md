@@ -193,6 +193,22 @@ leaking — the operator just needs to be reminded. The gold-standard
 operator set that env var; it does **not** name the resolved
 client-id value the Vault render produced.
 
+**Free-text diagnostics from the dispatch error builders are Tier-1
+redacted, then capped.** Every free-text field the
+`operations/_errors.py` builders emit from a `str(exc)` or an
+upstream response body — `extras.exception_message`,
+`extras.upstream_message`, `extras.detail`, and the `error` summary
+tails built from them — passes through `_sanitize_free_text`: a
+Tier-1 redaction pass with the packaged default policy
+(credential-shaped patterns only, so hosts / statuses / remediation
+prose stay legible), then the `_EXC_MESSAGE_CAP=256` truncation.
+Where the rows below say "capped" for these fields, read
+"redacted, then capped": the cap alone is a length bound, not a
+secrecy bound — a credential inside the first 256 chars used to ride
+the envelope verbatim. Redaction runs first so a secret straddling
+the cap boundary cannot survive truncation as a cleartext fragment
+the patterns no longer match. See `docs/codebase/redaction.md`.
+
 ## When the response is intentionally bare
 
 A handful of errors stay deliberately code-only because the

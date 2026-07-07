@@ -73,8 +73,36 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination_async,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+class SsrfBlockedError(httpx.ConnectError):
+    """Dispatch refused: the target resolves to a non-public address.
+
+    Connect-time arm of the target SSRF guard
+    (:mod:`meho_backplane.targets.ssrf_guard`,
+    evoila-bosnia/meho-internal#153): raised by
+    :meth:`HttpConnector._http_client` *before* any pooled client is
+    built or request issued, when the stored ``host`` is — or now
+    resolves to — a private / loopback / link-local (``169.254.0.0/16``
+    metadata) / reserved address that the operator-configured
+    ``MEHO_TARGET_SSRF_ALLOWLIST`` does not exempt. Re-screening the
+    **resolved** address here (not just the create-time literal) closes
+    the DNS-rebind window between create and dispatch.
+
+    Subclasses :class:`httpx.ConnectError` so the dispatcher's existing
+    ``ConnectError`` arm flattens it into the structured
+    ``connector_error`` shape carrying the guard's message — no new
+    dispatcher plumbing. Explicitly excluded from :func:`_retryable`:
+    the rejection is deterministic policy, not a transient network
+    failure, so retrying would only re-run the DNS lookup.
+    """
+
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # once G0.3 lands the Target model.
@@ -165,6 +193,10 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
 
 def _retryable(exc: BaseException) -> bool:
     """Retry on connection errors and 5xx; never on 4xx."""
+    if isinstance(exc, SsrfBlockedError):
+        # Deterministic SSRF-guard rejection, not a transient network
+        # failure — retrying cannot change the verdict.
+        return False
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -365,6 +397,22 @@ class HttpConnector(Connector):
            (evoila/meho#209) stays byte-identical to a connector with no
            TLS config at all.
         """
+        # SSRF guard (evoila-bosnia/meho-internal#153): re-screen the
+        # *resolved* destination on every acquisition, before the pooled
+        # client is built or served. The create/update schema validators
+        # already rejected a non-public literal, but the stored value can
+        # be a hostname whose DNS answer changed since create (rebind) or
+        # was unresolvable then — this is the enforcement point. The
+        # guard screens the httpx-normalized *dialed* host, never the
+        # raw string, so a stored value that embeds URL structure —
+        # including rows that predate the guard — is screened on the
+        # host the transport actually reaches. Runs before the cache
+        # lookup so a previously-pooled client for a now-rebinding
+        # hostname is refused too.
+        try:
+            await assert_public_destination_async(str(target.host))
+        except TargetDestinationBlockedError as exc:
+            raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
         verify_tls = bool(getattr(target, "verify_tls", True))
         ca_pin = getattr(target, "tls_ca_pin", None)

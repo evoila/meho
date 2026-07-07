@@ -41,6 +41,7 @@ from meho_backplane.broadcast import (
     publish_event,
     redact_payload,
 )
+from meho_backplane.broadcast.events import scrub_broadcast_params
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
@@ -496,9 +497,37 @@ async def publish_broadcast(
     Fail-open per the :func:`publish_event` contract -- a publish
     failure logs + bumps the error counter; the dispatcher's
     :class:`OperationResult` is independent.
+
+    Fail-closed on content (meho-internal #151): ``classify_op`` alone
+    decided the payload detail here, so a secret-bearing write op
+    missing from the ``credential_*`` allowlists broadcast its raw
+    request params to every co-tenant feed subscriber. The params now
+    run through :func:`scrub_broadcast_params` -- a key-name scrub plus
+    the Tier-1 deterministic redactor -- **before** the payload is
+    built, and any secret detection collapses the broadcast to
+    aggregate-only regardless of ``op_class``. Decision #3's
+    full-detail default is preserved for params in which no secret
+    material is detected.
     """
     op_class = classify_op(descriptor.op_id)
-    payload = redact_payload(op_class, {"params": params}, result_status)
+    scrubbed_params, secret_detected = scrub_broadcast_params(params)
+    if secret_detected and op_class not in {
+        "credential_read",
+        "credential_mint",
+        "credential_write",
+        "audit_query",
+    }:
+        _log.info(
+            "broadcast_params_secret_detected",
+            op_id=descriptor.op_id,
+            op_class=op_class,
+        )
+    payload = redact_payload(
+        op_class,
+        {"params": scrubbed_params},
+        result_status,
+        detail="aggregate" if secret_detected else None,
+    )
     raw_target_name = getattr(target, "name", None) if target is not None else None
     target_name = raw_target_name if isinstance(raw_target_name, str) else None
     event = BroadcastEvent(

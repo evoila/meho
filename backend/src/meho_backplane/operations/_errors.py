@@ -35,6 +35,8 @@ from typing import Any, Literal
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
     "result_ambiguous_connector",
@@ -63,8 +65,47 @@ __all__ = [
 #: Cap on the exception-message length recorded in the ``connector_error``
 #: extras payload. A misbehaving connector could embed a credential into
 #: a stringified exception; 256 chars is enough for an operator to
-#: recognise the failure shape while capping the leak surface.
+#: recognise the failure shape while capping the leak surface. The cap
+#: is the *second* line of defence -- :func:`_sanitize_free_text` runs
+#: the Tier-1 redactor over the text first, so a credential inside the
+#: first 256 chars does not ride the envelope in cleartext.
 _EXC_MESSAGE_CAP: int = 256
+
+#: Fail-closed placeholder when Tier-1 redaction itself is unavailable
+#: on the never-raises error path. Returning the raw text instead would
+#: reintroduce exactly the passthrough this sanitizer exists to close.
+_TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
+
+
+def _sanitize_free_text(text: str) -> str:
+    """Tier-1-redact, then length-cap, one free-text diagnostic string.
+
+    Every ``str(exc)`` / upstream-body line a result builder emits
+    (``extras["exception_message"]``, ``extras["upstream_message"]``,
+    ``extras["detail"]``, and the ``error`` summary tails built from
+    them) passes through here before landing in the response/audit
+    envelope. Redaction runs **before** the cap: capping first could
+    truncate a secret mid-value into a fragment the patterns no longer
+    match, leaving cleartext behind.
+
+    The packaged default policy (credential-shaped patterns only -- no
+    UUID/IP/FQDN rules, so hosts and IDs stay legible for diagnosis) is
+    pinned via :func:`get_default_policy`, deliberately bypassing the
+    resolver's override table: an operator-registered shadow-mode or
+    narrowed policy must not silently disable redaction on the error
+    path. Fail-closed: if redaction itself errors, the text is withheld
+    entirely -- this is a never-raises path and an unredacted fallback
+    would be the leak.
+    """
+    try:
+        redacted = redact(text, get_default_policy()).redacted
+    except Exception:  # fail-closed: never leak, never raise on the error path
+        return _TEXT_WITHHELD
+    if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
+        return _TEXT_WITHHELD
+    if len(redacted) > _EXC_MESSAGE_CAP:
+        return redacted[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    return redacted
 
 
 def result_unknown_op(op_id: str, known_op_count: int, duration_ms: float) -> OperationResult:
@@ -225,7 +266,7 @@ def result_no_connector(
         "version": version,
     }
     if exception_message is not None:
-        extras["exception_message"] = exception_message
+        extras["exception_message"] = _sanitize_free_text(exception_message)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -275,7 +316,7 @@ def result_ambiguous_connector(
             "error_code": "ambiguous_connector",
             "product": product,
             "version": version,
-            "exception_message": exception_message,
+            "exception_message": _sanitize_free_text(exception_message),
         },
     )
 
@@ -515,10 +556,14 @@ def result_connector_error(
     exc: BaseException,
     duration_ms: float,
 ) -> OperationResult:
-    """Connector / handler raised. Exception class + capped message land in extras."""
-    msg = str(exc)
-    if len(msg) > _EXC_MESSAGE_CAP:
-        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    """Connector / handler raised. Class + redacted, capped message land in extras.
+
+    ``str(exc)`` on a connector exception can embed a URL with inline
+    credentials, a header dump, or a driver DSN, so the message runs
+    through :func:`_sanitize_free_text` (Tier-1 redaction, then the
+    length cap) before it reaches the envelope.
+    """
+    msg = _sanitize_free_text(str(exc))
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -648,9 +693,7 @@ def result_connector_unsupported(
     :func:`result_connector_error` (both production raise sites are
     comfortably under the cap, so their texts survive verbatim).
     """
-    detail = str(exc)
-    if len(detail) > _EXC_MESSAGE_CAP:
-        detail = detail[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    detail = _sanitize_free_text(str(exc))
     origin = (
         f"The resolved connector ({connector_class})"
         if connector_class is not None
@@ -688,13 +731,6 @@ _HTTP_403_ECHOED_HEADERS: tuple[str, ...] = (
 )
 
 
-def _cap_message(message: str) -> str:
-    """Apply the :data:`_EXC_MESSAGE_CAP` discipline to one upstream line."""
-    if len(message) > _EXC_MESSAGE_CAP:
-        return message[:_EXC_MESSAGE_CAP] + "...<truncated>"
-    return message
-
-
 def _http_upstream_message(response: httpx.Response) -> str | None:
     """Best-effort extraction of the upstream's human error message.
 
@@ -704,10 +740,12 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     useful line for diagnosis, so it is preferred when the body parses as
     a JSON object carrying a string ``message``. Bodies that are not
     JSON, or JSON without a usable ``message``, fall back to the capped
-    raw text. ``None`` only when the body is empty. The same
-    :data:`_EXC_MESSAGE_CAP` discipline as the other builders bounds any
-    credential-bearing upstream text. Shared by the 403 and 422 builders
-    (the body shape is identical across GitHub's 4xx responses).
+    raw text. ``None`` only when the body is empty. Either branch runs
+    through :func:`_sanitize_free_text` -- Tier-1 redaction plus the
+    :data:`_EXC_MESSAGE_CAP` discipline -- so credential-bearing
+    upstream text never reaches the envelope in cleartext. Shared by
+    the 403 / 422 / auth-failed builders (the body shape is identical
+    across GitHub's 4xx responses).
     """
     try:
         body = response.json()
@@ -716,11 +754,11 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     if isinstance(body, dict):
         message = body.get("message")
         if isinstance(message, str) and message.strip():
-            return _cap_message(message)
+            return _sanitize_free_text(message)
     text = (response.text or "").strip()
     if not text:
         return None
-    return _cap_message(text)
+    return _sanitize_free_text(text)
 
 
 def _http_validation_errors(response: httpx.Response) -> list[Any]:
@@ -1209,9 +1247,7 @@ def result_connector_tls_verify_failed(
     ``getattr`` guard so a target shape without it degrades to a bare host
     label rather than raising inside the never-raises error path.
     """
-    msg = str(exc)
-    if len(msg) > _EXC_MESSAGE_CAP:
-        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    msg = _sanitize_free_text(str(exc))
     host = getattr(target, "host", None) or "the target host"
     summary = (
         f"connector_tls_verify_failed: TLS certificate verification failed "

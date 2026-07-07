@@ -56,6 +56,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.mcp.tools.memory import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.retrieval.retriever import RetrievalHit
@@ -439,6 +440,73 @@ def test_tools_call_search_memory_rejects_unrecognised_scope(
     assert body["error"]["code"] == INVALID_PARAMS
 
 
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_search_memory_rejects_over_cap_query(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``query`` beyond ``maxLength`` fails schema validation → -32602.
+
+    The cap bounds the free text the retrieval substrate (BM25 +
+    embedding encoder) has to chew on per call — resource-exhaustion
+    hardening, mirroring the sibling tool slices' free-text caps.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_memory",
+                "arguments": {"query": "q" * (_MAX_QUERY_CHARS + 1)},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_search_memory_accepts_at_cap_query(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``query`` exactly at ``maxLength`` passes schema validation."""
+    client, _op = client_with_operator
+
+    async def fake_retrieve(**kwargs: object) -> list[RetrievalHit]:
+        return []
+
+    with patch(
+        "meho_backplane.memory.service.retrieve",
+        side_effect=fake_retrieve,
+    ):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_memory",
+                    "arguments": {"query": "q" * _MAX_QUERY_CHARS},
+                },
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+
+
 # ---------------------------------------------------------------------------
 # add_to_memory — call path
 # ---------------------------------------------------------------------------
@@ -504,6 +572,105 @@ async def test_tools_call_add_to_memory_creates_entry_and_is_recallable(
     assert fetched is not None
     assert fetched.body == "Operator prefers concise CLI output."
     assert fetched.metadata["tags"] == ["preference"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_memory_rejects_over_cap_body(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``body`` beyond ``maxLength`` fails schema validation → -32602.
+
+    The rejection happens at the dispatcher's JSON-Schema gate, before
+    the handler (and therefore before the substrate's tsvector +
+    embedding indexing) ever sees the payload.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "body": "x" * (_MAX_BODY_CHARS + 1),
+                    "scope": "user",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_memory_rejects_over_cap_content_alias(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The deprecated ``content`` alias carries the same ``maxLength`` cap."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "x" * (_MAX_BODY_CHARS + 1),
+                    "scope": "user",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_memory_accepts_at_cap_body(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A ``body`` exactly at ``maxLength`` still writes successfully."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "body": "x" * _MAX_BODY_CHARS,
+                    "scope": "user",
+                    "slug": "at-cap-body",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+    created = json.loads(body["result"]["content"][0]["text"])
+    assert len(created["body"]) == _MAX_BODY_CHARS
 
 
 # ---------------------------------------------------------------------------

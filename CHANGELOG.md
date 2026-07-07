@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — agent runs fail closed on unexecutable runbook instructions
+
+- **An agent run whose prompt instructs execution of a runbook no longer
+  reports `succeeded` on a zero-tool-call no-op with a hallucinated
+  explanation** (#2077): the agent meta-tool catalog contains no
+  runbook-execution tool (`meho.runbook.*` are operator MCP verbs, and
+  `confirm`-gated steps require a human answer by design), so the run now
+  fails typed at run start — before any model call — with a
+  machine-classifiable `unexecutable_runbook_reference:`-prefixed error on
+  the run outcome (`meho.agents.run`, `GET /agents/runs/{handle}`, and one
+  terminal `error` SSE frame on the events stream). Prompts that merely
+  mention runbooks are unaffected; a future agent-executable runbook tool
+  hooks in via `RUNBOOK_EXECUTION_META_TOOL_NAMES`.
 ### Fixed — MCP async ingest rejects a foreign tenant_id eagerly
 
 - **`meho.connector.ingest` with `async: true` and a foreign

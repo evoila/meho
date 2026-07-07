@@ -56,7 +56,12 @@ from meho_backplane.agent.reaper import (
     AGENT_RUN_REAPER_INTERRUPTION_REASON,
     _run_one_tick,
 )
-from meho_backplane.agent.run import AgentDefinition, AgentRunEventKind, PydanticAgentRun
+from meho_backplane.agent.run import (
+    UNEXECUTABLE_RUNBOOK_CLASS,
+    AgentDefinition,
+    AgentRunEventKind,
+    PydanticAgentRun,
+)
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -1086,3 +1091,142 @@ async def test_run_scheduled_bounds_wait_and_converts_to_async(
             break
         await asyncio.sleep(0.01)
     assert view.status is AgentRunStatus.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# #2077: unexecutable-runbook run-start guard — a zero-tool-call run that
+# cannot satisfy its instruction fails typed instead of reporting a
+# hallucinated ``succeeded``.
+# ---------------------------------------------------------------------------
+
+
+def _model_that_must_not_be_called() -> FunctionModel:
+    """A model that fails the test if the loop ever consults it.
+
+    The #2077 guard's contract is *pre-model* refusal: proving the model is
+    never called also proves the run completed with zero tool-call
+    dispatches (there is no other way for the loop to emit one).
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise AssertionError("the model must not be consulted for an unexecutable-runbook run")
+
+    return FunctionModel(fn)
+
+
+async def test_run_refuses_unexecutable_runbook_reference_in_prompt() -> None:
+    """The #2077 repro: prompt "use runbook <slug>", default toolset, no tool.
+
+    The regression test for both observed defects: (a) the zero-tool-call
+    run reports a non-success terminal state (the model is never even
+    consulted), and (b) the reason is machine-classifiable on the outcome
+    object (``UNEXECUTABLE_RUNBOOK_CLASS`` prefix), not a free-text
+    confabulation in ``output.text``.
+    """
+    await _seed_definition(
+        name="runbook-bot",
+        system_prompt="use runbook vcenter-9.0-snapshot-revert",
+        toolset={},
+        turn_budget=20,
+    )
+    invoker = _invoker_with(_model_that_must_not_be_called())
+
+    outcome = await invoker.run(_make_operator(), "runbook-bot", "go")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert outcome.error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)
+    assert "no available tool to execute runbook" in outcome.error
+    assert "'vcenter-9.0-snapshot-revert'" in outcome.error
+    # The confirm-gated path is surfaced explicitly (issue AC 4): the reason
+    # names the human-operator contract instead of silently degrading.
+    assert "human operator" in outcome.error
+    assert outcome.output is None
+
+    # The refusal is durable + honest: failed row, no output, zero turns.
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.status is AgentRunStatus.FAILED
+    assert view.error == outcome.error
+    assert view.output is None
+    assert view.turns == 0
+
+
+async def test_run_refuses_runbook_instruction_in_inputs() -> None:
+    """The unexecutable instruction may arrive via the run inputs, too."""
+    await _seed_definition(name="helper")
+    invoker = _invoker_with(_model_that_must_not_be_called())
+
+    outcome = await invoker.run(_make_operator(), "helper", "please execute runbook disk-cleanup")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert outcome.error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)
+    assert "'disk-cleanup'" in outcome.error
+
+
+async def test_run_mentioning_runbooks_without_instruction_still_runs() -> None:
+    """A prompt that merely *mentions* runbooks is not refused (no false trip)."""
+    await _seed_definition(
+        name="runbook-faq",
+        system_prompt="You answer questions about runbook authoring and history.",
+    )
+    invoker = _invoker_with(_final_text("a runbook is an operator procedure"))
+
+    outcome = await invoker.run(_make_operator(), "runbook-faq", "what is a runbook?")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    assert outcome.output == {"text": "a runbook is an operator procedure"}
+
+
+async def test_stream_events_refuses_unexecutable_runbook() -> None:
+    """The SSE path emits one terminal ``error`` frame and records the failed row."""
+    await _seed_definition(
+        name="runbook-bot-sse",
+        system_prompt="use runbook vcenter-9.0-snapshot-revert",
+    )
+    invoker = _invoker_with(_model_that_must_not_be_called())
+
+    events = [
+        (run_id, event)
+        async for run_id, event in invoker.stream_events(_make_operator(), "runbook-bot-sse", "go")
+    ]
+
+    assert len(events) == 1
+    run_id, event = events[0]
+    assert event.kind is AgentRunEventKind.ERROR
+    error = str(event.data["error"])
+    assert error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)
+
+    view = await invoker.poll(_make_operator(), run_id)
+    assert view.status is AgentRunStatus.FAILED
+    assert view.error is not None
+    assert view.error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)
+
+
+async def test_run_scheduled_refuses_unexecutable_runbook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduled path applies the same guard after the no-input check."""
+    await _seed_definition(name="runbook-cron")
+    invoker = _invoker_with(_model_that_must_not_be_called())
+
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-runbook-cron")),
+    )
+
+    outcome = await invoker.run_scheduled(
+        "runbook-cron",
+        "execute runbook disk-cleanup",
+        agent_client_id="agent:runbook-cron",
+        agent_client_secret=SecretStr("s3cr3t"),
+    )
+
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert outcome.error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)
+    assert "'disk-cleanup'" in outcome.error

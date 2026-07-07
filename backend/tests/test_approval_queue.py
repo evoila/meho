@@ -2227,3 +2227,323 @@ async def test_proposed_effect_carries_catalog_safety_level(
 
     reset_dispatcher_caches()
     clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Session-replay lineage: park → approve → resume as one replay subtree
+# (#2086, Initiative #2151)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_persists_session_lineage(
+    session: AsyncSession,
+) -> None:
+    """#2086 AC1: the parked row persists the originating session + park audit id.
+
+    ``create_pending_request`` runs on the requester's task, where the
+    session context is still live. It must durably capture:
+
+    * ``agent_session_id`` — from ``agent_session_id_var`` (the agent-run
+      binding takes priority over the MCP transport fallback), and
+    * ``request_audit_id`` — the ``approval.request`` audit row's id,
+
+    and the "request" audit row itself must anchor on the session
+    (``agent_session_id`` set) without self-parenting
+    (``parent_audit_id`` NULL for a top-level park).
+    """
+    from meho_backplane.operations._audit import agent_session_id_var
+
+    session_id = uuid.uuid4()
+    operator = _make_operator(sub="agent-sub")
+    params = {"key": "value"}
+
+    token = agent_session_id_var.set(session_id)
+    try:
+        request = await create_pending_request(
+            session,
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+    finally:
+        agent_session_id_var.reset(token)
+    await session.commit()
+
+    assert request.agent_session_id == session_id
+    assert request.request_audit_id is not None
+
+    audit_row = (
+        (await session.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+        .scalars()
+        .one()
+    )
+    assert audit_row.id == request.request_audit_id
+    assert audit_row.agent_session_id == session_id
+    assert audit_row.parent_audit_id is None, (
+        "the parking row is the chain's root — it must not self-parent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lineage_null_outside_any_session(session: AsyncSession) -> None:
+    """No session bound → both lineage reads stay honest.
+
+    ``agent_session_id`` is NULL (a park from the chassis HTTP path has
+    no session), while ``request_audit_id`` is always populated — the
+    park audit row exists regardless of session context.
+    """
+    operator = _make_operator(sub="agent-sub")
+    params = {"key": "value"}
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    assert request.agent_session_id is None
+    assert request.request_audit_id is not None
+
+
+@pytest.mark.asyncio
+async def test_decision_audit_row_backlinks_and_inherits_session(
+    session: AsyncSession,
+) -> None:
+    """#2086 AC2 (decision half): the decision row joins the replay subtree.
+
+    The approver's task has no session context bound (a different
+    operator on a different request), so both lineage values must come
+    off the durable row: ``parent_audit_id`` = the parking row's audit
+    id, ``agent_session_id`` = the session the request was parked under
+    — the same source-from-the-row discipline ``work_ref`` established
+    (#1659).
+    """
+    from meho_backplane.operations._audit import agent_session_id_var
+
+    session_id = uuid.uuid4()
+    requester = _make_operator(sub="agent-sub")
+    params = {"key": "value"}
+
+    token = agent_session_id_var.set(session_id)
+    try:
+        request = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+    finally:
+        agent_session_id_var.reset(token)
+    await session.commit()
+
+    # Approver's task: no session vars bound.
+    assert agent_session_id_var.get() is None
+    reviewer = _make_operator(sub="reviewer-sub")
+    approved = await approve_request(session, request.id, operator=reviewer, params=params)
+    await session.commit()
+
+    decision_row = (
+        (await session.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+        .scalars()
+        .one()
+    )
+    assert decision_row.parent_audit_id == approved.request_audit_id
+    assert decision_row.agent_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2086 AC1-AC5: the approval-gated chain reconstructs as a replay tree.
+
+    Drives the full park → approve → resume-dispatch path under an MCP
+    session with ``MCP_REQUIRE_SESSION_ID`` **enforced** (AC4): the
+    transport-bound ``mcp_session_id`` structlog contextvar (the value
+    :func:`~meho_backplane.mcp.server._bind_mcp_session_id` binds after
+    the enforced-mode header check passes) is the session source at park
+    time, and the resume task — which has no session context of its own
+    — must re-hydrate it from the parked row.
+
+    Asserts the three lineage promises the issue names:
+
+    1. The parked row persists ``agent_session_id`` sourced from the MCP
+       transport binding (AC1).
+    2. The dispatched-after-approval audit row carries the originating
+       ``agent_session_id`` and a ``parent_audit_id`` equal to the
+       parking row's audit id (AC1 + AC2).
+    3. :func:`~meho_backplane.audit_query.replay.replay_session`
+       reconstructs the chain as one subtree — the ``approval.request``
+       row as an anchored root with the decision row and the executed
+       dispatch as its children, >= 3 session-anchored rows in total
+       (AC3, the ``row_count >= 3`` REST-surface contract) — no longer
+       ``{root: [], row_count: 0}`` (AC5).
+    """
+    from unittest.mock import AsyncMock
+
+    import structlog
+
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.audit_query.replay import replay_session
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.mcp.server import mcp_session_id_capture_mode
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.operations._audit import agent_session_id_var, parent_audit_id_var
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+    assert mcp_session_id_capture_mode() == "enforced"
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+    class _OkConnector(Connector):
+        product = "lineagetest"
+        version = "1.x"
+        impl_id = "lineagetest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="lineagetest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="lineagetest", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="lineagetest",
+        version="1.x",
+        impl_id="lineagetest",
+        op_id="lineagetest.op",
+        handler=_approval_test_ok_handler,
+        summary="Test op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    mcp_session_id = uuid.uuid4()
+    requester = _make_operator(sub="human-requester", principal_kind=PrincipalKind.USER)
+    params = {"x": 7}
+
+    # Step 1: park the op under the MCP transport's session binding —
+    # the same structlog contextvar _bind_mcp_session_id sets once the
+    # enforced-mode header check passes.
+    structlog.contextvars.bind_contextvars(mcp_session_id=str(mcp_session_id))
+    try:
+        result1 = await dispatch(
+            operator=requester,
+            connector_id="lineagetest-1.x",
+            op_id="lineagetest.op",
+            target=None,
+            params=params,
+        )
+    finally:
+        structlog.contextvars.unbind_contextvars("mcp_session_id")
+    assert result1.status == "awaiting_approval"
+    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        parked = await s.get(ApprovalRequest, approval_request_id)
+        assert parked is not None
+        assert parked.agent_session_id == mcp_session_id
+        assert parked.request_audit_id is not None
+        request_audit_id = parked.request_audit_id
+
+    # Step 2: a different operator approves — its task carries no
+    # session context (neither the agent var nor the MCP binding).
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    assert agent_session_id_var.get() is None
+    assert structlog.contextvars.get_contextvars().get("mcp_session_id") is None
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, approval_request_id, operator=reviewer)
+        await s.commit()
+
+    # Step 3: re-dispatch via the shared resume helper. The re-binds are
+    # scoped: both vars are reset once the dispatch returns.
+    result2 = await resume_dispatch_after_approval(operator=reviewer, request=approved)
+    assert result2.status == "ok"
+    assert agent_session_id_var.get() is None
+    assert parent_audit_id_var.get() is None
+
+    # The executed dispatch's audit row anchors in the originating
+    # session AND back-links to the parking row (AC1 + AC2).
+    async with get_sessionmaker()() as fresh:
+        dispatch_row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .one()
+        )
+        assert dispatch_row.agent_session_id == mcp_session_id
+        assert dispatch_row.parent_audit_id == request_audit_id
+
+        # AC3 row_count contract: the REST surface counts *anchor* rows
+        # (agent_session_id == session); the full chain anchors.
+        anchored = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.agent_session_id == mcp_session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(anchored) >= 3
+
+        # AC3 + AC5: the replay closure reconstructs the chain as one
+        # subtree — request row root, decision + dispatch as children.
+        forest = await replay_session(mcp_session_id, tenant_id=_TENANT_ID, session=fresh)
+
+    assert forest, "replay must no longer return an empty root for the approval chain"
+    roots_by_path = {node.path: node for node in forest}
+    assert "approval.request" in roots_by_path
+    chain_root = roots_by_path["approval.request"]
+    child_paths = sorted(child.path for child in chain_root.children)
+    assert child_paths == ["approval.decision", "lineagetest.op"]
+
+    reset_dispatcher_caches()
+    clear_registry()

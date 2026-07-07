@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — approval-gated dispatches reconstruct on the session-replay surface
+
+- **`GET /api/v1/audit/sessions/{id}/replay` now sees approval-gated
+  chains** (#2086): the park → decide → execute audit rows carried
+  neither an `agent_session_id` anchor nor a `parent_audit_id`
+  back-link (the approve/resume surfaces run on a different task than
+  the parking dispatch, so the session contextvars were gone by
+  decision time), leaving the whole chain invisible to replay
+  (`{root: [], row_count: 0}`) even with
+  `MCP_REQUIRE_SESSION_ID=enforced`. The parked `approval_request` row
+  now persists the originating session id and the parking audit row's
+  id (migration `0053`, same durability mold as `work_ref` / #1659);
+  the decision audit rows and `resume_dispatch_after_approval`'s
+  re-dispatch re-hydrate both, so an approved chain replays as one
+  subtree — the `approval.request` root with the decision and the
+  executed dispatch as its children — and the executed row honestly
+  records which session asked for it.
+
 ### Fixed — operations/call target failures all ride the 200 envelope
 
 - **`POST /api/v1/operations/call` (and `/preview`) now honor the

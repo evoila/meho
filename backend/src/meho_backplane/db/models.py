@@ -4198,6 +4198,24 @@ class ApprovalRequest(Base):
       No FK -- same soft-reference discipline as ``run_id`` / ``target_id``.
       Added by migration ``0040``.
 
+    * ``agent_session_id`` -- UUID nullable, soft-FK into the G8.2 session
+      graph (mirrors ``audit_log.agent_session_id``, 0014). The session
+      the parking dispatch belonged to, captured at creation via
+      :func:`~meho_backplane.operations._audit.resolve_agent_session_id`
+      (the agent run id inside an agent loop; the ``Mcp-Session-Id`` for
+      a direct MCP operator dispatch). Re-bound from this row on
+      re-dispatch so the approved op's audit row anchors in the
+      originating session's replay tree (#2086). NULL when the park
+      happened outside any session. Added by migration ``0053``.
+
+    * ``request_audit_id`` -- UUID nullable, soft-FK to ``audit_log.id``.
+      The primary key of the ``approval.request`` audit row written in
+      the same transaction as this row (the durable audit record of the
+      parking call). The decision audit rows and the resumed dispatch's
+      audit row set their ``parent_audit_id`` to this value, which links
+      the park → decide → execute chain into one replay subtree (#2086).
+      NULL only on pre-0053 rows. Added by migration ``0053``.
+
     Indexes
     -------
 
@@ -4284,6 +4302,28 @@ class ApprovalRequest(Base):
     # Added by migration 0040.
     work_ref: Mapped[str | None] = mapped_column(
         Text,
+        nullable=True,
+        default=None,
+    )
+    # Session-replay lineage (#2086). The session the parking dispatch
+    # belonged to (agent run id, or the MCP session id for a direct
+    # operator dispatch), captured at creation via
+    # resolve_agent_session_id(); re-bound onto agent_session_id_var on
+    # re-dispatch. Soft-FK into the G8.2 session graph -- same
+    # discipline as audit_log.agent_session_id (0014). Added by
+    # migration 0053.
+    agent_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    # The ``approval.request`` audit row written alongside this row (the
+    # durable audit record of the parking call). Decision audit rows and
+    # the resumed dispatch's audit row parent-link to it, stitching the
+    # park -> decide -> execute chain into one replay subtree (#2086).
+    # Soft-FK to audit_log.id. Added by migration 0053.
+    request_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
         nullable=True,
         default=None,
     )

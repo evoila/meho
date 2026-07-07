@@ -32,6 +32,20 @@ Every mutation writes a synchronous audit row in the **same transaction**:
   invariant. An approval isn't "granted" until its decision row
   commits.
 
+Session-replay lineage (#2086)
+------------------------------
+
+Every lifecycle audit row is linked into the G8.2 session-replay graph.
+The parked row persists ``agent_session_id`` (resolved at creation on
+the requester's task) and ``request_audit_id`` (the "request" audit
+row's pre-generated id); :func:`_write_audit_row` stamps both onto the
+rows it writes, and :func:`resume_dispatch_after_approval` re-binds them
+(plus ``work_ref``) around the re-dispatch. The result is one replay
+subtree — the ``approval.request`` row anchored on the originating
+session, with the decision row and the executed dispatch's row as its
+children — where previously every row in the chain was invisible to
+``GET /api/v1/audit/sessions/{id}/replay``.
+
 Transaction discipline
 ----------------------
 
@@ -73,7 +87,13 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditLog,
 )
-from meho_backplane.operations._audit import policy_decision_var, work_ref_var
+from meho_backplane.operations._audit import (
+    agent_session_id_var,
+    parent_audit_id_var,
+    policy_decision_var,
+    resolve_agent_session_id,
+    work_ref_var,
+)
 from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
@@ -219,6 +239,15 @@ async def _write_audit_row(
     ``approval_request_id``, ``op_id``, and ``connector_id`` so audit
     queries can surface the request context without joining the
     ``approval_request`` table.
+
+    Session-replay lineage (#2086): ``agent_session_id`` and
+    ``parent_audit_id`` are read off *request* (the durable copies
+    captured at park time), not off this task's contextvars — the
+    "request" row and the "decision" rows are written on different
+    tasks (requester vs approver / expiry sweep). The "request" row
+    itself is the one stored as ``request.request_audit_id``, so it
+    parent-links to the contextvar value instead of self-parenting;
+    decision rows parent-link to the stored id.
     """
     payload: dict[str, Any] = {
         "approval_request_id": str(request.id),
@@ -239,13 +268,37 @@ async def _write_audit_row(
     policy_kwargs: dict[str, Any] = {}
     if hasattr(AuditLog, "policy_decision"):
         policy_kwargs["policy_decision"] = policy_decision_var.get()
+    # Session-replay lineage (#2086), off the request row — the durable
+    # source of truth, same discipline as ``work_ref`` below. The
+    # "request" row and the "decision" rows are written on *different*
+    # tasks (requester vs approver / expiry sweep), so reading the
+    # contextvars here would drop the originating session on every
+    # decision row; the row keeps them aligned with the values the
+    # request was parked under.
+    #
+    # * ``agent_session_id`` — the parking session, so every lifecycle
+    #   row anchors in the originating session's replay tree.
+    # * ``parent_audit_id`` — the ``approval.request`` audit row's id
+    #   (``request.request_audit_id``) for decision rows, which is what
+    #   links park → decide into one subtree. The "request" row itself
+    #   is the one being written under that id (``audit_id`` equals it),
+    #   so it must not self-parent; it takes ``parent_audit_id_var``
+    #   instead (NULL for a top-level dispatch; a composite parent's id
+    #   when a composite child parked).
+    stored_parent = request.request_audit_id
+    parent_audit_id: uuid.UUID | None
+    if stored_parent is not None and stored_parent != audit_id:
+        parent_audit_id = stored_parent
+    else:
+        parent_audit_id = parent_audit_id_var.get()
     row = AuditLog(
         id=audit_id,
         occurred_at=_now(),
         operator_sub=operator.sub,
         tenant_id=operator.tenant_id,
         target_id=request.target_id,
-        parent_audit_id=None,
+        parent_audit_id=parent_audit_id,
+        agent_session_id=request.agent_session_id,
         method="APPROVAL",
         path=path,
         status_code=status_code,
@@ -342,6 +395,16 @@ async def create_pending_request(
     # transport/agent boundary, #1657), so the parked request, its
     # decision audit row, and the re-dispatched op all carry one ref.
     # NULL when nothing bound it.
+    #
+    # Session-replay lineage (#2086): the "request" audit row's id is
+    # generated *before* the row insert so it can be persisted as
+    # ``request_audit_id`` — the anchor every later lifecycle audit row
+    # (decision, resumed dispatch) parent-links to. ``agent_session_id``
+    # is resolved here, on the requester's task, where the session
+    # context (agent run var, or the MCP transport's session binding)
+    # is still live; the approve / resume surfaces run on a different
+    # operator's task and re-hydrate it from the row.
+    request_audit_id = uuid.uuid4()
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -358,12 +421,13 @@ async def create_pending_request(
         created_at=_now(),
         expires_at=expires_at,
         work_ref=work_ref_var.get(),
+        agent_session_id=resolve_agent_session_id(),
+        request_audit_id=request_audit_id,
     )
     session.add(request)
     await session.flush()
 
     # Synchronous "request" audit row -- same transaction.
-    request_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
         audit_id=request_audit_id,
@@ -642,16 +706,18 @@ async def resume_dispatch_after_approval(
 
     from meho_backplane.operations.dispatcher import dispatch
 
-    # Re-bind the request's stored work_ref onto the ContextVar for the
-    # re-dispatch (work_ref I2-T1 #1659). The operator decision surfaces
-    # (REST /approve, /decide, MCP by-id) run on a fresh task whose
-    # work_ref_var is unset, so the re-dispatched op's audit rows would
-    # otherwise lose the authorising ticket the parked request carried.
-    # The in-process agent-run resume path keeps its own bound var and
-    # does not call this helper, so it inherits the ref unchanged. Reset
-    # the token afterward to avoid leaking the ref onto unrelated work on
-    # the same task.
-    token = work_ref_var.set(request.work_ref)
+    # Re-bind the request's stored context for the re-dispatch: the
+    # decision surfaces run on a fresh task whose vars are unset, so the
+    # executed op's audit row would otherwise lose everything the parked
+    # request carried. Three row-sourced, token-reset bindings:
+    # ``work_ref`` (#1659, the authorising ticket), ``agent_session_id``
+    # (#2086, anchors the row in the requester's replay tree), and
+    # ``parent_audit_id`` (#2086, back-links it to the parking row). The
+    # in-process agent-run resume keeps its own bound vars and does not
+    # call this helper; pre-0053 NULLs bind ``None``, the vars' defaults.
+    work_ref_token = work_ref_var.set(request.work_ref)
+    session_token = agent_session_id_var.set(request.agent_session_id)
+    parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
         return await dispatch(
             operator=operator,
@@ -662,7 +728,9 @@ async def resume_dispatch_after_approval(
             _approved=True,
         )
     finally:
-        work_ref_var.reset(token)
+        parent_audit_id_var.reset(parent_token)
+        agent_session_id_var.reset(session_token)
+        work_ref_var.reset(work_ref_token)
 
 
 async def _rehydrate_resume_target(

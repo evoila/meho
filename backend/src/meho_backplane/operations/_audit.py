@@ -54,6 +54,7 @@ __all__ = [
     "parent_audit_id_var",
     "policy_decision_var",
     "publish_broadcast",
+    "resolve_agent_session_id",
     "run_id_var",
     "step_id_var",
     "work_ref_var",
@@ -181,6 +182,49 @@ policy_decision_var: ContextVar[str | None] = ContextVar(
     "policy_decision",
     default=None,
 )
+
+
+def resolve_agent_session_id() -> uuid.UUID | None:
+    """Resolve the effective session id for audit lineage on the current task.
+
+    One read shared by every audit writer that must anchor a row in the
+    G8.2 session-replay graph (``audit_log.agent_session_id``). Two bind
+    sources exist for "the session this dispatch belongs to", each set at
+    its own boundary:
+
+    * :data:`agent_session_id_var` — bound by the
+      :class:`~meho_backplane.agent.invocation.AgentInvoker` around an
+      agent run's bounded loop (the run id doubles as the session id).
+      Checked first: inside an agent loop the run is the session, even
+      when the loop itself was started over MCP.
+    * The ``mcp_session_id`` **structlog** contextvar — bound by
+      :func:`~meho_backplane.mcp.server._bind_mcp_session_id` from the
+      inbound ``Mcp-Session-Id`` header (stored as the canonical UUID
+      string). This is how a *direct* operator dispatch over MCP carries
+      the same session anchor its envelope rows get from
+      :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`.
+
+    Returns ``None`` outside both contexts (chassis HTTP, system sweeps)
+    — the correct value for the nullable column. A bound-but-malformed
+    ``mcp_session_id`` is a programming error (the binder only binds
+    canonical UUID strings); it is logged and treated as unbound, the
+    same fail-soft posture :func:`meho_backplane.mcp.audit._resolve_uuid_contextvar`
+    takes (#2086 approval-lineage fix).
+    """
+    session_id = agent_session_id_var.get()
+    if session_id is not None:
+        return session_id
+    raw = structlog.contextvars.get_contextvars().get("mcp_session_id")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
+        return None
 
 
 @dataclass(frozen=True, slots=True)

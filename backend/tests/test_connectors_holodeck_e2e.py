@@ -445,7 +445,7 @@ def _wire_seeded_connector(host: str, port: int) -> HolodeckConnector:
     class _SeededHolodeckConnector(HolodeckConnector):  # type: ignore[misc]
         """Subclass that injects the test client key into _auth_config."""
 
-        async def _auth_config(self, target: Any) -> dict[str, Any]:
+        async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
             return {
                 "username": "root",
                 "client_keys": [_CLIENT_KEY],

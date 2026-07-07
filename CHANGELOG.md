@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — async ingest rejects a foreign tenant_id synchronously
+
+- **`POST /api/v1/connectors/ingest` with `async: true` and a foreign
+  `tenant_id` now returns a synchronous 403 — the same status and body
+  shape as the sync branch — instead of `202 Accepted` plus a `failed`
+  job the caller could never poll** (#2208; hardens the #2085 / PR
+  #2204 write-scope semantics): the route runs the shared tenant-scope
+  predicate (`IngestionPipelineService.authorize_scope`) eagerly,
+  before the async branch mints its job row, so no job is created and
+  no pipeline is detached for an unauthorised write scope. Previously
+  the job row was minted under the *requested* foreign tenant, making
+  the poll on `GET /api/v1/connectors/ingest/jobs/{id}` 404
+  cross-tenant — "authz denied" was indistinguishable from "pipeline
+  crashed". The service-layer guard remains as defence-in-depth for
+  the CLI / MCP siblings; the 403 response is now declared in the
+  route's OpenAPI response map (CLI snapshot + Go client regenerated).
+
 ### Fixed — operations/call target failures all ride the 200 envelope
 
 - **`POST /api/v1/operations/call` (and `/preview`) now honor the

@@ -148,6 +148,20 @@ connector-related release-notes line.
   returns a structured `dispatch_error` envelope instead of an uncaught
   exception / MCP `-32603` (#2066).
 
+### Security
+
+- Hardened Tier-1 redaction at the connector boundary and the dispatch
+  error path. The `authorization_header` / `bearer_token` / `api_key`
+  named patterns now capture a labelled secret's value to its natural
+  delimiter (whitespace / closing quote / end of blob) instead of
+  stopping at the first punctuation byte, so punctuated values are
+  redacted whole. The `operations/_errors.py` result builders now run
+  every free-text diagnostic (`exception_message`, `upstream_message`,
+  `detail`, and the summary tails built from them) through the Tier-1
+  redactor **before** the 256-char cap, so a credential embedded in a
+  stringified connector exception or upstream error body no longer
+  reaches the response/audit envelope in cleartext.
+
 ## [0.19.0] - 2026-06-22
 
 ### Fixed — profiled vCenter legacy session-token shape

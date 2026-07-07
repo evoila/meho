@@ -165,6 +165,22 @@ reconcile + commit cycle. `target_id` echoes the refreshed target. The
 CLI `refresh` verb renders exactly these as `nodes: +A -R ~U` /
 `edges: +A -R ~U` (no fourth column) and surfaces `duration_ms`.
 
+Two nullable fields discriminate the all-zero-count no-op classes
+(#2093): `no_populator_for_product` carries the target's product slug
+when the resolved connector inherits the base-class
+`discover_topology` no-op (no populator shipped — the refresh was a
+no-op **by coverage gap**), and `populated_products` then lists the
+registered products that do override it (sorted, deduped across
+version/impl registry entries). Both are `null` when a populator ran —
+including a run that legitimately reconciled zero changes — so a
+consumer distinguishes "nothing changed" from "nothing could ever
+change" with a single field check. Populator detection is function
+identity against `Connector.discover_topology`
+(`refresh._has_populator`), which correctly classifies the
+operator-aware keyword-only override on `KubernetesConnector` and the
+auto-shim subclasses that inherit the base default. The CLI `refresh`
+verb appends a human-readable note when the signal is set.
+
 ### `TopologyNode` — frozen Pydantic v2 (read half)
 
 | Field | Type | Meaning |
@@ -216,7 +232,13 @@ separately via `resolve_node`.
 1. `resolve_connector(target)` → `get_or_create_connector_instance(cls)`
    (the same cached-singleton path the G0.6 dispatcher uses).
 2. `await connector.discover_topology(target)` → a `TopologyHints`
-   snapshot (nodes + edges, each with `properties`).
+   snapshot (nodes + edges, each with `properties`). When the resolved
+   class does **not** override the base no-op (`_has_populator` is
+   false), the eventual `RefreshResult` is stamped with
+   `no_populator_for_product` + `populated_products` (#2093); the
+   reconcile still runs on the empty snapshot — the audit/broadcast
+   contract is unchanged and stale nodes this target adopted earlier
+   still soft-delete.
 3. Open one transactional session (`sessionmaker() ... session.begin()`).
 4. `_reconcile_nodes` — diff the snapshot nodes against existing
    `graph_node` rows. The upsert decision is keyed on the **tenant-wide

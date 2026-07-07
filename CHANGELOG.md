@@ -106,6 +106,24 @@ connector-related release-notes line.
   generated CLI/SDK pick them up. The sibling silent-no-op case (a
   resolvable connector without topology support returning all-zero
   counts) is tracked separately in #2093. (#2092)
+
+### Fixed — topology refresh names the populator coverage gap instead of a silent all-zero no-op
+
+- `POST /api/v1/topology/refresh/{target_name}` against a target whose
+  `product` ships **no topology populator** (the connector inherits the
+  base `discover_topology` no-op — e.g. `argocd`, `vault`, `keycloak`,
+  `vrli`, `gh`, `vmware`) no longer returns an all-zero count body
+  indistinguishable from a clean populator run: the `RefreshResult` now
+  carries `no_populator_for_product` (the offending product slug) plus
+  `populated_products` (the registered products that DO refresh
+  meaningfully, e.g. `["k8s"]`). Both fields are `null` when a
+  populator ran — including a run that legitimately reconciled zero
+  changes — so a consumer tells no-op-by-design from coverage gap with
+  a single field check instead of tracing meho source. Non-breaking:
+  HTTP status stays 200 and the six counts are unchanged; the reconcile
+  (including soft-deletes of previously adopted nodes, the audit row,
+  and the broadcast event) still runs. The `meho topology refresh` CLI
+  verb appends a human-readable note when the signal is set. (#2093)
 ### Breaking changes — REST connector-ingest omitted `tenant_id` now targets the global scope
 
 - **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.

@@ -250,6 +250,96 @@ async def test_second_refresh_same_hints_is_unchanged() -> None:
     assert result.updated_edges == 0
     assert result.removed_nodes == 0
     assert result.removed_edges == 0
+    # #2093 — a populator that ran clean carries NO no-populator signal:
+    # this all-zero result must stay discriminable from a coverage gap.
+    assert result.no_populator_for_product is None
+    assert result.populated_products is None
+
+
+# ---------------------------------------------------------------------------
+# No-populator signal (#2093)
+# ---------------------------------------------------------------------------
+
+
+class _NoPopulatorConnector(Connector):
+    """Connector inheriting the base ``discover_topology`` no-op default.
+
+    Stands in for the argocd / vault / keycloak / vrli / gh / vmware
+    connectors that resolve fine but ship no topology populator — the
+    class the #2093 silent-no-op reproduction drove refresh against.
+    """
+
+    product = "nopop"
+
+    async def fingerprint(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def execute(
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+
+@pytest.mark.asyncio
+async def test_no_populator_refresh_carries_explicit_signal() -> None:
+    """A populator-less product's all-zero refresh names the coverage gap.
+
+    Registers one populated product (``faketopo`` — overrides
+    ``discover_topology``) and one populator-less product (``nopop`` —
+    inherits the base no-op), then refreshes a ``nopop`` target: counts
+    stay all-zero (the base default remains the fallback) but the result
+    surfaces ``no_populator_for_product`` + the ``populated_products``
+    set, so a consumer can tell no-op-by-gap from no-op-by-design
+    without reading meho source (#2093).
+    """
+    _register_fake()
+    register_connector_v2(product="nopop", version="", impl_id="", cls=_NoPopulatorConnector)
+    tenant_id, _ = await _seed_tenant_and_target()
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        nopop_target = Target(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            name="argocd-style-target",
+            aliases=[],
+            product="nopop",
+            host="nopop.example.test",
+        )
+        session.add(nopop_target)
+        await session.commit()
+        await session.refresh(nopop_target)
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(nopop_target, _operator(tenant_id))
+
+    assert result.added_nodes == 0
+    assert result.added_edges == 0
+    assert result.updated_nodes == 0
+    assert result.updated_edges == 0
+    assert result.removed_nodes == 0
+    assert result.removed_edges == 0
+    assert result.no_populator_for_product == "nopop"
+    assert result.populated_products == ("faketopo",)
+
+
+@pytest.mark.asyncio
+async def test_populated_refresh_omits_signal_even_with_gaps_registered() -> None:
+    """A populator-backed refresh stays signal-free while gap products coexist."""
+    _register_fake()
+    register_connector_v2(product="nopop", version="", impl_id="", cls=_NoPopulatorConnector)
+    tenant_id, target = await _seed_tenant_and_target()
+    _FakeConnector.hints = _hints_3n2e()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, _operator(tenant_id))
+
+    assert result.added_nodes == 3
+    assert result.no_populator_for_product is None
+    assert result.populated_products is None
 
 
 # ---------------------------------------------------------------------------

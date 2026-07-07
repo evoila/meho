@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -139,4 +140,15 @@ func printRefreshSummary(w io.Writer, target string, r *api.RefreshResult) {
 	fmt.Fprintf(w, "  nodes:  +%d  -%d  ~%d\n", r.AddedNodes, r.RemovedNodes, r.UpdatedNodes)
 	fmt.Fprintf(w, "  edges:  +%d  -%d  ~%d\n", r.AddedEdges, r.RemovedEdges, r.UpdatedEdges)
 	fmt.Fprintf(w, "  took:   %.0f ms\n", r.DurationMs)
+	// #2093 — the backend stamps no_populator_for_product when the
+	// target's connector ships no topology populator; without this
+	// note the all-zero counts above read as a clean no-op.
+	if r.NoPopulatorForProduct != nil {
+		fmt.Fprintf(w, "  note:   product %q has no topology populator — the zero counts are a coverage gap, not a clean no-op\n",
+			*r.NoPopulatorForProduct)
+		if r.PopulatedProducts != nil && len(*r.PopulatedProducts) > 0 {
+			fmt.Fprintf(w, "          products with populators: %s\n",
+				strings.Join(*r.PopulatedProducts, ", "))
+		}
+	}
 }

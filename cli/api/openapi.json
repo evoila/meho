@@ -961,7 +961,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.",
+        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.\n\n#2091. An explicit ``secret_ref`` outside the operator's tenant\nsubtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 such a target would\nimport clean and then fail every dispatch with an opaque Vault\n``permission denied``. Omitting ``secret_ref`` derives the\nper-tenant default (#1723) and always passes; no-op when the guard\nis disabled. See :func:`_enforce_secret_ref_tenant_scope`.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -1129,7 +1129,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.\n\n#2091. An explicit non-null ``secret_ref`` outside the operator's\ntenant subtree is rejected with a structured 422\n(``kind=\"secret_ref_outside_tenant_scope\"``) \u2014 the same write-time\ngate as POST. An explicit ``{\"secret_ref\": null}`` (clear) and a\nPATCH not sending the field are untouched; no-op when the guard is\ndisabled. See :func:`_enforce_secret_ref_tenant_scope`.",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -1805,7 +1805,7 @@
           "topology"
         ],
         "summary": "Refresh",
-        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.",
+        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.",
         "operationId": "refresh_api_v1_topology_refresh__target_name__post",
         "parameters": [
           {
@@ -1839,12 +1839,95 @@
               }
             }
           },
-          "422": {
-            "description": "Validation Error",
+          "409": {
+            "description": "Connector resolution is ambiguous: two or more registered connectors remain after the tie-break ladder for the target's ``(product, version)``. Set ``target.preferred_impl_id`` to one of the echoed ``candidates`` and retry.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "ambiguous_connector"
+                          ]
+                        },
+                        "product": {
+                          "type": "string"
+                        },
+                        "candidates": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "product": {
+                                "type": "string"
+                              },
+                              "version": {
+                                "type": "string"
+                              },
+                              "impl_id": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "product",
+                              "version",
+                              "impl_id"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "product",
+                        "candidates"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No registered connector advertises support for the target's ``product`` (e.g. a legacy pre-standardization product slug such as ``kubernetes`` instead of ``k8s``), so there is nothing to discover topology with.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "no_matching_connector"
+                          ]
+                        },
+                        "product": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "product",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
                 }
               }
             }
@@ -3016,7 +3099,7 @@
           "connectors"
         ],
         "summary": "Ingest Endpoint",
-        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\nAsync (default; ``async=true``) fires the pipeline off the request\nthread via :func:`asyncio.create_task` and returns\n:class:`IngestJobHandle` at HTTP 202; the operator polls\n``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.\nThis is the only mode that survives real-world vendor specs\nwithout tripping the kubelet liveness probe -- the\n``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event\nloop for ~30 s in the register + LLM-grouping phases, past\nthe 25 s liveness deadline. The 202 + job-id shape is the\n\"escape hatch must not crash the pod\" answer G0.16-T1 closes.\n\nSync (legacy; ``async=false``) runs the pipeline inline and\nreturns :class:`IngestResponse` at HTTP 200. Kept for small-spec\ncallers (CI tests with \u2264 100-op fixtures, ad-hoc shell scripts,\nthe v0.8.x clients that pre-date the async shape). Will not\nsurvive real-world specs and is documented as such in\n``docs/codebase/spec-ingestion.md`` and\n``docs/codebase/api-shape-conventions.md`` \u00a71.\n\n``dry_run=true`` parses every spec but writes nothing and is\nalways synchronous (the parse-only path is the fast leg per\nRDC #771 Finding 21 -- 30 s for the same spec, but with no DB\nor LLM hops and steady event-loop yields, well clear of the\nprobe deadline in practice). ``async`` is ignored on the dry-run\npath; the response carries the parser's ``inserted_count``\nprojection and ``grouping=None``.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping (#1699): this route exposes **no** ``tenant_id``\nparameter \u2014 the write scope is always the calling operator's\n``tenant_id`` from the JWT (the CLI verb drives this route and\ninherits the same scope). The MCP sibling\n``meho.connector.ingest`` accepts an optional ``tenant_id`` and\ntargets the built-in / global scope (``tenant_id=NULL``) when it\nis omitted (tenant_admin only). The dedup lookup\n(``operations/ingest/_upsert``) is scope-aware, so re-ingesting\nthe same spec under the other scope re-inserts every op as a\nshadow copy there \u2014 verify the scope matches your intent.",
+        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\nAsync (default; ``async=true``) fires the pipeline off the request\nthread via :func:`asyncio.create_task` and returns\n:class:`IngestJobHandle` at HTTP 202; the operator polls\n``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.\nThis is the only mode that survives real-world vendor specs\nwithout tripping the kubelet liveness probe -- the\n``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event\nloop for ~30 s in the register + LLM-grouping phases, past\nthe 25 s liveness deadline. The 202 + job-id shape is the\n\"escape hatch must not crash the pod\" answer G0.16-T1 closes.\n\nSync (legacy; ``async=false``) runs the pipeline inline and\nreturns :class:`IngestResponse` at HTTP 200. Kept for small-spec\ncallers (CI tests with \u2264 100-op fixtures, ad-hoc shell scripts,\nthe v0.8.x clients that pre-date the async shape). Will not\nsurvive real-world specs and is documented as such in\n``docs/codebase/spec-ingestion.md`` and\n``docs/codebase/api-shape-conventions.md`` \u00a71.\n\n``dry_run=true`` parses every spec but writes nothing and is\nalways synchronous (the parse-only path is the fast leg per\nRDC #771 Finding 21 -- 30 s for the same spec, but with no DB\nor LLM hops and steady event-loop yields, well clear of the\nprobe deadline in practice). ``async`` is ignored on the dry-run\npath; the response carries the parser's ``inserted_count``\nprojection and ``grouping=None``.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping (#2085, superseding the #1699 divergence): the\nbody's optional ``tenant_id`` selects the write scope with the\nMCP sibling ``meho.connector.ingest``'s semantics \u2014 omitted /\n``null`` \u2192 built-in / global (``tenant_id IS NULL``), own tenant\nUUID \u2192 tenant-curated, any other UUID \u2192 403 from\n:meth:`IngestionPipelineService._authorize`; both sit behind the\nroute's ``tenant_admin`` gate. The dedup is scope-aware: an\nexplicit re-ingest under the *other* scope shadow-copies.",
         "operationId": "ingest_endpoint_api_v1_connectors_ingest_post",
         "parameters": [
           {
@@ -22638,6 +22721,13 @@
             "nullable": true,
             "title": "Base Url"
           },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id",
+            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho.connector.ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403."
+          },
           "spec_info_versions_compatible": {
             "items": {
               "type": "string"
@@ -22662,7 +22752,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "IngestRequest",
-        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url`` and ``dry_run``\nare accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url``, ``dry_run``, and\n``tenant_id`` are accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``tenant_id`` selects the write scope (#2085): ``None`` \u2014 whether\nthe field is omitted or explicitly ``null`` \u2014 targets the\nbuilt-in / global scope (``tenant_id IS NULL``), the same\nomit-equals-global semantics the MCP sibling\n``meho.connector.ingest`` documents. The operator's own tenant\nUUID targets their tenant-curated namespace; any other UUID is\nrejected 403 by :meth:`IngestionPipelineService._authorize`.\nBefore #2085 the REST route resolved omission to the *caller's\ntenant*, diverging from the MCP surface \u2014 a consumer pasting the\nMCP-documented body into REST silently minted a tenant-scoped\nshadow copy of an existing global row (the dedup lookup is\nscope-aware and never matches across scopes).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
       },
       "IngestResponse": {
         "properties": {

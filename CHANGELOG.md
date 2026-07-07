@@ -108,6 +108,69 @@ connector-related release-notes line.
   MCP-transport crash where a non-string/dict `target` hit
   `AttributeError` instead of a structured envelope.
 
+### Added — target secret_ref tenant-scope fail-fast + cause-named Vault denial
+
+- **`POST`/`PATCH /api/v1/targets*` (which `meho targets import` drives)
+  now reject an explicit `secret_ref` outside the operator's readable
+  per-tenant subtree** with a structured 422
+  (`kind="secret_ref_outside_tenant_scope"`) naming the constraint, the
+  rendered tenant prefix, and the exact expected
+  `tenants/<tenant_id>/<name>` path — a target with such a ref imported
+  clean and then failed every dispatch with an opaque Vault `permission
+  denied`. Semantics mirror the runtime tenant-scope guard
+  (segment-boundary match on the mount-pinned candidate); the derived
+  per-tenant default (#1723) and an explicit-null clear are untouched,
+  and the gate is a no-op when the guard is disabled
+  (`VAULT_KV_TENANT_SCOPE_PREFIX=""`). (#2091)
+- **An `hvac` `Forbidden` during dispatch now maps to the structured
+  `connector_vault_forbidden` error** instead of the bare
+  `connector_error: Forbidden` passthrough: the message names the
+  target's `secret_ref`, the likely out-of-subtree cause, the
+  per-tenant convention with the exact expected path, and the
+  stage-the-credential remediation — with an explicit warning that
+  widening the deploy-owned Vault policy is the wrong fix. A
+  target-less denial (typed `vault.*` op rejected by the Vault ACL)
+  gets a generic Vault-authorization shape; other hvac errors fall
+  through to `connector_error` unchanged. (#2091)
+
+
+
+
+### Fixed — topology refresh returns structured errors instead of a bare 500
+
+- `POST /api/v1/topology/refresh/{target_name}` no longer returns a bare
+  `500 text/plain "Internal Server Error"` when no registered connector
+  supports the target's `product` (e.g. a legacy pre-standardization
+  `kubernetes` slug where the connector registers as `k8s`): the route
+  now maps the refresh service's connector-resolution exceptions to
+  structured JSON — `NoMatchingConnector` → **422
+  `no_matching_connector`** (with the offending `product` and the
+  resolver message) and `AmbiguousConnectorResolution` → **409
+  `ambiguous_connector`** (with the `(product, version, impl_id)`
+  candidates so the caller can set `target.preferred_impl_id` and
+  retry). Both error envelopes are declared in the OpenAPI spec so the
+  generated CLI/SDK pick them up. The sibling silent-no-op case (a
+  resolvable connector without topology support returning all-zero
+  counts) is tracked separately in #2093. (#2092)
+### Breaking changes — REST connector-ingest omitted `tenant_id` now targets the global scope
+
+- **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.
+
+### Security — fail-closed on unrecognized `principal_kind` claim
+
+- JWT verification now rejects a token whose `principal_kind` claim is
+  present but outside the closed `user`/`service`/`agent` enum with a
+  `401` (`unknown_principal_kind`) instead of silently treating the
+  principal as a human user. `principal_kind` is the discriminator the
+  per-kind permission model, approval gate, and agent dispatch branch
+  on, so an out-of-enum issuer-signed value now fails closed — exactly
+  like an unknown `tenant_role` at the same layer. The structured
+  `unknown_principal_kind` warning (claim name + offending value) is
+  still logged before the rejection. Tokens that **omit** the claim
+  entirely are unaffected: the pre-G11.2 absent-claim → `user` legacy
+  fallback is kept, so existing human-operator tokens keep working
+  without a Keycloak mapper update. Realms emitting a custom kind must
+  widen the enum first rather than relying on the silent coercion.
 ### Security — /health least-privilege split (OPERATOR gate + liveness probe)
 
 - **`GET /api/v1/health` (the federation-proof deep check) is now

@@ -547,15 +547,26 @@ async def test_group_read_missing_surfaces_connector_error(
     assert result.extras["exception_class"] == "InvalidPath"
 
 
-async def test_token_create_failure_surfaces_connector_error(
+async def test_token_create_failure_surfaces_connector_vault_forbidden(
     monkeypatch: pytest.MonkeyPatch,
     _registered_vault_typed_ops: None,
 ) -> None:
+    """A Vault ACL denial surfaces as the structured ``connector_vault_forbidden``.
+
+    #2091: :exc:`hvac.exceptions.Forbidden` is classified ahead of the
+    generic ``connector_error`` flatten (pre-#2091 this asserted the bare
+    ``connector_error: Forbidden`` shape). This dispatch carries no
+    target (typed ``vault.*`` op), so the builder's target-less generic
+    shape applies — no fabricated ``secret_ref`` diagnosis.
+    """
     fake = install_fake_client(monkeypatch)
     fake.auth.token.raise_on_create = hvac.exceptions.Forbidden("denied")
 
     result = await _dispatch_vault("vault.token.create", {"policies": ["root"]})
 
     assert result.status == "error"
-    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["error_code"] == "connector_vault_forbidden"
     assert result.extras["exception_class"] == "Forbidden"
+    assert result.extras["secret_ref"] is None
+    assert result.error is not None
+    assert result.error.startswith("connector_vault_forbidden:")

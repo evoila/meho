@@ -104,6 +104,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors import (
+    AmbiguousConnectorResolution,
+    NoMatchingConnector,
+)
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import GraphEdge, GraphEdgeKind, GraphNode
 from meho_backplane.targets.resolver import resolve_target
@@ -295,6 +299,92 @@ _CLOSURE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
 }
 
 
+#: OpenAPI 409 + 422 declarations for the ``refresh`` route (#2092).
+#: The refresh service resolves the target's connector via the *raising*
+#: :func:`~meho_backplane.connectors.resolve_connector`; both resolver
+#: outcomes are mapped to structured JSON here (instead of leaking as a
+#: bare ``text/plain`` 500 through FastAPI's default handler) so the
+#: generated CLI / SDK pick up the error envelopes.
+_REFRESH_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    409: {
+        "description": (
+            "Connector resolution is ambiguous: two or more registered "
+            "connectors remain after the tie-break ladder for the "
+            "target's ``(product, version)``. Set "
+            "``target.preferred_impl_id`` to one of the echoed "
+            "``candidates`` and retry."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "properties": {
+                                "error": {
+                                    "type": "string",
+                                    "enum": ["ambiguous_connector"],
+                                },
+                                "product": {"type": "string"},
+                                "candidates": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "product": {"type": "string"},
+                                            "version": {"type": "string"},
+                                            "impl_id": {"type": "string"},
+                                        },
+                                        "required": [
+                                            "product",
+                                            "version",
+                                            "impl_id",
+                                        ],
+                                    },
+                                },
+                            },
+                            "required": ["error", "product", "candidates"],
+                        },
+                    },
+                    "required": ["detail"],
+                },
+            },
+        },
+    },
+    422: {
+        "description": (
+            "No registered connector advertises support for the "
+            "target's ``product`` (e.g. a legacy pre-standardization "
+            "product slug such as ``kubernetes`` instead of ``k8s``), "
+            "so there is nothing to discover topology with."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "properties": {
+                                "error": {
+                                    "type": "string",
+                                    "enum": ["no_matching_connector"],
+                                },
+                                "product": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                            "required": ["error", "product", "message"],
+                        },
+                    },
+                    "required": ["detail"],
+                },
+            },
+        },
+    },
+}
+
+
 @router.get("/dependents/{name}", responses=_CLOSURE_RESPONSES)
 async def dependents(
     name: str,
@@ -454,7 +544,11 @@ async def path(
         raise _ambiguous_node_http(exc) from exc
 
 
-@router.post("/refresh/{target_name}", response_model=RefreshResult)
+@router.post(
+    "/refresh/{target_name}",
+    response_model=RefreshResult,
+    responses=_REFRESH_RESPONSES,
+)
 async def refresh(
     target_name: str,
     operator: Operator = _require_operator,
@@ -477,13 +571,24 @@ async def refresh(
     broadcast event inside its own transaction; this route binds the
     same op identity for the chassis HTTP-level audit row so both rows
     classify consistently.
+
+    Connector-resolution failures inside the service surface as
+    structured JSON rather than a bare 500 (#2092): a ``product`` no
+    registered connector supports returns 422 ``no_matching_connector``;
+    a resolution tie returns 409 ``ambiguous_connector`` with the
+    candidate ``(product, version, impl_id)`` triples.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_REFRESH,
         audit_op_class="read",
     )
     target = await resolve_target(session, operator.tenant_id, target_name)
-    result = await refresh_target_topology(target, operator)
+    try:
+        result = await refresh_target_topology(target, operator)
+    except NoMatchingConnector as exc:
+        raise _no_matching_connector_http(target.product, exc) from exc
+    except AmbiguousConnectorResolution as exc:
+        raise _ambiguous_connector_http(target.product, exc) from exc
     _log.info(
         "topology_refresh_route_completed",
         target_id=str(result.target_id),
@@ -513,6 +618,52 @@ def _ambiguous_node_http(exc: AmbiguousNodeError) -> HTTPException:
             "error": "ambiguous_node",
             "name": exc.name,
             "kinds": sorted(exc.kinds),
+        },
+    )
+
+
+def _no_matching_connector_http(product: str, exc: NoMatchingConnector) -> HTTPException:
+    """Map :class:`NoMatchingConnector` out of the refresh service to a 422.
+
+    ``refresh_target_topology`` resolves the target's connector via the
+    *raising* :func:`~meho_backplane.connectors.resolve_connector`; a
+    target whose ``product`` no registered connector advertises (e.g.
+    the legacy ``kubernetes`` slug where the connector self-registers
+    as ``k8s``) used to leak the ``LookupError`` into FastAPI's default
+    handler as a bare ``text/plain`` 500 (#2092). 422 mirrors the
+    dispatcher's treatment of the same resolver outcome
+    (``connector_unsupported``): the request is well-formed but this
+    target cannot be processed. The resolver message is echoed because
+    it carries the ``(product, version)`` pair the lookup ran with.
+    """
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "error": "no_matching_connector",
+            "product": product,
+            "message": str(exc),
+        },
+    )
+
+
+def _ambiguous_connector_http(product: str, exc: AmbiguousConnectorResolution) -> HTTPException:
+    """Map :class:`AmbiguousConnectorResolution` to a 409 with candidates.
+
+    The 409-with-candidates shape mirrors :func:`_ambiguous_node_http`:
+    the caller can recover without a second round trip by setting
+    ``target.preferred_impl_id`` to one of the echoed candidates. The
+    ``(product, version, impl_id)`` tuples carried on
+    :attr:`AmbiguousConnectorResolution.candidates` are rendered as
+    objects so the envelope stays self-describing over the wire.
+    """
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "ambiguous_connector",
+            "product": product,
+            "candidates": [
+                {"product": p, "version": v, "impl_id": i} for p, v, i in exc.candidates
+            ],
         },
     )
 

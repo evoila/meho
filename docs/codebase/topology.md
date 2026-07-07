@@ -1012,6 +1012,22 @@ Load-bearing details:
   + one broadcast event with the per-target counts. The two rows are
   intentional — same shape as the operations dispatcher writing a
   domain row alongside the middleware's HTTP row.
+- **`refresh` connector-resolution failures.** #2092. The refresh
+  service resolves the target's connector via the *raising*
+  `resolve_connector` (unlike the dispatcher / probe surfaces, which
+  use the fail-soft `resolve_connector_or_label`). The route maps both
+  resolver exceptions to structured JSON: `NoMatchingConnector` (e.g. a
+  legacy `product="kubernetes"` slug where the connector registers as
+  `k8s`) → HTTP **422 `no_matching_connector`** with the offending
+  `product` + the resolver message; `AmbiguousConnectorResolution` →
+  HTTP **409 `ambiguous_connector`** with the `(product, version,
+  impl_id)` candidate triples so the caller can set
+  `target.preferred_impl_id` and retry. Both shapes are declared on the
+  route via `_REFRESH_RESPONSES` for the generated CLI / SDK. Pre-#2092
+  the exceptions leaked through FastAPI's default handler as a bare
+  `500 text/plain "Internal Server Error"`. The sibling silent-no-op
+  case (a *resolvable* connector without topology support returning
+  all-zero counts) is #2093, tracked separately.
 - **Curated-edge writes are `tenant_admin`.** `POST /edges` and
   `DELETE /edges/{id}` sit behind `require_role(TenantRole.TENANT_ADMIN)`
   — Initiative #364 §5: annotation is a policy-layer assertion, so an

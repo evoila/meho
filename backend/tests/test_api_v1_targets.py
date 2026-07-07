@@ -32,6 +32,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from meho_backplane.connectors.schemas import ProbeResult
+from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
@@ -811,7 +812,13 @@ def test_create_target_operator_role_returns_403(client: TestClient) -> None:
 
 
 def test_create_target_with_all_fields(client: TestClient) -> None:
-    """Create succeeds with all optional fields populated."""
+    """Create succeeds with all optional fields populated.
+
+    The explicit ``secret_ref`` follows the canonical per-tenant
+    convention (#1723) — the pre-#2091 fixture used a stale
+    ``secret/meho/*`` path, which the #2091 write-time tenant-scope gate
+    now rejects.
+    """
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -824,7 +831,7 @@ def test_create_target_with_all_fields(client: TestClient) -> None:
                 "host": "vcenter.corp.internal",
                 "port": 443,
                 "fqdn": "vcenter.corp.internal",
-                "secret_ref": "secret/meho/vcenter",
+                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}/rdc-vcenter",
                 "auth_model": "impersonation",
                 "vpn_required": True,
                 "extras": {"dc": "fra1"},
@@ -2419,8 +2426,18 @@ def test_create_target_derives_per_tenant_secret_ref(client: TestClient) -> None
 
 
 def test_create_target_honours_explicit_secret_ref(client: TestClient) -> None:
-    """An explicitly-supplied ``secret_ref`` is stored verbatim, not derived."""
+    """An explicitly-supplied ``secret_ref`` is stored verbatim, not derived.
+
+    The explicit value differs from the derived default
+    (``tenants/<T>/custom``) while staying inside the operator's tenant
+    subtree — proving the handler honours the override without
+    re-deriving. (The pre-#2091 fixture used an out-of-tenant
+    ``tenants/some-other/...`` path, which the write-time tenant-scope
+    gate now rejects; the cross-tenant reject case is pinned by the
+    #2091 test cluster below.)
+    """
     key = make_rsa_keypair("kid-A")
+    explicit_ref = f"tenants/{DEFAULT_TENANT_ID}/shared-vcenter-cred"
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
@@ -2429,12 +2446,15 @@ def test_create_target_honours_explicit_secret_ref(client: TestClient) -> None:
                 "name": "custom",
                 "product": "ssh",
                 "host": "10.0.0.5",
-                "secret_ref": "tenants/some-other/custom",
+                "secret_ref": explicit_ref,
             },
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 201
-    assert response.json()["secret_ref"] == "tenants/some-other/custom"
+    assert response.json()["secret_ref"] == explicit_ref
+    # Genuinely honoured verbatim — not silently re-derived to the
+    # per-name default.
+    assert response.json()["secret_ref"] != f"tenants/{DEFAULT_TENANT_ID}/custom"
 
 
 @pytest.mark.asyncio
@@ -2490,3 +2510,188 @@ async def test_update_target_clears_secret_ref_when_explicit_null(client: TestCl
         )
     assert response.status_code == 200
     assert response.json()["secret_ref"] is None
+
+
+# ---------------------------------------------------------------------------
+# #2091 — secret_ref tenant-scope fail-fast at create / update
+# ---------------------------------------------------------------------------
+
+
+def test_create_target_rejects_secret_ref_outside_tenant_scope(client: TestClient) -> None:
+    """POST with an out-of-subtree ``secret_ref`` is a structured 422, not a 201.
+
+    #2091: a target whose ``secret_ref`` points outside the operator's
+    readable per-tenant subtree imports clean but can never dispatch
+    (Vault answers an opaque ``permission denied`` at credential
+    resolution). The write-time gate rejects it with a T11-compliant
+    detail naming the constraint, the rendered tenant prefix, and the
+    exact expected per-tenant path.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "vcf-logs",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                # The consumer-reported shape: the path a local CLI
+                # wrapper reads, outside the per-tenant subtree.
+                "secret_ref": "secret/meho/vcf-logs/logmaster",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "secret_ref_outside_tenant_scope"
+    assert detail["secret_ref"] == "secret/meho/vcf-logs/logmaster"
+    assert detail["tenant_prefix"] == f"secret/tenants/{DEFAULT_TENANT_ID}/"
+    assert detail["expected_secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/vcf-logs"
+    # The message names the constraint, the convention, and the remediation.
+    assert "outside the operator's readable tenant subtree" in detail["message"]
+    assert "tenants/<tenant_id>/<name>" in detail["message"]
+    assert "Do NOT widen the backplane's Vault policy" in detail["message"]
+    assert "docs/codebase/connectors-vault-tenant-scope.md" in detail["message"]
+
+    # Fail-fast means no row landed: the name stays free for a corrected
+    # re-import.
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        lookup = client.get(
+            "/api/v1/targets/vcf-logs",
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert lookup.status_code == 404
+
+
+def test_create_target_rejects_cross_tenant_secret_ref_segment_boundary(
+    client: TestClient,
+) -> None:
+    """A ``tenants/<T>-evil/...`` ref does not satisfy the ``tenants/<T>`` prefix.
+
+    Segment-boundary semantics mirror
+    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`:
+    the prefix match cannot be satisfied by a sibling namespace that
+    merely *starts with* the tenant id string.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "boundary",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": f"tenants/{DEFAULT_TENANT_ID}-evil/boundary",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["kind"] == "secret_ref_outside_tenant_scope"
+
+
+def test_create_target_derived_default_always_passes_gate(client: TestClient) -> None:
+    """Omitting ``secret_ref`` derives the per-tenant default — never rejected.
+
+    The #1723 happy path is untouched by the #2091 gate: the derived
+    default lands inside the rendered tenant prefix by construction.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={"name": "derived-ok", "product": "ssh", "host": "10.0.0.5"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/derived-ok"
+
+
+@pytest.mark.asyncio
+async def test_update_target_rejects_secret_ref_outside_tenant_scope(
+    client: TestClient,
+) -> None:
+    """PATCH sending an out-of-subtree ``secret_ref`` is a structured 422.
+
+    The row is left untouched — the gate runs before the ``setattr``
+    loop, so a rejected PATCH mutates nothing.
+    """
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(
+        name="patched",
+        product="ssh",
+        host="10.0.0.9",
+        secret_ref=f"tenants/{DEFAULT_TENANT_ID}/patched",
+    )
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/patched",
+            json={"secret_ref": "secret/meho/patched", "host": "moved.host"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["kind"] == "secret_ref_outside_tenant_scope"
+        assert detail["expected_secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/patched"
+
+        # Nothing was applied — neither the ref nor the piggy-backed host.
+        lookup = client.get(
+            "/api/v1/targets/patched",
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert lookup.status_code == 200
+    assert lookup.json()["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/patched"
+    assert lookup.json()["host"] == "10.0.0.9"
+
+
+@pytest.mark.asyncio
+async def test_update_target_accepts_in_tenant_explicit_secret_ref(
+    client: TestClient,
+) -> None:
+    """PATCH with an in-subtree explicit ``secret_ref`` is honoured verbatim."""
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(name="rehomed", product="ssh", host="10.0.0.9", secret_ref=None)
+    explicit_ref = f"tenants/{DEFAULT_TENANT_ID}/shared-cred"
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/rehomed",
+            json={"secret_ref": explicit_ref},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["secret_ref"] == explicit_ref
+
+
+def test_create_target_secret_ref_gate_noop_when_guard_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``VAULT_KV_TENANT_SCOPE_PREFIX=""`` (guard disabled) skips the gate.
+
+    A deploy still mid-migration has no defined subtree to enforce, so an
+    out-of-subtree explicit ``secret_ref`` imports exactly as before
+    #2091 (and dispatch surfaces any real Vault denial via the
+    ``connector_vault_forbidden`` structured error).
+    """
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "unguarded",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": "secret/meho/unguarded",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["secret_ref"] == "secret/meho/unguarded"

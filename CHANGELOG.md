@@ -94,6 +94,57 @@ connector-related release-notes line.
 
 - **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.
 
+### Security — fail-closed on unrecognized `principal_kind` claim
+
+- JWT verification now rejects a token whose `principal_kind` claim is
+  present but outside the closed `user`/`service`/`agent` enum with a
+  `401` (`unknown_principal_kind`) instead of silently treating the
+  principal as a human user. `principal_kind` is the discriminator the
+  per-kind permission model, approval gate, and agent dispatch branch
+  on, so an out-of-enum issuer-signed value now fails closed — exactly
+  like an unknown `tenant_role` at the same layer. The structured
+  `unknown_principal_kind` warning (claim name + offending value) is
+  still logged before the rejection. Tokens that **omit** the claim
+  entirely are unaffected: the pre-G11.2 absent-claim → `user` legacy
+  fallback is kept, so existing human-operator tokens keep working
+  without a Keycloak mapper update. Realms emitting a custom kind must
+  widen the enum first rather than relying on the silent coercion.
+### Security — /health least-privilege split (OPERATOR gate + liveness probe)
+
+- **`GET /api/v1/health` (the federation-proof deep check) is now
+  gated at `TenantRole.OPERATOR`**, and a new cheap liveness probe
+  ships at **`GET /api/v1/health/live`** for low-privilege /
+  monitoring callers (evoila-bosnia/meho-internal#159). Every
+  `/api/v1/health` call drives a live Vault JWT/OIDC credential
+  federation plus a KV v2 secret read under the caller's identity;
+  it previously required only a valid JWT, so the lowest-trust
+  `read_only` rank (what monitoring principals are expected to hold)
+  could trigger that Vault round-trip on every poll. A `read_only`
+  caller now receives 403 `insufficient_role` *before* any Vault
+  interaction; `operator` / `tenant_admin` callers (the CLI `meho
+  status` audience, the install smoke) see the exact same response
+  as before. **Migration for `read_only` monitoring callers**: poll
+  `GET /api/v1/health/live` instead — valid JWT (any tenant role),
+  returns `{operator, db}` (identity + DB-migration liveness), no
+  `vault` field, and its code path never touches Vault or the
+  dispatcher (pinned by a source-level guard test). Kubernetes
+  liveness/readiness probes are unaffected — they target the
+  unauthenticated `/healthz` / `/ready` chassis routes. The MCP
+  `meho.status` tool is unchanged (explicitly out of scope here).
+  OpenAPI snapshot + generated CLI client regenerated for the new
+  route.
+### Security — targets test fixture secret-ref hygiene
+
+- Align the internal-lab targets test fixture
+  (`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`) with its own
+  Vault-`secret_ref`-only convention: three operator-note remnants that
+  inlined a well-known lab-default credential string are replaced with
+  rotate-and-store-in-Vault guidance pointing at each target's
+  `secret_ref`, so the fixture models the secrets-stay-in-Vault pattern
+  end to end and stays trivially clean under the zero-tolerance
+  TruffleHog secret scan. Fixture prose only — no entry added or
+  removed, no code or schema change.
+  (evoila-bosnia/meho-internal#158)
 ### Security — runbook verify dispatch fails closed on Vault-backed credential reads
 
 - **The runbook `operation_call` verify dispatch's synthetic operator now carries an empty `raw_jwt`, so an operator-context Vault credential read refuses locally before any Vault contact** (evoila-bosnia/meho-internal#157): the runbook run service reconstructs a minimum-shape `Operator` from `operator_sub` for the verify dispatch; it previously carried a non-empty placeholder `raw_jwt` that bypassed the shared credential reader's empty-JWT fail-closed guard (`_resolve_secret_ref`), so the placeholder was forwarded to Vault's JWT/OIDC login and only rejected server-side after a live network round-trip. The synthetic operator now follows the empty-string synthetic-operator convention (same shape as the topology scheduler's refresh operator): a verify `op_id` resolving to a Vault-backed connector fails closed with a structured `VaultCredentialsReadError` refusal before Vault is touched, the step transitions to `failed`, and the dispatched verify's audit identity (`sub` / `tenant_id`) is unchanged. Non-Vault typed in-process verify ops dispatch exactly as before. Hardening only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

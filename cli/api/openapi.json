@@ -101,13 +101,57 @@
         }
       }
     },
+    "/api/v1/health/live": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness",
+        "description": "Cheap liveness probe for low-privilege / monitoring callers.\n\nRequires a valid JWT (``verify_jwt_and_bind`` \u2014 401 on missing /\ninvalid tokens, and ``operator_sub`` lands in structlog\ncontextvars) but deliberately carries **no role gate**: the lowest\ntenant role (``read_only``) held by monitoring principals must be\nable to poll it. In exchange, this handler is forbidden from\ntouching Vault \u2014 it must never invoke a connector, federate a\nper-operator Vault credential, or read a secret. The federation\nproof belongs to :func:`authenticated_health` behind the OPERATOR\ngate.",
+        "operationId": "liveness_api_v1_health_live_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
           "health"
         ],
         "summary": "Authenticated Health",
-        "description": "Federation-proof authenticated health check.\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(verify_jwt_and_bind)`` annotation is what guarantees the\nJWT is validated *and* ``operator_sub`` is bound into structlog\ncontextvars before this body runs \u2014 every log line emitted from\nhere downstream carries operator identity automatically.",
+        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps\n``verify_jwt_and_bind`` \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.",
         "operationId": "authenticated_health_api_v1_health_get",
         "parameters": [
           {
@@ -22863,6 +22907,23 @@
         ],
         "title": "KindFilterValue",
         "description": "Closed enum of the trigger ``kind`` values exposed in the filter URL.\n\nMirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`\nliteral (``cron`` / ``one_off`` / ``event``). The ``str`` mixin keeps\nthe template's ``{{ kind_filter }}`` rendering + ``selected`` matching\nstable, and an out-of-enum value fails Pydantic validation at the HTTP\nboundary with a 422 rather than silently filtering nothing."
+      },
+      "LivenessResponse": {
+        "properties": {
+          "operator": {
+            "$ref": "#/components/schemas/OperatorIdentity"
+          },
+          "db": {
+            "$ref": "#/components/schemas/DbStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operator",
+          "db"
+        ],
+        "title": "LivenessResponse",
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path."
       },
       "ManualStep": {
         "properties": {

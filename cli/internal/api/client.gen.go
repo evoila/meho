@@ -37439,8 +37439,27 @@ type RefreshApiV1TopologyRefreshTargetNamePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *RefreshResult
-	JSON422      *HTTPValidationError
+	JSON409      *struct {
+		Detail struct {
+			Candidates []struct {
+				ImplId  string `json:"impl_id"`
+				Product string `json:"product"`
+				Version string `json:"version"`
+			} `json:"candidates"`
+			Error   RefreshApiV1TopologyRefreshTargetNamePost409DetailError `json:"error"`
+			Product string                                                  `json:"product"`
+		} `json:"detail"`
+	}
+	JSON422 *struct {
+		Detail struct {
+			Error   RefreshApiV1TopologyRefreshTargetNamePost422DetailError `json:"error"`
+			Message string                                                  `json:"message"`
+			Product string                                                  `json:"product"`
+		} `json:"detail"`
+	}
 }
+type RefreshApiV1TopologyRefreshTargetNamePost409DetailError string
+type RefreshApiV1TopologyRefreshTargetNamePost422DetailError string
 
 // Status returns HTTPResponse.Status
 func (r RefreshApiV1TopologyRefreshTargetNamePostResponse) Status() string {
@@ -49646,8 +49665,31 @@ func ParseRefreshApiV1TopologyRefreshTargetNamePostResponse(rsp *http.Response) 
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Candidates []struct {
+					ImplId  string `json:"impl_id"`
+					Product string `json:"product"`
+					Version string `json:"version"`
+				} `json:"candidates"`
+				Error   RefreshApiV1TopologyRefreshTargetNamePost409DetailError `json:"error"`
+				Product string                                                  `json:"product"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
+		var dest struct {
+			Detail struct {
+				Error   RefreshApiV1TopologyRefreshTargetNamePost422DetailError `json:"error"`
+				Message string                                                  `json:"message"`
+				Product string                                                  `json:"product"`
+			} `json:"detail"`
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

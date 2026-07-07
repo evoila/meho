@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — topology refresh returns structured errors instead of a bare 500
+
+- `POST /api/v1/topology/refresh/{target_name}` no longer returns a bare
+  `500 text/plain "Internal Server Error"` when no registered connector
+  supports the target's `product` (e.g. a legacy pre-standardization
+  `kubernetes` slug where the connector registers as `k8s`): the route
+  now maps the refresh service's connector-resolution exceptions to
+  structured JSON — `NoMatchingConnector` → **422
+  `no_matching_connector`** (with the offending `product` and the
+  resolver message) and `AmbiguousConnectorResolution` → **409
+  `ambiguous_connector`** (with the `(product, version, impl_id)`
+  candidates so the caller can set `target.preferred_impl_id` and
+  retry). Both error envelopes are declared in the OpenAPI spec so the
+  generated CLI/SDK pick them up. The sibling silent-no-op case (a
+  resolvable connector without topology support returning all-zero
+  counts) is tracked separately in #2093. (#2092)
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

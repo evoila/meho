@@ -1761,7 +1761,7 @@
           "topology"
         ],
         "summary": "Refresh",
-        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.",
+        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.",
         "operationId": "refresh_api_v1_topology_refresh__target_name__post",
         "parameters": [
           {
@@ -1795,12 +1795,95 @@
               }
             }
           },
-          "422": {
-            "description": "Validation Error",
+          "409": {
+            "description": "Connector resolution is ambiguous: two or more registered connectors remain after the tie-break ladder for the target's ``(product, version)``. Set ``target.preferred_impl_id`` to one of the echoed ``candidates`` and retry.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "ambiguous_connector"
+                          ]
+                        },
+                        "product": {
+                          "type": "string"
+                        },
+                        "candidates": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "product": {
+                                "type": "string"
+                              },
+                              "version": {
+                                "type": "string"
+                              },
+                              "impl_id": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "product",
+                              "version",
+                              "impl_id"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "product",
+                        "candidates"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No registered connector advertises support for the target's ``product`` (e.g. a legacy pre-standardization product slug such as ``kubernetes`` instead of ``k8s``), so there is nothing to discover topology with.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "no_matching_connector"
+                          ]
+                        },
+                        "product": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "product",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
                 }
               }
             }

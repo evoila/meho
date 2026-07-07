@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — /health least-privilege split (OPERATOR gate + liveness probe)
+
+- **`GET /api/v1/health` (the federation-proof deep check) is now
+  gated at `TenantRole.OPERATOR`**, and a new cheap liveness probe
+  ships at **`GET /api/v1/health/live`** for low-privilege /
+  monitoring callers (evoila-bosnia/meho-internal#159). Every
+  `/api/v1/health` call drives a live Vault JWT/OIDC credential
+  federation plus a KV v2 secret read under the caller's identity;
+  it previously required only a valid JWT, so the lowest-trust
+  `read_only` rank (what monitoring principals are expected to hold)
+  could trigger that Vault round-trip on every poll. A `read_only`
+  caller now receives 403 `insufficient_role` *before* any Vault
+  interaction; `operator` / `tenant_admin` callers (the CLI `meho
+  status` audience, the install smoke) see the exact same response
+  as before. **Migration for `read_only` monitoring callers**: poll
+  `GET /api/v1/health/live` instead — valid JWT (any tenant role),
+  returns `{operator, db}` (identity + DB-migration liveness), no
+  `vault` field, and its code path never touches Vault or the
+  dispatcher (pinned by a source-level guard test). Kubernetes
+  liveness/readiness probes are unaffected — they target the
+  unauthenticated `/healthz` / `/ready` chassis routes. The MCP
+  `meho.status` tool is unchanged (explicitly out of scope here).
+  OpenAPI snapshot + generated CLI client regenerated for the new
+  route.
 ### Security — targets test fixture secret-ref hygiene
 
 - Align the internal-lab targets test fixture

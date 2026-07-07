@@ -47,7 +47,13 @@ Tenant scoping
 --------------
 
 Every route derives ``tenant_id`` from the JWT-validated
-:class:`Operator`. There is no surface that accepts a tenant id from
+:class:`Operator`, with one deliberate exception: ``POST /ingest``
+accepts an optional ``tenant_id`` in the body (#2085) that selects
+the *write* scope — omitted / ``null`` targets the built-in / global
+scope (matching the MCP sibling's "omit = global"), the operator's
+own tenant UUID targets their tenant namespace, and any other UUID
+is rejected 403 by the service-layer guard, so cross-tenant writes
+remain impossible. No read or edit surface accepts a tenant id from
 the body or query string — cross-tenant probes are impossible by
 construction. The one nuance: the ``operator`` role sees only their
 own tenant's connectors **and** built-ins (``tenant_id IS NULL``);
@@ -158,6 +164,7 @@ build-time-only framing this replaces.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from json import JSONDecodeError
 from typing import Annotated, Literal, NoReturn
 from uuid import UUID
@@ -423,16 +430,14 @@ async def ingest_endpoint(
       spec sources. The MCP admin tool and historical clients use
       this shape.
 
-    Tenant scoping (#1699): this route exposes **no** ``tenant_id``
-    parameter — the write scope is always the calling operator's
-    ``tenant_id`` from the JWT (the CLI verb drives this route and
-    inherits the same scope). The MCP sibling
-    ``meho.connector.ingest`` accepts an optional ``tenant_id`` and
-    targets the built-in / global scope (``tenant_id=NULL``) when it
-    is omitted (tenant_admin only). The dedup lookup
-    (``operations/ingest/_upsert``) is scope-aware, so re-ingesting
-    the same spec under the other scope re-inserts every op as a
-    shadow copy there — verify the scope matches your intent.
+    Tenant scoping (#2085, superseding the #1699 divergence): the
+    body's optional ``tenant_id`` selects the write scope with the
+    MCP sibling ``meho.connector.ingest``'s semantics — omitted /
+    ``null`` → built-in / global (``tenant_id IS NULL``), own tenant
+    UUID → tenant-curated, any other UUID → 403 from
+    :meth:`IngestionPipelineService._authorize`; both sit behind the
+    route's ``tenant_admin`` gate. The dedup is scope-aware: an
+    explicit re-ingest under the *other* scope shadow-copies.
     """
     # Snapshot the original ``catalog_entry`` before resolution (which
     # nulls it) so the ``UpstreamNotSpecError`` 422 — raised deep in the
@@ -465,7 +470,6 @@ async def ingest_endpoint(
         return await _run_sync_ingest(
             service=service,
             resolved=resolved,
-            operator=operator,
             catalog_entry=catalog_entry,
             spec_info_versions_compatible=spec_info_versions_compatible,
         )
@@ -481,7 +485,6 @@ async def _run_sync_ingest(
     *,
     service: IngestionPipelineService,
     resolved: IngestRequest,
-    operator: Operator,
     catalog_entry: str | None,
     spec_info_versions_compatible: tuple[str, ...] | None,
 ) -> JSONResponse:
@@ -501,7 +504,6 @@ async def _run_sync_ingest(
     result = await _run_ingest_with_http_mapping(
         service=service,
         body=resolved,
-        operator=operator,
         catalog_entry=catalog_entry,
         spec_info_versions_compatible=spec_info_versions_compatible,
     )
@@ -533,6 +535,11 @@ async def _spawn_async_ingest(
     is already in explicit-quadruple shape, but the asserts inside
     the closure guard against a future refactor that bypasses
     :func:`_resolve_catalog_entry_if_set`.
+
+    The job row and the pipeline both carry the body-resolved write
+    scope (``resolved.tenant_id``; ``None`` = built-in / global,
+    #2085), mirroring the MCP async path — a global ingest's job is
+    a built-in job, pollable by tenant_admins.
     """
     assert resolved.product is not None, "post-resolution invariant: product must be set"
     assert resolved.version is not None, "post-resolution invariant: version must be set"
@@ -540,7 +547,7 @@ async def _spawn_async_ingest(
     registry = get_job_registry()
     job = await registry.create(
         operator_sub=operator.sub,
-        tenant_id=operator.tenant_id,
+        tenant_id=resolved.tenant_id,
         catalog_entry=None,  # resolved body always has catalog_entry=None
         product=resolved.product,
         version=resolved.version,
@@ -558,25 +565,9 @@ async def _spawn_async_ingest(
             impl_id=resolved.impl_id,  # type: ignore[arg-type]
             specs=resolved.specs,
             base_url=resolved.base_url,
-            tenant_id=operator.tenant_id,
+            tenant_id=resolved.tenant_id,
             dry_run=False,
             spec_info_versions_compatible=spec_info_versions_compatible,
-        )
-
-    async def _dispatchability_check(result: IngestionPipelineResult) -> bool:
-        # Post-run honesty gate (claude-rdc-hetzner-dc#1136): resolve the
-        # connector exactly the way the dispatch/query meta-tools do —
-        # parse the connector_id into its natural-key triple and probe
-        # connector_exists under the operator's tenant scope. A run that
-        # returned without raising but leaves this False persisted
-        # nothing the dispatcher can route, so the job ends ``degraded``
-        # rather than lying with ``succeeded``.
-        probe_product, probe_version, probe_impl_id = parse_connector_id(result.connector_id)
-        return await connector_exists(
-            tenant_id=operator.tenant_id,
-            product=probe_product,
-            version=probe_version,
-            impl_id=probe_impl_id,
         )
 
     # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work
@@ -592,7 +583,9 @@ async def _spawn_async_ingest(
         run_ingest_job(
             job.job_id,
             pipeline_call=_pipeline_call,
-            dispatchability_check=_dispatchability_check,
+            dispatchability_check=partial(
+                _ingest_result_dispatchable, tenant_id=operator.tenant_id
+            ),
         ),
         name=f"ingest-job-{job.job_id}",
     )
@@ -609,6 +602,35 @@ async def _spawn_async_ingest(
     return JSONResponse(
         content=handle.model_dump(mode="json"),
         status_code=http_status.HTTP_202_ACCEPTED,
+    )
+
+
+async def _ingest_result_dispatchable(
+    result: IngestionPipelineResult,
+    *,
+    tenant_id: UUID,
+) -> bool:
+    """Post-run honesty gate for the async ingest job (claude-rdc-hetzner-dc#1136).
+
+    Resolve the connector exactly the way the dispatch/query
+    meta-tools do — parse the ``connector_id`` into its natural-key
+    triple and probe :func:`connector_exists` under *tenant_id*. A
+    pipeline run that returned without raising but leaves this
+    ``False`` persisted nothing the dispatcher can route, so the job
+    ends ``degraded`` rather than lying with ``succeeded``.
+
+    ``tenant_id`` is the calling operator's JWT tenant (not the
+    body-resolved write scope): ``connector_exists`` unions built-ins
+    (``tenant_id IS NULL``) with the operator's own rows, so both
+    write scopes #2085 permits are inside the probed set. Bound via
+    :func:`functools.partial` at the :func:`run_ingest_job` call.
+    """
+    probe_product, probe_version, probe_impl_id = parse_connector_id(result.connector_id)
+    return await connector_exists(
+        tenant_id=tenant_id,
+        product=probe_product,
+        version=probe_version,
+        impl_id=probe_impl_id,
     )
 
 
@@ -981,7 +1003,6 @@ async def _run_ingest_with_http_mapping(
     *,
     service: IngestionPipelineService,
     body: IngestRequest,
-    operator: Operator,
     catalog_entry: str | None = None,
     spec_info_versions_compatible: tuple[str, ...] | None = None,
 ) -> IngestionPipelineResult:
@@ -1014,13 +1035,17 @@ async def _run_ingest_with_http_mapping(
     assert body.version is not None, "post-resolution invariant: version must be set"
     assert body.impl_id is not None, "post-resolution invariant: impl_id must be set"
     try:
+        # Write scope is the body-resolved ``tenant_id`` (``None`` =
+        # built-in / global, #2085), matching the MCP surface's
+        # omit-equals-global semantics; the service-layer ``_authorize``
+        # rejects cross-tenant UUIDs with PermissionError → 403 below.
         return await service.ingest(
             product=body.product,
             version=body.version,
             impl_id=body.impl_id,
             specs=body.specs,
             base_url=body.base_url,
-            tenant_id=operator.tenant_id,
+            tenant_id=body.tenant_id,
             dry_run=body.dry_run,
             spec_info_versions_compatible=spec_info_versions_compatible,
         )

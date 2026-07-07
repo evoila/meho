@@ -103,20 +103,20 @@ __all__ = ["list_ingested_connectors", "next_step_for_registered_connector"]
 _log = structlog.get_logger(__name__)
 
 #: Tenant-scope guidance appended to every registered-row ``next_step``
-#: rationale (#1699). The suggested ``meho connector ingest`` verb drives
-#: ``POST /api/v1/connectors/ingest``, which always writes under the
-#: calling operator's tenant (the route exposes no ``tenant_id``);
-#: built-in / global ingest is only reachable via the MCP tool
-#: ``meho.connector.ingest`` with ``tenant_id`` omitted. Naming the
+#: rationale. The suggested ``meho connector ingest`` verb drives
+#: ``POST /api/v1/connectors/ingest``, which resolves an omitted / null
+#: body ``tenant_id`` to the built-in / global scope (#2085, matching
+#: the MCP tool ``meho.connector.ingest``'s omit-equals-global
+#: semantics; tenant_admin only). A tenant-scoped ingest requires the
+#: operator's own tenant UUID in the body's ``tenant_id``. Naming the
 #: split in the hint keeps an operator from populating one namespace and
 #: then re-ingesting into the other — the dedup lookup is scope-aware,
 #: so the second pass re-inserts every op as a shadow copy instead of
 #: skipping.
 _TENANT_SCOPE_GUIDANCE: Final[str] = (
-    "The verb writes under your own tenant scope (the CLI / REST ingest "
-    "surface exposes no tenant_id); for built-in / global scope use the "
-    "MCP tool meho.connector.ingest with tenant_id omitted (tenant_admin "
-    "only)."
+    "An omitted tenant_id means built-in / global scope on the CLI / "
+    "REST / MCP ingest surfaces alike (tenant_admin only); pass your "
+    "own tenant UUID as tenant_id for a tenant-scoped ingest."
 )
 
 

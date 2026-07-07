@@ -83,6 +83,7 @@ flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -117,6 +118,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SCHEDULED_RUN_NO_INPUT_CLASS",
+    "UNEXECUTABLE_RUNBOOK_CLASS",
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
@@ -129,7 +131,9 @@ __all__ = [
     "ModelFactory",
     "PydanticAgentRun",
     "ScheduledRunNoInputError",
+    "UnexecutableRunbookReferenceError",
     "default_model_factory",
+    "find_runbook_instruction",
     "prompt_is_effectively_empty",
 ]
 
@@ -142,6 +146,86 @@ _log = structlog.get_logger(__name__)
 #: ``"messages: at least one message is required"`` text every supported
 #: backend would otherwise surface). See :class:`ScheduledRunNoInputError`.
 SCHEDULED_RUN_NO_INPUT_CLASS = "scheduled_run_no_input"
+
+
+#: Machine-readable classification tag prefixed onto the ``agent_run.error``
+#: column when a run is refused because its prompt instructs the agent to
+#: execute a runbook it has no tool to execute (#2077). Greppable in logs
+#: and in the runs table — and stable enough for a caller to probe the run
+#: outcome object (``error.startswith(UNEXECUTABLE_RUNBOOK_CLASS)``) instead
+#: of parsing free text. See :class:`UnexecutableRunbookReferenceError`.
+UNEXECUTABLE_RUNBOOK_CLASS = "unexecutable_runbook_reference"
+
+#: Instruct-shaped runbook references (#2077). Two phrase orders are
+#: covered, both anchored on an imperative verb so a prompt that merely
+#: *mentions* runbooks ("answer questions about runbook authoring") does
+#: not trip the guard:
+#:
+#: * ``<verb> [the] runbook [template] [<slug>]`` — the observed repro
+#:   shape (``"use runbook <runbook-slug>"``); the slug is optional so a
+#:   generic "follow the runbook" instruction still fails closed.
+#: * ``<verb> [the] <slug> runbook`` — the reversed English form
+#:   ("run the disk-cleanup runbook").
+#:
+#: The slug alternative mirrors the runbook template slug contract
+#: (:data:`meho_backplane.kb.schemas.SLUG_PATTERN`, reused by
+#: :mod:`meho_backplane.runbooks.schemas`), matched case-insensitively
+#: because prompts are free prose. This is a best-effort boundary guard,
+#: not a parser: a phrasing it misses degrades to today's behaviour, a
+#: phrasing it catches turns a hallucinated success into an honest typed
+#: failure.
+_RUNBOOK_INSTRUCTION_RE: re.Pattern[str] = re.compile(
+    r"\b(?:use|run|execute|follow|start|apply|perform|invoke)\s+(?:(?:the|a|an)\s+)?"
+    r"(?:"
+    r"runbook\b(?:\s+template\b)?"
+    r"(?:(?:\s*:\s*|\s+)(?P<q1>[`'\"]?)(?P<slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q1))?"
+    r"|"
+    r"(?P<q2>[`'\"]?)(?P<pre_slug>[a-z](?:[a-z0-9.\-]*[a-z0-9])?)(?P=q2)\s+runbook\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: A captured slug token only counts as a *named* runbook when it is quoted
+#: (`` `x` `` / ``'x'`` / ``"x"``) or slug-structured (contains a digit, dot,
+#: or hyphen — the consumer runbook convention, e.g.
+#: ``vcenter-9.0-snapshot-revert``). A bare English word after the
+#: instruction ("use a runbook *to* remediate") is prose: the instruction is
+#: still unexecutable, just unnamed.
+_SLUG_STRUCTURE_RE: re.Pattern[str] = re.compile(r"[0-9.\-]")
+
+
+def find_runbook_instruction(*texts: str) -> str | None:
+    """Return the runbook a prompt instructs the agent to execute, if any.
+
+    Scans each of *texts* (the definition's system prompt and the run's
+    user inputs) for an instruct-shaped runbook reference — see
+    :data:`_RUNBOOK_INSTRUCTION_RE` for the covered phrase shapes. Returns
+    the referenced slug (lowercased), ``""`` when the instruction names no
+    specific runbook ("follow the runbook"), or ``None`` when no text
+    instructs runbook execution.
+
+    Detection is deliberately independent of whether the referenced
+    runbook *exists*: the failure being guarded (#2077) is "the agent has
+    no tool that can execute any runbook", which holds for present and
+    absent slugs alike. The caller intersects this with
+    :func:`~meho_backplane.agent.toolset.toolset_admits_runbook_execution`
+    before refusing the run.
+    """
+    for text in texts:
+        match = _RUNBOOK_INSTRUCTION_RE.search(text)
+        if match is None:
+            continue
+        slug = match.group("slug")
+        quote = match.group("q1")
+        if slug is None:
+            slug = match.group("pre_slug")
+            quote = match.group("q2")
+        if not slug:
+            return ""
+        if not quote and _SLUG_STRUCTURE_RE.search(slug) is None:
+            return ""
+        return slug.lower()
+    return None
 
 
 def prompt_is_effectively_empty(inputs: str) -> bool:
@@ -254,6 +338,45 @@ class ScheduledRunNoInputError(AgentRunError):
             f"{SCHEDULED_RUN_NO_INPUT_CLASS}: scheduled run for agent "
             f"{agent!r} has no usable user prompt (empty inputs); a "
             "scheduled trigger must supply a non-empty prompt",
+        )
+
+
+class UnexecutableRunbookReferenceError(AgentRunError):
+    """A run's prompt instructs runbook execution the agent cannot perform.
+
+    Raised (as a value — the invocation surface stringifies it onto the
+    ``agent_run.error`` column) when the run-start guard (#2077) finds an
+    instruct-shaped runbook reference in the system prompt or inputs while
+    the definition's toolset resolves **no** runbook-execution tool. Without
+    the guard such a run reaches the model with no way to act, takes zero
+    tool calls, and reports ``succeeded`` with a confabulated explanation
+    (the observed repro hallucinated *"the agent <slug> is not available in
+    this tenant"*) — a misleading outcome the operator then chases.
+
+    The message is prefixed with :data:`UNEXECUTABLE_RUNBOOK_CLASS` so the
+    refusal is machine-classifiable on the run outcome object, mirroring
+    :class:`ScheduledRunNoInputError` / :data:`SCHEDULED_RUN_NO_INPUT_CLASS`
+    (#1505). It also spells out *why* the path is closed rather than built:
+    runbook steps are confirm-gated by design (``meho.runbook.next``: only
+    the human operator may answer), so autonomous completion would violate
+    the runbook contract even if a tool existed.
+
+    Subclass of :class:`AgentRunError` so any caller that only handles the
+    seam's uniform failure type still classifies this refusal correctly.
+    """
+
+    def __init__(self, *, agent: str, runbook: str | None) -> None:
+        self.agent = agent
+        self.runbook = runbook or None
+        named = f" {runbook!r}" if runbook else ""
+        super().__init__(
+            f"{UNEXECUTABLE_RUNBOOK_CLASS}: no available tool to execute "
+            f"runbook{named}; agent {agent!r} was instructed to execute a "
+            "runbook but its toolset resolves no runbook-execution tool. "
+            "Runbooks are operator-driven — confirm-gated steps must be "
+            "answered by a human operator (meho.runbook.next) — so the run "
+            "is refused before any model call instead of degrading to a "
+            "fabricated answer."
         )
 
 

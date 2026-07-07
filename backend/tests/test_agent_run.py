@@ -47,6 +47,7 @@ from meho_backplane.agent import (
     AgentRunError,
     AgentRunStatus,
     PydanticAgentRun,
+    find_runbook_instruction,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
@@ -555,3 +556,47 @@ async def test_read_only_identity_gets_no_tools_in_loop(
     await runtime.result(handle)
 
     assert captured["tool_names"] == []
+
+
+# ---------------------------------------------------------------------------
+# Runbook-instruction detection (#2077)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The observed repro shape: verb + runbook + slug.
+        ("use runbook vcenter-9.0-snapshot-revert", "vcenter-9.0-snapshot-revert"),
+        ("Use the runbook `disk-cleanup`", "disk-cleanup"),
+        ("execute runbook: pf-restart", "pf-restart"),
+        ("Start runbook template pf-restart", "pf-restart"),
+        ("INVOKE THE RUNBOOK MEHO-EVICT", "meho-evict"),
+        # Reversed English order: verb + slug + runbook.
+        ("run the disk-cleanup runbook", "disk-cleanup"),
+        # Instructed but unnamed -> still unexecutable; empty slug sentinel.
+        ("Please follow the runbook, then report.", ""),
+        ("use a runbook to remediate", ""),
+        # Mentions without an execution instruction must NOT trip the guard.
+        ("answer questions about runbook authoring", None),
+        ("use the runbooks page to review history", None),
+        ("you summarize incident reports", None),
+        ("run the tests and report", None),
+        ("the runbook was used yesterday", None),
+    ],
+)
+def test_find_runbook_instruction_detects_instruct_shapes(
+    text: str,
+    expected: str | None,
+) -> None:
+    """Instruct-shaped runbook references are found; mere mentions are not."""
+    assert find_runbook_instruction(text) == expected
+
+
+def test_find_runbook_instruction_scans_every_text() -> None:
+    """The reference may live in the system prompt OR the run inputs."""
+    assert (
+        find_runbook_instruction("you are helpful", "please execute runbook disk-cleanup")
+        == "disk-cleanup"
+    )
+    assert find_runbook_instruction("you are helpful", "list open incidents") is None

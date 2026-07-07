@@ -90,6 +90,31 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — target secret_ref tenant-scope fail-fast + cause-named Vault denial
+
+- **`POST`/`PATCH /api/v1/targets*` (which `meho targets import` drives)
+  now reject an explicit `secret_ref` outside the operator's readable
+  per-tenant subtree** with a structured 422
+  (`kind="secret_ref_outside_tenant_scope"`) naming the constraint, the
+  rendered tenant prefix, and the exact expected
+  `tenants/<tenant_id>/<name>` path — a target with such a ref imported
+  clean and then failed every dispatch with an opaque Vault `permission
+  denied`. Semantics mirror the runtime tenant-scope guard
+  (segment-boundary match on the mount-pinned candidate); the derived
+  per-tenant default (#1723) and an explicit-null clear are untouched,
+  and the gate is a no-op when the guard is disabled
+  (`VAULT_KV_TENANT_SCOPE_PREFIX=""`). (#2091)
+- **An `hvac` `Forbidden` during dispatch now maps to the structured
+  `connector_vault_forbidden` error** instead of the bare
+  `connector_error: Forbidden` passthrough: the message names the
+  target's `secret_ref`, the likely out-of-subtree cause, the
+  per-tenant convention with the exact expected path, and the
+  stage-the-credential remediation — with an explicit warning that
+  widening the deploy-owned Vault policy is the wrong fix. A
+  target-less denial (typed `vault.*` op rejected by the Vault ACL)
+  gets a generic Vault-authorization shape; other hvac errors fall
+  through to `connector_error` unchanged. (#2091)
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

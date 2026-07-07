@@ -152,13 +152,30 @@ Detail payloads land in ``extras``. Codes:
   ``remediation_*`` clauses. Only TLS-verify failures are siphoned here;
   every other ``ConnectError`` (DNS, connection-refused, timeout) falls
   through to ``connector_error``.
+* ``connector_vault_forbidden`` -- the handler raised
+  :exc:`hvac.exceptions.Forbidden`: Vault answered ``permission denied``
+  under the operator's identity. #2091 (Initiative #2150), extending the
+  #1627/#1649 structured-cause pattern to the Vault-authorization
+  sibling. The load-bearing case is dispatch-time credential resolution
+  (``connectors/_shared/vault_creds.py`` reading ``target.secret_ref``):
+  a ref outside the readable per-tenant subtree (#1723) is the likely
+  cause, so the ``error`` names the target's ``secret_ref``, the
+  ``tenants/<tenant_id>/<name>`` convention, the exact expected path,
+  and the stage-the-credential remediation (never "widen the
+  deploy-owned Vault policy"). A typed ``vault.*`` op denied by the
+  Vault ACL itself gets the target-less generic shape. ``extras``
+  carries ``secret_ref`` / ``expected_secret_ref`` /
+  ``exception_class`` / ``exception_message``. Login-phase denials are
+  wrapped into the ``VaultClientError`` family before the handler sees
+  them and still fall through to ``connector_error``.
 * ``connector_error`` -- the connector / handler raised any other
   exception (any :exc:`httpx.HTTPStatusError` whose status is none of
   403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
   included, and the reducer / redaction middleware raised *any*
   exception -- the ``connector_unsupported`` / ``connector_http_403`` /
   ``connector_http_422`` / ``connector_auth_failed`` /
-  ``connector_tls_verify_failed`` classifications apply only to the
+  ``connector_tls_verify_failed`` / ``connector_vault_forbidden``
+  classifications apply only to the
   source-kind branch where connector code runs). The raised exception's
   class name lands in
   ``extras["exception_class"]``; the (length-capped) message in
@@ -206,6 +223,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 import httpx
+import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
@@ -238,6 +256,7 @@ from meho_backplane.operations._errors import (
     result_connector_http_422,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
+    result_connector_vault_forbidden,
     result_denied,
     result_handler_unreachable,
     result_invalid_params,
@@ -785,6 +804,16 @@ async def _run_branch_with_error_handling(
     ``connector_error: ConnectError``. Narrowed to TLS-verify failures;
     every other ``ConnectError`` (DNS, connection-refused, timeout) falls
     through to ``connector_error`` unchanged.
+
+    #2091 adds a ``connector_vault_forbidden`` catch for
+    :exc:`hvac.exceptions.Forbidden` -- Vault answering ``permission
+    denied`` during dispatch, whose load-bearing case is credential
+    resolution reading a ``target.secret_ref`` outside the readable
+    per-tenant subtree (#1723). The bare ``connector_error: Forbidden``
+    flatten read exactly like a missing Vault grant and invited the
+    wrong fix (widening the deploy-owned Vault policy); the structured
+    shape names the ref, the ``tenants/<tenant_id>/<name>`` convention,
+    and the stage-the-credential remediation instead.
     """
     try:
         return await _run_source_kind_branch(
@@ -982,6 +1011,58 @@ async def _run_branch_with_error_handling(
         if is_tls_verify_failure:
             return result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
         return result_connector_error(op_id, conn_exc, duration_ms)
+    except hvac.exceptions.Forbidden as vault_exc:
+        # #2091: Vault answering "permission denied" during dispatch is a
+        # classifiable authorization failure, not an unforeseen crash. The
+        # load-bearing case is credential resolution — the shared reader
+        # (``connectors/_shared/vault_creds.py``) reads ``target.secret_ref``
+        # under the operator's identity, and a ref outside the readable
+        # per-tenant subtree (#1723) surfaces as hvac's ``Forbidden``.
+        # Flattening it into the generic ``connector_error: Forbidden``
+        # below buried the cause in ``extras.exception_message``, reading
+        # exactly like a missing Vault grant (and inviting the wrong fix:
+        # widening the deploy-owned Vault policy). The structured
+        # ``connector_vault_forbidden`` names the target's ``secret_ref``
+        # and the per-tenant convention instead. A typed ``vault.*`` op
+        # denied by the Vault ACL itself lands here too (target-less
+        # message shape — the builder degrades gracefully). The arm sits
+        # ahead of the generic ``except Exception`` so the structured shape
+        # wins; ``hvac.exceptions.Forbidden`` is disjoint from every
+        # earlier arm's exception types. Login-phase denials never reach
+        # this arm — ``vault_client_for_operator`` wraps them into the
+        # ``VaultClientError`` family before the handler sees them.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        expected_secret_ref: str | None = None
+        target_name = getattr(target, "name", None)
+        if target_name:
+            # Call-time import on purpose (the ingest-arm precedent above):
+            # ``tenant_paths`` drags the vault ops module in via its
+            # imports, and the dispatcher must stay import-light.
+            from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+
+            try:
+                expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
+            except ValueError:
+                # Whitespace/slash-only target identity — no derivable
+                # leaf; the builder falls back to the convention template.
+                expected_secret_ref = None
+        return result_connector_vault_forbidden(
+            op_id,
+            vault_exc,
+            target,
+            duration_ms,
+            expected_secret_ref=expected_secret_ref,
+        )
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(

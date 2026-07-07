@@ -19,7 +19,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
-``connector_error``.
+``connector_vault_forbidden`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -48,6 +48,7 @@ __all__ = [
     "result_connector_http_422",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
+    "result_connector_vault_forbidden",
     "result_denied",
     "result_handler_unreachable",
     "result_invalid_params",
@@ -1022,6 +1023,117 @@ def result_connector_auth_failed(
         error=summary,
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_connector_vault_forbidden(
+    op_id: str,
+    exc: BaseException,
+    target: Any,
+    duration_ms: float,
+    expected_secret_ref: str | None = None,
+) -> OperationResult:
+    """Vault denied a read/write with **permission denied** during dispatch.
+
+    #2091 (Initiative #2150), the Vault-authorization sibling of
+    :func:`result_connector_http_403` (#1649) and
+    :func:`result_connector_auth_failed` (#1804). A dispatch whose
+    credential resolution reads the target's ``secret_ref`` from Vault
+    under the operator's identity
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`)
+    surfaces an out-of-subtree ref as :exc:`hvac.exceptions.Forbidden` —
+    Vault's opaque ``permission denied``. Routing it through
+    :func:`result_connector_error` flattened that into
+    ``connector_error: Forbidden`` with the cause buried in
+    ``extras["exception_message"]``, reading exactly like a missing
+    Vault grant — and the first instinct (widen the deploy-owned
+    ``meho-mcp`` Vault policy) is the wrong fix: the policy is re-applied
+    on every deploy, and the design stores a target's credential at the
+    per-tenant path ``tenants/<tenant_id>/<name>`` (#1723).
+
+    Two message shapes, keyed on whether the dispatch carried a target
+    with a configured ``secret_ref``:
+
+    * **credential resolution** (``target.secret_ref`` set) — names the
+      target's ``secret_ref``, states the likely cause (the ref is
+      outside the operator's readable per-tenant subtree), names the
+      canonical convention and the exact *expected_secret_ref* the
+      caller derived (:func:`~meho_backplane.connectors.vault.tenant_paths.tenant_secret_ref`),
+      and carries the stage-the-credential remediation plus the explicit
+      "do NOT widen the Vault policy" warning.
+    * **no target / no ref** (a typed ``vault.*`` op denied by the Vault
+      ACL itself) — a generic Vault-authorization cause naming the
+      operator-identity read and the tenant-scope convention, without
+      fabricating a ``secret_ref`` diagnosis that does not apply.
+
+    ``target`` is typed :class:`typing.Any` because the dispatcher
+    threads the live ORM/duck-typed target (or ``None``) through; only
+    ``.name`` / ``.secret_ref`` are read, with ``getattr`` guards so any
+    target shape degrades gracefully inside the never-raises error path.
+    The hvac exception text (``permission denied, on GET <url>``) names
+    only the operator-supplied path — no secret material — and tails the
+    operator-facing string under the :data:`_EXC_MESSAGE_CAP` discipline.
+    ``extras`` carries the machine-usable fields (``error_code`` /
+    ``secret_ref`` / ``expected_secret_ref`` / ``exception_class`` /
+    ``exception_message``) so an agent can branch without re-parsing the
+    text, per the #1141 convention.
+    """
+    msg = str(exc)
+    if len(msg) > _EXC_MESSAGE_CAP:
+        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    secret_ref = getattr(target, "secret_ref", None)
+    target_name = getattr(target, "name", None) or "the target"
+    if secret_ref:
+        expected_clause = (
+            f"stage the credential at {expected_secret_ref!r} on the 'secret' mount "
+            if expected_secret_ref is not None
+            else "stage the credential under 'tenants/<tenant_id>/<name>' on the 'secret' mount "
+        )
+        summary = (
+            f"connector_vault_forbidden: Vault denied the credential read for "
+            f"{target_name} (permission denied). The target's secret_ref "
+            f"{secret_ref!r} is most likely outside the operator's readable "
+            f"per-tenant subtree — the canonical layout stores a target's "
+            f"credential at 'tenants/<tenant_id>/<name>' (#1723, enforced by "
+            f"the rendered VAULT_KV_TENANT_SCOPE_PREFIX). To fix, "
+            f"{expected_clause}and update the target's secret_ref, then "
+            f"retry. Do NOT widen the backplane's Vault policy — it is "
+            f"deploy-owned and re-applied on every upgrade. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the "
+            f"namespace convention and "
+            f"docs/codebase/error-message-shape.md for the dispatch error "
+            f"convention."
+        )
+    else:
+        summary = (
+            "connector_vault_forbidden: Vault denied this operation "
+            "(permission denied) under the operator's identity. The "
+            "requested path is outside what the operator's Vault ACL policy "
+            "/ tenant scope grants — per-tenant secrets live under "
+            "'tenants/<tenant_id>/...' on the 'secret' mount (#1723). Check "
+            "the requested path against that convention and the deploy's "
+            "Vault policy for the meho role. See "
+            "docs/codebase/connectors-vault-tenant-scope.md for the "
+            "namespace convention and "
+            "docs/codebase/error-message-shape.md for the dispatch error "
+            "convention."
+        )
+    if msg:
+        # hvac renders Forbidden as "permission denied, on GET <url>" —
+        # the URL is the operator-supplied path, never secret material.
+        summary = f"{summary} Vault said: {msg}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_vault_forbidden",
+            "secret_ref": secret_ref,
+            "expected_secret_ref": expected_secret_ref,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+        },
     )
 
 

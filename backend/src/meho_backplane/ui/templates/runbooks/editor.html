@@ -124,12 +124,23 @@
   </div>
 
   {# ---------- Form ---------- #}
+  {#-
+    ``hx-disabled-elt`` is an inherited htmx attribute: without ``hx-disinherit``
+    every descendant htmx request (each step body's debounced preview POST)
+    would inherit the form's ``find button[type=submit]`` and resolve ``find``
+    from the textarea — which has no submit-button descendant — logging
+    ``The selector "find button[type=submit]" on hx-disabled-elt returned no
+    matches!`` once per preview POST. Disinheriting it here keeps the value on
+    the form's own submit (self, not inherited) while stopping the leak into
+    the per-step triggers.
+  -#}
   <form
     id="runbook-editor-form"
     hx-post="{{ submit_url }}"
     hx-target="#runbook-editor-form"
     hx-swap="none"
     hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+    hx-disinherit="hx-disabled-elt"
     x-on:submit="syncSteps()"
     x-bind:hx-disabled-elt="validationErrors().length > 0 ? 'find button[type=submit]' : null"
   >
@@ -396,10 +407,35 @@
     document.querySelectorAll(".runbook-step-body").forEach(enhanceTextarea);
   }
 
+  // htmx only scans the DOM it renders itself. A step cloned by Alpine's
+  // ``x-for`` is inserted outside the htmx request cycle, so its per-step
+  // ``hx-post="/ui/runbooks/preview"`` trigger never binds until the node is
+  // handed to ``htmx.process``. Processing the form root is idempotent —
+  // htmx skips nodes it has already initialised — so re-running it after every
+  // step add/remove and after each HTMX settle registers the new triggers
+  // without double-binding the existing ones.
+  function processSteps() {
+    if (typeof window.htmx === "undefined") {
+      return;
+    }
+    var form = document.getElementById("runbook-editor-form");
+    if (form) {
+      window.htmx.process(form);
+    }
+  }
+
+  // Mount CodeMirror on the step bodies AND register their htmx triggers.
+  // Both must run in every rescan hook: CodeMirror gives the textarea its
+  // editor, htmx.process binds the per-step live-preview POST.
+  function rescan() {
+    scanBodies();
+    processSteps();
+  }
+
   // Initial scan once the DOM (and Alpine's x-for) has rendered, plus a
   // rescan after HTMX settles new content and after Alpine adds a step.
   function init() {
-    scanBodies();
+    rescan();
   }
   if (document.readyState !== "loading") {
     // base.html scripts are deferred, so the DOM is parsed; give Alpine a
@@ -408,11 +444,11 @@
   } else {
     document.addEventListener("DOMContentLoaded", function () { setTimeout(init, 0); });
   }
-  document.body.addEventListener("htmx:afterSettle", scanBodies);
+  document.body.addEventListener("htmx:afterSettle", rescan);
   // Re-scan when a step is added/removed (Alpine re-renders the x-for).
   document.addEventListener("click", function (e) {
     if (e.target && e.target.closest && e.target.closest("#runbook-editor-form, [x-on\\:click]")) {
-      setTimeout(scanBodies, 0);
+      setTimeout(rescan, 0);
     }
   });
 })();

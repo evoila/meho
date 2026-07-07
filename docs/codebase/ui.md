@@ -2840,6 +2840,34 @@ differential), and to a 404 for an admin. The restricted placeholder
 carries only the slug the operator typed and epoch-sentinel timestamps —
 no real template metadata leaks.
 
+### Editor step-body preview (dynamic HTMX processing)
+
+Each step in the authoring editor (`editor.html` + `_step_fields.html`) is
+rendered inside an Alpine `<template x-for="(step, idx) in steps">` loop, and
+every step's Body textarea carries a debounced
+`hx-post="/ui/runbooks/preview"` that swaps the sibling
+`.runbook-step-preview` pane. htmx only binds `hx-*` attributes on DOM it
+renders itself; a step cloned by Alpine's `x-for` (a `+ Add step` click, or
+any step beyond the first on an edit) is inserted outside the htmx request
+cycle, so its preview trigger never binds until the node is handed to
+`htmx.process`. The `{% block scripts %}` init therefore runs a `rescan()`
+(CodeMirror mount **plus** `htmx.process` on the form root) on first render,
+on every `htmx:afterSettle`, and after each add/remove/reorder click.
+Processing the form root is idempotent — htmx skips nodes it has already
+initialised — so re-running it never double-binds the existing steps' preview
+POSTs. Without this every step after the first was inert (#2174; the first
+step worked only because it was present at htmx's initial page scan).
+
+`hx-disabled-elt` is an **inherited** htmx attribute, so the form's
+`x-bind:hx-disabled-elt="… ? 'find button[type=submit]' : null"` (which
+disables the submit button while client-side validation fails) would leak into
+each descendant preview POST — the textarea would resolve `find
+button[type=submit]` against itself, match nothing, and log
+`The selector "find button[type=submit]" on hx-disabled-elt returned no
+matches!` once per preview POST. The form carries
+`hx-disinherit="hx-disabled-elt"` to keep the value on its own submit while
+stopping the leak into the per-step triggers.
+
 ### Lifecycle fragment + HTMX wiring
 
 Each publish / deprecate action posts via HTMX. On the **detail** page it

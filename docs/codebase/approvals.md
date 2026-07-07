@@ -107,11 +107,33 @@ model, or resume endpoint):
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
+   **How to audit a break-glass self-approval (#2087).** There is
+   **no** `self_approved` field on the audit row — do not filter for
+   one. When break-glass is enabled and a self-approval goes through,
+   `_check_self_approval` (`approval_queue.py`) emits the structured
+   **log event** `approval_self_approval_break_glass` (WARNING, with
+   `approval_request_id`, `op_id`, `operator_sub`, `tenant_id`) and
+   returns; the decision audit row written by `approve_request` via
+   `_write_audit_row` carries the ordinary payload
+   (`approval_request_id`, `op_id`, `connector_id`, `principal_sub`,
+   `result_status`, `decision`, `reviewed_by`, optional `reason`).
+   A self-approval is therefore identified **on the ledger** as the
+   `approval.decision` row where the requester equals the approver —
+   `payload.principal_sub == payload.reviewed_by` (the approver's
+   `operator.sub`). A first-class `self_approved` audit marker would
+   be net-new, separately scoped work. Whether the deploy currently
+   allows self-approval at all is visible without grepping the values
+   file: `GET /ready` → `features.approval_queue.effective_posture`
+   is `"single_operator_break_glass"` when
+   `APPROVAL_ALLOW_SELF_APPROVAL=true`, `"four_eyes_enforced"`
+   otherwise (see `features.py::_approval_queue_block`).
+
    `APPROVAL_ALLOW_SELF_APPROVAL` is an **emergency** escape, not the
-   single-operator answer: enabling it posture-wide re-opens, for every
-   op, the single-account request+grant hole this guard closes.
-   Single-operator tenants should park their four-eyes writes under an
-   **agent-requester** (a distinct `principal_kind=agent` `sub`) instead
+   endorsed single-operator posture: enabling it posture-wide re-opens,
+   for every op, the single-account request+grant hole this guard
+   closes (#1401). Single-operator tenants should park their four-eyes
+   writes under an **agent-requester** (a distinct
+   `principal_kind=agent` `sub`) instead
    — see [Single-operator tenants: use an agent-requester, not
    break-glass](#single-operator-tenants-use-an-agent-requester-not-break-glass-1738)
    below.
@@ -152,7 +174,10 @@ so `approve_request` raises `self_approval_forbidden`. The break-glass
 switch `APPROVAL_ALLOW_SELF_APPROVAL` exists for that case — but it is an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
 re-opens, for every op, the single-account *request + grant* hole #1401
-was created to close.
+was created to close. Whether a deploy has it set is surfaced on
+`GET /ready` → `features.approval_queue.effective_posture`
+(`"single_operator_break_glass"` vs the default
+`"four_eyes_enforced"`, #2087).
 
 The everyday answer is an **agent-requester**: park the write under an
 **agent principal** (`principal_kind=agent`) rather than under the human.

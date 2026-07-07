@@ -1218,8 +1218,10 @@ NULL`, tenant_admin only), the operator's own tenant UUID targets
 their tenant-curated namespace, and any other UUID is rejected with
 a synchronous 403 by `IngestionPipelineService.authorize_scope` —
 run eagerly at the REST route on both the sync and async branches
-(before the async job row is created, #2208) and re-run inside
-`ingest()` as defence-in-depth. Under the previous #1699
+(before the async job row is created, #2208), eagerly in the MCP
+tool handler before its inline/async branch split (#2214, surfacing
+as a structured JSON-RPC `-32602` carrying the same message — MCP
+has no HTTP-403), and re-run inside `ingest()` as defence-in-depth. Under the previous #1699
 contract the REST route hard-coded the caller's JWT tenant, so a
 consumer following the MCP-documented "omit for global" body
 silently minted a caller-tenant shadow copy of an existing global
@@ -1568,7 +1570,15 @@ async branch creates its job row. Without the eager check the async
 branch returned 202 + a `failed` job minted under the *foreign*
 scope, which the caller's poll could never see (the job read gate
 is tenant-scoped), making "authz denied" indistinguishable from
-"pipeline crashed".
+"pipeline crashed". The MCP tool has the same eager gate (#2214):
+`_authorize_write_scope_or_invalid_params` in
+`mcp/tools/connector_ingest.py` runs the same predicate before the
+handler's inline/async branch split and maps the denial onto a
+structured `-32602` carrying the identical message (before that,
+the MCP sync path's `PermissionError` degraded to an opaque
+`-32603 "internal error: PermissionError"` via the dispatcher's
+generic catch-all, and the async path minted the unpollable
+foreign-scoped job).
 
 **Job storage is process-local.** The `IngestJobRegistry` keeps
 in-memory rows in an `OrderedDict` behind an `asyncio.Lock`,

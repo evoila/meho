@@ -47,6 +47,7 @@ from meho_backplane.agent import (
     AgentRunError,
     AgentRunStatus,
     PydanticAgentRun,
+    find_runbook_instruction,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
@@ -555,3 +556,68 @@ async def test_read_only_identity_gets_no_tools_in_loop(
     await runtime.result(handle)
 
     assert captured["tool_names"] == []
+
+
+# ---------------------------------------------------------------------------
+# Runbook-instruction detection (#2077)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The observed repro shape: verb + runbook + slug.
+        ("use runbook vcenter-9.0-snapshot-revert", "vcenter-9.0-snapshot-revert"),
+        ("Use the runbook `disk-cleanup`", "disk-cleanup"),
+        ("execute runbook: pf-restart", "pf-restart"),
+        ("Start runbook template pf-restart", "pf-restart"),
+        ("INVOKE THE RUNBOOK MEHO-EVICT", "meho-evict"),
+        # Reversed English order: verb + slug + runbook.
+        ("run the disk-cleanup runbook", "disk-cleanup"),
+        # Instructed but unnamed -> still unexecutable; empty slug sentinel.
+        ("Please follow the runbook, then report.", ""),
+        ("use a runbook to remediate", ""),
+        # Mentions without an execution instruction must NOT trip the guard.
+        ("answer questions about runbook authoring", None),
+        ("use the runbooks page to review history", None),
+        ("you summarize incident reports", None),
+        ("run the tests and report", None),
+        ("the runbook was used yesterday", None),
+        # Prohibitions: a negated instruct verb forbids execution — refusing
+        # here would claim the agent "was instructed to execute a runbook",
+        # the opposite of the prompt (iter-1 review, B1).
+        ("never run a runbook yourself; escalate to an operator", None),
+        ("do not execute runbook steps without approval", None),
+        ("don't execute the runbook without operator approval", None),
+        # Runbook-headed noun compounds: talking ABOUT runbook artifacts,
+        # not instructing execution (iter-1 review, B1).
+        ("You help operators use runbook templates effectively", None),
+        ("explain how to use runbook syntax", None),
+        ("help users run the runbook linter", None),
+        # Third-person prose: someone ELSE acts, not this agent (iter-1
+        # review, B1).
+        ("we run a runbook review process every week", None),
+        ("operators use the runbook to remediate", None),
+        # A rejected earlier mention must not mask a real later instruction
+        # (finditer scan, iter-1 review, B1).
+        (
+            "help users run the runbook linter, then use runbook disk-cleanup-1",
+            "disk-cleanup-1",
+        ),
+    ],
+)
+async def test_find_runbook_instruction_detects_instruct_shapes(
+    text: str,
+    expected: str | None,
+) -> None:
+    """Instruct-shaped runbook references are found; mere mentions are not."""
+    assert find_runbook_instruction(text) == expected
+
+
+async def test_find_runbook_instruction_scans_every_text() -> None:
+    """The reference may live in the system prompt OR the run inputs."""
+    assert (
+        find_runbook_instruction("you are helpful", "please execute runbook disk-cleanup")
+        == "disk-cleanup"
+    )
+    assert find_runbook_instruction("you are helpful", "list open incidents") is None

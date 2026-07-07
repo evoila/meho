@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — operator-console read-session token revalidation
+
+- The operator console's `/ui/*` read path now re-validates the
+  session's stored access token against the JWKS-cached JWT chain on a
+  drift-gated cadence (`UI_SESSION_READ_REVALIDATION_SECONDS`, default
+  300; `0` = every request), instead of authenticating reads off the
+  decrypted session row alone for the session's full absolute lifetime.
+  Past the threshold, an expired token silently refreshes through the
+  existing RFC 9700 rotation seam and a token the IdP no longer honours
+  (refresh grant rejected, signature/audience failure) bounces the
+  operator to login — bounding IdP-side revocation and role-demotion
+  lag on read renders to roughly the access-token TTL plus the
+  threshold. On a JWKS cache hit the added per-request cost is zero
+  outbound calls; long-lived SSE streams honour the same check on
+  (re)connect.
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.
@@ -145,6 +161,18 @@ connector-related release-notes line.
   operation and fails CI when an op declaring secret-shaped parameters
   is not pinned to a `credential_*` class. Benign write broadcasts
   keep their full mutation detail.
+
+- Hardened Tier-1 redaction at the connector boundary and the dispatch
+  error path. The `authorization_header` / `bearer_token` / `api_key`
+  named patterns now capture a labelled secret's value to its natural
+  delimiter (whitespace / closing quote / end of blob) instead of
+  stopping at the first punctuation byte, so punctuated values are
+  redacted whole. The `operations/_errors.py` result builders now run
+  every free-text diagnostic (`exception_message`, `upstream_message`,
+  `detail`, and the summary tails built from them) through the Tier-1
+  redactor **before** the 256-char cap, so a credential embedded in a
+  stringified connector exception or upstream error body no longer
+  reaches the response/audit envelope in cleartext.
 
 ## [0.19.0] - 2026-06-22
 

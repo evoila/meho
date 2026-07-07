@@ -52,20 +52,33 @@ the 302 location). BaseHTTPMiddleware spawns an anyio task wrapper
 that has complicated streaming + contextvar interactions; the
 ASGI-level pattern below is the canonical "wrap send" recipe.
 
-Why no session refresh here
----------------------------
+Session refresh vs read-path revalidation
+-----------------------------------------
 
 The RFC-9700-compliant refresh lives in
 :mod:`meho_backplane.ui.auth.refresh` (G0.25 #1694) and hooks in at
 :func:`require_ui_admin` -- the dependency that actually presents
 the access token to the JWT chain -- not in this middleware. Doing
-the refresh inside the middleware would require the middleware to
-know which surface needs the access token (most ``/ui/*`` page
-renders do not), and would inflate the hot path's DB cost. The
-middleware only loads + validates the existing session row;
-token-consuming dependencies refresh proactively (row near
-``expires_at``) and reactively (JWT chain reports
-``token_expired``) through the refresh module's seams.
+the *unconditional* refresh inside the middleware would require the
+middleware to know which surface needs the access token (most
+``/ui/*`` page renders do not), and would inflate the hot path's DB
+cost. Token-consuming dependencies refresh proactively (row near
+``expires_at``) and reactively (JWT chain reports ``token_expired``)
+through the refresh module's seams.
+
+What the middleware *does* run, after every successful row load, is
+the **drift-gated read-path revalidation**
+(:func:`~meho_backplane.ui.auth.revalidation.revalidate_read_session`):
+when the session has not been revalidated within
+``ui_session_read_revalidation_seconds`` (default 300), the stored
+access token is re-presented to the JWT chain (an in-memory check on
+a JWKS cache hit; a refresh round-trip only once the token is past
+``exp``). A failed revalidation collapses to the same
+redirect-to-login as a missing session. This bounds the read path's
+IdP revocation / role-demotion lag to roughly the access-token TTL
+plus the drift threshold, instead of the 12 h absolute session
+lifetime -- see the revalidation module docstring for the exact
+accepted lag window.
 
 References
 ----------
@@ -92,6 +105,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 from meho_backplane.health import ui_readiness_verdict
 from meho_backplane.ui.audit import bind_ui_view_audit
+from meho_backplane.ui.auth.revalidation import revalidate_read_session
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
 
@@ -286,8 +300,10 @@ class UISessionMiddleware:
     # Pre-existing 132-line / C901-13 ASGI dispatch handler (cookie-parse →
     # session-load → readiness-stash → passthrough, read top-to-bottom).
     # #1776 only adds one call to the extracted `_stash_ui_readiness`
-    # helper; splitting the request lifecycle is out of scope for a
-    # readiness-pill fix. code-quality-allow: pre-existing oversize handler
+    # helper, and the read-path revalidation hardening adds one guarded
+    # call to the extracted `revalidate_read_session` helper; splitting
+    # the request lifecycle stays out of scope for both.
+    # code-quality-allow: pre-existing oversize handler
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         # Non-HTTP scopes (websocket, lifespan) pass through. The BFF
         # has no websocket surface in v0.2 and the lifespan must not
@@ -346,6 +362,13 @@ class UISessionMiddleware:
                                 ),
                             )
                         ).one_or_none()
+                if decrypted is not None:
+                    # Drift-gated token revalidation (read-path
+                    # revocation-lag bound -- see module docstring).
+                    # ``None`` means the stored token failed the JWT
+                    # chain terminally; collapse to the same
+                    # redirect-to-login as a missing session.
+                    decrypted = await revalidate_read_session(decrypted)
                 if decrypted is not None:
                     tenant_slug = tenant_row[0] if tenant_row is not None else None
                     tenant_name = tenant_row[1] if tenant_row is not None else None

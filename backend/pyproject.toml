@@ -18,6 +18,11 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.18.5",
     "jsonschema>=4.26.0",
+    # jsonschema asserts ``format: date-time`` only when this package is
+    # importable — the MCP tools/call gate passes
+    # ``Draft202012Validator.FORMAT_CHECKER`` and relies on the checker
+    # being registered (``format: uuid`` needs no extra dependency).
+    "rfc3339-validator>=0.1.4",
     "defusedxml>=0.7.1",
     "pgvector>=0.3,<1.0",
     "fastembed>=0.7,<1.0",
@@ -161,6 +166,7 @@ select = [
 "tests/test_mcp_resource_tenant_conventions.py" = ["F811"]
 "tests/test_mcp_initialize_instructions.py" = ["F811"]
 "tests/test_mcp_capability_gating.py" = ["F811"]
+"tests/test_mcp_inputschema_format_enforcement.py" = ["F811"]
 # A005 flags any module name that matches a stdlib module by short name,
 # regardless of package path. These two are namespaced under
 # `meho_backplane.*` and are never imported as bare `operator` / `logging`,

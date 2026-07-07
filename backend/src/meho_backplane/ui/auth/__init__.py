@@ -29,6 +29,14 @@ across four submodules so the layering is grep-explicit:
   row-near-expiry), ``verify_access_token_with_refresh`` (reactive,
   on ``token_expired``), and ``refresh_session_tokens`` (the locked
   RFC 6749 § 6 + RFC 9700 § 4.14 chokepoint both legs share).
+* :mod:`meho_backplane.ui.auth.revalidation` -- drift-gated read-path
+  token revalidation. The session middleware calls
+  ``revalidate_read_session`` after every successful row load; past
+  ``ui_session_read_revalidation_seconds`` without a validation, the
+  stored access token is re-presented to the JWT chain, bounding
+  IdP revocation / role-demotion lag on the read surfaces to
+  ~(access-token TTL + threshold) instead of the absolute session
+  lifetime.
 * :mod:`meho_backplane.ui.auth.errors` (G0.25 #1694) -- the
   app-level exception handler that maps the refresh path's terminal
   ``session_expired`` 401 to a ``/ui/auth/login`` redirect for HTML

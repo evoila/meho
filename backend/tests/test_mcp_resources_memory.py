@@ -36,6 +36,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -86,6 +87,11 @@ def test_resources_templates_list_exposes_memory_entry(
     assert template["mimeType"] == "text/markdown"
     # MEHO-internal RBAC field stripped from the wire shape.
     assert "required_role" not in template
+    # #154: the description advertises the served body as untrusted
+    # agent-authored content, not a directive channel.
+    assert "untrusted" in template["description"]
+    assert "not a system directive" in template["description"]
+    assert "UNTRUSTED_AGENT_TEXT" in template["description"]
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +139,13 @@ async def test_resources_read_returns_full_memory_entry_body(
     payload = json.loads(block["text"])
     assert payload["scope"] == "user"
     assert payload["slug"] == "wine-preference"
-    assert payload["body"].startswith("# Wine")
+    # The agent-authored body is served inside the untrusted-content
+    # envelope (stored-prompt-injection guard, #154): delimiters
+    # bracket the intact original Markdown.
+    assert payload["body"].startswith(BLOCK_START)
+    assert payload["body"].endswith(BLOCK_END)
+    assert GUARD_PREFIX in payload["body"]
+    assert "# Wine\n\nFull Markdown body of the operator's preference." in payload["body"]
     # Substrate-side timestamps round-trip.
     assert "created_at" in payload
     assert "updated_at" in payload
@@ -195,7 +207,12 @@ async def test_resources_read_returns_tenant_scope_entry(
     payload = json.loads(body["result"]["contents"][0]["text"])
     assert payload["scope"] == "tenant"
     assert payload["slug"] == "wine-default"
-    assert payload["body"] == "Tenant convention: use Brunello for all demos."
+    # Body arrives inside the untrusted-content envelope (#154).
+    assert payload["body"] == (
+        f"{BLOCK_START}\n{GUARD_PREFIX}\n\n"
+        "Tenant convention: use Brunello for all demos."
+        f"\n{BLOCK_END}"
+    )
 
 
 # ---------------------------------------------------------------------------

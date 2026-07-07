@@ -68,10 +68,15 @@ dispatcher's `connector_error` branch.
 ## Control flow
 
 1. **Fail closed on empty JWT.** If `operator.raw_jwt` is empty (a
-   system-initiated call — topology scheduler, readiness probe), raise
+   system-initiated call — topology scheduler, readiness probe, the
+   runbook verify dispatch's synthetic operator built by
+   `runbooks/run_service.py::_build_operator_for_dispatch`), raise
    `VaultCredentialsReadError` *before* touching Vault. The decision's
    system-call carve-out: such calls cannot perform an operator-context
    read and must error, never silently fall back to a backplane identity.
+   Synthetic operators must carry `raw_jwt=""` — a non-empty placeholder
+   would sail past this guard and forward an invalid string to Vault's
+   JWT/OIDC login (a live network round-trip before rejection).
 2. **Reject unset `secret_ref`.** A target with `secret_ref=None` is
    unconfigured → `VaultCredentialsReadError`.
 3. **Reject an API-path-shaped `secret_ref`.** `secret_ref` must be the

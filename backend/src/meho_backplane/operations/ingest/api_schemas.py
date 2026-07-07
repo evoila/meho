@@ -155,8 +155,8 @@ class IngestRequest(BaseModel):
     ``catalog_entry`` alongside any of ``product`` / ``version`` /
     ``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at
     the validator below. A body that sets neither fails 422
-    ``ingest_request_underspecified``. ``base_url`` and ``dry_run``
-    are accepted in both shapes.
+    ``ingest_request_underspecified``. ``base_url``, ``dry_run``, and
+    ``tenant_id`` are accepted in both shapes.
 
     ``dry_run=True`` skips both the DB writes and the grouping pass:
     only :func:`parse_openapi` runs, and the response carries
@@ -168,6 +168,19 @@ class IngestRequest(BaseModel):
     registered :class:`GenericRestConnector` shim; ``None`` leaves
     the shim unconfigured (the connector's eventual hand-coded
     subclass at G3.x will set its own base URL).
+
+    ``tenant_id`` selects the write scope (#2085): ``None`` — whether
+    the field is omitted or explicitly ``null`` — targets the
+    built-in / global scope (``tenant_id IS NULL``), the same
+    omit-equals-global semantics the MCP sibling
+    ``meho.connector.ingest`` documents. The operator's own tenant
+    UUID targets their tenant-curated namespace; any other UUID is
+    rejected 403 by :meth:`IngestionPipelineService._authorize`.
+    Before #2085 the REST route resolved omission to the *caller's
+    tenant*, diverging from the MCP surface — a consumer pasting the
+    MCP-documented body into REST silently minted a tenant-scoped
+    shadow copy of an existing global row (the dedup lookup is
+    scope-aware and never matches across scopes).
 
     ``extra="forbid"`` rejects unknown body fields with 422
     ``extra_forbidden`` (G0.9-T2 / #729) — silent-drop on a typo
@@ -183,6 +196,23 @@ class IngestRequest(BaseModel):
     specs: list[SpecSource] = Field(default_factory=list, max_length=16)
     catalog_entry: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, max_length=2048)
+    #: Write scope for the ingested rows (#2085). The description below
+    #: is load-bearing: it renders into the OpenAPI request schema (and
+    #: the CLI's generated types), and the cross-surface parity test
+    #: asserts it states the same omission semantics as the MCP tool
+    #: description in ``mcp/tools/connector_ingest.py``.
+    tenant_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Write scope for the ingested connector rows. Omit or pass "
+            "null to ingest under the built-in / global scope "
+            "(tenant_id IS NULL) — the same omit-equals-global "
+            "semantics as the MCP tool meho.connector.ingest "
+            "(tenant_admin only). Pass your own tenant UUID for a "
+            "tenant-scoped ingest; another tenant's UUID is rejected "
+            "with 403."
+        ),
+    )
     #: Explicit-quadruple counterpart to the catalog row's
     #: :attr:`ConnectorSpecEntry.spec_info_versions_compatible` opt-in
     #: (G0.16-T5 #1307). Lets an operator running the manual ``--spec``

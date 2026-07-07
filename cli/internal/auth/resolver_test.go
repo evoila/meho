@@ -81,6 +81,10 @@ func TestParseResolveEntriesRejectsMalformed(t *testing.T) {
 		{"port-zero", "kc.example.com:0:10.0.0.5", "range 1-65535"},
 		{"port-out-of-range", "kc.example.com:65536:10.0.0.5", "range 1-65535"},
 		{"negative-port", "kc.example.com:-1:10.0.0.5", "numeric TCP port"},
+		// Atoi accepts a leading sign / leading zeros, but the dial address
+		// never carries either spelling — such an entry would be inert.
+		{"signed-port", "kc.example.com:+443:10.0.0.5", "numeric TCP port"},
+		{"leading-zero-port", "kc.example.com:0443:10.0.0.5", "numeric TCP port"},
 		// The format is front-split (host = everything before the first
 		// colon), so an IPv6 literal cannot appear in the host position;
 		// it gets an explicit error, not a confusing port/IP one.

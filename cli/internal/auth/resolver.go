@@ -96,7 +96,10 @@ func splitResolveEntry(raw string) (host, port, ip string, err error) {
 	// the transport's dial address, which always carries a numeric port —
 	// a named port would key the map as "host:https", never match, and
 	// the pin would be silently ignored. Reject it loudly instead.
-	if portNum, convErr := strconv.Atoi(port); convErr != nil || portNum < 1 || portNum > 65535 {
+	// The canonical-spelling check (Itoa round-trip) closes the same gap
+	// for "+443" / "0443": Atoi accepts them, but the dial address never
+	// carries a sign or leading zeros, so they would key an inert entry.
+	if portNum, convErr := strconv.Atoi(port); convErr != nil || portNum < 1 || portNum > 65535 || strconv.Itoa(portNum) != port {
 		return "", "", "", fmt.Errorf("port %q is not a numeric TCP port in the range 1-65535 (named services such as \"https\" are not supported)", port)
 	}
 	// Accept a bracketed IPv6 literal on the IP side for symmetry with

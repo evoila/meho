@@ -45,11 +45,11 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from meho_backplane.connectors.bind9 import Bind9Connector
+from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
 # Docker availability -- mirrors tests/integration/conftest.py heuristic
@@ -76,7 +76,11 @@ class _Bind9Target:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). This lane has no Vault, so the
+    # autouse ``_container_vault_secrets`` fixture routes
+    # ``SshConnector._resolve_secret`` through an in-memory registry that
+    # returns the container-local credentials.
+    secret_ref: str
     # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
     # id)``); a double missing either field raises ``AttributeError`` the
     # moment it reaches the pool. This testcontainers lane is the only one
@@ -88,6 +92,31 @@ class _Bind9Target:
     def __post_init__(self) -> None:
         if not self.id:
             self.id = f"id-{self.name}"
+
+
+#: The container-local root password. The bind9 container's sshd + sudo
+#: both accept it; the write-op tests pass it explicitly to
+#: ``_remote_bash_with_sudo`` and the auth path resolves it from the
+#: stubbed Vault secret.
+_CONTAINER_PASSWORD: str = "testpw"  # NOSONAR -- container-local, torn down per module
+
+#: KV-v2 path the container target carries in ``secret_ref``; the autouse
+#: fixture registers the resolved credential dict under it.
+_CONTAINER_SECRET_PATH: str = "meho/testing/bind9/container"
+
+
+@pytest.fixture(autouse=True)
+def _container_vault_secrets() -> Iterator[None]:
+    """Route ``SshConnector._resolve_secret`` to the container credentials.
+
+    The container lane exercises the real SSH pool but has no Vault; the
+    stub returns the same ``{username, password}`` the pre-#2155 embedded
+    ``secret_ref`` dict carried.
+    """
+    with stub_ssh_vault_secrets(
+        {_CONTAINER_SECRET_PATH: {"username": "root", "password": _CONTAINER_PASSWORD}}
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +260,7 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
                 name="bind9-test",
                 host=host,
                 port=port,
-                secret_ref={"username": "root", "password": "testpw"},  # NOSONAR -- container-local
+                secret_ref=_CONTAINER_SECRET_PATH,
             )
             yield target
         finally:
@@ -485,7 +514,7 @@ async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -
         "print(h.hexdigest())\n"
     )
     cmd = f"python3 -c {shlex.quote(probe_script)}"
-    proc = await connector._run_command(target, cmd, raw_jwt="")
+    proc = await connector._run_command(target, cmd, operator=None)
     exit_status = getattr(proc, "exit_status", 0)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     digest = stdout.strip() if isinstance(stdout, str) else ""
@@ -634,8 +663,7 @@ async def test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged
             await atomic_apply(
                 connector,
                 bind9_container_target,
-                raw_jwt="",
-                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                sudo_password=_CONTAINER_PASSWORD,
                 audit_slice_path="/etc/bind/db.evba.lab",
                 zone_name="evba.lab",
                 # Stage a syntactically valid zonefile so checkzone passes
@@ -699,8 +727,7 @@ async def test_atomic_apply_rollback_on_checkzone_failure_leaves_tree_unchanged(
             await atomic_apply(
                 connector,
                 bind9_container_target,
-                raw_jwt="",
-                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                sudo_password=_CONTAINER_PASSWORD,
                 audit_slice_path="/etc/bind/db.evba.lab",
                 zone_name="evba.lab",
                 # Garbage zonefile -- named-checkzone refuses to load
@@ -783,7 +810,7 @@ async def test_config_backup_against_real_bind9_creates_archive(
         # robust if the path schema ever picks up a wider character
         # class (e.g. tag pattern relaxed in a future op).
         cmd = f"ls -1 {shlex.quote(result['path'])}"
-        proc = await connector._run_command(bind9_container_target, cmd, raw_jwt="")
+        proc = await connector._run_command(bind9_container_target, cmd, operator=None)
         ls_stderr = getattr(proc, "stderr", "")
         assert proc.exit_status == 0, (
             f"backup file missing: ls exit={proc.exit_status} stderr={ls_stderr!r}"
@@ -879,7 +906,7 @@ async def test_config_apply_views_against_real_bind9_lands_multi_file_tree(
         assert "/etc/bind/named.conf.smoke" in result["files"]
         # The fragment we deposited must be on disk -- cat it back.
         cat_proc = await connector._run_command(
-            bind9_container_target, "cat /etc/bind/named.conf.smoke", raw_jwt=""
+            bind9_container_target, "cat /etc/bind/named.conf.smoke"
         )
         assert cat_proc.exit_status == 0
         assert "smoke fragment" in (cat_proc.stdout or "")

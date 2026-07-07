@@ -73,18 +73,17 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). The connector in this suite is
+    # a MagicMock, so the path is never resolved — it exists to keep the
+    # target shape contract-honest.
+    secret_ref: str
 
 
 _TARGET = _StubTarget(
     name="holorouter-lab",
     host="holorouter.test.invalid",
     port=22,
-    secret_ref={
-        "username": "root",
-        # Canary password the secret-leak assertions key on.
-        "password": "holodeck-canary-password-xyz",  # NOSONAR
-    },
+    secret_ref="meho/testing/holodeck/holorouter-lab",
 )
 
 
@@ -205,8 +204,10 @@ async def test_pwsh_run_calls_run_command_with_encoded_command_argv() -> None:
     assert target_arg is _TARGET
     expected_encoded = encode_pwsh_command(script)
     assert cmd_arg == (f"pwsh -NoProfile -NonInteractive -EncodedCommand {expected_encoded}")
-    # raw_jwt / timeout are forwarded as kwargs.
-    assert kwargs.get("raw_jwt") == ""
+    # operator / timeout are forwarded as kwargs; no operator threaded
+    # here, so the helper forwards None (fails closed at Vault in prod).
+    assert "operator" in kwargs
+    assert kwargs.get("operator") is None
     assert "timeout" in kwargs
 
 

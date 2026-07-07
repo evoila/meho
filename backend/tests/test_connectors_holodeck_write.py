@@ -85,14 +85,16 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). The unit-level handler tests
+    # patch ``_run_command``, so the path is never resolved.
+    secret_ref: str
 
 
 _TARGET = _StubTarget(
     name="holorouter-write-test",
     host="holorouter.test.invalid",
     port=22,
-    secret_ref={"username": "root", "password": "write-canary-pw"},  # NOSONAR canary
+    secret_ref="meho/testing/holodeck/holorouter-write-test",
 )
 
 
@@ -457,7 +459,7 @@ async def _seed_target(host: str, port: int) -> TargetORM:
 
 def _wire_seeded_connector() -> HolodeckConnector:
     class _SeededHolodeckConnector(HolodeckConnector):  # type: ignore[misc]
-        async def _auth_config(self, target: Any) -> dict[str, Any]:
+        async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
             return {"username": "root", "client_keys": [_CLIENT_KEY], "known_hosts": None}
 
     instance = _SeededHolodeckConnector()

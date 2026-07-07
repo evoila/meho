@@ -142,11 +142,15 @@ def encode_pwsh_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
+# code-quality-allow: pre-existing ~101-line helper; the length is the
+# parameter-contract + encoding-convention docstring, not logic complexity —
+# the #2155 operator-threading param is a minimal, out-of-scope-to-refactor add.
 async def pwsh_run(
     connector: Any,
     target: Any,
     script: str,
     *,
+    operator: Any = None,
     depth: int = PWSH_DEFAULT_DEPTH,
     timeout: float = 30.0,
 ) -> Any:
@@ -169,6 +173,9 @@ async def pwsh_run(
         for deep cmdlet outputs); the helper does not append the
         conversion itself because some ops construct multi-statement
         scripts where only the final pipeline produces the JSON.
+    operator
+        Forwarded to ``_run_command`` for the operator-context Vault
+        credential read on an SSH pool miss; ``None`` fails closed.
     depth
         Advisory — surfaced as the recommended ``-Depth`` value via
         :data:`PWSH_DEFAULT_DEPTH`. The helper itself does not rewrite
@@ -194,7 +201,7 @@ async def pwsh_run(
     encoded = encode_pwsh_command(script)
     cmd = f"pwsh -NoProfile -NonInteractive -EncodedCommand {encoded}"
 
-    proc = await connector._run_command(target, cmd, raw_jwt="", timeout=timeout)
+    proc = await connector._run_command(target, cmd, operator=operator, timeout=timeout)
 
     stdout: str = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stderr: str = (proc.stderr or "") if hasattr(proc, "stderr") else ""

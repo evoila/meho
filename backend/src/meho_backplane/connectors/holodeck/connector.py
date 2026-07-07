@@ -67,6 +67,8 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
@@ -259,19 +261,35 @@ class HolodeckConnector(SshConnector):
         interpolate ``target.secret_ref`` fields into the PowerShell
         text.
 
-        ``operator`` exists for ABC parity (G0.16-T4 #1306) — Holodeck
-        authenticates via SSH key, not Vault OIDC, so the route operator
-        plays no role here.
+        ``operator`` is threaded to the SSH adapter's
+        :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._auth_config`,
+        which resolves ``target.secret_ref`` (a Vault KV-v2 path string)
+        under the operator's identity on an SSH pool miss (#2155).
+        ``None`` (background callers) fails closed at Vault and maps to
+        ``reachable=False``.
         """
-        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
         # Phase 1: read /etc/photon-release. Failure here is a hard
         # fingerprint failure -- there's no Photon-less Holodeck shape
-        # to fall back to.
+        # to fall back to. The catch tuple covers the transport
+        # (OSError / asyncssh.Error) plus the credential-resolution
+        # failures _auth_config raises: the two-phase Vault contract
+        # (VaultClientError login-phase, VaultCredentialsReadError
+        # read-phase) and ValueError (secret carries neither key nor
+        # password) — an unresolvable credential is an unreachable
+        # target, not an unhandled exception (#986 discipline).
         try:
-            photon_proc = await self._run_command(target, "cat /etc/photon-release", raw_jwt="")
-        except (OSError, asyncssh.Error) as exc:
+            photon_proc = await self._run_command(
+                target, "cat /etc/photon-release", operator=operator
+            )
+        except (
+            OSError,
+            asyncssh.Error,
+            ValueError,
+            VaultClientError,
+            VaultCredentialsReadError,
+        ) as exc:
             _log.warning(
                 "holodeck_fingerprint_unreachable",
                 target=getattr(target, "name", None),
@@ -299,6 +317,7 @@ class HolodeckConnector(SshConnector):
                 self,
                 target,
                 "Get-HoloDeckConfig | ConvertTo-Json -Compress",
+                operator=operator,
             )
         except PwshRunError as exc:
             _log.warning(
@@ -386,18 +405,22 @@ class HolodeckConnector(SshConnector):
 
         # Order matters: PermissionDenied (subclass of DisconnectError)
         # must be caught before DisconnectError; OSError is the TCP-
-        # level failure. ValueError from _auth_config (missing
-        # credentials) folds into ssh_auth_failed -- the operator's
-        # remediation is the same as for a rejected password.
+        # level failure. Credential-resolution failures fold into
+        # ssh_auth_failed: ValueError (secret carries neither key nor
+        # password) and the Vault two-phase errors (VaultClientError /
+        # VaultCredentialsReadError). ``probe()`` carries no operator,
+        # so the Vault read runs under the synthesised system operator
+        # and fails closed — the operator's remediation is the same as
+        # for a rejected password: check the target's Vault secret.
         try:
-            await self._connect(target, raw_jwt="")
+            await self._connect(target)
         except asyncssh.PermissionDenied:
             return _result(False, "ssh_auth_failed")
         except asyncssh.DisconnectError:
             return _result(False, "ssh_auth_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except ValueError:
+        except (ValueError, VaultClientError, VaultCredentialsReadError):
             return _result(False, "ssh_auth_failed")
 
         # Photon health: ``/etc/photon-release`` must produce non-empty
@@ -405,7 +428,7 @@ class HolodeckConnector(SshConnector):
         # repointed the Holodeck target's Vault secret at a stock
         # Linux box) or a degraded appliance image.
         try:
-            photon_proc = await self._run_command(target, "cat /etc/photon-release", raw_jwt="")
+            photon_proc = await self._run_command(target, "cat /etc/photon-release")
         except (OSError, asyncssh.Error):
             return _result(False, "ssh_auth_failed")
         photon_raw = (photon_proc.stdout or "") if hasattr(photon_proc, "stdout") else ""
@@ -457,6 +480,7 @@ class HolodeckConnector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Return the Holodeck appliance's product/version/Photon snapshot.
 
@@ -471,7 +495,7 @@ class HolodeckConnector(SshConnector):
         verbatim into ``OperationResult.result``.
         """
         del params  # declared empty in schema; intentionally ignored
-        result = await self.fingerprint(target)
+        result = await self.fingerprint(target, operator)
         return {
             "vendor": result.vendor,
             "product": result.product,
@@ -485,6 +509,7 @@ class HolodeckConnector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.config.show`` (G3.8-T2 #854).
 
@@ -495,12 +520,13 @@ class HolodeckConnector(SshConnector):
             holodeck_config_show as _holodeck_config_show,
         )
 
-        return await _holodeck_config_show(self, target, params)
+        return await _holodeck_config_show(self, target, params, operator)
 
     async def pod_list(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.pod.list`` (G3.8-T2 #854).
 
@@ -516,12 +542,13 @@ class HolodeckConnector(SshConnector):
             holodeck_pod_list as _holodeck_pod_list,
         )
 
-        return await _holodeck_pod_list(self, target, params)
+        return await _holodeck_pod_list(self, target, params, operator)
 
     async def pod_info(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.pod.info`` (G3.8-T2 #854).
 
@@ -532,12 +559,13 @@ class HolodeckConnector(SshConnector):
             holodeck_pod_info as _holodeck_pod_info,
         )
 
-        return await _holodeck_pod_info(self, target, params)
+        return await _holodeck_pod_info(self, target, params, operator)
 
     async def service_list(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.service.list`` (G3.8-T2 #854).
 
@@ -548,12 +576,13 @@ class HolodeckConnector(SshConnector):
             holodeck_service_list as _holodeck_service_list,
         )
 
-        return await _holodeck_service_list(self, target, params)
+        return await _holodeck_service_list(self, target, params, operator)
 
     async def k8s_exec(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.k8s.exec`` (G3.8-T2 #854).
 
@@ -567,12 +596,13 @@ class HolodeckConnector(SshConnector):
             holodeck_k8s_exec as _holodeck_k8s_exec,
         )
 
-        return await _holodeck_k8s_exec(self, target, params)
+        return await _holodeck_k8s_exec(self, target, params, operator)
 
     async def logs_tail(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.logs.tail`` (G3.8-T2 #854).
 
@@ -583,12 +613,13 @@ class HolodeckConnector(SshConnector):
             holodeck_logs_tail as _holodeck_logs_tail,
         )
 
-        return await _holodeck_logs_tail(self, target, params)
+        return await _holodeck_logs_tail(self, target, params, operator)
 
     async def networking_show(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.networking.show`` (G3.8-T2 #854).
 
@@ -599,12 +630,13 @@ class HolodeckConnector(SshConnector):
             holodeck_networking_show as _holodeck_networking_show,
         )
 
-        return await _holodeck_networking_show(self, target, params)
+        return await _holodeck_networking_show(self, target, params, operator)
 
     async def disk_usage(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.disk.usage`` (G3.18-T1 #2153).
 
@@ -615,12 +647,13 @@ class HolodeckConnector(SshConnector):
             holodeck_disk_usage as _holodeck_disk_usage,
         )
 
-        return await _holodeck_disk_usage(self, target, params)
+        return await _holodeck_disk_usage(self, target, params, operator)
 
     async def k8s_pods_gc(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.k8s.pods.gc`` (G3.18-T2 #2154).
 
@@ -632,12 +665,13 @@ class HolodeckConnector(SshConnector):
             holodeck_k8s_pods_gc as _holodeck_k8s_pods_gc,
         )
 
-        return await _holodeck_k8s_pods_gc(self, target, params)
+        return await _holodeck_k8s_pods_gc(self, target, params, operator)
 
     async def backups_prune(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.backups.prune`` (G3.18-T2 #2154).
 
@@ -649,12 +683,13 @@ class HolodeckConnector(SshConnector):
             holodeck_backups_prune as _holodeck_backups_prune,
         )
 
-        return await _holodeck_backups_prune(self, target, params)
+        return await _holodeck_backups_prune(self, target, params, operator)
 
     async def images_import(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``holodeck.images.import`` (G3.18-T2 #2154).
 
@@ -666,7 +701,7 @@ class HolodeckConnector(SshConnector):
             holodeck_images_import as _holodeck_images_import,
         )
 
-        return await _holodeck_images_import(self, target, params)
+        return await _holodeck_images_import(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

@@ -55,6 +55,7 @@ from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.connector import parse_pfsense_version
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.settings import get_settings
+from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
 # Environment + registry fixtures
@@ -82,7 +83,9 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155) — resolved through the stubbed
+    # ``_resolve_secret`` seam against the module registry below.
+    secret_ref: str
     # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
     # id)``); a double missing either field hits ``AttributeError`` at the
     # pool (evoila/meho#1682). ``id`` defaults off ``name`` so distinct
@@ -95,32 +98,42 @@ class _StubTarget:
             self.id = f"id-{self.name}"
 
 
-_KEY_TARGET = _StubTarget(
-    name="pfsense-lab",
-    host="pfsense.test.invalid",
-    port=22,
-    secret_ref={
-        "username": "admin",
-        "ssh_private_key": None,  # replaced per-test with a real key
-    },
-)
+#: Path → secret-data registry the autouse ``_vault_secrets`` fixture
+#: routes ``SshConnector._resolve_secret`` through. Populated at module
+#: definition (for the shared targets below) and by ``_target_with_secret``
+#: inside tests; never cleared per-test so module-level targets stay
+#: resolvable.
+_VAULT_SECRETS: dict[str, dict[str, Any]] = {}
 
-_PASSWORD_ONLY_TARGET = _StubTarget(
-    name="pfsense-password-only",
-    host="pfsense.test.invalid",
-    port=22,
-    secret_ref={
+
+@pytest.fixture(autouse=True)
+def _vault_secrets() -> Iterator[None]:
+    with stub_ssh_vault_secrets(_VAULT_SECRETS):
+        yield
+
+
+def _target_with_secret(
+    name: str, secret: dict[str, Any], *, host: str | None = None, port: int | None = 22
+) -> _StubTarget:
+    secret_path = f"meho/testing/pfsense/{name}"
+    _VAULT_SECRETS[secret_path] = secret
+    return _StubTarget(
+        name=name,
+        host=host if host is not None else "pfsense.test.invalid",
+        port=port,
+        secret_ref=secret_path,
+    )
+
+
+_PASSWORD_ONLY_TARGET = _target_with_secret(
+    "pfsense-password-only",
+    {
         "username": "admin",
         "password": "webgui-breakglass",  # NOSONAR -- test only
     },
 )
 
-_NO_CREDS_TARGET = _StubTarget(
-    name="pfsense-no-creds",
-    host="pfsense.test.invalid",
-    port=22,
-    secret_ref={"username": "admin"},
-)
+_NO_CREDS_TARGET = _target_with_secret("pfsense-no-creds", {"username": "admin"})
 
 
 def _completed_process(stdout: str = "", exit_status: int = 0) -> Any:
@@ -206,12 +219,7 @@ async def test_auth_config_key_auth_returns_client_keys() -> None:
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
 
-    target = _StubTarget(
-        name="pfsense-key",
-        host="pfsense.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": pem},
-    )
+    target = _target_with_secret("pfsense-key", {"username": "admin", "ssh_private_key": pem})
     connector = PfSenseConnector()
     auth = await connector._auth_config(target)
     assert auth["username"] == "admin"
@@ -249,12 +257,9 @@ async def test_auth_config_defaults_username_to_admin() -> None:
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
 
-    target = _StubTarget(
-        name="pfsense-no-user",
-        host="pfsense.test.invalid",
-        port=None,
-        secret_ref={"ssh_private_key": pem},  # no "username"
-    )
+    target = _target_with_secret(
+        "pfsense-no-user", {"ssh_private_key": pem}, port=None
+    )  # no "username" in the secret
     connector = PfSenseConnector()
     auth = await connector._auth_config(target)
     assert auth["username"] == "admin"
@@ -322,12 +327,7 @@ async def test_fingerprint_parses_canonical_etc_version() -> None:
     """``/etc/version`` with version+build+kernel → canonical FingerprintResult."""
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
-    target = _StubTarget(
-        name="pfsense-fp",
-        host="pfsense.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": pem},
-    )
+    target = _target_with_secret("pfsense-fp", {"username": "admin", "ssh_private_key": pem})
 
     connector = PfSenseConnector()
     run_mock = AsyncMock(
@@ -347,11 +347,10 @@ async def test_fingerprint_parses_canonical_etc_version() -> None:
 
 async def test_fingerprint_unreachable_on_os_error() -> None:
     """``OSError`` from ``_run_command`` → ``reachable=False`` + ``extras["error"]``."""
-    target = _StubTarget(
-        name="pfsense-unreachable",
+    target = _target_with_secret(
+        "pfsense-unreachable",
+        {"username": "admin", "ssh_private_key": "fake"},
         host="dead.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": "fake"},
     )
     connector = PfSenseConnector()
     with patch.object(
@@ -370,11 +369,10 @@ async def test_fingerprint_unreachable_on_os_error() -> None:
 
 async def test_fingerprint_unreachable_on_ssh_error() -> None:
     """``asyncssh.Error`` from ``_run_command`` → ``reachable=False``."""
-    target = _StubTarget(
-        name="pfsense-ssh-error",
+    target = _target_with_secret(
+        "pfsense-ssh-error",
+        {"username": "admin", "ssh_private_key": "fake"},
         host="broken.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": "fake"},
     )
     connector = PfSenseConnector()
     perm_denied = asyncssh.PermissionDenied(reason="publickey auth failed")
@@ -600,17 +598,11 @@ async def test_per_target_connection_isolation() -> None:
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
 
-    target_a = _StubTarget(
-        name="pfsense-a",
-        host="pfsense-a.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": pem},
+    target_a = _target_with_secret(
+        "pfsense-a", {"username": "admin", "ssh_private_key": pem}, host="pfsense-a.test.invalid"
     )
-    target_b = _StubTarget(
-        name="pfsense-b",
-        host="pfsense-b.test.invalid",
-        port=22,
-        secret_ref={"username": "admin", "ssh_private_key": pem},
+    target_b = _target_with_secret(
+        "pfsense-b", {"username": "admin", "ssh_private_key": pem}, host="pfsense-b.test.invalid"
     )
 
     conn_a = MagicMock(name="conn_a")
@@ -638,8 +630,8 @@ async def test_per_target_connection_isolation() -> None:
             AsyncMock(return_value={"username": "admin", "client_keys": []}),
         ),
     ):
-        got_a = await connector._connect(target_a, raw_jwt="")
-        got_b = await connector._connect(target_b, raw_jwt="")
+        got_a = await connector._connect(target_a)
+        got_b = await connector._connect(target_b)
 
     assert got_a is conn_a
     assert got_b is conn_b

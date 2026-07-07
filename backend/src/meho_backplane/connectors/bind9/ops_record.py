@@ -73,10 +73,12 @@ import dns.rdatatype
 import dns.zone
 import structlog.contextvars
 
+from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.bind9._atomic import atomic_apply
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
 __all__ = [
@@ -255,6 +257,7 @@ async def bind9_record_get(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.record.get``.
 
@@ -292,7 +295,7 @@ async def bind9_record_get(
     # +noall +answer trims the wire output to only the answer
     # section so the parser sees a bounded payload.
     cmd = f"dig @localhost {shlex.quote(fqdn)} {record_type} +noall +answer +nocomments"
-    proc = await connector._run_command(target, cmd, raw_jwt="")
+    proc = await connector._run_command(target, cmd, operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     output = stdout if isinstance(stdout, str) else ""
     rows = parse_dig_answer(output)
@@ -486,6 +489,7 @@ async def _resolve_zone_via_checkconf(
     connector: Bind9Connector,
     target: Any,
     fqdn: str,
+    operator: Operator | None = None,
 ) -> tuple[str, str]:
     """Locate (zone_name, zonefile_path) for *fqdn* via ``named-checkconf -p``.
 
@@ -502,7 +506,7 @@ async def _resolve_zone_via_checkconf(
     )
 
     cmd = "named-checkconf -p"
-    proc = await connector._run_command(target, cmd, raw_jwt="")
+    proc = await connector._run_command(target, cmd, operator=operator)
     output = _require_zero_exit(proc, command=cmd)
     rows = parse_named_checkconf_zones(output)
     zone_names = [row["name"] for row in rows]
@@ -671,6 +675,7 @@ async def _resolve_zone_and_path(
     *,
     fqdn: str,
     explicit_zone: str | None,
+    operator: Operator | None = None,
 ) -> tuple[str, str]:
     """Return ``(zone_name, zonefile_path)`` for *fqdn*.
 
@@ -681,15 +686,18 @@ async def _resolve_zone_and_path(
     """
     if explicit_zone is not None:
         zone_name = explicit_zone.rstrip(".")
-        zonefile_path = await _resolve_zonefile_path_for_zone(connector, target, zone_name)
+        zonefile_path = await _resolve_zonefile_path_for_zone(
+            connector, target, zone_name, operator
+        )
         return zone_name, zonefile_path
-    return await _resolve_zone_via_checkconf(connector, target, fqdn)
+    return await _resolve_zone_via_checkconf(connector, target, fqdn, operator)
 
 
 async def _read_zonefile_text(
     connector: Bind9Connector,
     target: Any,
     zonefile_path: str,
+    operator: Operator | None = None,
 ) -> str:
     """Read the current zonefile text via ``cat`` (no sudo needed).
 
@@ -705,7 +713,7 @@ async def _read_zonefile_text(
     # cause (the file isn't readable). Route through the typed surface
     # so the dispatcher's connector_error envelope carries the actual
     # remote exit status + stderr.
-    cat_proc = await connector._run_command(target, cmd, raw_jwt="")
+    cat_proc = await connector._run_command(target, cmd, operator=operator)
     return _require_zero_exit(cat_proc, command=cmd)
 
 
@@ -713,6 +721,7 @@ async def bind9_record_add(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.record.add`` -- atomic A/AAAA record write.
 
@@ -752,11 +761,11 @@ async def bind9_record_add(
         )
     _validate_ip_for_type(ip, record_type)
 
-    sudo_password = _sudo_password_from_target(target)
+    sudo_password = await _sudo_password_from_target(connector, target, operator)
     zone_name, zonefile_path = await _resolve_zone_and_path(
-        connector, target, fqdn=fqdn, explicit_zone=explicit_zone
+        connector, target, fqdn=fqdn, explicit_zone=explicit_zone, operator=operator
     )
-    current_text = await _read_zonefile_text(connector, target, zonefile_path)
+    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
     try:
         new_text = _add_record_to_zonefile(
@@ -783,7 +792,7 @@ async def bind9_record_add(
     apply_result = await atomic_apply(
         connector,
         target,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         audit_slice_path=zonefile_path,
         zone_name=zone_name,
@@ -817,6 +826,7 @@ async def bind9_record_remove(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.record.remove`` -- atomic A/AAAA record remove.
 
@@ -830,11 +840,11 @@ async def bind9_record_remove(
     fqdn: str = params["fqdn"]
     explicit_zone: str | None = params.get("zone")
 
-    sudo_password = _sudo_password_from_target(target)
+    sudo_password = await _sudo_password_from_target(connector, target, operator)
     zone_name, zonefile_path = await _resolve_zone_and_path(
-        connector, target, fqdn=fqdn, explicit_zone=explicit_zone
+        connector, target, fqdn=fqdn, explicit_zone=explicit_zone, operator=operator
     )
-    current_text = await _read_zonefile_text(connector, target, zonefile_path)
+    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
     try:
         new_text = _remove_record_from_zonefile(
@@ -859,7 +869,7 @@ async def bind9_record_remove(
     apply_result = await atomic_apply(
         connector,
         target,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         audit_slice_path=zonefile_path,
         zone_name=zone_name,
@@ -886,6 +896,7 @@ async def _resolve_zonefile_path_for_zone(
     connector: Bind9Connector,
     target: Any,
     zone_name: str,
+    operator: Operator | None = None,
 ) -> str:
     """Look up the zonefile path for an explicit ``--zone`` arg.
 
@@ -899,7 +910,7 @@ async def _resolve_zonefile_path_for_zone(
     )
 
     cmd = "named-checkconf -p"
-    proc = await connector._run_command(target, cmd, raw_jwt="")
+    proc = await connector._run_command(target, cmd, operator=operator)
     output = _require_zero_exit(proc, command=cmd)
     try:
         return _resolve_zonefile_path(output, zone_name)
@@ -909,29 +920,32 @@ async def _resolve_zonefile_path_for_zone(
         raise ZoneResolutionError("unresolvable", fqdn=zone_name) from exc
 
 
-def _sudo_password_from_target(target: Any) -> str:
-    """Read the sudo password from the target's ``secret_ref``.
+async def _sudo_password_from_target(
+    connector: Bind9Connector, target: Any, operator: Operator | None = None
+) -> str:
+    """Resolve the sudo password from the target's Vault secret.
 
-    The :class:`Target` schema (v0.2) stores SSH credentials on a
-    target's ``secret_ref`` dict; the sudo password reuses the SSH
-    password by default (consumer-wrapper convention). A future iter
-    may key on a dedicated ``sudo_password`` field; the lookup here
-    falls back to ``password`` so existing target rows keep working.
+    ``target.secret_ref`` is a Vault KV-v2 path string (#2155);
+    resolution goes through the SSH adapter's
+    :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._resolve_secret`
+    under the operator's identity — the same seam SSH auth uses. The
+    sudo password reuses the SSH password by default
+    (consumer-wrapper convention): the lookup keys on a dedicated
+    ``sudo_password`` field first and falls back to ``password`` so
+    existing Vault secrets keep working.
 
     Raises :class:`ValueError` if no password is configured -- the
     safe-sudo primitive's invariant requires a non-empty single-line
     string and the connector cannot legitimately proceed otherwise.
     """
-    secret_ref = getattr(target, "secret_ref", None) or {}
-    if not isinstance(secret_ref, dict):
-        raise ValueError(f"target.secret_ref must be a dict; got {type(secret_ref).__name__}")
-    password = secret_ref.get("sudo_password") or secret_ref.get("password")
+    secret = await connector._resolve_secret(target, operator)
+    password = secret.get("sudo_password") or secret.get("password")
     if not password:
         raise ValueError(
-            "target.secret_ref carries no sudo_password / password; "
+            "the target's Vault secret carries no sudo_password / password; "
             "bind9 write ops require a sudo credential"
         )
-    return str(password)
+    return strip_credential_value(password)
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,9 @@ dispatcher's `connector_error` branch.
   401/`unauthorized_client` that reads like a permissions/realm problem
   (#1474). `_extract_fields` applies it to every field, so every
   `load_basic_credentials` consumer is covered at once; the payload-shape
-  discriminators that use `load_vault_secret_data` (keycloak / gh-rest) call
+  discriminators that use `load_vault_secret_data` (keycloak / gh-rest, and
+  the SSH adapter's `_resolve_secret` — key-vs-password selection plus the
+  bind9 sudo password, #2155) call
   it directly on the fields they pluck. Only surrounding whitespace is
   trimmed — internal whitespace is preserved.
 - **`VaultCredentialsReadError`** — read-phase failure (empty JWT, unset

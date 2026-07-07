@@ -118,9 +118,25 @@ required of operators today.
 
 The shipped connector's auth model is `shared_service_account` over
 either SSH password auth (the HoloRouter OVA default) or SSH key auth.
-The credential is stored in Vault at a per-host path under the operator
-tenant's KV-v2 mount, then materialized onto the target row's
-`secret_ref` column.
+The credential is stored in Vault at a per-host path under the
+KV-v2 mount; the target row's `secret_ref` column carries that **path
+string** (never the credential itself — the connector resolves the
+path under the calling operator's Vault identity on every SSH
+connect).
+
+Two constraints on the path (both break credential resolution when
+violated):
+
+1. **Mount-relative — no `secret/` prefix.** `secret_ref` is the
+   logical KV-v2 path relative to the mount. Vault's KV-v2 API
+   inserts the `/data/` segment itself, so a value that embeds the
+   mount (`secret/…`) double-resolves to `secret/data/secret/…` and
+   404s.
+2. **Inside the meho-readable subtree.** The backplane's Vault policy
+   grants operators read on `secret/meho/*` only (see
+   [vault-provisioning.md](vault-provisioning.md)) — stage the secret
+   under `meho/…` or the resolution fails with a Vault permission
+   error.
 
 ### Password auth (the v0.2 default)
 
@@ -129,7 +145,7 @@ typically have not installed SSH keys on the appliance.
 
 ```console
 $ meho vault kv put --target rdc-vault secret \
-    rdc-hetzner-dc/holodeck/holorouter-01 \
+    meho/rdc-hetzner-dc/holodeck/holorouter-01 \
     --data @holodeck_secret_ref.json
 ```
 
@@ -171,7 +187,9 @@ targets:
     product: holodeck
     host: 10.5.20.1
     port: 22
-    secret_ref: secret/rdc-hetzner-dc/holodeck/holorouter-01
+    # Mount-relative KV-v2 path inside the meho-readable subtree —
+    # no `secret/` prefix (see "Target + auth model" above).
+    secret_ref: meho/rdc-hetzner-dc/holodeck/holorouter-01
     auth_model: shared_service_account
 ```
 

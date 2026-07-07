@@ -27,7 +27,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `probe`, `execute`, `about`, and the 7 T2 read-op bound-method shims.
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
-  `ssh_private_key` in `target.secret_ref`; raises `ValueError` with a message
+  `ssh_private_key` in the target's **Vault secret** (`target.secret_ref` is a
+  KV-v2 path string resolved via the base adapter's `_resolve_secret`, #2155);
+  raises `ValueError` with a message
   naming the WebGUI break-glass credential when the key is absent. The
   `password` field in the Vault secret is the pfSense WebGUI break-glass
   credential and must never be used for SSH auth — pfSense's `admin` account
@@ -52,8 +54,10 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
 ### Auth
 
-`_auth_config` is called by the `SshConnector._connect` method before opening
-any TCP connection. It inspects `target.secret_ref`:
+`_auth_config(target, operator)` is called by the `SshConnector._connect`
+method before opening any TCP connection. It resolves `target.secret_ref`
+(a Vault KV-v2 path string) to the secret's data dict via the base
+adapter's `_resolve_secret` (operator-context Vault read, #2155), then:
 
 1. `ssh_private_key` present → parse via `asyncssh.import_private_key`, return
    `{username, client_keys=[key]}`.

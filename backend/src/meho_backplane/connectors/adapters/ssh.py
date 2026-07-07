@@ -6,14 +6,33 @@
 Every SSH-based connector (bind9, pfsense, Holodeck, etc.) inherits
 :class:`SshConnector` and overrides ``fingerprint``, ``probe``, and
 ``execute``. Auth is centralised — vendor connectors do not override
-``_auth_config``.
+``_auth_config`` (pfSense narrows it to key-only, but the Vault
+resolution itself stays here).
 
-**Auth flavours.** ``_auth_config`` reads ``target.secret_ref``:
+**Credential resolution.** ``target.secret_ref`` is a Vault KV-v2 path
+**string** (``Target.secret_ref`` is ``str | None``; the DB column is
+``Text``) — *not* an embedded credential dict (the bind9 anti-shape;
+see :mod:`meho_backplane.connectors._shared.vault_creds`). ``_auth_config``
+resolves the path to the secret's data dict via
+:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`
+under the request operator's identity — the same operator-context read
+every REST connector loader performs. ``load_vault_secret_data`` (not
+``load_basic_credentials``) because the SSH auth contract is
+*either/or*: a key-only secret legitimately has no ``password`` and a
+password-only secret no ``ssh_private_key``, while the named-fields
+loader requires every requested field to be present. Operator-less
+callers (readiness probe, ``probe()``) fall back to
+:func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`,
+whose placeholder JWT the live Vault JWT/OIDC auth method rejects —
+system-initiated calls cannot read per-target vendor credentials
+(fail-closed carve-out).
 
-* **Key auth (preferred):** ``secret_ref`` carries a ``ssh_private_key``
+**Auth flavours.** From the resolved secret data dict:
+
+* **Key auth (preferred):** the secret carries a ``ssh_private_key``
   field (PEM-encoded text) plus ``username``; the key is parsed via
   ``asyncssh.import_private_key`` and passed as ``client_keys``.
-* **Password auth (fallback):** ``secret_ref`` carries ``username`` and
+* **Password auth (fallback):** the secret carries ``username`` and
   ``password``; used when ``ssh_private_key`` is absent.
 * **Missing credentials:** raises :exc:`ValueError` immediately so callers
   fail fast rather than hitting an opaque asyncssh auth error.
@@ -43,7 +62,13 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.vault_creds import (
+    load_vault_secret_data,
+    strip_credential_value,
+)
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import FingerprintResult
 
@@ -94,30 +119,58 @@ class SshConnector(Connector):
         # in parallel. Keyed on the same tenant-unique tuple as the pool.
         self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    async def _auth_config(self, target: Target) -> dict[str, Any]:
-        """Extract auth kwargs from ``target.secret_ref``.
+    async def _resolve_secret(self, target: Target, operator: Operator | None) -> dict[str, Any]:
+        """Resolve ``target.secret_ref`` (a Vault KV-v2 path string) to the secret dict.
+
+        The single Vault seam for the SSH family — auth
+        (:meth:`_auth_config`) and any per-op credential need (the bind9
+        sudo password) resolve through here so tests and callers have one
+        place to stub. ``operator=None`` (readiness probe, ``probe()``)
+        falls back to the synthesised system operator, whose placeholder
+        JWT the live Vault JWT/OIDC auth method rejects — preserving the
+        "system-initiated calls cannot read per-target vendor
+        credentials" carve-out.
+
+        Raises
+        ------
+        meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError
+            Read-phase failure: unset ``secret_ref``, API-path-shaped
+            ``secret_ref``, empty operator JWT, malformed KV-v2 payload.
+        meho_backplane.auth.vault.VaultClientError
+            Login-phase failure (Vault unreachable, role/JWT denied —
+            including the synthesised system operator's placeholder JWT).
+        """
+        resolved = operator if operator is not None else synthesise_system_operator()
+        return await load_vault_secret_data(target, resolved)
+
+    async def _auth_config(
+        self, target: Target, operator: Operator | None = None
+    ) -> dict[str, Any]:
+        """Resolve ``target.secret_ref`` from Vault and derive auth kwargs.
 
         Returns ``{username, client_keys=[key]}`` for key auth, or
         ``{username, password}`` for password auth. Raises :exc:`ValueError`
-        when neither ``ssh_private_key`` nor ``password`` is present.
-
-        T5 (VaultConnector) will replace the direct dict access with a
-        Vault fetch once it lands; the auth-selection logic stays here.
+        when the resolved secret carries neither ``ssh_private_key`` nor
+        ``password``; Vault resolution failures propagate per
+        :meth:`_resolve_secret`'s two-phase error contract.
         """
-        secret: dict[str, Any] = getattr(target, "secret_ref", {}) or {}
-        username: str = secret.get("username", "root")
-        private_key_text: str | None = secret.get("ssh_private_key")
-        if private_key_text:
-            key = asyncssh.import_private_key(private_key_text)
+        secret = await self._resolve_secret(target, operator)
+        username: str = strip_credential_value(secret.get("username", "root"))
+        private_key_raw = secret.get("ssh_private_key")
+        if private_key_raw:
+            key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
             return {"username": username, "client_keys": [key]}
-        password: str | None = secret.get("password")
-        if password:
-            return {"username": username, "password": password}
+        password_raw = secret.get("password")
+        if password_raw:
+            return {"username": username, "password": strip_credential_value(password_raw)}
         raise ValueError(
-            f"target '{target.name}': secret_ref must include ssh_private_key or password"
+            f"target '{target.name}': the Vault secret at secret_ref must include "
+            "ssh_private_key or password"
         )
 
-    async def _connect(self, target: Target, raw_jwt: str) -> asyncssh.SSHClientConnection:
+    async def _connect(
+        self, target: Target, operator: Operator | None = None
+    ) -> asyncssh.SSHClientConnection:
         """Return a live SSH connection for *target*.
 
         Fast path (no lock): returns the cached connection when it is open
@@ -155,7 +208,7 @@ class SshConnector(Connector):
                     await conn.wait_closed()
                 del self._connections[cache_key]
 
-            auth_kwargs = await self._auth_config(target)
+            auth_kwargs = await self._auth_config(target, operator)
             conn = await asyncssh.connect(
                 target.host,
                 port=target.port or 22,
@@ -173,14 +226,17 @@ class SshConnector(Connector):
         target: Target,
         cmd: str,
         *,
-        raw_jwt: str,
+        operator: Operator | None = None,
         timeout: float = 30.0,
     ) -> asyncssh.SSHCompletedProcess:
         """Run *cmd* on *target* via the pooled SSH connection.
 
+        ``operator`` is threaded to :meth:`_connect` → :meth:`_auth_config`
+        for the operator-context Vault credential read on a pool miss;
+        ``None`` fails closed at Vault per :meth:`_resolve_secret`.
         Raises :exc:`asyncio.TimeoutError` when *timeout* is exceeded.
         """
-        conn = await self._connect(target, raw_jwt)
+        conn = await self._connect(target, operator)
         result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
         logger.info(
             "ssh_command_executed",

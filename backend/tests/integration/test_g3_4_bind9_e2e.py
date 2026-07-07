@@ -359,7 +359,7 @@ class _SeededBind9Connector(Bind9Connector):  # type: ignore[misc]
         super().__init__()
         self._test_creds = creds
 
-    async def _auth_config(self, target: Any) -> dict[str, Any]:
+    async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
         return {"username": self._test_creds.username, "password": self._test_creds.password}
 
 
@@ -552,14 +552,16 @@ async def bind9_e2e(
     _hr._CONNECTOR_INSTANCE_CACHE[Bind9Connector] = seeded_connector
 
     # Phase 7 — short-circuit the sudo-password resolvers. These are
-    # free functions on the ops_config / ops_record modules; the
-    # production resolver reads `target.secret_ref` as a dict, which
-    # it no longer is. Returning the container's password directly
-    # is the cleanest seam.
+    # module-level async helpers on ops_config / ops_record; the
+    # production resolver reads `target.secret_ref` (a Vault KV-v2 path
+    # string, #2155) via an operator-context Vault read, and this
+    # integration container has no Vault. Returning the container's
+    # password directly is the cleanest seam. The stub mirrors the
+    # production signature: async, ``(connector, target, operator=None)``.
     from meho_backplane.connectors.bind9 import ops_config as _ops_config
     from meho_backplane.connectors.bind9 import ops_record as _ops_record
 
-    def _container_sudo_password(_target: Any) -> str:
+    async def _container_sudo_password(_connector: Any, _target: Any, _operator: Any = None) -> str:
         return creds.password
 
     monkeypatch.setattr(_ops_config, "_sudo_password_for_target", _container_sudo_password)
@@ -729,7 +731,7 @@ async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -
         "print(h.hexdigest())\n"
     )
     cmd = f"python3 -c {shlex.quote(probe_script)}"
-    proc = await connector._run_command(target, cmd, raw_jwt="")
+    proc = await connector._run_command(target, cmd)
     exit_status = getattr(proc, "exit_status", 0)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     digest = stdout.strip() if isinstance(stdout, str) else ""

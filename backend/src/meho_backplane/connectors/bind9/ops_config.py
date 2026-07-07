@@ -109,10 +109,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog.contextvars
 
+from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.bind9._atomic import atomic_apply
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
 __all__ = [
@@ -221,6 +223,7 @@ async def bind9_config_show(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.show``.
 
@@ -242,7 +245,7 @@ async def bind9_config_show(
     a rejection.
     """
     requested: str = params["path"]
-    fingerprint = await connector.fingerprint(target)
+    fingerprint = await connector.fingerprint(target, operator)
     # The fingerprint extras carry the absolute ``named.conf`` path; the
     # *directory* of that file is the bind config root. The fallback
     # ``/etc/bind`` is the Debian-family default, which is the only
@@ -262,7 +265,7 @@ async def bind9_config_show(
     # spaces, ...); the ensure_path_under_root filter rejected control
     # bytes already, so the resulting quoted form is safe to splice
     # into the SSH command line.
-    proc = await connector._run_command(target, f"cat {shlex.quote(resolved)}", raw_jwt="")
+    proc = await connector._run_command(target, f"cat {shlex.quote(resolved)}", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
 
@@ -410,7 +413,9 @@ def pack_views_tar(
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_bind_root(connector: Bind9Connector, target: Any) -> str:
+async def _resolve_bind_root(
+    connector: Bind9Connector, target: Any, operator: Operator | None = None
+) -> str:
     """Return the absolute bind config root for *target*.
 
     Mirrors :func:`bind9_config_show`'s fingerprint-driven lookup.
@@ -418,7 +423,7 @@ async def _resolve_bind_root(connector: Bind9Connector, target: Any) -> str:
     the same way: read the fingerprint, take the directory part of
     ``extras["named_conf_path"]``, fall back to ``/etc/bind``.
     """
-    fingerprint = await connector.fingerprint(target)
+    fingerprint = await connector.fingerprint(target, operator)
     named_conf_path = fingerprint.extras.get("named_conf_path") or "/etc/bind/named.conf"
     if not isinstance(named_conf_path, str):
         raise ConfigPathRejectedError(
@@ -427,26 +432,30 @@ async def _resolve_bind_root(connector: Bind9Connector, target: Any) -> str:
     return posixpath.dirname(named_conf_path) or "/etc/bind"
 
 
-def _sudo_password_for_target(target: Any) -> str:
-    """Read the sudo password from the target's ``secret_ref``.
+async def _sudo_password_for_target(
+    connector: Bind9Connector, target: Any, operator: Operator | None = None
+) -> str:
+    """Resolve the sudo password from the target's Vault secret.
 
-    Re-uses the contract from
-    :mod:`meho_backplane.connectors.bind9.ops_record` -- the secret
-    keys (``sudo_password`` then ``password``) and the
-    :class:`ValueError` on missing-credential surface are identical.
-    Hoisted here as well so the config-write handlers don't take a
-    cross-module import dependency on a private helper.
+    Resolves ``target.secret_ref`` (a Vault KV-v2 path string) through
+    the SSH adapter's
+    :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._resolve_secret`
+    under the operator's identity — the same seam SSH auth uses — and
+    extracts ``sudo_password`` (falling back to ``password``, the
+    documented reuse of the SSH login credential). Re-uses the contract
+    from :mod:`meho_backplane.connectors.bind9.ops_record` -- the secret
+    keys and the :class:`ValueError` on missing-credential surface are
+    identical. Hoisted here as well so the config-write handlers don't
+    take a cross-module import dependency on a private helper.
     """
-    secret_ref = getattr(target, "secret_ref", None) or {}
-    if not isinstance(secret_ref, dict):
-        raise ValueError(f"target.secret_ref must be a dict; got {type(secret_ref).__name__}")
-    password = secret_ref.get("sudo_password") or secret_ref.get("password")
+    secret = await connector._resolve_secret(target, operator)
+    password = secret.get("sudo_password") or secret.get("password")
     if not password:
         raise ValueError(
-            "target.secret_ref carries no sudo_password / password; "
+            "the target's Vault secret carries no sudo_password / password; "
             "bind9 config-write ops require a sudo credential"
         )
-    return str(password)
+    return strip_credential_value(password)
 
 
 # Global-atomic-apply warning every write op surfaces in its description
@@ -475,6 +484,7 @@ async def bind9_config_apply_file(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.apply_file`` -- atomic single-fragment write.
 
@@ -500,9 +510,9 @@ async def bind9_config_apply_file(
     requested: str = params["path"]
     content: str = params["content"]
 
-    bind_root = await _resolve_bind_root(connector, target)
+    bind_root = await _resolve_bind_root(connector, target, operator)
     resolved_path = ensure_path_under_root(requested, bind_root)
-    sudo_password = _sudo_password_for_target(target)
+    sudo_password = await _sudo_password_for_target(connector, target, operator)
 
     # Verify predicate: the live-loaded config must still parse. A
     # bad fragment that passes the staged-tree parse but breaks the
@@ -513,7 +523,7 @@ async def bind9_config_apply_file(
     apply_result = await atomic_apply(
         connector,
         target,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         audit_slice_path=resolved_path,
         # zone_name="" -- this is a config write, not a zonefile write.
@@ -625,6 +635,7 @@ async def bind9_config_apply_views(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.apply_views`` -- atomic multi-file tree write.
 
@@ -674,7 +685,7 @@ async def bind9_config_apply_views(
     if not files:
         raise ValueError("bind9.config.apply_views requires a non-empty 'files' mapping")
 
-    bind_root = await _resolve_bind_root(connector, target)
+    bind_root = await _resolve_bind_root(connector, target, operator)
     # Pack first so a traversal input fails the op pre-stage with the
     # structured ConfigPathRejectedError -- no remote IO past the
     # fingerprint call.
@@ -708,7 +719,7 @@ async def bind9_config_apply_views(
     else:
         primary_path = resolved_paths[0]
 
-    sudo_password = _sudo_password_for_target(target)
+    sudo_password = await _sudo_password_for_target(connector, target, operator)
 
     # Verify predicate: prefer a representative dig if the caller named
     # one; otherwise fall back to the "config still parses live" check.
@@ -725,7 +736,7 @@ async def bind9_config_apply_views(
     apply_result = await atomic_apply(
         connector,
         target,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         audit_slice_path=primary_path,
         zone_name="",  # multi-file config-write; no SOA-bump rollback.
@@ -881,6 +892,7 @@ async def bind9_config_backup(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.backup``.
 
@@ -909,8 +921,8 @@ async def bind9_config_backup(
     ``rm`` if the backup is unwanted).
     """
     tag: str | None = params.get("tag")
-    sudo_password = _sudo_password_for_target(target)
-    bind_root = await _resolve_bind_root(connector, target)
+    sudo_password = await _sudo_password_for_target(connector, target, operator)
+    bind_root = await _resolve_bind_root(connector, target, operator)
 
     # Compose the filename. ``time.strftime`` returns a localtime-zoned
     # timestamp -- but we want UTC so backups across timezones sort
@@ -990,7 +1002,7 @@ async def bind9_config_backup(
     proc = await connector._remote_bash_with_sudo(
         target,
         script,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         timeout=120.0,
     )
@@ -1119,6 +1131,7 @@ async def bind9_config_reload(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.config.reload``.
 
@@ -1147,7 +1160,7 @@ async def bind9_config_reload(
     not the cause).
     """
     del params  # declared empty in schema; intentionally ignored
-    sudo_password = _sudo_password_for_target(target)
+    sudo_password = await _sudo_password_for_target(connector, target, operator)
 
     # ``rndc reload`` is one positional command; the wrapper captures
     # stdout + stderr + exit so the result envelope can carry whichever
@@ -1182,7 +1195,7 @@ async def bind9_config_reload(
     proc = await connector._remote_bash_with_sudo(
         target,
         script,
-        raw_jwt="",
+        operator=operator,
         sudo_password=sudo_password,
         timeout=60.0,
     )

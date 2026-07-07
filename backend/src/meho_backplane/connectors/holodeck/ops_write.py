@@ -87,6 +87,7 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.holodeck.connector import HolodeckConnector
 
 __all__ = [
@@ -232,7 +233,12 @@ def bound_image_tar(raw_path: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _run_text(self: HolodeckConnector, target: Any, cmd: str) -> dict[str, Any]:
+async def _run_text(
+    self: HolodeckConnector,
+    target: Any,
+    cmd: str,
+    operator: Operator | None = None,
+) -> dict[str, Any]:
     """Run *cmd* over plain SSH, return ``{stdout, stderr, exit_status}``.
 
     Shared thin layer for the three write handlers: run the (already-bounded,
@@ -240,7 +246,7 @@ async def _run_text(self: HolodeckConnector, target: Any, cmd: str) -> dict[str,
     the completed process into the connector's standard result envelope.
     Stderr is capped at 4096 chars (the ``PwshRunError`` convention).
     """
-    proc = await self._run_command(target, cmd, raw_jwt="")
+    proc = await self._run_command(target, cmd, operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stderr = (proc.stderr or "") if hasattr(proc, "stderr") else ""
     if not isinstance(stdout, str):
@@ -260,6 +266,7 @@ async def holodeck_k8s_pods_gc(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Garbage-collect terminal (Failed / Succeeded) pods on the in-appliance K8s.
 
@@ -288,7 +295,7 @@ async def holodeck_k8s_pods_gc(
         for phase in phases:
             selector = shlex.quote(f"status.phase={phase}")
             cmd = f"kubectl delete pods{ns_arg} --field-selector {selector}"
-            outcome = await _run_text(self, target, cmd)
+            outcome = await _run_text(self, target, cmd, operator)
             deletes.append({"phase": phase, "command": cmd, **outcome})
     except Exception as exc:
         return {"deleted": False, "error": str(exc), "deletes": deletes}
@@ -299,6 +306,7 @@ async def holodeck_backups_prune(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Prune backups under ``/var/backups``, keeping the newest ``keep_newest``.
 
@@ -340,7 +348,7 @@ async def holodeck_backups_prune(
         f"| xargs -r -d '\\n' rm -f --"
     )
     try:
-        outcome = await _run_text(self, target, cmd)
+        outcome = await _run_text(self, target, cmd, operator)
     except Exception as exc:
         return {"pruned": False, "error": str(exc)}
     return {
@@ -356,6 +364,7 @@ async def holodeck_images_import(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Import a seed-image tarball into containerd's ``k8s.io`` namespace.
 
@@ -373,7 +382,7 @@ async def holodeck_images_import(
 
     cmd = f"ctr -n k8s.io images import {shlex.quote(tar_path)}"
     try:
-        outcome = await _run_text(self, target, cmd)
+        outcome = await _run_text(self, target, cmd, operator)
     except Exception as exc:
         return {"imported": False, "error": str(exc)}
     return {"imported": True, "tar_path": tar_path, "command": cmd, **outcome}

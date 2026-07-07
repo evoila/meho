@@ -145,6 +145,22 @@ _OP_CLASS_WRITE: Final[str] = "write"
 _DEFAULT_SEARCH_LIMIT: Final[int] = 10
 _MAX_SEARCH_LIMIT: Final[int] = 50
 
+#: Length cap on the ``search_memory`` free-text ``query``. Mirrors the
+#: 256-char class the sibling tool slices use for free-text inputs
+#: (``audit.py`` / ``topology.py``); both BM25 and the embedding encoder
+#: consume the query, so an unbounded string is compute the substrate
+#: pays for on every call.
+_MAX_QUERY_CHARS: Final[int] = 256
+
+#: Length cap on the ``add_to_memory`` body (and its deprecated
+#: ``content`` alias). Matches the operator-console cap
+#: (:data:`meho_backplane.ui.routes.memory.views.BODY_MAX_LENGTH`) so a
+#: memory writable through the UI is writable through MCP and vice
+#: versa. The retrieval substrate indexes the body as one document
+#: (tsvector + 384-dim embedding), so the cap bounds the worst-case
+#: per-call indexing allocation.
+_MAX_BODY_CHARS: Final[int] = 64 * 1024
+
 #: ISO 8601 enum of the five scope values, exposed via the MCP
 #: ``inputSchema`` ``enum`` constraint. Built from
 #: :class:`MemoryScope` so an enum extension lands here automatically.
@@ -443,9 +459,11 @@ register_mcp_tool(
                 "query": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": _MAX_QUERY_CHARS,
                     "description": (
                         "Free-form query. Both BM25 (lexical) and cosine "
-                        "(semantic) signals consume it; ranks are fused via RRF."
+                        "(semantic) signals consume it; ranks are fused via RRF. "
+                        f"Capped at {_MAX_QUERY_CHARS} characters."
                     ),
                 },
                 "scope": {
@@ -530,8 +548,10 @@ register_mcp_tool(
                 "body": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": _MAX_BODY_CHARS,
                     "description": (
                         "Memory body. Markdown is fine; stored as-is. "
+                        f"Capped at {_MAX_BODY_CHARS} characters. "
                         "The retrieval substrate indexes it as a single "
                         "document (BM25 over tsvector + 384-dim embedding "
                         "for cosine). Field name aligned with "
@@ -542,6 +562,7 @@ register_mcp_tool(
                 "content": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": _MAX_BODY_CHARS,
                     "description": (
                         "DEPRECATED v0.6.x alias for `body`; removed in "
                         "v0.7. Provided so v0.3.x clients pinned to the "

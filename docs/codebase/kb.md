@@ -224,3 +224,7 @@ ignored (substrate cap, not a kb-package decision).
 - [`memory.md`](./memory.md) — the durable session/policy memory
   service that shares the `documents` substrate but enforces
   different scope encoding + RBAC.
+- [`untrusted-text-envelope.md`](./untrusted-text-envelope.md) — the
+  `meho://kb/{slug}` resource serves `body` inside the
+  `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored prompt-injection
+  hardening at the LLM-facing read boundary).

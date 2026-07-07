@@ -41,6 +41,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
 from meho_backplane.retrieval.retriever import RetrievalHit
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -517,6 +518,73 @@ def test_tools_call_search_knowledge_rejects_extra_arguments(
     assert body["error"]["code"] == INVALID_PARAMS
 
 
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_search_knowledge_rejects_over_cap_query(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``query`` beyond ``maxLength`` fails schema validation → -32602.
+
+    The cap bounds the free text the retrieval substrate (BM25 +
+    embedding encoder) has to chew on per call — resource-exhaustion
+    hardening, mirroring the sibling tool slices' free-text caps.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_knowledge",
+                "arguments": {"query": "q" * (_MAX_QUERY_CHARS + 1)},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_search_knowledge_accepts_at_cap_query(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``query`` exactly at ``maxLength`` passes schema validation."""
+    client, _op = client_with_operator
+
+    async def fake_retrieve(**kwargs: object) -> list[RetrievalHit]:
+        return []
+
+    with patch(
+        "meho_backplane.kb.service.retrieve",
+        side_effect=fake_retrieve,
+    ):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_knowledge",
+                    "arguments": {"query": "q" * _MAX_QUERY_CHARS},
+                },
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+
+
 # ---------------------------------------------------------------------------
 # add_to_knowledge — call path
 # ---------------------------------------------------------------------------
@@ -581,6 +649,74 @@ async def test_tools_call_add_to_knowledge_creates_entry_and_is_findable(
     assert fetched is not None
     assert fetched.body == "Vault federation login with JWT auth method."
     assert fetched.metadata["source"] == "agent"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_knowledge_rejects_over_cap_body(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``body`` beyond ``maxLength`` fails schema validation → -32602.
+
+    The rejection happens at the dispatcher's JSON-Schema gate, before
+    the handler (and therefore before the substrate's tsvector +
+    embedding indexing) ever sees the payload.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_knowledge",
+                "arguments": {
+                    "slug": "over-cap-body",
+                    "body": "x" * (_MAX_BODY_CHARS + 1),
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_knowledge_accepts_at_cap_body(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A ``body`` exactly at ``maxLength`` still writes successfully."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_knowledge",
+                "arguments": {
+                    "slug": "at-cap-body",
+                    "body": "x" * _MAX_BODY_CHARS,
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+    created = json.loads(body["result"]["content"][0]["text"])
+    assert len(created["body"]) == _MAX_BODY_CHARS
 
 
 @pytest.mark.parametrize(

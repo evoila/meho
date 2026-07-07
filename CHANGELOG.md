@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — fail-closed on unrecognized `principal_kind` claim
+
+- JWT verification now rejects a token whose `principal_kind` claim is
+  present but outside the closed `user`/`service`/`agent` enum with a
+  `401` (`unknown_principal_kind`) instead of silently treating the
+  principal as a human user. `principal_kind` is the discriminator the
+  per-kind permission model, approval gate, and agent dispatch branch
+  on, so an out-of-enum issuer-signed value now fails closed — exactly
+  like an unknown `tenant_role` at the same layer. The structured
+  `unknown_principal_kind` warning (claim name + offending value) is
+  still logged before the rejection. Tokens that **omit** the claim
+  entirely are unaffected: the pre-G11.2 absent-claim → `user` legacy
+  fallback is kept, so existing human-operator tokens keep working
+  without a Keycloak mapper update. Realms emitting a custom kind must
+  widen the enum first rather than relying on the silent coercion.
 ### Security — /health least-privilege split (OPERATOR gate + liveness probe)
 
 - **`GET /api/v1/health` (the federation-proof deep check) is now

@@ -210,14 +210,15 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89  # v7.2.2
         with:
-          # `~> v2` resolves to the latest GoReleaser v2.x at run
-          # time. We intentionally don't pin to a specific patch
-          # (e.g. `v2.15.4`) so security and bug fixes land
-          # automatically; the v2 major is locked, which is what
-          # matters for config-schema stability. (The local
-          # `make release-dry-run` target pins to v2.15.4 for a
-          # reproducible developer experience.)
-          version: '~> v2'
+          # Pinned to the exact patch so the GoReleaser build that
+          # produces the signed (cosign) release artefacts is
+          # deterministic — a floating `~> v2` resolved "latest v2.x
+          # at run time", so the exact toolchain could change silently
+          # between releases. The pin matches cli/Makefile's
+          # GORELEASER_VERSION, keeping this pipeline and the local
+          # `make release-dry-run` on the identical GoReleaser build;
+          # bump both together.
+          version: 'v2.15.4'
           # `release --clean` wipes dist/ before building and then
           # creates/uploads the GitHub Release. No `--snapshot` —
           # we're on a real tag push so GoReleaser uses

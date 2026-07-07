@@ -356,3 +356,8 @@ marker.
 * Best-practices: `python_best_practices.md` (don't duplicate
   validation logic across entry points — one canonical resolver;
   pydantic set-vs-unset is the idiomatic discriminator).
+
+See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
+— the `meho://memory/{scope}/{slug}` resource serves `body` inside the
+`<<UNTRUSTED_AGENT_TEXT` guard envelope (stored prompt-injection
+hardening at the LLM-facing read boundary).

@@ -45,13 +45,19 @@ as untrusted:
 * **Slack mirror** (G6.2, already shipped): plain-text mode, no rich
   formatting (no Markdown rendering that could activate injected
   markup).
-* **LLM consumption** (other agents reading via ``meho.broadcast.recent``):
+* **LLM consumption** (other agents reading via ``meho.broadcast.recent``,
+  ``meho.broadcast.watch``, or ``meho://tenant/{tenant_id}/feed``):
   the calling agent MUST NOT treat another agent's ``activity`` as
   policy / system input. This is the same isolation contract the G7.1
   preamble assembler enforces with its
   ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` wrapper around
   agent-untrusted operational rules
-  (:mod:`meho_backplane.conventions.preamble`).
+  (:mod:`meho_backplane.conventions.preamble`). Enforced at the read
+  boundary since evoila-bosnia/meho-internal#154:
+  :func:`~meho_backplane.broadcast.history.dump_event_wire` wraps
+  ``activity`` / ``scope`` / ``target`` in the untrusted-content
+  envelope (:mod:`meho_backplane.untrusted_text`) on every LLM-facing
+  re-serve.
 
 Publish semantics
 =================

@@ -91,12 +91,14 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import BroadcastEvent
+from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "InvalidSinceError",
     "default_since_ms",
+    "dump_event_wire",
     "event_matches",
     "list_recent_events_fail_soft",
     "list_recent_events_strict",
@@ -375,6 +377,51 @@ def parse_entry(
         return None
 
 
+#: Announcement fields that carry agent-authored free text. Kept in
+#: one place so every LLM-facing dump site wraps the same set; the
+#: audit-driven :class:`BroadcastEvent` has no counterpart (its
+#: ``payload`` is server-derived and redacted upstream, its op fields
+#: are chassis-classified — none are agent prose).
+_ANNOUNCEMENT_UNTRUSTED_FIELDS: Final[tuple[str, ...]] = ("activity", "scope", "target")
+
+
+def dump_event_wire(
+    event: BroadcastEvent | AgentAnnouncementEvent,
+) -> dict[str, Any]:
+    """Serialise *event* for an LLM-facing response, guarding agent prose.
+
+    ``model_dump(mode="json")`` plus the stored-prompt-injection guard
+    (evoila-bosnia/meho-internal#154): on an agent-authored
+    :class:`AgentAnnouncementEvent`, each free-text field
+    (:data:`_ANNOUNCEMENT_UNTRUSTED_FIELDS`) is wrapped via
+    :func:`~meho_backplane.untrusted_text.wrap_untrusted_text` so a
+    reading agent sees the text delimited as untrusted data rather
+    than as bare context it might absorb as instructions. Audit-driven
+    :class:`BroadcastEvent` dumps pass through unchanged.
+
+    Every surface that re-serves stream events to a model goes through
+    this helper — ``meho.broadcast.recent`` (via
+    :func:`_list_recent_events_core`), ``meho.broadcast.watch``
+    (:func:`meho_backplane.mcp.tools.broadcast._filter_xread_items`)
+    and the ``meho://tenant/{tenant_id}/feed`` resource
+    (:mod:`meho_backplane.mcp.resources.tenant_feed`). The UI history
+    pane is *not* such a surface: it consumes
+    :func:`list_recent_events_fail_soft` but drops announcement-kind
+    events before rendering (``_is_audit_event``), and its HTML sink
+    escapes content separately.
+
+    Filtering (:func:`event_matches`) runs on the *model*, before this
+    dump, so ``target`` equality matching is unaffected by the wrap.
+    """
+    data = event.model_dump(mode="json")
+    if isinstance(event, AgentAnnouncementEvent):
+        for field in _ANNOUNCEMENT_UNTRUSTED_FIELDS:
+            value = data.get(field)
+            if isinstance(value, str):
+                data[field] = wrap_untrusted_text(value)
+    return data
+
+
 async def _list_recent_events_core(
     operator: Operator,
     *,
@@ -441,7 +488,9 @@ async def _list_recent_events_core(
         # or the announcement-id equivalent for AgentAnnouncementEvent).
         # Both coexist so the caller can correlate a stream-cursor walk
         # with the canonical audit row via ``event_id`` / ``audit_id``.
-        matched.append({"id": entry_id, **event.model_dump(mode="json")})
+        # ``dump_event_wire`` wraps announcement free-text in the
+        # untrusted-content envelope (stored-prompt-injection guard).
+        matched.append({"id": entry_id, **dump_event_wire(event)})
 
     # next_cursor pages forward from the LAST FETCHED entry, not the
     # last matched one -- a page where every entry was filtered out

@@ -436,9 +436,13 @@ Authorization Grant (RFC 8628). End-to-end shape:
      duration of the flow. The format and semantics mirror `curl
      --resolve` (repeatable; per-host:port). Implemented in
      `internal/auth/resolver.go`: `ParseResolveEntries` validates the
-     `host:port:ip` triples (port must be a valid TCP port, IP a
-     literal address; a malformed entry is a hard error, not a silent
-     skip), and `HTTPClientWithOverrides` builds an `http.Client`
+     `host:port:ip` triples (port must be strictly numeric, 1-65535 —
+     named services like `https` are rejected loudly because the
+     override map is keyed by the numeric dial address, so a named
+     port would validate yet silently never fire; IP must be a
+     literal address; the entry is front-split at the first two
+     colons, so an IPv6-literal *host* is rejected with an explicit
+     error; a malformed entry is a hard error, not a silent skip), and `HTTPClientWithOverrides` builds an `http.Client`
      whose cloned `http.DefaultTransport.DialContext` substitutes the
      pinned IP at connect time. The pin only rewrites the dialled
      address — net/http still derives the TLS SNI and `Host` header
@@ -1741,9 +1745,10 @@ validation — useful as a fast feedback loop when editing
 
 Both targets install GoReleaser into `cli/bin/` on first run
 (pinned to v2.15.4 for developer reproducibility). The GHA workflow
-uses `goreleaser/goreleaser-action@<sha>` with `version: '~> v2'`
-so security and bug-fix releases land automatically — the v2 major
-schema is what matters for stability, not the patch version.
+uses `goreleaser/goreleaser-action@<sha>` with the same exact pin
+(`version: 'v2.15.4'`), so the CI release pipeline and the local
+dry-run build artefacts with the identical GoReleaser build. Bump
+the workflow pin and `cli/Makefile`'s `GORELEASER_VERSION` together.
 
 ### Reproducible-build limits
 

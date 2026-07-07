@@ -81,7 +81,7 @@ Future connectors with vendor simulators should mirror the same shape:
 
 | Connector | Simulator / fake | Image / package | Helper file |
 | --- | --- | --- | --- |
-| `vmware-rest-9.0` (G3.1) | `vmware/vcsim` | `docker pull vmware/vcsim:latest` | `_vcsim.py` |
+| `vmware-rest-9.0` (G3.1) | `vmware/vcsim` | `docker pull vmware/vcsim:v0.55.1` (CI pins a release tag, never `:latest`) | `_vcsim.py` |
 | `vault-kv-1` (G3.x) | HashiCorp Vault dev mode | `testcontainers-python` ships `VaultContainer` | future `_vault.py` |
 | `k8s-kubeconfig-1` (G3.x) | k3s/k3d | `rancher/k3s:v1.32.x-k3s1` | `tests/integration/test_connectors_k8s_k3d.py` (already in place) |
 | `bind9` (G3.x) | bind9 dev container | Vendored bind9 image | future `_bind9.py` |
@@ -97,7 +97,7 @@ Doc PRs adding a new helper should cite this module as the prior art and call ou
 
 ## CI integration
 
-The vcsim-backed tests run on the `meho-runners-ci` pool (gha-runner-scale-set, ARC v2) per the existing test workflow. The Docker Hub login step at [`.github/workflows/ci.yml:109-110`](../../.github/workflows/ci.yml) authenticates pulls of `vmware/vcsim:latest`; no static service definition is needed because the testcontainers fixture boots vcsim per-test-session.
+The vcsim-backed tests run on the `meho-runners-ci` pool (gha-runner-scale-set, ARC v2) per the existing test workflow. The Docker Hub login step at [`.github/workflows/ci.yml:109-110`](../../.github/workflows/ci.yml) authenticates pulls of the pinned `vmware/vcsim` release tag (`v0.55.1` via the Harbor dockerhub-proxy — pinned, like the sibling pgvector/valkey/Vault images, so an upstream `:latest` push can't change CI behavior without a commit); no static service definition is needed because the testcontainers fixture boots vcsim per-test-session.
 
 `MEHO_VCSIM_URL` is **not** set in CI by default — the testcontainers path runs on every PR. Operators can override locally with `MEHO_VCSIM_URL=http://localhost:8989` when running `vcsim -l :8989` outside the pytest session.
 

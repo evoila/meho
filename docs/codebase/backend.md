@@ -92,11 +92,22 @@ this stage it exposes:
   at lifespan startup. The Vault readiness probe registered in
   lifespan delegates to `VaultConnector.probe()` and flips `/ready`
   red when `/sys/health` is unreachable, sealed, or uninitialized.
-* Federation-proof endpoint — `GET /api/v1/health` (auth-required) is
-  the load-bearing integration point where the entire JWT → Vault
-  chain runs on every call (Task #24, refactored to dispatch under
-  G0.6-T-Refactor-Vault #390). The route uses the
-  `verify_jwt_and_bind` dependency wrapper, which delegates to
+* Federation-proof endpoint — `GET /api/v1/health` (auth-required,
+  **OPERATOR-gated**) is the load-bearing integration point where the
+  entire JWT → Vault chain runs on every call (Task #24, refactored
+  to dispatch under G0.6-T-Refactor-Vault #390). Because every call
+  federates a live per-operator Vault credential and reads a KV
+  secret, the route is gated with
+  `Depends(require_role(TenantRole.OPERATOR))` — a `read_only` caller
+  gets 403 `insufficient_role` before any Vault interaction.
+  Low-privilege / monitoring principals poll the companion
+  `GET /api/v1/health/live` liveness probe instead: valid JWT
+  required (any tenant role), reports operator identity +
+  DB-migration liveness (`LivenessResponse`), and its code path never
+  touches Vault or the dispatcher (a source-level guard test in
+  `backend/tests/test_api_v1_health_split.py` pins this). The
+  `require_role` gate wraps the `verify_jwt_and_bind` dependency,
+  which delegates to
   `verify_jwt` and — on success — binds `operator_sub` into structlog
   contextvars. The handler dispatches `vault.kv.read` via
   `dispatch(operator=..., connector_id="vault-1.x", op_id="vault.kv.read", ...)`

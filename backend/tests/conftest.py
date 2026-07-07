@@ -451,6 +451,46 @@ def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _default_target_ssrf_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exempt the suite's fixture address space from the target SSRF guard.
+
+    evoila-bosnia/meho-internal#153 rejects targets whose ``host``/
+    ``fqdn`` is — or resolves to — a private / loopback / link-local
+    address at create/update *and* connect time, overridable only via
+    ``MEHO_TARGET_SSRF_ALLOWLIST``. The suite predates that guard and
+    registers hundreds of targets on ``10.x`` / ``192.168.x`` /
+    ``127.0.0.1`` literals (plus testcontainers bridge addresses in
+    ``172.16.0.0/12`` for the integration lane), which are exactly the
+    on-prem shapes the allowlist exists for. Pin the documented
+    override here so every pre-existing fixture keeps validating,
+    instead of scattering per-test env plumbing.
+
+    Two knobs, same precedence contract as ``_default_backplane_url``
+    (last-write wins, so per-test overrides beat this default):
+
+    1. The env allowlist covers the RFC 1918 / loopback / ULA /
+       link-local **IP-literal** fixtures. ``169.254.0.0/16`` is
+       deliberately absent — no fixture uses metadata space, and
+       keeping it blocked preserves the sharpest edge of the guard
+       even suite-wide.
+    2. ``_resolve_addrs`` (the guard's single DNS seam) is stubbed to
+       "unresolvable" so the fixtures' synthetic hostnames
+       (``vcenter.invalid``, ``vrli.lab.internal``, …) never leave the
+       process as real DNS queries — the guard fail-opens on
+       unresolvable names by design and the mocked transports never
+       dial anyway. Guard-focused tests (``test_targets_ssrf_guard``)
+       re-patch the seam with their own resolver and
+       ``monkeypatch.delenv`` the allowlist to exercise the real
+       behaviour.
+    """
+    monkeypatch.setenv(
+        "MEHO_TARGET_SSRF_ALLOWLIST",
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128,fc00::/7,fe80::/10",
+    )
+    monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", lambda host: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],

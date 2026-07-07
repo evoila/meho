@@ -155,7 +155,13 @@ jobs:
       # B sees a green cache-hit week and retires it.
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      # vcsim pinned to an explicit release tag (same rule as the
+      # pgvector/valkey/Vault rows — never `:latest`) so the
+      # vmware-rest acceptance tests are reproducible and an upstream
+      # image push can't break or silently alter CI without a commit.
+      # v0.55.1 is what `:latest` resolved to at pin time
+      # (digest sha256:fcca7b87bfb16c3f7b8c8aa94d9d95855891c86fcb216bd6d8dc7b27af385085).
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
       # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
       # Same env-knob shape as the rows above: the test reads this with
@@ -485,7 +491,9 @@ jobs:
     env:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      # vcsim release-tag pin — see the comment on the first
+      # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
     defaults:
       run:
@@ -629,7 +637,9 @@ jobs:
     env:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
-      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      # vcsim release-tag pin — see the comment on the first
+      # MEHO_TEST_VCSIM_IMAGE occurrence (backend-tests job) for why.
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:v0.55.1
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
       # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
       # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
@@ -736,6 +746,23 @@ jobs:
         # cli/ so `./...` resolves to the CLI module's packages only.
         working-directory: cli
         run: go build ./...
+
+      - name: govulncheck (Go dependency CVE scan)
+        # Surfaces known CVEs in the CLI's Go dependency graph.
+        # govulncheck does reachability analysis against the Go vuln DB
+        # (https://vuln.go.dev): it exits non-zero only when a
+        # vulnerable symbol is actually reachable from this module's
+        # call graph, so the gate fails on real exposure instead of on
+        # every transitive advisory. Placed after `go build` so a
+        # broken import graph fails on the cheaper, clearer step first.
+        # The tool version is pinned (same supply-chain rule as the
+        # SHA-pinned actions above); Dependabot doesn't track
+        # `go install` pins, so bump it deliberately alongside Go
+        # toolchain bumps.
+        working-directory: cli
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          govulncheck ./...
 
       - name: Ensure C toolchain is available (for cgo race runtime)
         # `go test -race` links the cgo-based race runtime, which needs

@@ -1481,11 +1481,22 @@ def _build_operator_for_dispatch(
     uses ``operator.sub`` + ``operator.tenant_id``). The runbook
     service's public API takes ``operator_sub: str`` — by convention
     the route / MCP layer has the JWT-validated operator and we
-    reconstruct the minimum-shape object here. The ``raw_jwt`` is set to
-    a sentinel because the dispatcher only re-uses it for downstream
-    services that need to act on behalf of the operator; the runbook
-    verify call always runs in-process against typed connectors that
-    accept this shape.
+    reconstruct the minimum-shape object here.
+
+    ``raw_jwt`` is the **empty string** — the fail-closed synthetic-
+    operator convention (the topology scheduler's refresh operator uses
+    the same shape). This operator is reconstructed from
+    ``operator_sub``, not validated from a bearer token, so it must
+    never be usable as operator context for a downstream credential
+    read: every Vault-touching layer short-circuits on an empty
+    ``raw_jwt`` (``_resolve_secret_ref`` in
+    :mod:`meho_backplane.connectors._shared.vault_creds` raises
+    ``VaultCredentialsReadError`` before Vault is contacted). A verify
+    ``op_id`` that resolves to a Vault-backed connector therefore fails
+    closed locally with a structured refusal instead of forwarding a
+    placeholder string to Vault's JWT/OIDC login. Typed in-process
+    verify handlers that need no per-target credential read never
+    consume ``raw_jwt`` and dispatch unchanged.
 
     Imports lazily to avoid a hard import-cycle at module load (the
     auth subpackage depends on a lot of substrate; runbooks initialises
@@ -1497,7 +1508,7 @@ def _build_operator_for_dispatch(
         sub=sub,
         name=sub,
         email=None,
-        raw_jwt="<runbook-internal-dispatch>",
+        raw_jwt="",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
     )

@@ -24393,6 +24393,15 @@
             "nullable": true,
             "title": "Current Step Id"
           },
+          "current_step_state": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "failed"
+            ],
+            "nullable": true,
+            "title": "Current Step State"
+          },
           "position": {
             "$ref": "#/components/schemas/StepPosition",
             "nullable": true
@@ -24414,7 +24423,7 @@
           "started_at"
         ],
         "title": "RunSummary",
-        "description": "List-view projection returned by ``meho.runbook.list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``meho.runbook.next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``.\n\n:attr:`work_ref` surfaces the external change-ticket reference the\nrun was started under (work_ref I3-T1 #1661); ``None`` when the run\ncarries no ticket."
+        "description": "List-view projection returned by ``meho.runbook.list_runs``.\n\nRun-level state plus the current step's *state* -- no step\ncontents are exposed. The step-by-step content is\nopaque-by-construction (only ``meho.runbook.next`` ever returns a\nstep body, and only one step at a time), so :attr:`current_step_id`\nis the *id* of the step the run is currently on -- enough for a UI\nto render \"step 3: drain-node\" -- but not the body.\n\n:attr:`current_step_state` is the persisted\n``runbook_run_step_states.state`` of that step (#2119). A\n``\"no\"`` / ``\"escalate\"`` answer to a ``confirm`` verify (or a\nmismatched ``operation_call`` verify) transitions the step to\n``failed`` -- a state that previously was only discoverable by\nmaking *another* ``next`` mutation and parsing the 400. Surfacing\nit here lets operators / monitoring poll the list surface and see\n\"this run is stuck on a failed step; the only forward path is\nabort\" without mutating anything. The step's state is not step\n*content*, so the Initiative #1198 opacity floor is untouched.\nThe escalate-vs-no distinction stays in the persisted\n``verify_response`` (out of scope per #2119).\n\n:attr:`current_step_id`, :attr:`current_step_state`, and\n:attr:`position` are ``None`` for runs in terminal state\n(``completed`` / ``abandoned``); a terminal-state run has no\n\"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``.\n\n:attr:`work_ref` surfaces the external change-ticket reference the\nrun was started under (work_ref I3-T1 #1661); ``None`` when the run\ncarries no ticket."
       },
       "RunbookListRunsResponse": {
         "properties": {

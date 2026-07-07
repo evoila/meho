@@ -307,10 +307,14 @@ _LIST_DESCRIPTION: Final[str] = (
     'Use when: the human asks "what\'s in flight?", "what have I '
     'completed recently?", or the senior asks "who\'s stuck on what?" '
     "before considering meho.runbook.reassign.\n\n"
-    "Returns RunSummary entries -- run-level state only, no step "
-    "contents. To see the current step body of an in-progress run you "
-    "OWN, call meho.runbook.next with last_verified=False to refresh "
-    "(the substrate returns the current step)."
+    "Returns RunSummary entries -- run-level state plus the current "
+    "step's state (current_step_state: in_progress / failed), no step "
+    "contents. current_step_state='failed' means the step's verify did "
+    "not pass (answer no/escalate, or a mismatched operation_call "
+    "result); the only forward path for that run is meho.runbook.abort. "
+    "To see the current step body of an in-progress run you OWN, call "
+    "meho.runbook.next with last_verified=False to refresh (the "
+    "substrate returns the current step)."
 )
 
 

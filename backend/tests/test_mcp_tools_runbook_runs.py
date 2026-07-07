@@ -801,8 +801,10 @@ async def test_list_runs_omits_step_contents(
     assert summary["assigned_to"] == op.sub
     assert summary["template_slug"] == "r1"
     assert summary["state"] == "in_progress"
-    # Position + current step id give "where" without giving "what".
+    # Position + current step id/state give "where" + "how it's going"
+    # without giving "what" (#2119: state is not step content).
     assert summary.get("current_step_id") == "step-1"
+    assert summary.get("current_step_state") == "in_progress"
     # No leakage of step bodies / lists.
     for forbidden in ("steps", "current_step", "body", "title", "verify"):
         assert forbidden not in summary, f"summary leaked {forbidden!r}"

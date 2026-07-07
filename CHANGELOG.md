@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — runbook run list surfaces the failed step state
+
+- **`GET /api/v1/runbooks/runs` (and `meho.runbook.list_runs`) now
+  project `current_step_state` (`in_progress` / `failed`) on each run
+  summary** (#2119): a `"no"` / `"escalate"` answer to a step's
+  `confirm` verify has always persisted the step as `failed`, but the
+  read surface kept reporting only `state: "in_progress"` +
+  `current_step_id` — operators and monitoring could only discover the
+  failure by firing *another* `next` mutation and parsing the 400.
+  The persisted per-step state now rides the existing list projection
+  (additive, optional field; step *contents* remain opaque per the
+  Initiative #1198 adherence floor), so a poller can see "stuck on a
+  failed step; abort is the only forward path" without mutating the
+  run. OpenAPI snapshot + generated CLI client regenerated.
+
 ### Fixed — async ingest rejects a foreign tenant_id synchronously
 
 - **`POST /api/v1/connectors/ingest` with `async: true` and a foreign

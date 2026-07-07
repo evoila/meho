@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -142,11 +143,16 @@ class _FakeIngestionPipelineService:
     def __init__(self) -> None:
         self.init_kwargs: dict[str, Any] = {}
         self.ingest_calls: list[dict[str, Any]] = []
+        self.authorize_scope_calls: list[UUID | None] = []
 
     def __call__(self, operator: Operator, **kwargs: Any) -> _FakeIngestionPipelineService:
         self.operator = operator
         self.init_kwargs = kwargs
         return self
+
+    def authorize_scope(self, tenant_id: UUID | None) -> None:
+        """Record the handler's eager scope check (#2214); never denies."""
+        self.authorize_scope_calls.append(tenant_id)
 
     async def ingest(self, **kwargs: Any) -> IngestionPipelineResult:
         self.ingest_calls.append(kwargs)
@@ -172,6 +178,9 @@ class _BlockingIngestionPipelineService:
     def __call__(self, operator: Operator, **_kwargs: Any) -> _BlockingIngestionPipelineService:
         return self
 
+    def authorize_scope(self, tenant_id: UUID | None) -> None:
+        """Satisfy the handler's eager scope check (#2214); never denies."""
+
     async def ingest(self, **kwargs: Any) -> IngestionPipelineResult:
         self.ingest_calls.append(kwargs)
         self.started.set()
@@ -187,6 +196,9 @@ class _RaisingIngestionPipelineService:
 
     def __call__(self, operator: Operator, **_kwargs: Any) -> _RaisingIngestionPipelineService:
         return self
+
+    def authorize_scope(self, tenant_id: UUID | None) -> None:
+        """Satisfy the handler's eager scope check (#2214); never denies."""
 
     async def ingest(self, **_kwargs: Any) -> IngestionPipelineResult:
         raise self._exc
@@ -363,6 +375,9 @@ async def test_inline_dry_run_returns_ingest_response_no_grouping(
     assert call["product"] == "vmware"
     assert call["dry_run"] is True
     assert call["tenant_id"] == OPERATOR_TENANT_ID
+    # The eager scope gate (#2214) ran with the coerced tenant before
+    # the inline/async branch split.
+    assert fake.authorize_scope_calls == [OPERATOR_TENANT_ID]
     assert [s.uri for s in call["specs"]] == [
         "docs:vcenter-9.0/vcenter.yaml",
         "docs:vcenter-9.0/vi-json.yaml",
@@ -743,6 +758,82 @@ async def test_async_failure_surfaces_on_poll(
     assert terminal["ingestion"] is None
 
 
+# ---------------------------------------------------------------------------
+# Eager tenant-scope gate on both paths (#2214, MCP twin of REST #2208)
+# ---------------------------------------------------------------------------
+
+
+async def test_async_foreign_tenant_denied_eagerly_no_job_no_task() -> None:
+    """``async=true`` + foreign ``tenant_id`` → -32602 before any job row (#2214).
+
+    Drives the real :class:`IngestionPipelineService` — the eager
+    :meth:`~IngestionPipelineService.authorize_scope` check raises
+    before ``ingest`` (or any spec fetch / DB hop) runs, so no stub is
+    needed and the dummy ``docs:`` URI is never dereferenced. Before
+    the eager gate, this call returned a success-shaped job handle and
+    minted a ``failed`` job under the *foreign* scope — invisible to
+    the caller's tenant-scoped ``ingest_status`` poll — instead of the
+    immediate structured error.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    foreign_tenant = uuid4()
+
+    with pytest.raises(McpInvalidParamsError, match="cannot ingest into") as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "docs:never-fetched/spec.yaml"}],
+                "async": True,
+                "tenant_id": str(foreign_tenant),
+            },
+        )
+    # Same diagnostic string the REST 403's plain ``detail`` carries —
+    # one shared PermissionError message, no cross-surface drift.
+    assert str(caught.value) == (
+        f"operator tenant_id={OPERATOR_TENANT_ID} cannot ingest into tenant_id={foreign_tenant}"
+    )
+    # The load-bearing #2214 assertions: the denial fired BEFORE the
+    # async path created its job row or detached the pipeline task —
+    # there is nothing to poll and nothing running. (The autouse
+    # ``_isolated_job_registry`` fixture guarantees the registry
+    # started this test empty.)
+    assert get_job_registry()._jobs == {}
+    assert ci_mod._background_tasks == set()
+
+
+async def test_inline_foreign_tenant_denied_with_same_envelope() -> None:
+    """The sync path returns the identical structured denial (#2214).
+
+    Both paths now share :func:`_authorize_write_scope_or_invalid_params`,
+    so the sync and async branches fail the same request with the same
+    ``-32602`` message. Before the eager gate the sync path's
+    :class:`PermissionError` fell through the dispatcher's generic
+    ``except Exception`` and degraded to an opaque ``-32603
+    "internal error: PermissionError"`` with the message discarded.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    foreign_tenant = uuid4()
+
+    with pytest.raises(McpInvalidParamsError, match="cannot ingest into") as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "docs:never-fetched/spec.yaml"}],
+                "tenant_id": str(foreign_tenant),
+            },
+        )
+    assert str(caught.value) == (
+        f"operator tenant_id={OPERATOR_TENANT_ID} cannot ingest into tenant_id={foreign_tenant}"
+    )
+    assert get_job_registry()._jobs == {}
+
+
 async def test_ingest_status_unknown_handle_is_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -797,8 +888,6 @@ async def test_ingest_status_cross_tenant_is_not_found(
     await _poll_until_terminal(owner, handle["job_id"])
 
     # A second operator in a different tenant probes the same handle.
-    from uuid import UUID
-
     intruder = Operator(
         sub="intruder",
         name="Intruder",

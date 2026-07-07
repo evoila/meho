@@ -23,6 +23,12 @@
   render (writes nothing) and the real async ingest (kicks the job +
   seeds the poll fragment).
 
+  A **Write scope** select (#2209) rides both modes: ``global`` (the
+  default, matching the REST/CLI omit-equals-global contract per #2085)
+  or ``tenant`` (a tenant-curated ingest). The form posts only the
+  discriminator -- the handler derives the tenant UUID from the
+  authenticated operator, never from the client.
+
   Submit contract: the form ``hx-post``s to
   ``/ui/connectors/registry/ingest`` swapping ``#ingest-result`` (the
   in-modal result slot). A 422 friendly pre-check error, a catalog 422,
@@ -225,6 +231,29 @@
           </button>
         </div>
       </div>
+
+      {# ---------- Write scope (#2209) ---------- #}
+      {# Orthogonal to the catalog/explicit split, so it renders outside
+         the mode panels. The form posts only the discriminator; the
+         handler derives the tenant UUID from the authenticated operator
+         (``global`` leaves tenant_id unset — the omit-equals-global
+         REST contract per #2085). #}
+      <label class="form-control" data-scope-select>
+        <span class="label-text">Write scope</span>
+        <select
+          name="scope"
+          class="select select-bordered select-sm"
+          aria-label="Write scope"
+        >
+          <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant</option>
+          <option value="tenant">This tenant only</option>
+        </select>
+        <span class="label-text-alt mt-1 opacity-70">
+          Global matches the CLI / REST default (omitting
+          <span class="font-mono">tenant_id</span>); &ldquo;This
+          tenant&rdquo; curates the connector under your tenant only.
+        </span>
+      </label>
 
       {# ---------- Dry-run toggle ---------- #}
       <label class="label cursor-pointer justify-start gap-3 pt-1" data-dry-run-toggle>

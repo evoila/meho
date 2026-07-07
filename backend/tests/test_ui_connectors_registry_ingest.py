@@ -35,6 +35,14 @@ Acceptance criteria on issue #1886:
 * A body that sets BOTH ``catalog_entry`` and a quadruple field is
   rejected with a friendly inline error, not a 500
   (``test_both_shapes_rejected_with_friendly_error``).
+* The write-scope control (#2209): ``scope=tenant`` sends the
+  authenticated operator's own ``tenant_id`` on the in-process body;
+  ``scope=global`` and an omitted field leave it unset (the
+  omit-equals-global REST contract per #2085); a tampered value renders
+  the friendly inline 422
+  (``test_scope_tenant_sends_operator_tenant_id`` /
+  ``test_scope_global_and_omitted_leave_tenant_id_unset`` /
+  ``test_scope_unknown_value_rejected_with_friendly_error``).
 * The new literal ``/ui/connectors/registry/ingest*`` routes register
   before ``/ui/connectors/{name}`` AND before the
   ``/ui/connectors/registry/{connector_id}`` param routes
@@ -690,6 +698,100 @@ def test_both_shapes_rejected_with_friendly_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AC (#2209): the scope control posts tenant_id accordingly
+# ---------------------------------------------------------------------------
+
+
+def test_scope_tenant_sends_operator_tenant_id() -> None:
+    """scope=tenant puts the *authenticated* operator's tenant UUID on the body."""
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    ingest_mock = AsyncMock(return_value=_sync_ingest_response())
+    try:
+        with patch(_INGEST_ENDPOINT, ingest_mock):
+            resp = client.post(
+                "/ui/connectors/registry/ingest",
+                data={
+                    "mode": "explicit",
+                    "product": "vmware",
+                    "version": "9.0",
+                    "impl_id": "vmware-rest",
+                    "spec_uri": ["https://vendor.example/openapi.yaml"],
+                    "dry_run": "true",
+                    "scope": "tenant",
+                },
+                headers=_form_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 200, resp.text
+    sent_body = ingest_mock.await_args.kwargs["body"]
+    # Server-derived from the session operator, never a client-posted UUID.
+    assert sent_body.tenant_id == _TENANT_A
+
+
+def test_scope_global_and_omitted_leave_tenant_id_unset() -> None:
+    """scope=global (and an omitted field -- a pre-#2209 form) keep the global scope."""
+    for data_scope in ({"scope": "global"}, {}):
+        client, mock, csrf = _client_with_role(
+            tenant_id=_TENANT_A,
+            operator_sub=_OP_ADMIN,
+            role=TenantRole.TENANT_ADMIN,
+        )
+        ingest_mock = AsyncMock(return_value=_sync_ingest_response())
+        try:
+            with patch(_INGEST_ENDPOINT, ingest_mock):
+                resp = client.post(
+                    "/ui/connectors/registry/ingest",
+                    data={
+                        "mode": "catalog",
+                        "catalog_entry": "vmware/9.0",
+                        "dry_run": "true",
+                        **data_scope,
+                    },
+                    headers=_form_headers(csrf),
+                )
+        finally:
+            mock.stop()
+
+        assert resp.status_code == 200, resp.text
+        sent_body = ingest_mock.await_args.kwargs["body"]
+        assert sent_body.tenant_id is None, f"scope form fields {data_scope!r}"
+
+
+def test_scope_unknown_value_rejected_with_friendly_error() -> None:
+    """A tampered scope value renders the friendly inline 422, never reaches ingest."""
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    ingest_mock = AsyncMock(side_effect=AssertionError("ingest_endpoint must not be called"))
+    try:
+        with patch(_INGEST_ENDPOINT, ingest_mock):
+            resp = client.post(
+                "/ui/connectors/registry/ingest",
+                data={
+                    "mode": "catalog",
+                    "catalog_entry": "vmware/9.0",
+                    "scope": "other-tenant",
+                },
+                headers=_form_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 422, resp.text
+    assert "data-registry-error" in resp.text
+    assert "unknown write scope" in resp.text.lower()
+    ingest_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # AC: the ingest submit + poll require TENANT_ADMIN (403 for an operator)
 # ---------------------------------------------------------------------------
 
@@ -786,6 +888,11 @@ def test_ingest_modal_renders_for_admin() -> None:
     # A dry-run toggle + the spec-uri repeater render.
     assert "data-dry-run-toggle" in body
     assert "data-spec-uris" in body
+    # The write-scope select (#2209) renders both options, global preselected.
+    assert "data-scope-select" in body
+    assert 'name="scope"' in body
+    assert 'value="global" selected' in body
+    assert 'value="tenant"' in body
     # The modal re-set the CSRF cookie so the submit's double-submit lines up.
     assert CSRF_COOKIE_NAME in resp.headers.get("set-cookie", "")
 

@@ -1233,7 +1233,13 @@ namespaces are isolated). All surfaces document the shared contract
 description, the MCP tool description, and the registered-row
 `next_step` rationale); the cross-surface parity is pinned by
 `test_omitted_tenant_id_resolves_global_on_both_surfaces`
-in `tests/test_api_v1_connectors_ingest.py`.
+in `tests/test_api_v1_connectors_ingest.py`. The two human
+on-ramps expose the scope affordance since #2209: the CLI verb's
+`--tenant-id` flag (omit = global; parsed locally so a typo'd UUID
+fails before the request) and the `/ui/connectors/registry` ingest
+modal's Write-scope select (`global`/`tenant` discriminator; the BFF
+derives the UUID from the authenticated operator, never from the
+client).
 
 **Shared scope resolution (`get_review_payload` + `enable_reads`,
 G0.13-T5 #1135 / G0.26-T1 #1801).** Every read/enable-reads path

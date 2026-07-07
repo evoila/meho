@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — operator console surfaces the topology no-populator coverage gap
+
+- **The console's topology refresh partial now renders the #2093
+  coverage-gap signal**: when a refreshed target's connector ships no
+  topology populator (`no_populator_for_product` set on the
+  `RefreshResult`), the result fragment shows a warning callout naming
+  the product and listing the registered products that do ship a
+  populator — matching the CLI note — instead of bare all-zero counts
+  that read as a clean no-op. Server-rendered Jinja conditional only;
+  no route, HTMX, or OpenAPI change. (#2210)
+
 ### Fixed — operations/call target failures all ride the 200 envelope
 
 - **`POST /api/v1/operations/call` (and `/preview`) now honor the

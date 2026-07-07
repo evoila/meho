@@ -104,6 +104,19 @@ connector-related release-notes line.
   streaming cap for chunked bodies) and returns HTTP 413 with a
   JSON-RPC `INVALID_REQUEST` envelope instead of buffering unbounded
   payloads.
+### Fixed — `meho login --resolve` named-port silent no-op
+
+- `meho login --resolve <host>:<port>:<ip>` now rejects named service
+  ports (e.g. `kc.example.com:https:10.0.0.5`) loudly at parse time:
+  the override map is keyed by the numeric dial address, so a named
+  port previously passed validation (`net.LookupPort`) but keyed the
+  map as `host:https` — never matching the dial address, silently
+  ignoring the pin, and violating the flag's fail-loud contract. The
+  port must now be strictly numeric (1-65535). An IPv6-literal *host*
+  (unrepresentable in the front-split `host:port:ip` format) also gets
+  an explicit error instead of a misleading port/IP validation
+  failure, and the parser docs now describe the actual front-split
+  behaviour. Follow-up to the PR #2181 review. (#2107)
 
 ### Security — operator-console read-session token revalidation
 

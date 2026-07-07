@@ -90,8 +90,10 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "META_TOOL_NAMES",
+    "RUNBOOK_EXECUTION_META_TOOL_NAMES",
     "MetaToolSpec",
     "resolve_agent_tools",
+    "toolset_admits_runbook_execution",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -251,6 +253,57 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
 #: toolset spec validator (or a test) can check an allow-list against the
 #: real catalog without importing the catalog tuple itself.
 META_TOOL_NAMES: frozenset[str] = frozenset(spec.name for spec in _META_TOOL_CATALOG)
+
+#: Meta-tools that can *execute a runbook*. Empty on purpose (#2077):
+#: runbook execution (``meho.runbook.start`` / ``meho.runbook.next`` /
+#: ``meho.runbook.abort``) is an **operator** MCP surface, not part of the
+#: agent meta-tool catalog — runbook steps are confirm-gated by design
+#: ("Only the human operator can answer — do not auto-confirm on the
+#: human's behalf"), so an autonomous loop cannot legitimately complete
+#: one. The run-start guard
+#: (:func:`~meho_backplane.agent.invocation.AgentInvoker` via
+#: :func:`toolset_admits_runbook_execution`) fails a run whose prompt
+#: instructs runbook execution instead of letting the model confabulate a
+#: success. If an agent-executable runbook tool is ever added to
+#: :data:`_META_TOOL_CATALOG`, list its name here so the guard admits
+#: definitions that carry it.
+RUNBOOK_EXECUTION_META_TOOL_NAMES: frozenset[str] = frozenset()
+
+
+def toolset_admits_runbook_execution(toolset: dict[str, Any] | None) -> bool:
+    """Return ``True`` when *toolset* could register a runbook-execution tool.
+
+    The explicit agent↔runbook capability check (#2077): the current agent
+    meta-tool catalog contains **no** runbook-execution tool
+    (:data:`RUNBOOK_EXECUTION_META_TOOL_NAMES` is empty), so today this
+    returns ``False`` for every spec — a prompt that instructs the agent to
+    execute a runbook can never be satisfied and the run-start guard fails
+    the run closed instead of letting the model hallucinate an answer.
+
+    Kept capability-shaped (catalog ∩ allow-list) rather than hard-coded
+    ``False`` so a future agent-executable runbook tool only has to be
+    named in :data:`RUNBOOK_EXECUTION_META_TOOL_NAMES` for the guard to
+    admit definitions that request it. Role floors are deliberately not
+    consulted: they can only *shrink* the registered set, and an empty
+    capability catalog is already the fail-closed answer.
+
+    A mis-shaped spec (``meta_tools`` present but not a list of strings)
+    answers ``False`` — the same fail-closed posture; the authoritative
+    :class:`ValueError` for the authoring bug is raised by
+    :func:`resolve_agent_tools` when the run builds its agent.
+    """
+    if not RUNBOOK_EXECUTION_META_TOOL_NAMES:
+        return False
+    spec = toolset or {}
+    try:
+        requested = _extract_str_list(spec, "meta_tools")
+    except ValueError:
+        return False
+    if requested is None:
+        # Omitted allow-list means "all meta-tools the role admits" — the
+        # catalog's runbook-execution tool is on the surface.
+        return True
+    return bool(frozenset(requested) & RUNBOOK_EXECUTION_META_TOOL_NAMES)
 
 
 def _extract_str_list(spec: dict[str, Any], key: str) -> list[str] | None:

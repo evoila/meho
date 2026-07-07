@@ -20214,6 +20214,12 @@
             "title": "Dry Run",
             "default": false
           },
+          "scope": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Scope",
+            "default": "global"
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true

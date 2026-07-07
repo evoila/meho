@@ -238,7 +238,7 @@ features will work out of the box?":
     "agent_runtime":  {"configured": false, "missing_env": ["KEYCLOAK_ADMIN_URL", "..."], "docs": "..."},
     "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
     "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
-    "approval_queue": {"configured": false, "depends_on": "agent_runtime"}
+    "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"}
   }
 }
 ```
@@ -289,7 +289,12 @@ Walk the four gates in the order an operator hits them:
   separate env vars — the queue activates automatically once
   **agent runtime** above is configured. The `/ready` block exposes
   `approval_queue.depends_on: "agent_runtime"` so operators know
-  there is no second admin client to provision.
+  there is no second admin client to provision. The block also
+  surfaces `effective_posture` (#2087): `"four_eyes_enforced"` on the
+  default fail-closed posture, `"single_operator_break_glass"` when
+  the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
+  escape (see `docs/codebase/approvals.md` — the endorsed
+  single-operator answer is an agent-requester, not the flag).
 
 - [ ] **GitHub `gh-rest-3` connector credential** (optional;
   enables the `gh/3` typed connector landed by Initiative

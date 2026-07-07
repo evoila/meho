@@ -18,6 +18,10 @@ Coverage matrix (G0.14-T7 #1148):
 * ``approval_queue`` is transitive on ``agent_runtime`` — its
   ``configured`` mirrors ``agent_runtime.configured`` and the
   ``depends_on`` field surfaces the chain.
+* ``approval_queue.effective_posture`` (#2087) resolves from
+  ``Settings.approval_allow_self_approval``: ``four_eyes_enforced``
+  by default, ``single_operator_break_glass`` under the emergency
+  ``APPROVAL_ALLOW_SELF_APPROVAL=true`` escape.
 """
 
 from __future__ import annotations
@@ -239,6 +243,32 @@ def test_approval_queue_configured_when_agent_runtime_configured() -> None:
     approval_queue = block["approval_queue"]
     assert approval_queue["configured"] is True
     assert approval_queue["depends_on"] == "agent_runtime"
+
+
+def test_approval_queue_effective_posture_defaults_to_four_eyes() -> None:
+    """The default posture is the fail-closed four-eyes gate (#2087).
+
+    ``Settings.approval_allow_self_approval`` defaults to ``False``,
+    so a deploy that never touched ``APPROVAL_ALLOW_SELF_APPROVAL``
+    reports ``four_eyes_enforced``. The posture field is independent
+    of ``configured`` — it reflects the guard in
+    ``operations.approval_queue.approve_request``, which is active
+    whether or not the agent runtime is wired.
+    """
+    block = build_features_block(_settings_with())
+    assert block["approval_queue"]["effective_posture"] == "four_eyes_enforced"
+
+
+def test_approval_queue_effective_posture_reports_break_glass() -> None:
+    """``APPROVAL_ALLOW_SELF_APPROVAL=true`` surfaces on ``/ready`` (#2087).
+
+    With the emergency break-glass switch enabled, the block reports
+    ``single_operator_break_glass`` so an operator or auditor can see
+    the degraded posture from one GET instead of grepping the deploy's
+    values file.
+    """
+    block = build_features_block(_settings_with(approval_allow_self_approval=True))
+    assert block["approval_queue"]["effective_posture"] == "single_operator_break_glass"
 
 
 # ---------------------------------------------------------------------------

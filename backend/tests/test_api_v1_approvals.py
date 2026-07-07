@@ -195,7 +195,8 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         principal_kind=PrincipalKind.USER,
     )
     # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
-    # reads id / target_id / op_id / connector_id / params / work_ref off it.
+    # reads id / target_id / op_id / connector_id / params / work_ref /
+    # agent_session_id / request_audit_id (#2086 lineage re-binds) off it.
     request = SimpleNamespace(
         id=uuid.uuid4(),
         target_id=target_id,
@@ -203,6 +204,8 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         connector_id="vault-1.x",
         params={"path": "secret/x", "value": "s3cr3t"},
         work_ref=None,
+        agent_session_id=None,
+        request_audit_id=None,
     )
 
     # The pinned target no longer resolves (soft-deleted between request
@@ -268,6 +271,8 @@ async def test_resume_dispatches_when_no_target_was_pinned(
         connector_id="some-1.x",
         params={"k": "v"},
         work_ref=None,
+        agent_session_id=None,
+        request_audit_id=None,
     )
 
     seen: dict[str, Any] = {}

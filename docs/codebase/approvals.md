@@ -107,11 +107,33 @@ model, or resume endpoint):
    the params-hash check, so a self-approver gets the precise refusal
    reason.
 
+   **How to audit a break-glass self-approval (#2087).** There is
+   **no** `self_approved` field on the audit row — do not filter for
+   one. When break-glass is enabled and a self-approval goes through,
+   `_check_self_approval` (`approval_queue.py`) emits the structured
+   **log event** `approval_self_approval_break_glass` (WARNING, with
+   `approval_request_id`, `op_id`, `operator_sub`, `tenant_id`) and
+   returns; the decision audit row written by `approve_request` via
+   `_write_audit_row` carries the ordinary payload
+   (`approval_request_id`, `op_id`, `connector_id`, `principal_sub`,
+   `result_status`, `decision`, `reviewed_by`, optional `reason`).
+   A self-approval is therefore identified **on the ledger** as the
+   `approval.decision` row where the requester equals the approver —
+   `payload.principal_sub == payload.reviewed_by` (the approver's
+   `operator.sub`). A first-class `self_approved` audit marker would
+   be net-new, separately scoped work. Whether the deploy currently
+   allows self-approval at all is visible without grepping the values
+   file: `GET /ready` → `features.approval_queue.effective_posture`
+   is `"single_operator_break_glass"` when
+   `APPROVAL_ALLOW_SELF_APPROVAL=true`, `"four_eyes_enforced"`
+   otherwise (see `features.py::_approval_queue_block`).
+
    `APPROVAL_ALLOW_SELF_APPROVAL` is an **emergency** escape, not the
-   single-operator answer: enabling it posture-wide re-opens, for every
-   op, the single-account request+grant hole this guard closes.
-   Single-operator tenants should park their four-eyes writes under an
-   **agent-requester** (a distinct `principal_kind=agent` `sub`) instead
+   endorsed single-operator posture: enabling it posture-wide re-opens,
+   for every op, the single-account request+grant hole this guard
+   closes (#1401). Single-operator tenants should park their four-eyes
+   writes under an **agent-requester** (a distinct
+   `principal_kind=agent` `sub`) instead
    — see [Single-operator tenants: use an agent-requester, not
    break-glass](#single-operator-tenants-use-an-agent-requester-not-break-glass-1738)
    below.
@@ -152,7 +174,10 @@ so `approve_request` raises `self_approval_forbidden`. The break-glass
 switch `APPROVAL_ALLOW_SELF_APPROVAL` exists for that case — but it is an
 **emergency** escape, not the everyday answer. Flipping it posture-wide
 re-opens, for every op, the single-account *request + grant* hole #1401
-was created to close.
+was created to close. Whether a deploy has it set is surfaced on
+`GET /ready` → `features.approval_queue.effective_posture`
+(`"single_operator_break_glass"` vs the default
+`"four_eyes_enforced"`, #2087).
 
 The everyday answer is an **agent-requester**: park the write under an
 **agent principal** (`principal_kind=agent`) rather than under the human.
@@ -587,6 +612,42 @@ Two rows per request lifecycle (the synchronous-audit invariant):
 | Request | `approval.request` | `202` | `create_pending_request` |
 | Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
 
+### Session-replay lineage (#2086)
+
+The park → decide → execute chain reconstructs as **one subtree** on the
+G8.2 replay surface (`GET /api/v1/audit/sessions/{id}/replay`), which
+anchors on `audit_log.agent_session_id` and walks `parent_audit_id`.
+Before #2086 every row in the chain carried NULLs for both, so an
+approval-gated dispatch was invisible to replay (`{root: [],
+row_count: 0}`) even with `MCP_REQUIRE_SESSION_ID=enforced` — the
+approve/resume surfaces run on a *different task* (the approver's
+request) than the parking dispatch, so the session contextvars bound at
+the parking boundary are gone by decision time.
+
+The fix follows the `work_ref` durability mold (#1659): persist at park,
+re-hydrate later. Two columns on `approval_request` (migration `0053`):
+
+- `agent_session_id` — the parking session, resolved at
+  `create_pending_request` time by
+  `operations/_audit.py::resolve_agent_session_id()`:
+  `agent_session_id_var` (agent-run loop) first, then the MCP
+  transport's `mcp_session_id` structlog contextvar (a direct operator
+  dispatch over MCP). NULL outside any session.
+- `request_audit_id` — the `approval.request` audit row's id
+  (pre-generated so it can land on the row in the same transaction).
+
+`approval_queue._write_audit_row` reads both off the row (never the
+approver's contextvars): the request row anchors on the session with no
+parent (chain root); decision rows anchor on the same session and
+parent-link to `request_audit_id`. `resume_dispatch_after_approval`
+re-binds `agent_session_id_var` + `parent_audit_id_var` (token-scoped,
+alongside `work_ref_var`) around the `dispatch(..., _approved=True)`, so
+the executed op's DISPATCH row anchors in the originating session and
+back-links to the parking row. Net result: >= 3 session-anchored rows
+per approved chain, tree shape `approval.request` → {`approval.decision`,
+`<op_id>`}. Pre-0053 rows keep NULLs and simply stay out of replay (the
+pre-fix behaviour).
+
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent
@@ -624,6 +685,7 @@ fail-open semantics on broadcast outage.
 - `cli/internal/cmd/approvals/` — CLI verbs.
 - `backend/alembic/versions/0023_create_approval_request.py` — schema.
 - `backend/alembic/versions/0036_add_approval_request_params.py` — `params` column for direct-op approve re-dispatch (#1503).
+- `backend/alembic/versions/0053_add_approval_request_session_lineage.py` — `agent_session_id` + `request_audit_id` lineage columns for session replay (#2086).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): broadcast subscription + re-dispatch on approval.
 - `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).

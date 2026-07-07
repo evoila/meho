@@ -77,6 +77,7 @@ from meho_backplane.agent.models import (
     vllm_chat_profile,
 )
 from meho_backplane.agent.run import (
+    UNEXECUTABLE_RUNBOOK_CLASS,
     AgentDefinition,
     AgentRun,
     AgentRunError,
@@ -88,12 +89,16 @@ from meho_backplane.agent.run import (
     BudgetExceededError,
     ModelFactory,
     PydanticAgentRun,
+    UnexecutableRunbookReferenceError,
     default_model_factory,
+    find_runbook_instruction,
 )
 from meho_backplane.agent.toolset import (
     META_TOOL_NAMES,
+    RUNBOOK_EXECUTION_META_TOOL_NAMES,
     MetaToolSpec,
     resolve_agent_tools,
+    toolset_admits_runbook_execution,
 )
 
 __all__ = [
@@ -101,6 +106,8 @@ __all__ = [
     "AWAITING_APPROVAL_TIMEOUT_ERROR_CODE",
     "DEFAULT_TENANT_KEY",
     "META_TOOL_NAMES",
+    "RUNBOOK_EXECUTION_META_TOOL_NAMES",
+    "UNEXECUTABLE_RUNBOOK_CLASS",
     "VCF_PAIF_OPENAI_COMPAT_BASE_PATH",
     "AgentDefinition",
     "AgentInvocationDepthExceeded",
@@ -134,6 +141,7 @@ __all__ = [
     "TenantModelPolicy",
     "TierMapping",
     "TokenAcquisitionError",
+    "UnexecutableRunbookReferenceError",
     "agent_invoke_depth_var",
     "anthropic_backend_builder",
     "anthropic_capabilities",
@@ -147,6 +155,7 @@ __all__ = [
     "default_model_factory",
     "default_openai_backend_builder",
     "default_vcf_paif_backend_builder",
+    "find_runbook_instruction",
     "make_invoke_agent_tool",
     "ollama_chat_profile",
     "openai_chat_profile",
@@ -154,6 +163,7 @@ __all__ = [
     "openai_compat_capabilities",
     "resolve_agent_tools",
     "resume_or_surface_awaiting_approval",
+    "toolset_admits_runbook_execution",
     "vcf_paif_backend_builder",
     "vcf_paif_bearer_provider",
     "vcf_paif_capabilities",

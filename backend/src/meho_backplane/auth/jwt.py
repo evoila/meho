@@ -659,7 +659,7 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
 
 
 def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
-    """Extract ``principal_kind`` from *claims* with a ``user`` default.
+    """Extract ``principal_kind`` from *claims*, absent claim → ``user``.
 
     G11.2-T1 (#815): the ``principal_kind`` claim is **optional** — a
     JWT that carries no ``principal_kind`` claim is treated as a human
@@ -667,10 +667,15 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
     tokens working without a Keycloak mapper update.
 
     Only three values are accepted: ``user``, ``service``, ``agent``.
-    An unrecognised value is logged and defaults to ``user`` (not a 401)
-    — an unknown principal kind should not lock out an operator whose
-    realm emits a custom value; G11.2-T3 will enforce per-kind permission
-    restrictions and can surface a more targeted error at that point.
+    A claim that is **present but unrecognised** is logged and rejected
+    with a 401 (``unknown_principal_kind``), mirroring
+    :func:`_extract_tenant_role`'s unknown-role handling at this layer.
+    ``principal_kind`` is the discriminator agent-vs-human authorization
+    branches on (per-kind permission model, approval gate, agent
+    dispatch), so silently coercing an issuer-signed value the enum
+    doesn't model to the human-user default would be a fail-open
+    authorization decision. A realm that emits a custom kind needs the
+    enum widened first — exactly like an out-of-enum ``tenant_role``.
 
     The claim name is configurable via ``JWT_PRINCIPAL_KIND_CLAIM_NAME``
     (default ``principal_kind``) in :class:`~meho_backplane.settings.Settings`
@@ -684,14 +689,14 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
         return PrincipalKind.USER
     try:
         return PrincipalKind(raw)
-    except ValueError:
+    except ValueError as exc:
         log = structlog.get_logger(__name__)
         log.warning(
             "unknown_principal_kind",
             claim_name=claim_name,
             value=raw,
         )
-        return PrincipalKind.USER
+        raise _http_401("unknown_principal_kind") from exc
 
 
 def _extract_capabilities(claims: Any, settings: Settings) -> frozenset[str]:
@@ -812,9 +817,11 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     bare ``invalid_token`` fallback is reserved for unexpected
     pydantic validation failures (the malformed-email regression case).
 
-    ``principal_kind`` extraction is graceful (unknown value → ``user``
-    default) per G11.2-T1 — an unrecognised kind must not break existing
-    human-operator flows.
+    ``principal_kind`` extraction is graceful only for the **absent**
+    claim (→ ``user`` default, the pre-G11.2 legacy contract); a
+    present-but-unrecognised value fails closed with its own 401 detail
+    token (``unknown_principal_kind``), matching the tenant-claim
+    extractors above.
     """
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:

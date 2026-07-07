@@ -42,7 +42,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select, text
@@ -53,6 +53,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import (
+    VaultCredentialsReadError,
+    load_basic_credentials,
+)
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import (
@@ -74,6 +78,7 @@ from meho_backplane.runbooks.run_service import (
     PreviousStepFailedError,
     RunAlreadyTerminalError,
     RunbookRunService,
+    _build_operator_for_dispatch,
 )
 from meho_backplane.runbooks.runs_schemas import (
     AbortRunRequest,
@@ -289,6 +294,22 @@ async def _ok_handler(
     return {"ok": True}
 
 
+async def _vault_backed_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Typed handler standing in for a Vault-backed connector's credential read.
+
+    Module-level (the typed-op registry rejects closures). Performs the
+    operator-context Vault read every Vault-backed connector loader
+    performs; under the synthetic runbook-dispatch operator the read
+    must refuse locally before Vault is contacted.
+    """
+    await load_basic_credentials(target, operator)
+    return {"ok": True}  # pragma: no cover - the read above must refuse
+
+
 async def _seed_stub_op(
     stub_embedding_service: AsyncMock,
     *,
@@ -310,7 +331,7 @@ async def _seed_stub_op(
     )
 
 
-async def _seed_target(tenant_id: uuid.UUID, name: str) -> None:
+async def _seed_target(tenant_id: uuid.UUID, name: str, *, secret_ref: str | None = None) -> None:
     """Seed a minimal Target row so the resolver in ``call_operation()`` succeeds.
 
     The dispatcher's target resolver (``targets.resolver.resolve_target``)
@@ -318,7 +339,10 @@ async def _seed_target(tenant_id: uuid.UUID, name: str) -> None:
     run's ``target`` string through to ``call_operation()`` which routes
     it via the resolver. Without a seed row, the call returns a 404 and
     the verify dispatch can't validate. Real production runbooks pin to
-    targets the operator has provisioned out of band.
+    targets the operator has provisioned out of band. ``secret_ref``
+    configures the target as Vault-backed for the fail-closed dispatch
+    tests (a populated ``secret_ref`` makes the empty-``raw_jwt`` guard
+    the *only* precondition that can refuse the credential read).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -329,6 +353,7 @@ async def _seed_target(tenant_id: uuid.UUID, name: str) -> None:
                 product="stub",
                 host="stub-host.example",
                 auth_model="shared_service_account",
+                secret_ref=secret_ref,
             )
         )
         await session.commit()
@@ -882,6 +907,132 @@ async def test_abort_run_writes_dispatch_audit_row(
     column_step_id = getattr(row, "step_id", None)
     assert (column_run_id == start.run_id) or (payload.get("run_id") == str(start.run_id))
     assert (column_step_id == "step-1") or (payload.get("step_id") == "step-1")
+
+
+# ---------------------------------------------------------------------------
+# Synthetic dispatch operator fails closed on Vault-backed reads
+# ---------------------------------------------------------------------------
+
+
+def test_build_operator_for_dispatch_carries_empty_raw_jwt() -> None:
+    """The synthetic runbook-dispatch operator honours the fail-closed shape.
+
+    ``raw_jwt`` must be the empty string (the synthetic-operator
+    convention every Vault-touching layer short-circuits on) — never a
+    non-empty placeholder that sails past ``_resolve_secret_ref``'s
+    empty-``raw_jwt`` guard and reaches Vault's JWT/OIDC login. The
+    audit identity (``sub`` / ``tenant_id``) is preserved unchanged.
+    """
+    operator = _build_operator_for_dispatch(sub=OPERATOR, tenant_id=_TENANT_A)
+
+    assert operator.raw_jwt == ""
+    assert operator.sub == OPERATOR
+    assert operator.name == OPERATOR
+    assert operator.tenant_id == _TENANT_A
+
+
+@pytest.mark.asyncio
+async def test_dispatch_operator_vault_read_refused_before_vault_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vault-backed credential read under the synthetic operator fails closed locally.
+
+    ``load_basic_credentials`` must raise ``VaultCredentialsReadError``
+    from the ``_resolve_secret_ref`` precondition guard (no
+    authenticated operator) **before** any Vault contact: the login
+    entry point (``vault_client_for_operator``) is never invoked. The
+    target carries a populated ``secret_ref`` so the empty-``raw_jwt``
+    guard is the only precondition that can refuse the read.
+    """
+    vault_login = MagicMock(name="vault_client_for_operator")
+    monkeypatch.setattr(
+        "meho_backplane.connectors._shared.vault_creds.vault_client_for_operator",
+        vault_login,
+    )
+
+    class _VaultBackedTarget:
+        name = "n"
+        host = "stub-host.example"
+        secret_ref = "targets/n"
+
+    operator = _build_operator_for_dispatch(sub=OPERATOR, tenant_id=_TENANT_A)
+
+    with pytest.raises(VaultCredentialsReadError, match="authenticated operator"):
+        await load_basic_credentials(_VaultBackedTarget(), operator)
+
+    vault_login.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_next_step_vault_backed_verify_fails_closed_without_vault_contact(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verify op that needs a Vault credential read refuses with a failed step.
+
+    End-to-end through ``next_step``: the verify ``op_id`` resolves to a
+    handler that performs the operator-context Vault read
+    (``load_basic_credentials``). Under the synthetic runbook-dispatch
+    operator the read must fail closed at the local precondition guard —
+    the dispatch surfaces a structured refusal (step ``failed``,
+    subsequent calls raise :class:`PreviousStepFailedError`) and the
+    Vault login entry points are **never** invoked. Complements
+    :func:`test_next_step_operation_call_match_advances`, which proves
+    the non-Vault typed verify path dispatches unchanged with the same
+    synthetic operator.
+    """
+    vault_login = MagicMock(name="vault_client_for_operator")
+    monkeypatch.setattr(
+        "meho_backplane.connectors._shared.vault_creds.vault_client_for_operator",
+        vault_login,
+    )
+    jwt_login = MagicMock(name="_to_thread_jwt_login")
+    monkeypatch.setattr("meho_backplane.auth.vault._to_thread_jwt_login", jwt_login)
+
+    register_connector_v2(product="stub", version="", impl_id="", cls=_StubConnector)
+    await register_typed_operation(
+        product="stub",
+        version="1.x",
+        impl_id="stub",
+        op_id="stub.vault_backed",
+        handler=_vault_backed_handler,
+        summary="Vault-backed stub op for fail-closed dispatch tests.",
+        description="Performs an operator-context Vault credential read.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    tenant_id = _TENANT_A
+    await _seed_target(tenant_id, "n", secret_ref="targets/n")
+    await _seed_published_template(
+        tenant_id, "d", body=_op_call_template(op_id="stub.vault_backed")
+    )
+
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    with pytest.raises(PreviousStepFailedError):
+        await run_service.next_step(
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(last_verified=True, verify_response=None),
+        )
+
+    vault_login.assert_not_called()
+    jwt_login.assert_not_called()
+
+    rows = (
+        await db_session.scalars(
+            select(RunbookRunStepState).where(RunbookRunStepState.run_id == start.run_id)
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].state == "failed"
 
 
 # ---------------------------------------------------------------------------

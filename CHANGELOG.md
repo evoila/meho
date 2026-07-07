@@ -106,6 +106,184 @@ connector-related release-notes line.
   generated CLI/SDK pick them up. The sibling silent-no-op case (a
   resolvable connector without topology support returning all-zero
   counts) is tracked separately in #2093. (#2092)
+### Breaking changes — REST connector-ingest omitted `tenant_id` now targets the global scope
+
+- **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.
+
+### Security — fail-closed on unrecognized `principal_kind` claim
+
+- JWT verification now rejects a token whose `principal_kind` claim is
+  present but outside the closed `user`/`service`/`agent` enum with a
+  `401` (`unknown_principal_kind`) instead of silently treating the
+  principal as a human user. `principal_kind` is the discriminator the
+  per-kind permission model, approval gate, and agent dispatch branch
+  on, so an out-of-enum issuer-signed value now fails closed — exactly
+  like an unknown `tenant_role` at the same layer. The structured
+  `unknown_principal_kind` warning (claim name + offending value) is
+  still logged before the rejection. Tokens that **omit** the claim
+  entirely are unaffected: the pre-G11.2 absent-claim → `user` legacy
+  fallback is kept, so existing human-operator tokens keep working
+  without a Keycloak mapper update. Realms emitting a custom kind must
+  widen the enum first rather than relying on the silent coercion.
+### Security — /health least-privilege split (OPERATOR gate + liveness probe)
+
+- **`GET /api/v1/health` (the federation-proof deep check) is now
+  gated at `TenantRole.OPERATOR`**, and a new cheap liveness probe
+  ships at **`GET /api/v1/health/live`** for low-privilege /
+  monitoring callers (evoila-bosnia/meho-internal#159). Every
+  `/api/v1/health` call drives a live Vault JWT/OIDC credential
+  federation plus a KV v2 secret read under the caller's identity;
+  it previously required only a valid JWT, so the lowest-trust
+  `read_only` rank (what monitoring principals are expected to hold)
+  could trigger that Vault round-trip on every poll. A `read_only`
+  caller now receives 403 `insufficient_role` *before* any Vault
+  interaction; `operator` / `tenant_admin` callers (the CLI `meho
+  status` audience, the install smoke) see the exact same response
+  as before. **Migration for `read_only` monitoring callers**: poll
+  `GET /api/v1/health/live` instead — valid JWT (any tenant role),
+  returns `{operator, db}` (identity + DB-migration liveness), no
+  `vault` field, and its code path never touches Vault or the
+  dispatcher (pinned by a source-level guard test). Kubernetes
+  liveness/readiness probes are unaffected — they target the
+  unauthenticated `/healthz` / `/ready` chassis routes. The MCP
+  `meho.status` tool is unchanged (explicitly out of scope here).
+  OpenAPI snapshot + generated CLI client regenerated for the new
+  route.
+### Security — targets test fixture secret-ref hygiene
+
+- Align the internal-lab targets test fixture
+  (`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`) with its own
+  Vault-`secret_ref`-only convention: three operator-note remnants that
+  inlined a well-known lab-default credential string are replaced with
+  rotate-and-store-in-Vault guidance pointing at each target's
+  `secret_ref`, so the fixture models the secrets-stay-in-Vault pattern
+  end to end and stays trivially clean under the zero-tolerance
+  TruffleHog secret scan. Fixture prose only — no entry added or
+  removed, no code or schema change.
+  (evoila-bosnia/meho-internal#158)
+### Security — runbook verify dispatch fails closed on Vault-backed credential reads
+
+- **The runbook `operation_call` verify dispatch's synthetic operator now carries an empty `raw_jwt`, so an operator-context Vault credential read refuses locally before any Vault contact** (evoila-bosnia/meho-internal#157): the runbook run service reconstructs a minimum-shape `Operator` from `operator_sub` for the verify dispatch; it previously carried a non-empty placeholder `raw_jwt` that bypassed the shared credential reader's empty-JWT fail-closed guard (`_resolve_secret_ref`), so the placeholder was forwarded to Vault's JWT/OIDC login and only rejected server-side after a live network round-trip. The synthetic operator now follows the empty-string synthetic-operator convention (same shape as the topology scheduler's refresh operator): a verify `op_id` resolving to a Vault-backed connector fails closed with a structured `VaultCredentialsReadError` refusal before Vault is touched, the step transitions to `failed`, and the dispatched verify's audit identity (`sub` / `tenant_id`) is unchanged. Non-Vault typed in-process verify ops dispatch exactly as before. Hardening only — no FastAPI route/schema change, OpenAPI snapshot unchanged.
+### Security
+
+- The MCP `tools/call` argument gate now asserts the `format` keywords
+  declared in tool `inputSchema`s (`uuid`, `date-time`): the
+  jsonschema validation call passes
+  `format_checker=Draft202012Validator.FORMAT_CHECKER` (with the new
+  `rfc3339-validator` dependency registering the `date-time` checker),
+  so a malformed UUID or non-RFC-3339 timestamp is rejected as JSON-RPC
+  `-32602` "Invalid params" before any tool handler runs — previously
+  `format` was annotation-only and such values reached in-handler
+  parsers, surfacing as `-32603` "Internal error" and defeating agent
+  self-correction. In-handler UUID/timestamp re-parses stay in place as
+  defense-in-depth.
+### Security — CI supply-chain input pinning + Go CVE scanning
+
+- **Pinned the release/CI supply-chain inputs that still floated, and
+  added Go dependency CVE scanning** (#155): the GoReleaser build used
+  by the signed CLI release pipeline is pinned to the exact patch
+  `v2.15.4` (was `~> v2`, i.e. "latest v2.x at run time"), matching
+  `cli/Makefile`'s `GORELEASER_VERSION` so CI releases and the local
+  `make release-dry-run` use the identical GoReleaser build; the
+  testcontainers VCSim image is pinned to the `v0.55.1` release tag
+  (was `:latest`) in all three CI jobs, matching the pinning
+  convention of the sibling pgvector/valkey/Vault test images; and the
+  `go-lint-test` CI job now runs `govulncheck ./...` (pinned
+  `golang.org/x/vuln@v1.5.0`) against the `cli/` module, so known CVEs
+  reachable from the CLI's call graph fail CI instead of going
+  unnoticed. Workflow + docs only — no runtime code change.
+### Security — untrusted-content envelope on stored agent text
+
+- Agent-authored stored text is now re-served to LLM-facing read
+  surfaces inside a positional guard/delimiter envelope
+  (`<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>`, mirroring the
+  tenant-conventions preamble wrapper): broadcast announcement
+  `activity`/`scope`/`target` on `meho.broadcast.recent`,
+  `meho.broadcast.watch` and the `meho://tenant/{tenant_id}/feed`
+  resource, plus the full Markdown `body` on the `meho://kb/{slug}` and
+  `meho://memory/{scope}/{slug}` resources. The delimiters are never
+  derived from the wrapped content, so stored text containing the
+  closing-delimiter literal cannot escape the block, and the three
+  resource descriptions now advertise the served free-text as
+  agent-authored, untrusted, and not a system directive. The
+  tenant-feed resource additionally serves agent announcements (it
+  previously skipped them as malformed). Structural hardening only —
+  no content filtering or detection, stored rows unchanged.
+  (evoila-bosnia/meho-internal#154)
+### Security — target-destination SSRF guard (create/update + connect)
+
+- **Targets can no longer be pointed at non-public addresses unless the
+  deployment explicitly allowlists them** (evoila-bosnia/meho-internal#153):
+  `POST`/`PATCH /api/v1/targets` now reject a `host`/`fqdn` that is — or
+  resolves to — a private, loopback, link-local (including
+  `169.254.0.0/16` cloud-metadata), ULA, multicast, unspecified, or
+  otherwise reserved address with a structured 422 that never echoes the
+  resolved IP; and the HTTP connector transport re-screens the
+  **resolved** address immediately before every dispatch (closing the
+  DNS-rebind window between create and connect), refusing with a
+  structured `connector_error` before any request or credential leaves
+  the backplane. The rejection classes extend the existing OpenAPI
+  spec-fetch guard with a `not is_global` posture, so every
+  non-globally-routable address — including carrier-grade NAT
+  `100.64.0.0/10` — is blocked. Both layers screen the
+  **httpx-normalized dialed host**, never the raw string: a `host`
+  value carrying URL structure cannot screen as one destination and
+  dial another — values embedding credentials, a query, or a fragment
+  are refused outright, while path- or port-bearing values (the GitHub
+  connector's documented `owner/repo` host shapes stay valid) are
+  screened on the host component they actually dial.
+  **Deployment impact (action likely required):** MEHO
+  deployments register on-prem appliances on RFC 1918 space as a matter
+  of course — set the new `MEHO_TARGET_SSRF_ALLOWLIST` env var (comma-
+  separated CIDR ranges, bare IPs, and/or hostname literals, e.g.
+  `10.0.0.0/8,192.168.0.0/16,vcenter.lab.internal`) to opt your trusted
+  internal ranges back in. The allowlist is range-scoped — everything
+  outside it stays blocked, so the guard is never globally disabled.
+  Existing target rows are unaffected at rest (reads/lists still work);
+  the guard bites on the next create, update, or dispatch.
+### Security
+
+- Bound the `/mcp` transport and the memory/knowledge MCP tool inputs
+  against oversized payloads: `search_memory.query` and
+  `search_knowledge.query` now carry a 256-char `maxLength`,
+  `add_to_memory.body` (and its deprecated `content` alias) and
+  `add_to_knowledge.body` cap at 64 KiB — matching the operator
+  console's existing body cap — so oversized free text is refused by
+  schema validation before it reaches the retrieval substrate's
+  tsvector + embedding indexing. The `/mcp` route itself now enforces a
+  1 MiB request-body limit (`Content-Length` fast-reject plus a
+  streaming cap for chunked bodies) and returns HTTP 413 with a
+  JSON-RPC `INVALID_REQUEST` envelope instead of buffering unbounded
+  payloads.
+### Fixed — `meho login --resolve` named-port silent no-op
+
+- `meho login --resolve <host>:<port>:<ip>` now rejects named service
+  ports (e.g. `kc.example.com:https:10.0.0.5`) loudly at parse time:
+  the override map is keyed by the numeric dial address, so a named
+  port previously passed validation (`net.LookupPort`) but keyed the
+  map as `host:https` — never matching the dial address, silently
+  ignoring the pin, and violating the flag's fail-loud contract. The
+  port must now be strictly numeric (1-65535). An IPv6-literal *host*
+  (unrepresentable in the front-split `host:port:ip` format) also gets
+  an explicit error instead of a misleading port/IP validation
+  failure, and the parser docs now describe the actual front-split
+  behaviour. Follow-up to the PR #2181 review. (#2107)
+
+### Security — operator-console read-session token revalidation
+
+- The operator console's `/ui/*` read path now re-validates the
+  session's stored access token against the JWKS-cached JWT chain on a
+  drift-gated cadence (`UI_SESSION_READ_REVALIDATION_SECONDS`, default
+  300; `0` = every request), instead of authenticating reads off the
+  decrypted session row alone for the session's full absolute lifetime.
+  Past the threshold, an expired token silently refreshes through the
+  existing RFC 9700 rotation seam and a token the IdP no longer honours
+  (refresh grant rejected, signature/audience failure) bounces the
+  operator to login — bounding IdP-side revocation and role-demotion
+  lag on read renders to roughly the access-token TTL plus the
+  threshold. On a JWKS cache hit the added per-request cost is zero
+  outbound calls; long-lived SSE streams honour the same check on
+  (re)connect.
 
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
@@ -148,6 +326,32 @@ connector-related release-notes line.
   path params fails ingest loudly. `preview_operation` on such an op now
   returns a structured `dispatch_error` envelope instead of an uncaught
   exception / MCP `-32603` (#2066).
+
+### Security
+
+- Hardened the dispatch broadcast feed against classification drift.
+  Broadcast request params now run through a Tier-1 pass — a
+  secret-shaped key-name scrub plus the deterministic named-pattern
+  redactor — before the payload is built, and any secret detection
+  collapses the broadcast to aggregate-only regardless of op class, so
+  a secret-bearing op missing from the `credential_*` allowlists no
+  longer ships its raw params to co-tenant feed subscribers. A new
+  classifier-coverage test enumerates every registered typed/composite
+  operation and fails CI when an op declaring secret-shaped parameters
+  is not pinned to a `credential_*` class. Benign write broadcasts
+  keep their full mutation detail.
+
+- Hardened Tier-1 redaction at the connector boundary and the dispatch
+  error path. The `authorization_header` / `bearer_token` / `api_key`
+  named patterns now capture a labelled secret's value to its natural
+  delimiter (whitespace / closing quote / end of blob) instead of
+  stopping at the first punctuation byte, so punctuated values are
+  redacted whole. The `operations/_errors.py` result builders now run
+  every free-text diagnostic (`exception_message`, `upstream_message`,
+  `detail`, and the summary tails built from them) through the Tier-1
+  redactor **before** the 256-char cap, so a credential embedded in a
+  stringified connector exception or upstream error body no longer
+  reaches the response/audit envelope in cleartext.
 
 ## [0.19.0] - 2026-06-22
 

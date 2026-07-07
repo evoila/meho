@@ -2281,31 +2281,26 @@ paths:
 
 
 @pytest.mark.asyncio
-async def test_cross_surface_reingest_under_global_scope_creates_shadow_copy(
+async def test_omitted_tenant_id_resolves_global_on_both_surfaces(
     client: TestClient,
     tmp_path: Any,
 ) -> None:
-    """REST (tenant scope) then MCP-global re-ingest re-inserts every op (#1699).
+    """REST then MCP ingest, both with ``tenant_id`` omitted, land in ONE scope (#2085).
 
-    Pins the cross-surface tenant-scope contract on the ingest surface:
+    Pins the cross-surface tenant-scope parity on the ingest surface:
 
-    1. ``POST /api/v1/connectors/ingest`` exposes no ``tenant_id``
-       parameter — rows always land under the calling operator's tenant
-       (here :data:`tests.mcp_test_fixtures.OPERATOR_TENANT_ID`).
+    1. ``POST /api/v1/connectors/ingest`` with **no** ``tenant_id`` in
+       the body resolves to the built-in / global scope
+       (``tenant_id IS NULL``) — before #2085 it silently minted rows
+       under the calling operator's JWT tenant, diverging from the MCP
+       surface's documented "omit = global".
     2. The MCP sibling ``meho.connector.ingest`` with ``tenant_id``
-       *omitted* targets the built-in / global scope
-       (``tenant_id IS NULL``).
-    3. Re-ingesting the **same spec** under the other scope is *expected*
-       to insert every operation again (``skipped_count == 0``): the
-       dedup lookup in ``operations/ingest/_upsert`` scopes its
-       natural-key match by ``tenant_id`` (``IS NULL`` for global,
-       ``== UUID`` for tenant rows), so rows in one namespace are
-       invisible to a write in the other. This is by design — the global
-       and per-tenant connector namespaces are isolated — but it
-       surprises operators who mix surfaces expecting an idempotent
-       re-ingest, which is why both surfaces document the contract
-       rather than changing the behaviour (#1699; the v0.14.0 cycle-10
-       dogfood hit this as a 136-op shadow copy).
+       *omitted* targets the same built-in / global scope.
+    3. Re-ingesting the **same spec** over the other surface is
+       therefore an idempotent dedup hit (``inserted_count == 0``,
+       every op skipped): both writes address the same namespace, so
+       no caller-tenant shadow copy is minted (the failure mode the
+       v0.14.0 cycle-10 dogfood hit as a 136-op duplicate row).
 
     Lives here rather than in ``test_mcp_tools_connector_ingest.py``
     because the REST leg needs this module's real-pipeline machinery
@@ -2368,9 +2363,9 @@ paths:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-scopeprobe.yaml")
 
-        # Leg 1 — REST with the operator's JWT. The body carries no
-        # tenant_id field (the schema rejects one); the route hard-codes
-        # ``tenant_id=operator.tenant_id`` from the JWT.
+        # Leg 1 — REST with the operator's JWT and NO tenant_id in the
+        # body → the built-in / global scope (#2085), not the caller's
+        # JWT tenant.
         rest_response = client.post(
             "/api/v1/connectors/ingest",
             json={**triple, "specs": [{"uri": spec_url}], "async": False},
@@ -2381,25 +2376,26 @@ paths:
         assert rest_ingestion["inserted_count"] == 2
         assert rest_ingestion["skipped_count"] == 0
 
-        # Leg 2 — the MCP handler with ``tenant_id`` omitted → global
-        # scope. Same spec, same triple, real pipeline service (the
-        # handler reads the stub LLM factory installed above via
+        # Leg 2 — the MCP handler with ``tenant_id`` omitted → the same
+        # global scope. Same spec, same triple, real pipeline service
+        # (the handler reads the stub LLM factory installed above via
         # ``get_llm_client_factory``).
         mcp_payload = await ci_mod._ingest_handler(
             build_operator(TenantRole.TENANT_ADMIN),
             {**triple, "specs": [{"uri": spec_url}]},
         )
 
-    # Expected (though potentially surprising) behaviour: the scope-aware
-    # dedup found no match in the global namespace, so every op inserts
-    # again — nothing is skipped or updated across the scope boundary.
+    # Parity: both writes addressed the global namespace, so the second
+    # pass is an idempotent dedup hit — no op re-inserted, no shadow copy.
     mcp_ingestion = mcp_payload["ingestion"]
-    assert mcp_ingestion["inserted_count"] == 2
-    assert mcp_ingestion["skipped_count"] == 0
+    assert mcp_ingestion["inserted_count"] == 0
+    assert mcp_ingestion["skipped_count"] == 2
     assert mcp_ingestion["updated_count"] == 0
 
-    # The DB now carries the shadow copy: the same two op rows exist once
-    # under the operator's tenant and once under the global scope.
+    # The DB carries exactly ONE copy of the two op rows, under the
+    # global scope; the caller's tenant namespace stays empty. This is
+    # the row-count assertion #2085's acceptance criteria require:
+    # exactly one (impl_id, version) row set post-ingest.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
@@ -2411,9 +2407,137 @@ paths:
         scope = str(row.tenant_id) if row.tenant_id is not None else None
         by_scope.setdefault(scope, set()).add(row.op_id)
     assert by_scope == {
-        str(OPERATOR_TENANT_ID): {"GET:/items", "GET:/items/{id}"},
         None: {"GET:/items", "GET:/items/{id}"},
     }
+    assert str(OPERATOR_TENANT_ID) not in by_scope
+
+
+@pytest.mark.asyncio
+async def test_ingest_explicit_own_tenant_id_mints_tenant_scoped_rows(
+    client: TestClient,
+    tmp_path: Any,
+) -> None:
+    """An explicit own-tenant ``tenant_id`` in the body scopes the rows to that tenant.
+
+    The tenant-curated write path stays reachable after #2085 flipped
+    the *omission* default to global: passing the calling operator's
+    own tenant UUID lands the rows under that tenant (the same
+    semantics the MCP tool documents for an explicit ``tenant_id``).
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '1'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    propose_json = (
+        '[{"group_key": "items", "name": "Items", '
+        '"when_to_use": "Use these operations to manage items."}]'
+    )
+    assign_json = '{"GET:/items": "items"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-owntenant.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "scopetenant",
+                "version": "1.0",
+                "impl_id": "scopetenant-rest",
+                "specs": [{"uri": spec_url}],
+                "tenant_id": str(tenant_a),
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.product == "scopetenant"),
+        )
+        rows = result.scalars().all()
+    assert {row.tenant_id for row in rows} == {tenant_a}
+
+
+def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
+    """A ``tenant_id`` that is not the caller's own tenant is rejected 403.
+
+    The service-layer guard (:meth:`IngestionPipelineService._authorize`)
+    runs before any spec fetch or DB write, so the probe needs no
+    reachable spec — the dummy https URI is never dereferenced. This is
+    the cross-tenant-write hole #2085's body field must NOT open.
+    """
+    tenant_a = uuid.uuid4()
+    other_tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "scopedenied",
+                "version": "1.0",
+                "impl_id": "scopedenied-rest",
+                "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+                "tenant_id": str(other_tenant),
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    assert "cannot ingest into" in response.json()["detail"]
+
+
+def test_ingest_tenant_id_omission_semantics_documented_cross_surface() -> None:
+    """The omit-equals-global semantics is documented identically on both surfaces (#2085).
+
+    Acceptance criteria 4 + 5 of the task: the ingest request schema
+    carries a non-empty ``description`` for ``tenant_id`` (it renders
+    into the generated ``openapi.json`` / CLI snapshot via
+    ``model_json_schema``), and the MCP tool description states the
+    same omission semantics, so the two surfaces can no longer
+    contradict each other on what an omitted ``tenant_id`` means.
+    """
+    from meho_backplane.mcp.tools.connector_ingest import _INGEST_DESCRIPTION
+    from meho_backplane.operations.ingest import IngestRequest
+
+    field = IngestRequest.model_fields["tenant_id"]
+    assert field.description, "IngestRequest.tenant_id must carry a schema description"
+    # Both surfaces state the same resolution: omission → global scope.
+    for surface_text in (field.description, _INGEST_DESCRIPTION):
+        lowered = surface_text.lower()
+        assert "omit" in lowered
+        assert "global" in lowered
+    # The description flows into the OpenAPI request schema (and from
+    # there into the committed CLI snapshot on regen).
+    schema = IngestRequest.model_json_schema()
+    assert schema["properties"]["tenant_id"]["description"] == field.description
 
 
 def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
@@ -4065,8 +4189,11 @@ async def test_ingest_async_job_poll_cross_tenant_is_404_not_403(
     Same conflation :class:`ReviewService` enforces on the read
     surfaces -- an operator must not be able to enumerate other
     tenants by status-code differential. The test seeds a job under
-    tenant A (real flow: POST /ingest under tenant A's admin token)
-    and then polls it under tenant B's admin token.
+    tenant A (real flow: POST /ingest under tenant A's admin token
+    with an explicit body ``tenant_id`` — since #2085 an *omitted*
+    ``tenant_id`` mints a built-in / global job, which tenant B's
+    admin may legitimately poll) and then polls it under tenant B's
+    admin token.
 
     Driven over :class:`ASGITransport` (not :class:`TestClient`)
     because the POST + the cross-tenant GET share a single event
@@ -4138,6 +4265,10 @@ paths:
                     "version": "1.0",
                     "impl_id": "tenantiso-impl",
                     "specs": [{"uri": spec_url}],
+                    # Explicit tenant scope: an omitted tenant_id would
+                    # mint a GLOBAL job (#2085) that tenant B's admin
+                    # can poll by design.
+                    "tenant_id": str(tenant_a_id),
                 },
                 headers=_authed(token_a),
             )

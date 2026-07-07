@@ -1,11 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /api/v1/health`` — federation-proof authenticated health endpoint.
+"""Authenticated health endpoints — liveness probe + federation-proof deep check.
 
-This route is the load-bearing integration point for Goal #11's smoke
-test. A single call exercises the entire authn / authz / federation
-chain end-to-end:
+Two routes with deliberately different privilege requirements:
+
+* ``GET /api/v1/health/live`` — a **cheap liveness probe** for
+  low-privilege / monitoring principals. Requires only a valid JWT
+  (any tenant role, including ``read_only``) and reports operator
+  identity plus DB-migration liveness. Its code path never touches
+  Vault: no connector call, no per-operator credential federation,
+  no secret read.
+* ``GET /api/v1/health`` — the **federation-proof deep check**, gated
+  at :data:`~meho_backplane.auth.operator.TenantRole.OPERATOR` via
+  :func:`~meho_backplane.auth.rbac.require_role`. Every call drives a
+  live Vault JWT/OIDC login plus a KV v2 secret read under the
+  caller's identity, so least privilege demands the gate: a
+  ``read_only`` principal receives 403 ``insufficient_role`` before
+  any Vault credential is federated. Low-privilege monitoring callers
+  that only need "is the process up?" use ``/health/live`` instead.
+
+The deep check is the load-bearing integration point for Goal #11's
+smoke test. A single call exercises the entire authn / authz /
+federation chain end-to-end:
 
 1. The :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
    runs :func:`~meho_backplane.auth.jwt.verify_jwt` against the incoming
@@ -48,7 +65,8 @@ import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
@@ -161,7 +179,32 @@ class HealthResponse(BaseModel):
     mcp_protocol_version: str = PROTOCOL_VERSION
 
 
+class LivenessResponse(BaseModel):
+    """``GET /api/v1/health/live`` response body.
+
+    The cheap, low-privilege liveness surface: operator identity (from
+    the already-validated JWT — zero extra cost) plus DB-migration
+    liveness from
+    :func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault
+    field on purpose — this model must never grow one. The federation
+    proof lives exclusively on the OPERATOR-gated
+    :class:`HealthResponse` route so a low-privilege monitoring
+    principal can never drive a per-operator Vault credential
+    federation from the liveness path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    operator: OperatorIdentity
+    db: DbStatus
+
+
 router = APIRouter(prefix="/api/v1", tags=["health"])
+
+#: Module-level dependency singleton (sibling-router convention, and
+#: what keeps ruff B008 happy): resolves the OPERATOR rank once at
+#: import time so a typo'd role fails at boot, not per-request.
+_require_operator = Depends(require_role(TenantRole.OPERATOR))
 
 
 #: Vault exception class names that indicate a login-phase failure (the
@@ -298,16 +341,47 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     )
 
 
+@router.get("/health/live", response_model=LivenessResponse)
+async def liveness(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> LivenessResponse:
+    """Cheap liveness probe for low-privilege / monitoring callers.
+
+    Requires a valid JWT (``verify_jwt_and_bind`` — 401 on missing /
+    invalid tokens, and ``operator_sub`` lands in structlog
+    contextvars) but deliberately carries **no role gate**: the lowest
+    tenant role (``read_only``) held by monitoring principals must be
+    able to poll it. In exchange, this handler is forbidden from
+    touching Vault — it must never invoke a connector, federate a
+    per-operator Vault credential, or read a secret. The federation
+    proof belongs to :func:`authenticated_health` behind the OPERATOR
+    gate.
+    """
+    db_probe_result = await db_migration_probe()
+    return LivenessResponse(
+        operator=OperatorIdentity(
+            sub=operator.sub,
+            name=operator.name,
+            email=operator.email,
+        ),
+        db=DbStatus(migrated=db_probe_result.ok),
+    )
+
+
 @router.get("/health", response_model=HealthResponse)
 async def authenticated_health(
-    operator: Operator = Depends(verify_jwt_and_bind),
+    operator: Operator = _require_operator,
 ) -> HealthResponse:
-    """Federation-proof authenticated health check.
+    """Federation-proof authenticated health check (OPERATOR-gated).
 
     See module docstring for the four-step chain this exercises. The
-    ``Depends(verify_jwt_and_bind)`` annotation is what guarantees the
-    JWT is validated *and* ``operator_sub`` is bound into structlog
-    contextvars before this body runs — every log line emitted from
-    here downstream carries operator identity automatically.
+    ``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps
+    ``verify_jwt_and_bind`` — the JWT is validated *and*
+    ``operator_sub`` is bound into structlog contextvars before the
+    role check runs — and then enforces least privilege: every call
+    here federates a live per-operator Vault credential and reads a
+    KV secret, which is not a ``read_only``-rank capability. Callers
+    below OPERATOR receive 403 ``insufficient_role`` before any Vault
+    interaction; monitoring principals poll ``/health/live`` instead.
     """
     return await build_health_response(operator)

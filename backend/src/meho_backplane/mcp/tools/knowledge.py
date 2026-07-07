@@ -93,6 +93,22 @@ _OP_CLASS_WRITE: Final[str] = "write"
 _DEFAULT_SEARCH_LIMIT: Final[int] = 10
 _MAX_SEARCH_LIMIT: Final[int] = 50
 
+#: Length cap on the ``search_knowledge`` free-text ``query``. Mirrors
+#: the 256-char class the sibling tool slices use for free-text inputs
+#: (``audit.py`` / ``topology.py``); both BM25 and the embedding encoder
+#: consume the query, so an unbounded string is compute the substrate
+#: pays for on every call.
+_MAX_QUERY_CHARS: Final[int] = 256
+
+#: Length cap on the ``add_to_knowledge`` Markdown body. Matches the
+#: memory-surface cap (``tools/memory.py`` ``_MAX_BODY_CHARS`` and the
+#: operator-console
+#: :data:`meho_backplane.ui.routes.memory.views.BODY_MAX_LENGTH`) — the
+#: same retrieval substrate indexes both corpora as single documents
+#: (tsvector + 384-dim embedding), so the cap bounds the worst-case
+#: per-call indexing allocation.
+_MAX_BODY_CHARS: Final[int] = 64 * 1024
+
 #: Shared slug-shape description rendered into both the tool input schema
 #: (``add_to_knowledge``) and the resource template (``meho://kb/{slug}``).
 #: Authored once so a future contract tweak edits one string. The
@@ -233,9 +249,11 @@ register_mcp_tool(
                 "query": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": _MAX_QUERY_CHARS,
                     "description": (
                         "Free-form query. Both BM25 (lexical) and cosine "
-                        "(semantic) signals consume it; ranks are fused via RRF."
+                        "(semantic) signals consume it; ranks are fused via RRF. "
+                        f"Capped at {_MAX_QUERY_CHARS} characters."
                     ),
                 },
                 "filters": {
@@ -302,11 +320,13 @@ register_mcp_tool(
                 "body": {
                     "type": "string",
                     "minLength": 1,
+                    "maxLength": _MAX_BODY_CHARS,
                     "description": (
                         "Markdown body. Stored as-is; no chunking. The "
                         "retrieval substrate indexes it as a single "
                         "document (BM25 over tsvector + 384-dim "
-                        "embedding for cosine)."
+                        "embedding for cosine). "
+                        f"Capped at {_MAX_BODY_CHARS} characters."
                     ),
                 },
                 "metadata": {

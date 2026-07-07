@@ -3727,8 +3727,8 @@ type IngestKbRequest struct {
 // “catalog_entry“ alongside any of “product“ / “version“ /
 // “impl_id“ / “specs[]“ fails 422 “catalog_entry_conflict“ at
 // the validator below. A body that sets neither fails 422
-// “ingest_request_underspecified“. “base_url“ and “dry_run“
-// are accepted in both shapes.
+// “ingest_request_underspecified“. “base_url“, “dry_run“, and
+// “tenant_id“ are accepted in both shapes.
 //
 // “dry_run=True“ skips both the DB writes and the grouping pass:
 // only :func:`parse_openapi` runs, and the response carries
@@ -3740,6 +3740,19 @@ type IngestKbRequest struct {
 // registered :class:`GenericRestConnector` shim; “None“ leaves
 // the shim unconfigured (the connector's eventual hand-coded
 // subclass at G3.x will set its own base URL).
+//
+// “tenant_id“ selects the write scope (#2085): “None“ — whether
+// the field is omitted or explicitly “null“ — targets the
+// built-in / global scope (“tenant_id IS NULL“), the same
+// omit-equals-global semantics the MCP sibling
+// “meho.connector.ingest“ documents. The operator's own tenant
+// UUID targets their tenant-curated namespace; any other UUID is
+// rejected 403 by :meth:`IngestionPipelineService._authorize`.
+// Before #2085 the REST route resolved omission to the *caller's
+// tenant*, diverging from the MCP surface — a consumer pasting the
+// MCP-documented body into REST silently minted a tenant-scoped
+// shadow copy of an existing global row (the dedup lookup is
+// scope-aware and never matches across scopes).
 //
 // “extra="forbid"“ rejects unknown body fields with 422
 // “extra_forbidden“ (G0.9-T2 / #729) — silent-drop on a typo
@@ -3755,7 +3768,10 @@ type IngestRequest struct {
 	Product                    *string       `json:"product"`
 	SpecInfoVersionsCompatible *[]string     `json:"spec_info_versions_compatible"`
 	Specs                      *[]SpecSource `json:"specs,omitempty"`
-	Version                    *string       `json:"version"`
+
+	// TenantId Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) — the same omit-equals-global semantics as the MCP tool meho.connector.ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403.
+	TenantId *openapi_types.UUID `json:"tenant_id"`
+	Version  *string             `json:"version"`
 }
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
@@ -3913,6 +3929,40 @@ type KbListResponse struct {
 // stable, and an out-of-enum value fails Pydantic validation at the HTTP
 // boundary with a 422 rather than silently filtering nothing.
 type KindFilterValue string
+
+// LivenessResponse “GET /api/v1/health/live“ response body.
+//
+// The cheap, low-privilege liveness surface: operator identity (from
+// the already-validated JWT — zero extra cost) plus DB-migration
+// liveness from
+// :func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault
+// field on purpose — this model must never grow one. The federation
+// proof lives exclusively on the OPERATOR-gated
+// :class:`HealthResponse` route so a low-privilege monitoring
+// principal can never drive a per-operator Vault credential
+// federation from the liveness path.
+type LivenessResponse struct {
+	// Db Database migration status.
+	//
+	// ``migrated`` is ``True`` when the DB-migration-state probe reports
+	// healthy (current Alembic revision matches head), ``False`` when
+	// the probe reports unhealthy for any reason (DB unreachable,
+	// revision diverged, ``alembic_version`` table absent). v0.1 ships
+	// no opinions on retry / repair — operators see the probe's
+	// ``detail`` string on the ``/ready`` payload (and downstream tooling
+	// in T29 enforces the migration-runner contract). The field stays
+	// ``bool | None`` for forward compatibility with response decoders
+	// that were generated against the chassis-stage shape, but the
+	// handler now always populates it from the probe.
+	Db DbStatus `json:"db"`
+
+	// Operator Operator identity surface exposed to the CLI.
+	//
+	// Excludes ``raw_jwt`` deliberately — the bearer token must never
+	// appear in a response body, and the :class:`Operator` model carries
+	// it for downstream Vault forward-auth only.
+	Operator OperatorIdentity `json:"operator"`
+}
 
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
 //
@@ -6614,6 +6664,11 @@ type AuthenticatedHealthApiV1HealthGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// LivenessApiV1HealthLiveGetParams defines parameters for LivenessApiV1HealthLiveGet.
+type LivenessApiV1HealthLiveGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListKbApiV1KbGetParams defines parameters for ListKbApiV1KbGet.
 type ListKbApiV1KbGetParams struct {
 	// Q Free-text filter. Canonical across the kb / memory / operations-search list surfaces. On `kb` this is a SQL `LIKE` pattern; on `memory` a slug substring; on `operations/search` the hybrid-retrieval query. Supersedes the per-surface legacy param (`filter` / `slug_pattern` / `query`), which stays accepted but deprecated.
@@ -8901,6 +8956,9 @@ type ClientInterface interface {
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// LivenessApiV1HealthLiveGet request
+	LivenessApiV1HealthLiveGet(ctx context.Context, params *LivenessApiV1HealthLiveGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListKbApiV1KbGet request
 	ListKbApiV1KbGet(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10897,6 +10955,18 @@ func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpo
 
 func (c *Client) AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthenticatedHealthApiV1HealthGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) LivenessApiV1HealthLiveGet(ctx context.Context, params *LivenessApiV1HealthLiveGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewLivenessApiV1HealthLiveGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -19366,6 +19436,48 @@ func NewAuthenticatedHealthApiV1HealthGetRequest(server string, params *Authenti
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/health")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewLivenessApiV1HealthLiveGetRequest generates requests for LivenessApiV1HealthLiveGet
+func NewLivenessApiV1HealthLiveGetRequest(server string, params *LivenessApiV1HealthLiveGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/health/live")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -33749,6 +33861,9 @@ type ClientWithResponsesInterface interface {
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
 
+	// LivenessApiV1HealthLiveGetWithResponse request
+	LivenessApiV1HealthLiveGetWithResponse(ctx context.Context, params *LivenessApiV1HealthLiveGetParams, reqEditors ...RequestEditorFn) (*LivenessApiV1HealthLiveGetResponse, error)
+
 	// ListKbApiV1KbGetWithResponse request
 	ListKbApiV1KbGetWithResponse(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*ListKbApiV1KbGetResponse, error)
 
@@ -36182,6 +36297,29 @@ func (r AuthenticatedHealthApiV1HealthGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AuthenticatedHealthApiV1HealthGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type LivenessApiV1HealthLiveGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *LivenessResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r LivenessApiV1HealthLiveGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r LivenessApiV1HealthLiveGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -42539,6 +42677,15 @@ func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx 
 	return ParseAuthenticatedHealthApiV1HealthGetResponse(rsp)
 }
 
+// LivenessApiV1HealthLiveGetWithResponse request returning *LivenessApiV1HealthLiveGetResponse
+func (c *ClientWithResponses) LivenessApiV1HealthLiveGetWithResponse(ctx context.Context, params *LivenessApiV1HealthLiveGetParams, reqEditors ...RequestEditorFn) (*LivenessApiV1HealthLiveGetResponse, error) {
+	rsp, err := c.LivenessApiV1HealthLiveGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseLivenessApiV1HealthLiveGetResponse(rsp)
+}
+
 // ListKbApiV1KbGetWithResponse request returning *ListKbApiV1KbGetResponse
 func (c *ClientWithResponses) ListKbApiV1KbGetWithResponse(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*ListKbApiV1KbGetResponse, error) {
 	rsp, err := c.ListKbApiV1KbGet(ctx, params, reqEditors...)
@@ -47866,6 +48013,39 @@ func ParseAuthenticatedHealthApiV1HealthGetResponse(rsp *http.Response) (*Authen
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest HealthResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseLivenessApiV1HealthLiveGetResponse parses an HTTP response from a LivenessApiV1HealthLiveGetWithResponse call
+func ParseLivenessApiV1HealthLiveGetResponse(rsp *http.Response) (*LivenessApiV1HealthLiveGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &LivenessApiV1HealthLiveGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LivenessResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

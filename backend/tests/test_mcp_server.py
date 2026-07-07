@@ -53,6 +53,7 @@ from meho_backplane.mcp.schemas import (
     PARSE_ERROR,
     PROTOCOL_VERSION,
 )
+from meho_backplane.mcp.server import _MAX_REQUEST_BODY_BYTES
 from meho_backplane.settings import get_settings
 
 _DISPATCH_TEST_OPERATOR: Operator = Operator(
@@ -474,6 +475,80 @@ def test_array_body_returns_invalid_request(client: TestClient) -> None:
     body = response.json()
     assert body["id"] is None
     assert body["error"]["code"] == INVALID_REQUEST
+
+
+def _padded_ping_body(total_bytes: int) -> bytes:
+    """Build a valid ``ping`` request envelope padded to exactly *total_bytes*.
+
+    The padding rides in an ignored ``params`` member so the payload
+    stays well-formed JSON-RPC — proving a rejection is about the
+    body's *size*, not its shape.
+    """
+    prefix = b'{"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"pad": "'
+    suffix = b'"}}'
+    pad_len = total_bytes - len(prefix) - len(suffix)
+    assert pad_len >= 0, "total_bytes too small for the envelope"
+    return prefix + b"x" * pad_len + suffix
+
+
+def test_oversize_body_rejected_at_transport(client: TestClient) -> None:
+    """A body over the transport cap → HTTP 413 + -32600, id=null.
+
+    The declared ``Content-Length`` already exceeds
+    :data:`~meho_backplane.mcp.server._MAX_REQUEST_BODY_BYTES`, so the
+    guard rejects before any parsing — the payload being a well-formed
+    ``ping`` envelope proves dispatch was never reached (a dispatched
+    ping would have returned ``result: {}``).
+    """
+    response = client.post(
+        "/mcp",
+        content=_padded_ping_body(_MAX_REQUEST_BODY_BYTES + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["id"] is None
+    assert body["error"]["code"] == INVALID_REQUEST
+    assert "exceeds" in body["error"]["message"]
+
+
+def test_oversize_chunked_body_rejected_at_transport(client: TestClient) -> None:
+    """An over-cap body without ``Content-Length`` is caught by the streaming arm.
+
+    Generator content posts as chunked transfer (no declared length),
+    so the header fast-reject can't fire; the incremental read must
+    stop the moment the running total crosses the cap.
+    """
+    oversize = _padded_ping_body(_MAX_REQUEST_BODY_BYTES + 1)
+    chunk_size = 64 * 1024
+    chunks = [oversize[i : i + chunk_size] for i in range(0, len(oversize), chunk_size)]
+
+    response = client.post(
+        "/mcp",
+        content=iter(chunks),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["id"] is None
+    assert body["error"]["code"] == INVALID_REQUEST
+
+
+def test_at_limit_body_still_dispatches(client: TestClient) -> None:
+    """A body exactly at the transport cap flows through to normal dispatch."""
+    response = client.post(
+        "/mcp",
+        content=_padded_ping_body(_MAX_REQUEST_BODY_BYTES),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 1
+    assert body["result"] == {}
+    assert "error" not in body
 
 
 def test_wrong_jsonrpc_version_returns_invalid_request(client: TestClient) -> None:

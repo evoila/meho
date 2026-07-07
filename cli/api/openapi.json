@@ -101,13 +101,57 @@
         }
       }
     },
+    "/api/v1/health/live": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness",
+        "description": "Cheap liveness probe for low-privilege / monitoring callers.\n\nRequires a valid JWT (``verify_jwt_and_bind`` \u2014 401 on missing /\ninvalid tokens, and ``operator_sub`` lands in structlog\ncontextvars) but deliberately carries **no role gate**: the lowest\ntenant role (``read_only``) held by monitoring principals must be\nable to poll it. In exchange, this handler is forbidden from\ntouching Vault \u2014 it must never invoke a connector, federate a\nper-operator Vault credential, or read a secret. The federation\nproof belongs to :func:`authenticated_health` behind the OPERATOR\ngate.",
+        "operationId": "liveness_api_v1_health_live_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
           "health"
         ],
         "summary": "Authenticated Health",
-        "description": "Federation-proof authenticated health check.\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(verify_jwt_and_bind)`` annotation is what guarantees the\nJWT is validated *and* ``operator_sub`` is bound into structlog\ncontextvars before this body runs \u2014 every log line emitted from\nhere downstream carries operator identity automatically.",
+        "description": "Federation-proof authenticated health check (OPERATOR-gated).\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(require_role(TenantRole.OPERATOR))`` dependency wraps\n``verify_jwt_and_bind`` \u2014 the JWT is validated *and*\n``operator_sub`` is bound into structlog contextvars before the\nrole check runs \u2014 and then enforces least privilege: every call\nhere federates a live per-operator Vault credential and reads a\nKV secret, which is not a ``read_only``-rank capability. Callers\nbelow OPERATOR receive 403 ``insufficient_role`` before any Vault\ninteraction; monitoring principals poll ``/health/live`` instead.",
         "operationId": "authenticated_health_api_v1_health_get",
         "parameters": [
           {
@@ -3055,7 +3099,7 @@
           "connectors"
         ],
         "summary": "Ingest Endpoint",
-        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\nAsync (default; ``async=true``) fires the pipeline off the request\nthread via :func:`asyncio.create_task` and returns\n:class:`IngestJobHandle` at HTTP 202; the operator polls\n``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.\nThis is the only mode that survives real-world vendor specs\nwithout tripping the kubelet liveness probe -- the\n``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event\nloop for ~30 s in the register + LLM-grouping phases, past\nthe 25 s liveness deadline. The 202 + job-id shape is the\n\"escape hatch must not crash the pod\" answer G0.16-T1 closes.\n\nSync (legacy; ``async=false``) runs the pipeline inline and\nreturns :class:`IngestResponse` at HTTP 200. Kept for small-spec\ncallers (CI tests with \u2264 100-op fixtures, ad-hoc shell scripts,\nthe v0.8.x clients that pre-date the async shape). Will not\nsurvive real-world specs and is documented as such in\n``docs/codebase/spec-ingestion.md`` and\n``docs/codebase/api-shape-conventions.md`` \u00a71.\n\n``dry_run=true`` parses every spec but writes nothing and is\nalways synchronous (the parse-only path is the fast leg per\nRDC #771 Finding 21 -- 30 s for the same spec, but with no DB\nor LLM hops and steady event-loop yields, well clear of the\nprobe deadline in practice). ``async`` is ignored on the dry-run\npath; the response carries the parser's ``inserted_count``\nprojection and ``grouping=None``.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping (#1699): this route exposes **no** ``tenant_id``\nparameter \u2014 the write scope is always the calling operator's\n``tenant_id`` from the JWT (the CLI verb drives this route and\ninherits the same scope). The MCP sibling\n``meho.connector.ingest`` accepts an optional ``tenant_id`` and\ntargets the built-in / global scope (``tenant_id=NULL``) when it\nis omitted (tenant_admin only). The dedup lookup\n(``operations/ingest/_upsert``) is scope-aware, so re-ingesting\nthe same spec under the other scope re-inserts every op as a\nshadow copy there \u2014 verify the scope matches your intent.",
+        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\nAsync (default; ``async=true``) fires the pipeline off the request\nthread via :func:`asyncio.create_task` and returns\n:class:`IngestJobHandle` at HTTP 202; the operator polls\n``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.\nThis is the only mode that survives real-world vendor specs\nwithout tripping the kubelet liveness probe -- the\n``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event\nloop for ~30 s in the register + LLM-grouping phases, past\nthe 25 s liveness deadline. The 202 + job-id shape is the\n\"escape hatch must not crash the pod\" answer G0.16-T1 closes.\n\nSync (legacy; ``async=false``) runs the pipeline inline and\nreturns :class:`IngestResponse` at HTTP 200. Kept for small-spec\ncallers (CI tests with \u2264 100-op fixtures, ad-hoc shell scripts,\nthe v0.8.x clients that pre-date the async shape). Will not\nsurvive real-world specs and is documented as such in\n``docs/codebase/spec-ingestion.md`` and\n``docs/codebase/api-shape-conventions.md`` \u00a71.\n\n``dry_run=true`` parses every spec but writes nothing and is\nalways synchronous (the parse-only path is the fast leg per\nRDC #771 Finding 21 -- 30 s for the same spec, but with no DB\nor LLM hops and steady event-loop yields, well clear of the\nprobe deadline in practice). ``async`` is ignored on the dry-run\npath; the response carries the parser's ``inserted_count``\nprojection and ``grouping=None``.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping (#2085, superseding the #1699 divergence): the\nbody's optional ``tenant_id`` selects the write scope with the\nMCP sibling ``meho.connector.ingest``'s semantics \u2014 omitted /\n``null`` \u2192 built-in / global (``tenant_id IS NULL``), own tenant\nUUID \u2192 tenant-curated, any other UUID \u2192 403 from\n:meth:`IngestionPipelineService._authorize`; both sit behind the\nroute's ``tenant_admin`` gate. The dedup is scope-aware: an\nexplicit re-ingest under the *other* scope shadow-copies.",
         "operationId": "ingest_endpoint_api_v1_connectors_ingest_post",
         "parameters": [
           {
@@ -7886,7 +7930,7 @@
           "mcp"
         ],
         "summary": "Mcp Dispatch",
-        "description": "Dispatch a single JSON-RPC 2.0 request or notification.\n\nThe Streamable HTTP body contract (\u00a7\"Sending Messages to the Server\"):\n\n* Input is a JSON object \u2014 batch arrays are unsupported in T1.\n* On a *request* (id present): return 200 + single JSON envelope.\n* On a *notification* (id absent, or method prefix\n  ``notifications/``): return 202 with no body, regardless of\n  whether the handler errored \u2014 JSON-RPC \u00a74.1.2 forbids replying.\n\nAuthentication (G0.5-T2, #247): every request to this route MUST\ncarry a Bearer token whose ``aud`` claim equals the canonical MCP\nresource URI per RFC 8707 \u00a72. Validation runs as a FastAPI\ndependency before the body is parsed, so a missing or invalid\ntoken short-circuits to 401 + ``WWW-Authenticate: Bearer\nresource_metadata=...`` per RFC 9728 \u00a75.1 \u2014 the dispatch pipeline\nnever sees an unauthenticated request. The :class:`Operator` is\ninjected into this handler for downstream use even though T2\nitself doesn't consume the identity beyond the contextvar binding\nside effect; T3 / T4 / T5 will pull tenant / role data off it.\n\nThe function is the orchestrator only; each phase of the dispatch\npipeline lives in its own helper so the per-phase contract is grep-\nable and the cognitive complexity stays under the project's\nSonarCloud threshold:\n\n* :func:`_parse_request_body` \u2014 body \u2192 ``dict`` or transport error.\n* :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`\n  \u2014 envelope shape validation.\n* :func:`_validate_protocol_version_header` \u2014 spec \u00a7\"Protocol\n  Version Header\" enforcement.\n* :func:`_dispatch_to_handler` \u2014 handler lookup + execution + error\n  mapping.\n\nGET requests on this path automatically return HTTP 405 (FastAPI's\ndefault for an unmatched method) which satisfies the spec's\nfallback when the server does not implement the GET-opens-SSE\nbranch of the Streamable HTTP transport.",
+        "description": "Dispatch a single JSON-RPC 2.0 request or notification.\n\nThe Streamable HTTP body contract (\u00a7\"Sending Messages to the Server\"):\n\n* Input is a JSON object \u2014 batch arrays are unsupported in T1.\n* On a *request* (id present): return 200 + single JSON envelope.\n* On a *notification* (id absent, or method prefix\n  ``notifications/``): return 202 with no body, regardless of\n  whether the handler errored \u2014 JSON-RPC \u00a74.1.2 forbids replying.\n\nAuthentication (G0.5-T2, #247): every request to this route MUST\ncarry a Bearer token whose ``aud`` claim equals the canonical MCP\nresource URI per RFC 8707 \u00a72. Validation runs as a FastAPI\ndependency before the body is parsed, so a missing or invalid\ntoken short-circuits to 401 + ``WWW-Authenticate: Bearer\nresource_metadata=...`` per RFC 9728 \u00a75.1 \u2014 the dispatch pipeline\nnever sees an unauthenticated request. The :class:`Operator` is\ninjected into this handler for downstream use even though T2\nitself doesn't consume the identity beyond the contextvar binding\nside effect; T3 / T4 / T5 will pull tenant / role data off it.\n\nThe function is the orchestrator only; each phase of the dispatch\npipeline lives in its own helper so the per-phase contract is grep-\nable and the cognitive complexity stays under the project's\nSonarCloud threshold:\n\n* :func:`_read_body_capped` \u2014 bounded body read; over-cap payloads\n  are refused with HTTP 413 before any parsing.\n* :func:`_parse_request_body` \u2014 body \u2192 ``dict`` or transport error.\n* :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`\n  \u2014 envelope shape validation.\n* :func:`_validate_protocol_version_header` \u2014 spec \u00a7\"Protocol\n  Version Header\" enforcement.\n* :func:`_dispatch_to_handler` \u2014 handler lookup + execution + error\n  mapping.\n\nGET requests on this path automatically return HTTP 405 (FastAPI's\ndefault for an unmatched method) which satisfies the spec's\nfallback when the server does not implement the GET-opens-SSE\nbranch of the Streamable HTTP transport.",
         "operationId": "mcp_dispatch_mcp_post",
         "parameters": [
           {
@@ -22677,6 +22721,13 @@
             "nullable": true,
             "title": "Base Url"
           },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id",
+            "description": "Write scope for the ingested connector rows. Omit or pass null to ingest under the built-in / global scope (tenant_id IS NULL) \u2014 the same omit-equals-global semantics as the MCP tool meho.connector.ingest (tenant_admin only). Pass your own tenant UUID for a tenant-scoped ingest; another tenant's UUID is rejected with 403."
+          },
           "spec_info_versions_compatible": {
             "items": {
               "type": "string"
@@ -22701,7 +22752,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "IngestRequest",
-        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url`` and ``dry_run``\nare accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url``, ``dry_run``, and\n``tenant_id`` are accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``tenant_id`` selects the write scope (#2085): ``None`` \u2014 whether\nthe field is omitted or explicitly ``null`` \u2014 targets the\nbuilt-in / global scope (``tenant_id IS NULL``), the same\nomit-equals-global semantics the MCP sibling\n``meho.connector.ingest`` documents. The operator's own tenant\nUUID targets their tenant-curated namespace; any other UUID is\nrejected 403 by :meth:`IngestionPipelineService._authorize`.\nBefore #2085 the REST route resolved omission to the *caller's\ntenant*, diverging from the MCP surface \u2014 a consumer pasting the\nMCP-documented body into REST silently minted a tenant-scoped\nshadow copy of an existing global row (the dedup lookup is\nscope-aware and never matches across scopes).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
       },
       "IngestResponse": {
         "properties": {
@@ -22939,6 +22990,23 @@
         ],
         "title": "KindFilterValue",
         "description": "Closed enum of the trigger ``kind`` values exposed in the filter URL.\n\nMirrors the wire-level :data:`~meho_backplane.scheduler.schemas.KindFilter`\nliteral (``cron`` / ``one_off`` / ``event``). The ``str`` mixin keeps\nthe template's ``{{ kind_filter }}`` rendering + ``selected`` matching\nstable, and an out-of-enum value fails Pydantic validation at the HTTP\nboundary with a 422 rather than silently filtering nothing."
+      },
+      "LivenessResponse": {
+        "properties": {
+          "operator": {
+            "$ref": "#/components/schemas/OperatorIdentity"
+          },
+          "db": {
+            "$ref": "#/components/schemas/DbStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operator",
+          "db"
+        ],
+        "title": "LivenessResponse",
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path."
       },
       "ManualStep": {
         "properties": {

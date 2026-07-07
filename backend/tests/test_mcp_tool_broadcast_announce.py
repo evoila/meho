@@ -58,6 +58,7 @@ from meho_backplane.mcp.tools.broadcast import (
     _handler_recent,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import wrap_untrusted_text
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -761,8 +762,10 @@ class TestBroadcastAnnounceIntegration:
         assert len(recent["events"]) == 1
         event = recent["events"][0]
         assert event["event_kind"] == "agent_announcement"
-        assert event["activity"] == "investigating"
-        assert event["target"] == "prod-vc-1"
+        # dump_event_wire re-serves agent-authored free text inside the
+        # untrusted-content envelope (_ANNOUNCEMENT_UNTRUSTED_FIELDS).
+        assert event["activity"] == wrap_untrusted_text("investigating")
+        assert event["target"] == wrap_untrusted_text("prod-vc-1")
         assert event["phase"] == "start"
         assert event["principal_sub"] == op.sub
         assert event["tenant_id"] == str(op.tenant_id)
@@ -800,8 +803,10 @@ class TestBroadcastAnnounceIntegration:
 
         a_activities = [e["activity"] for e in recent_a["events"]]
         b_activities = [e["activity"] for e in recent_b["events"]]
-        assert a_activities == ["tenant-a-secret"]
-        assert b_activities == ["tenant-b-secret"]
-        # Belt-and-suspenders cross-leak negative assertion.
-        assert "tenant-b-secret" not in a_activities
-        assert "tenant-a-secret" not in b_activities
+        assert a_activities == [wrap_untrusted_text("tenant-a-secret")]
+        assert b_activities == [wrap_untrusted_text("tenant-b-secret")]
+        # Belt-and-suspenders cross-leak negative assertion, wrap-aware:
+        # the wire values are enveloped, so probe for the enveloped form
+        # (the raw string would trivially pass against wrapped entries).
+        assert wrap_untrusted_text("tenant-b-secret") not in a_activities
+        assert wrap_untrusted_text("tenant-a-secret") not in b_activities

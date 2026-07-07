@@ -55,6 +55,31 @@ __all__ = [
 ]
 
 
+# Secret-*value* character class shared by the labelled-secret patterns
+# below. The previous class (alphanumerics plus ``. _ - + / =`` only)
+# stopped at the first punctuation byte, so a value like
+# ``P@ssw0rd!withMore`` was captured only partially -- or not at all
+# when the leading run of in-class bytes was shorter than the
+# pattern's minimum -- leaving the
+# secret (or its tail) in cleartext past the redaction span. A value is
+# now consumed to its *natural delimiter*: whitespace or a quote
+# (quotes bound the ``key: 'value'`` shape and terminate JSON string
+# leaves). A single negated character class keeps matching linear (no
+# nested quantifiers, so no catastrophic backtracking); the explicit
+# upper bound keeps a pathological unbroken blob from being swallowed
+# wholesale. Opaque-ID false positives (Git SHAs, build hashes) stay
+# out because every pattern using this class still requires labelled
+# context (``Authorization:`` / ``Bearer`` / ``password=``-style).
+_VALUE_CHARS: Final[str] = r"[^\s'\"]"
+
+#: Upper bound on one secret-value run. Generous enough that real
+#: credentials (JWTs, PATs, DSNs) are consumed whole -- a cap a secret
+#: routinely exceeded would reintroduce the tail-leak the widened class
+#: exists to close -- while still bounding the redacted span on
+#: degenerate multi-kilobyte unbroken blobs.
+_VALUE_MAX: Final[int] = 4096
+
+
 # -- Authorization-style headers --------------------------------------------
 #
 # ``Authorization: Bearer <jwt>`` and ``Authorization: Basic
@@ -64,20 +89,23 @@ __all__ = [
 # the inner-token type -- the operator-facing signal is the header
 # itself. ``re.IGNORECASE`` covers ``authorization`` / ``Authorization``
 # / ``AUTHORIZATION`` (HTTP header names are case-insensitive per
-# RFC 7230).
+# RFC 7230). The credential part consumes :data:`_VALUE_CHARS` to its
+# natural delimiter so schemes carrying punctuation-rich parameters
+# (``Digest``, proxy DSNs) are redacted whole.
 _AUTHORIZATION_HEADER = re.compile(
-    r"Authorization\s*:\s*[A-Za-z]+\s+[A-Za-z0-9._\-+/=]+",
+    r"Authorization\s*:\s*[A-Za-z]+\s+" + _VALUE_CHARS + "{1," + str(_VALUE_MAX) + "}",
     re.IGNORECASE,
 )
 
 # Bare bearer tokens: ``Bearer <opaque>``. Separate from
 # authorization_header because operators paste ``Bearer eyJ...`` into
 # Slack snippets without the surrounding header name (curl ``-H "Bearer
-# ..."`` is wrong but common). The token body matches base64url + hex +
-# the JWT three-segment shape; the leading ``\b`` anchor prevents
-# matching ``foobarBearer ...`` mid-word.
+# ..."`` is wrong but common). The token body consumes
+# :data:`_VALUE_CHARS` to whitespace / quote / end so opaque tokens
+# carrying punctuation are captured whole; the leading ``\b`` anchor
+# prevents matching ``foobarBearer ...`` mid-word.
 _BEARER_TOKEN = re.compile(
-    r"\bBearer\s+[A-Za-z0-9._\-+/=]{8,}",
+    r"\bBearer\s+" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + "}",
     re.IGNORECASE,
 )
 
@@ -108,6 +136,12 @@ _JWT = re.compile(
 # because the false-positive rate against opaque IDs (Git SHAs,
 # build hashes, CSP nonces) would be intolerable; downstream Tier-2 NER
 # can take a second pass on free text.
+#
+# The value tail consumes :data:`_VALUE_CHARS` to its natural delimiter
+# (whitespace / quote / end of blob), so a punctuated value like
+# ``password: 'hunter2$plus#tail'`` is redacted whole instead of being
+# truncated at the first out-of-class byte -- the label requirement is
+# what keeps the false-positive posture, not the value alphabet.
 _API_KEY = re.compile(
     r"\b(?:"
     r"api[_-]?key"
@@ -121,7 +155,7 @@ _API_KEY = re.compile(
     r"|client[_-]?secret"
     r"|token"
     r")"
-    r"\s*[=:]\s*['\"]?[A-Za-z0-9._\-+/=]{8,}['\"]?",
+    r"\s*[=:]\s*['\"]?" + _VALUE_CHARS + "{8," + str(_VALUE_MAX) + r"}['\"]?",
     re.IGNORECASE,
 )
 

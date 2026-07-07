@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -30,12 +31,19 @@ type HostOverrides map[string]string
 //
 //	kc.example.com:443:10.0.0.5
 //
-// The port is required (and must be numeric) so the override targets a
-// specific endpoint; the IP is validated as a literal IPv4 or IPv6
-// address. IPv6 addresses are accepted in either bare or bracketed form
-// on the IP side (`kc:443:[::1]` and `kc:443:::1` both resolve to `::1`),
-// with the host taken as everything before the last two colon-separated
-// fields so IPv6 literals used as the *host* are not silently mangled.
+// The port is required and must be strictly numeric (1-65535). Named
+// services such as "https" are rejected: the override map is keyed by
+// the literal dial address, which always carries a numeric port, so a
+// named port would pass validation yet never match — the pin would be
+// silently ignored, violating the fail-loud contract below.
+//
+// The IP is validated as a literal IPv4 or IPv6 address. IPv6 addresses
+// are accepted in either bare or bracketed form on the IP side
+// (`kc:443:[::1]` and `kc:443:::1` both resolve to `::1`). The host is
+// taken as everything before the *first* colon, so an IPv6 literal used
+// as the host is not supported and is rejected with an explicit error;
+// the --resolve target is a DNS name by definition (an IP-literal host
+// needs no resolution override).
 //
 // A malformed entry is a hard error rather than a silent skip: an
 // operator who mistypes their override should learn immediately, not
@@ -56,13 +64,17 @@ func ParseResolveEntries(entries []string) (HostOverrides, error) {
 	return overrides, nil
 }
 
-// splitResolveEntry parses one `host:port:ip` string. The IP field may
-// itself contain colons (IPv6), so we split off the IP as everything
-// after the last two structural colons: the trailing field is the IP and
-// the field before it is the port. Whatever remains is the host.
+// splitResolveEntry parses one `host:port:ip` string by splitting from
+// the front: the host is everything before the first colon, the port is
+// the next colon-delimited field, and the remainder is the IP. Only the
+// IP field may therefore contain colons (bare or bracketed IPv6); an
+// IPv6 literal in the host position cannot be represented in this
+// format and is rejected up front with an explicit error rather than a
+// confusing downstream port/IP validation failure.
 func splitResolveEntry(raw string) (host, port, ip string, err error) {
-	// Find the port:ip boundary by walking from the front: host and port
-	// are the first two colon-delimited fields; the rest is the IP.
+	if strings.HasPrefix(raw, "[") {
+		return "", "", "", errors.New("IPv6-literal hosts are not supported; the host must be a DNS name (only the ip field may be IPv6)")
+	}
 	first := strings.IndexByte(raw, ':')
 	if first < 0 {
 		return "", "", "", errors.New("expected host:port:ip")
@@ -79,8 +91,16 @@ func splitResolveEntry(raw string) (host, port, ip string, err error) {
 	if host == "" {
 		return "", "", "", errors.New("host is empty")
 	}
-	if _, portErr := net.LookupPort("tcp", port); portErr != nil {
-		return "", "", "", fmt.Errorf("port %q is not a valid TCP port", port)
+	// The port must be strictly numeric. net.LookupPort would also accept
+	// service names like "https", but the override map is matched against
+	// the transport's dial address, which always carries a numeric port —
+	// a named port would key the map as "host:https", never match, and
+	// the pin would be silently ignored. Reject it loudly instead.
+	// The canonical-spelling check (Itoa round-trip) closes the same gap
+	// for "+443" / "0443": Atoi accepts them, but the dial address never
+	// carries a sign or leading zeros, so they would key an inert entry.
+	if portNum, convErr := strconv.Atoi(port); convErr != nil || portNum < 1 || portNum > 65535 || strconv.Itoa(portNum) != port {
+		return "", "", "", fmt.Errorf("port %q is not a numeric TCP port in the range 1-65535 (named services such as \"https\" are not supported)", port)
 	}
 	// Accept a bracketed IPv6 literal on the IP side for symmetry with
 	// how hosts are written elsewhere; strip the brackets before parsing.

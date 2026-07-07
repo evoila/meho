@@ -95,6 +95,7 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
 )
 from meho_backplane.broadcast.history import (
+    dump_event_wire,
     event_matches,
     parse_entry,
     stream_key,
@@ -671,6 +672,13 @@ def _filter_xread_items(
     audit-log correlation). Entries that fail :func:`parse_entry` (bad
     field shape, malformed JSON) are logged + skipped inside the helper
     so the watch handler never raises on a single bad entry.
+
+    Serialisation goes through
+    :func:`~meho_backplane.broadcast.history.dump_event_wire` so
+    agent-authored announcement free-text (``activity`` / ``scope`` /
+    ``target``) reaches the calling agent wrapped in the
+    untrusted-content envelope — same stored-prompt-injection guard as
+    the ``broadcast.recent`` path (evoila-bosnia/meho-internal#154).
     """
     matched: list[dict[str, Any]] = []
     for entry_id, fields in items:
@@ -684,7 +692,7 @@ def _filter_xread_items(
             target=target,
         ):
             continue
-        matched.append({"id": entry_id, **event.model_dump(mode="json")})
+        matched.append({"id": entry_id, **dump_event_wire(event)})
     return matched
 
 

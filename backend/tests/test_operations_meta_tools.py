@@ -1341,6 +1341,46 @@ async def test_call_operation_empty_string_target_returns_target_required_envelo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_value", "expected_type"),
+    [
+        (12345, "integer"),
+        (12.5, "number"),
+        (True, "boolean"),
+        (["rdc-vault"], "array"),
+    ],
+    ids=["integer", "number", "boolean", "array"],
+)
+async def test_call_operation_wrong_type_target_returns_target_invalid_type_envelope(
+    stub_embedding_service: AsyncMock,
+    target_value: object,
+    expected_type: str,
+) -> None:
+    """#2110: a wrong-JSON-typed ``target`` rides the envelope (``target_invalid_type``).
+
+    Exercises the raw ``arguments`` path (the MCP transport, which has no
+    Pydantic body model in front of it). Before #2110 a non-str/dict target
+    hit ``target_arg.get("name")`` and escaped as an ``AttributeError`` —
+    an unstructured internal error instead of the dispatcher envelope. The
+    JSON-type name of the offending value rides in ``extras.received_type``.
+    """
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.read",
+            "target": target_value,
+            "params": {},
+        },
+    )
+    assert result["status"] == "error"
+    assert result["error"].startswith("target_invalid_type:")
+    assert result["extras"]["error_code"] == "target_invalid_type"
+    assert result["extras"]["received_type"] == expected_type
+
+
+@pytest.mark.asyncio
 async def test_call_operation_unresolvable_target_returns_no_target_envelope(
     stub_embedding_service: AsyncMock,
 ) -> None:

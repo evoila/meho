@@ -55,6 +55,7 @@ __all__ = [
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
+    "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
     "status_code_for_result",
@@ -184,8 +185,8 @@ def result_no_target(
     parsing a 404 body. (The meta-tool layer catches
     :exc:`~meho_backplane.targets.resolver.TargetNotFoundError` and returns
     this rather than letting the HTTP-layer 404 escape.) A genuinely malformed
-    ``target`` (wrong JSON type) is still a request-schema violation and stays
-    a 422 at the request model — that boundary is deliberate.
+    ``target`` (wrong JSON type) rides the envelope too, as
+    :func:`result_target_invalid_type` (#2110 closed the last 422 boundary).
 
     ``extras`` carries the near-miss ``matches`` (up to 5 candidate names) and
     the ``query`` verbatim from the resolver's 404 detail, so the envelope is
@@ -201,6 +202,47 @@ def result_no_target(
             "op_id": op_id,
             "query": query,
             "matches": matches,
+        },
+    )
+
+
+def result_target_invalid_type(
+    op_id: str,
+    received_type: str,
+    duration_ms: float,
+) -> OperationResult:
+    """A supplied ``target`` is not a string, an object, or ``null`` (#2110).
+
+    The last target-failure mode to join the envelope. #136 moved the
+    resolution failures (``target_required`` / ``no_target`` /
+    ``ambiguous_target``) into the envelope but deliberately left a
+    wrong-JSON-typed ``target`` (e.g. ``target: 12345``) as a request-schema
+    422 from the Pydantic body model. Issue #2110's recorded decision
+    (Option A, 2026-07-06) supersedes that boundary: **every** target-failure
+    mode returns HTTP 200 + this envelope, so a consumer's error handling is
+    one switch on ``extras.error_code`` with no 422 ``detail[]`` array left to
+    special-case. The body models keep the documented ``string | object |
+    null`` schema for codegen (see ``_TargetArg`` in
+    :mod:`meho_backplane.operations.meta_tools`) while accepting any JSON
+    value at runtime; :func:`~meho_backplane.operations.meta_tools._normalize_target_arg`
+    classifies the wrong-typed value and this builder shapes the envelope.
+
+    ``extras`` carries the JSON-type name of the offending value
+    (``received_type``: ``"integer"`` / ``"boolean"`` / ``"array"`` / ...) so
+    an agent can name what it sent without re-parsing the human text.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"target_invalid_type: target must be a string name, an object "
+            f"with a 'name' field, or null; got {received_type}"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "target_invalid_type",
+            "op_id": op_id,
+            "received_type": received_type,
         },
     )
 

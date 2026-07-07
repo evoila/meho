@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — operations/call target failures all ride the 200 envelope
+
+- **`POST /api/v1/operations/call` (and `/preview`) now honor the
+  documented "always HTTP 200 + dispatcher envelope" contract across
+  all six target-failure modes** (#2110, Option A; completes #136 /
+  #2130): a `target` of a wrong JSON type (e.g. `target: 12345`) — the
+  last mode that still escaped as a FastAPI 422 `detail[]` array —
+  returns `status="error"` with
+  `extras.error_code="target_invalid_type"` and the offending JSON-type
+  name in `extras.received_type`. Consumer error handling is now a
+  single switch on `extras.error_code`
+  (`target_required` / `target_invalid_type` / `no_target` /
+  `ambiguous_target`), invariant across typed connectors. The published
+  OpenAPI schema for `target` is unchanged (`string | object | null`),
+  so generated clients don't churn; the same seam also fixes a latent
+  MCP-transport crash where a non-string/dict `target` hit
+  `AttributeError` instead of a structured envelope.
+
 ### Security — /health least-privilege split (OPERATOR gate + liveness probe)
 
 - **`GET /api/v1/health` (the federation-proof deep check) is now

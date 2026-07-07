@@ -181,6 +181,7 @@ from meho_backplane.memory.service import MemoryService
 from meho_backplane.retrieval.eval import eval_surface
 from meho_backplane.retrieval.eval.corpus import load_corpus
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _ISSUER
 from tests.integration.conftest import build_integration_app
@@ -1139,7 +1140,15 @@ async def test_resource_read_returns_body_for_accessible_memory(
 
     payload = await handler(op_a_operator, bound)
     assert payload["slug"] == "resource-read-target"
-    assert payload["body"] == "Tenant shared memory accessible via resources/read."
+    # Stored-prompt-injection guard (#154): the resource handler serves
+    # the body inside the positional untrusted-content envelope, so the
+    # wire shape is asserted enveloped -- mirrors
+    # test_mcp_resources_memory.py::test_resources_read_returns_tenant_scope_entry.
+    assert payload["body"] == (
+        f"{BLOCK_START}\n{GUARD_PREFIX}\n\n"
+        "Tenant shared memory accessible via resources/read."
+        f"\n{BLOCK_END}"
+    )
     assert payload["scope"] == "tenant"
     assert payload["id"] == str(stored.id)
 

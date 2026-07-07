@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — untrusted-content envelope on stored agent text
+
+- Agent-authored stored text is now re-served to LLM-facing read
+  surfaces inside a positional guard/delimiter envelope
+  (`<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>`, mirroring the
+  tenant-conventions preamble wrapper): broadcast announcement
+  `activity`/`scope`/`target` on `meho.broadcast.recent`,
+  `meho.broadcast.watch` and the `meho://tenant/{tenant_id}/feed`
+  resource, plus the full Markdown `body` on the `meho://kb/{slug}` and
+  `meho://memory/{scope}/{slug}` resources. The delimiters are never
+  derived from the wrapped content, so stored text containing the
+  closing-delimiter literal cannot escape the block, and the three
+  resource descriptions now advertise the served free-text as
+  agent-authored, untrusted, and not a system directive. The
+  tenant-feed resource additionally serves agent announcements (it
+  previously skipped them as malformed). Structural hardening only —
+  no content filtering or detection, stored rows unchanged.
+  (evoila-bosnia/meho-internal#154)
 ### Security — target-destination SSRF guard (create/update + connect)
 
 - **Targets can no longer be pointed at non-public addresses unless the

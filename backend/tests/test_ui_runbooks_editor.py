@@ -978,6 +978,129 @@ def test_editor_new_step_preview_uses_valid_hx_target() -> None:
     assert ".flex-wrap >> .runbook-step-preview" not in body
 
 
+def test_editor_processes_htmx_on_dynamically_added_steps() -> None:
+    """The editor hands Alpine-cloned steps to ``htmx.process`` (#2174).
+
+    Each step's Body textarea carries ``hx-post="/ui/runbooks/preview"``, but
+    that trigger lives inside an Alpine ``x-for`` loop. htmx only binds
+    ``hx-*`` on the DOM it renders itself, so a step added via ``+ Add step``
+    (or any step past the first on an edit) is never htmx-processed and its
+    live preview never fires. The regression before #2174 was that the editor
+    script re-mounted CodeMirror on new step bodies but never called
+    ``htmx.process`` — so only the first step (present at htmx's initial page
+    scan) produced a preview.
+
+    This asserts the fix is wired into the rendered editor script: a
+    ``htmx.process`` call plus its use in the shared rescan path that runs on
+    ``htmx:afterSettle`` and after each add/remove click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/new")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The dynamically-added step subtree is registered with htmx.
+    assert "htmx.process" in body
+    # The rescan path (CodeMirror + htmx.process) is bound to the settle event
+    # and the add/remove click so new steps get processed, not just the first.
+    assert "htmx:afterSettle" in body
+
+
+def test_editor_form_disinherits_disabled_elt() -> None:
+    """The editor form disinherits ``hx-disabled-elt`` so step previews are clean (#2174).
+
+    ``hx-disabled-elt`` is an inherited htmx attribute. The form binds
+    ``find button[type=submit]`` (to disable submit while validation fails);
+    without ``hx-disinherit`` every descendant step's debounced preview POST
+    inherits it and resolves ``find button[type=submit]`` against the textarea
+    — matching nothing — logging
+    ``The selector "find button[type=submit]" on hx-disabled-elt returned no
+    matches!`` once per preview POST. The form must carry
+    ``hx-disinherit="hx-disabled-elt"`` to scope the value to its own submit.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/new")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'hx-disinherit="hx-disabled-elt"' in body
+
+
+def test_editor_edit_multi_step_hydrates_every_step_preview_trigger() -> None:
+    """On edit, every hydrated step carries its own preview trigger (#2174).
+
+    The ``x-for`` renders one ``_step_fields.html`` per step, but only one
+    physical set of markup is in the response — the per-step preview trigger
+    is authored once and cloned per Alpine iteration. The regression is
+    binding, not markup: the trigger and its target must be present so that
+    once the added/hydrated step is htmx-processed the second step's preview
+    fires. This edit path seeds a two-step template and asserts the per-step
+    preview trigger + target + the htmx.process wiring are all present.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    two_step_body = RunbookTemplateBody(
+        title="Two step",
+        description="A two-step runbook.",
+        target_kind="k8s-node",
+        steps=[
+            ManualStep(
+                id="first",
+                title="First",
+                body="First **body**.",
+                type="manual",
+                verify=ConfirmVerify(type="confirm", prompt="First done?"),
+            ),
+            ManualStep(
+                id="second",
+                title="Second",
+                body="Second **body**.",
+                type="manual",
+                verify=ConfirmVerify(type="confirm", prompt="Second done?"),
+            ),
+        ],
+    )
+    _seed_template(tenant_id=_TENANT_A, slug="two-step", body=two_step_body)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/two-step/edit")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Both hydrated steps are in the Alpine model.
+    assert "first" in body
+    assert "second" in body
+    # The per-step preview trigger + target are present, and the editor
+    # processes the cloned step subtrees with htmx so step 2+ binds too.
+    assert 'hx-post="/ui/runbooks/preview"' in body
+    assert 'hx-target="next .runbook-step-preview"' in body
+    assert "htmx.process" in body
+
+
 # ---------------------------------------------------------------------------
 # Audit op-id on UI-path template writes (#2116)
 #

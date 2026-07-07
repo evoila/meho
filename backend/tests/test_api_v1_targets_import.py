@@ -50,6 +50,8 @@ import respx
 import yaml
 from fastapi.testclient import TestClient
 
+from meho_backplane.settings import get_settings
+
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
     make_rsa_keypair,
@@ -97,6 +99,26 @@ _KNOWN_TOP_LEVEL = frozenset(
     }
 )
 _SKIP_SILENT = frozenset({"fingerprint"})
+
+
+@pytest.fixture(autouse=True)
+def _legacy_layout_guard_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run this module as a mid-migration deploy (tenant-scope guard off).
+
+    The pinned consumer fixture predates the per-tenant Vault layout
+    (#1723): its ``secret_ref`` values live under the consumer's own
+    ``secret/rdc-hetzner-dc/...`` subtree. On a guard-**on** deploy the
+    #2091 write-time gate now rejects exactly these refs by design (that
+    consumer's dispatch-time ``permission denied`` is the signal #2091
+    exists to fail fast on) — the reject path is pinned in
+    ``test_api_v1_targets.py``'s "#2091 secret_ref tenant-scope
+    fail-fast" cluster. *This* module's claim is the CLI↔server
+    bulk-import mapping round-trip, so it opts out via the documented
+    mid-migration escape hatch (``VAULT_KV_TENANT_SCOPE_PREFIX=""``),
+    the same state a deploy importing a legacy ``targets.yaml`` runs in.
+    """
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "")
+    get_settings.cache_clear()
 
 
 @pytest.fixture

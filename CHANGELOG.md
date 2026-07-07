@@ -90,6 +90,34 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — target secret_ref tenant-scope fail-fast + cause-named Vault denial
+
+- **`POST`/`PATCH /api/v1/targets*` (which `meho targets import` drives)
+  now reject an explicit `secret_ref` outside the operator's readable
+  per-tenant subtree** with a structured 422
+  (`kind="secret_ref_outside_tenant_scope"`) naming the constraint, the
+  rendered tenant prefix, and the exact expected
+  `tenants/<tenant_id>/<name>` path — a target with such a ref imported
+  clean and then failed every dispatch with an opaque Vault `permission
+  denied`. Semantics mirror the runtime tenant-scope guard
+  (segment-boundary match on the mount-pinned candidate); the derived
+  per-tenant default (#1723) and an explicit-null clear are untouched,
+  and the gate is a no-op when the guard is disabled
+  (`VAULT_KV_TENANT_SCOPE_PREFIX=""`). (#2091)
+- **An `hvac` `Forbidden` during dispatch now maps to the structured
+  `connector_vault_forbidden` error** instead of the bare
+  `connector_error: Forbidden` passthrough: the message names the
+  target's `secret_ref`, the likely out-of-subtree cause, the
+  per-tenant convention with the exact expected path, and the
+  stage-the-credential remediation — with an explicit warning that
+  widening the deploy-owned Vault policy is the wrong fix. A
+  target-less denial (typed `vault.*` op rejected by the Vault ACL)
+  gets a generic Vault-authorization shape; other hvac errors fall
+  through to `connector_error` unchanged. (#2091)
+
+
+
+
 ### Fixed — topology refresh returns structured errors instead of a bare 500
 
 - `POST /api/v1/topology/refresh/{target_name}` no longer returns a bare

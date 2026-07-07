@@ -146,6 +146,7 @@ from meho_backplane.api.v1._envelope import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -154,10 +155,12 @@ from meho_backplane.connectors.registry import (
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import (
     Target,
@@ -792,6 +795,133 @@ def _apply_product_patch(updates: dict[str, Any], current_product: str) -> str:
     return new_product if new_product is not None else current_product
 
 
+def _build_secret_ref_outside_tenant_scope_detail(
+    *,
+    secret_ref: str,
+    tenant_prefix: str,
+    expected_secret_ref: str,
+) -> dict[str, object]:
+    """Build the T11-compliant ``secret_ref_outside_tenant_scope`` 422 detail.
+
+    #2091 (Initiative #2150). Mirrors :func:`_build_unknown_product_detail`
+    and the ``docs/codebase/error-message-shape.md`` convention: a stable
+    snake_case ``kind`` discriminator, the offending value, the
+    machine-actionable expected alternative, and a human ``message``
+    naming the constraint + the ``tenants/<tenant_id>/<name>`` convention
+    + the remediation. ``tenant_prefix`` is the operator's rendered,
+    mount-pinned tenant-scope prefix (e.g. ``secret/tenants/<uuid>/``) —
+    the operator's own tenant identity rendered onto the deploy's
+    configured template, not secret material.
+
+    Pure builder — no I/O, no logging. Shared by the POST and PATCH
+    write surfaces via :func:`_enforce_secret_ref_tenant_scope` so the
+    two cannot drift on the constraint's diagnostic shape.
+    """
+    return {
+        "kind": "secret_ref_outside_tenant_scope",
+        "secret_ref": secret_ref,
+        "tenant_prefix": tenant_prefix,
+        "expected_secret_ref": expected_secret_ref,
+        "message": (
+            f"secret_ref={secret_ref!r} is outside the operator's readable "
+            f"tenant subtree {tenant_prefix!r}. At dispatch the backplane "
+            f"resolves the target's credential on the {DEFAULT_KV_MOUNT!r} "
+            f"KV-v2 mount under the operator's Vault identity, whose "
+            f"readable subtree follows the per-tenant convention "
+            f"'tenants/<tenant_id>/<name>' — a target with this secret_ref "
+            f"can never dispatch (Vault answers 'permission denied'). "
+            f"Stage the credential at {expected_secret_ref!r} and re-run "
+            f"the import, or omit secret_ref to let the server derive "
+            f"that path. Do NOT widen the backplane's Vault policy — it "
+            f"is deploy-owned and re-applied on every upgrade. See "
+            f"docs/codebase/connectors-vault-tenant-scope.md for the "
+            f"namespace convention and "
+            f"docs/codebase/error-message-shape.md for the error "
+            f"convention."
+        ),
+    }
+
+
+def _enforce_secret_ref_tenant_scope(
+    secret_ref: str,
+    operator: Operator,
+    target_name: str,
+) -> None:
+    """Reject an explicit ``secret_ref`` outside the operator's tenant subtree.
+
+    #2091 (Initiative #2150). A target whose ``secret_ref`` points outside
+    the per-tenant subtree imports clean but can never dispatch — the
+    dispatch-time credential read
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`)
+    runs under the operator's Vault identity, whose ACL policy is aligned
+    to the per-tenant layout (#1723), so Vault answers an opaque
+    ``permission denied`` at first use. This write-time gate surfaces the
+    misconfiguration at POST / PATCH instead, with a structured 422
+    naming the constraint and the ``tenants/<tenant_id>/<name>``
+    convention (:func:`_build_secret_ref_outside_tenant_scope_detail`).
+
+    Semantics mirror
+    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`
+    exactly, so the write-time gate and the ``vault.kv.*`` runtime guard
+    agree on what "inside the tenant namespace" means:
+
+    * the match candidate is the normalised mount-pinned
+      ``<mount>/<secret_ref>`` — ``secret_ref`` is a logical KV-v2 path
+      relative to the mount, and the dispatch-time read addresses the
+      default ``secret`` mount
+      (:data:`~meho_backplane.connectors._shared.vault_creds.DEFAULT_KV_MOUNT`);
+    * the operator's prefix is rendered from
+      :attr:`~meho_backplane.settings.Settings.vault_kv_tenant_scope_prefix`
+      via :func:`~meho_backplane.connectors.vault.tenant_scope.rendered_tenant_prefix`;
+    * matching is on a path-segment boundary, so a ``tenants/<id>``
+      prefix cannot be satisfied by ``tenants/<id>-evil/...``;
+    * an **empty** template (``VAULT_KV_TENANT_SCOPE_PREFIX=""``, the
+      guard-disabled mid-migration state) makes this check a no-op —
+      there is no defined subtree to enforce.
+
+    Only an *explicitly supplied* ``secret_ref`` is checked. The
+    server-derived default
+    (:func:`~meho_backplane.connectors.vault.tenant_paths.tenant_secret_ref`)
+    lands inside the rendered prefix by construction (#1723) and is never
+    routed through this gate, so the happy path cannot regress. Clearing
+    the ref (``{"secret_ref": null}``) is likewise untouched — an
+    unconfigured target fails dispatch with the existing actionable
+    "no secret_ref configured" error, not a Vault denial.
+
+    Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
+    on violation; returns ``None`` otherwise.
+    """
+    template = get_settings().vault_kv_tenant_scope_prefix.strip()
+    if not template:
+        # Guard disabled (mid-migration deploy) — no defined subtree to
+        # enforce; preserve pre-#2091 behaviour exactly.
+        return
+
+    prefix = rendered_tenant_prefix(operator, template=template)
+    normalised_prefix = prefix.strip().strip("/")
+    candidate = f"{DEFAULT_KV_MOUNT}/{secret_ref.strip().strip('/')}"
+    if candidate == normalised_prefix or candidate.startswith(normalised_prefix + "/"):
+        return
+
+    try:
+        expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
+    except ValueError:
+        # A whitespace/slash-only name has no derivable leaf; fall back to
+        # the convention template so the 422 detail stays renderable
+        # (never a 500 out of the diagnostic path).
+        expected_secret_ref = f"tenants/{operator.tenant_id}/<target-name>"
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=_build_secret_ref_outside_tenant_scope_detail(
+            secret_ref=secret_ref,
+            # Re-append the trailing "/" for readability: the prefix names
+            # a subtree, and the rendered template carries it too.
+            tenant_prefix=normalised_prefix + "/",
+            expected_secret_ref=expected_secret_ref,
+        ),
+    )
+
+
 @router.get("")
 async def list_targets(
     product: str | None = Query(default=None),
@@ -1106,6 +1236,14 @@ async def create_target(
     populates the registry before the first request arrives, so the
     skip branch never fires; a misregistered deploy that *did* hit it
     is recoverable via T4 #1145's PATCH-product or DELETE path.
+
+    #2091. An explicit ``secret_ref`` outside the operator's tenant
+    subtree is rejected with a structured 422
+    (``kind="secret_ref_outside_tenant_scope"``) — such a target would
+    import clean and then fail every dispatch with an opaque Vault
+    ``permission denied``. Omitting ``secret_ref`` derives the
+    per-tenant default (#1723) and always passes; no-op when the guard
+    is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
     """
     # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
     # token against the registered set so a value copied straight out of
@@ -1124,14 +1262,13 @@ async def create_target(
     # registry / resolver spelling (G0.18-T2 #1355).
     create_fields["product"] = product
     # #1723: default a fresh target's secret onto the per-tenant shared
-    # path ``tenants/<tenant_id>/<name>`` so new targets land on the
-    # canonical layout the #1643 guard can enforce, instead of the
-    # retired per-``sub`` layout an operator would otherwise type by
-    # hand. An explicitly-supplied ``secret_ref`` is honoured verbatim
-    # (operator override / a non-default mount layout); only the absent
-    # case is derived.
+    # path ``tenants/<tenant_id>/<name>``. An explicit ``secret_ref`` is
+    # honoured verbatim — but only inside the operator's tenant subtree
+    # (#2091, see :func:`_enforce_secret_ref_tenant_scope`).
     if create_fields.get("secret_ref") is None:
         create_fields["secret_ref"] = tenant_secret_ref(operator.tenant_id, body.name)
+    else:
+        _enforce_secret_ref_tenant_scope(create_fields["secret_ref"], operator, body.name)
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -1173,6 +1310,38 @@ async def create_target(
     return _to_full(t)
 
 
+def _validate_update_body_fields(
+    updates: dict[str, Any],
+    t: TargetORM,
+    operator: Operator,
+) -> None:
+    """Run the pre-``setattr`` structured-422 validators for a target PATCH.
+
+    Extracted from :func:`update_target` so the handler stays within the
+    function-size budget while the validation phase reads as one unit.
+    Three checks, all raising *before* the row is mutated:
+
+    * **product** — G0.14-T4 (#1145) / G0.18-T2 (#1355). Reject
+      ``{"product": null}`` and validate a changed product against the
+      registered tokens; resolves the effective product for the impl-id
+      scope. See :func:`_apply_product_patch`.
+    * **preferred_impl_id** — G0.15-T6 (#1215). Same rejection as on
+      POST. When the PATCH also changes ``product``, the new product is
+      the relevant scope — the validator must agree with the post-update
+      row state, otherwise a single PATCH could land an impl_id the
+      resolver silently ignores at the next dispatch. See
+      :func:`_validate_preferred_impl_id`.
+    * **secret_ref** — #2091. Same tenant-subtree rejection as on POST
+      for an explicit non-null ``secret_ref``; an explicit null (clear)
+      and an absent field pass through. See
+      :func:`_enforce_secret_ref_tenant_scope`.
+    """
+    effective_product = _apply_product_patch(updates, t.product)
+    _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
+    if updates.get("secret_ref") is not None:
+        _enforce_secret_ref_tenant_scope(updates["secret_ref"], operator, t.name)
+
+
 @router.patch("/{name}", response_model=Target)
 async def update_target(
     name: str,
@@ -1191,6 +1360,13 @@ async def update_target(
     typo-correcting a misregistered target sees the same actionable
     diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
+
+    #2091. An explicit non-null ``secret_ref`` outside the operator's
+    tenant subtree is rejected with a structured 422
+    (``kind="secret_ref_outside_tenant_scope"``) — the same write-time
+    gate as POST. An explicit ``{"secret_ref": null}`` (clear) and a
+    PATCH not sending the field are untouched; no-op when the guard is
+    disabled. See :func:`_enforce_secret_ref_tenant_scope`.
     """
     t = await resolve_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
@@ -1216,17 +1392,10 @@ async def update_target(
     effective_ca_pin = updates["tls_ca_pin"] if ca_pin_sent else ca_pin_before
     effective_verify_tls = updates["verify_tls"] if verify_tls_sent else verify_tls_before
     _enforce_tls_trust_exclusion(effective_ca_pin, effective_verify_tls)
-    # G0.14-T4 (#1145) / G0.18-T2 (#1355). Validate the patched
-    # ``product`` (rejecting ``{"product": null}``) and resolve the
-    # effective product for the impl-id scope below. See
-    # :func:`_apply_product_patch`.
-    effective_product = _apply_product_patch(updates, t.product)
-    # G0.15-T6 (#1215). Same impl_id rejection as on POST. When the PATCH
-    # also changes ``product``, the new product is the relevant scope --
-    # the validator must agree with the post-update row state, otherwise a
-    # single PATCH could land an impl_id the resolver silently ignores at
-    # the next dispatch. See :func:`_validate_preferred_impl_id`.
-    _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
+    # Structured-422 write validators (product / impl-id / secret_ref) —
+    # all raise before the ``setattr`` loop so a rejected PATCH mutates
+    # nothing. See :func:`_validate_update_body_fields`.
+    _validate_update_body_fields(updates, t, operator)
     for k, v in updates.items():
         setattr(t, k, v)
     # #1723: home an as-yet-unconfigured target onto the per-tenant shared

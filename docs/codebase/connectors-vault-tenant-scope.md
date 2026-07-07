@@ -265,6 +265,34 @@ the empty-prefix opt-out is for: a per-`sub` deploy drops it once the
 migration completes, while a custom-layout deploy may keep it empty
 indefinitely.
 
+## Write-time sibling: the target `secret_ref` gate (#2091)
+
+The guard above protects the *runtime* `vault.kv.*` ops. The same
+subtree definition also gates the **targets write surface**
+(`POST`/`PATCH /api/v1/targets*`, which `meho targets import` drives):
+an explicitly supplied `secret_ref` outside the operator's rendered
+tenant prefix is rejected at write time with a structured 422
+(`kind="secret_ref_outside_tenant_scope"`,
+`_enforce_secret_ref_tenant_scope` in `api/v1/targets.py`) instead of
+importing clean and failing every dispatch with an opaque Vault
+`permission denied`. Semantics deliberately mirror
+`enforce_tenant_scope`: the match candidate is the normalised
+mount-pinned `<mount>/<secret_ref>` (the dispatch-time credential read
+addresses the default `secret` mount), matching is on a path-segment
+boundary, and the empty-prefix opt-out makes the gate a no-op. Only an
+*explicit* ref is checked — the derived per-tenant default (#1723) and
+an explicit-null clear pass untouched.
+
+A target that predates the gate (or a genuine Vault-policy drift) still
+surfaces at dispatch as the structured `connector_vault_forbidden`
+error (`result_connector_vault_forbidden` in `operations/_errors.py`,
+caught by the dispatcher's `except hvac.exceptions.Forbidden` arm),
+which names the target's `secret_ref`, the `tenants/<tenant_id>/<name>`
+convention, and the exact expected path — rather than the bare
+`connector_error: Forbidden` that read like a missing Vault grant and
+invited widening the deploy-owned policy (the wrong fix). See
+`error-message-shape.md` for both rows.
+
 ## Scope notes
 
 - This is **defense-in-depth, not the primary gate.** The guard never
@@ -286,3 +314,10 @@ out-of-namespace deny, look-alike sibling prefix, cross-mount, disabled
 default, system-tenant exemption) plus dispatch-level coverage that **every**
 KV-v2 handler denies a cross-tenant path (`exception_class=VaultTenantScopeError`,
 no Vault login) and allows an in-namespace path unchanged.
+
+The #2091 write-time gate is covered in
+[`backend/tests/test_api_v1_targets.py`](../../backend/tests/test_api_v1_targets.py)
+(the "#2091 — secret_ref tenant-scope fail-fast" cluster: POST/PATCH
+reject, segment boundary, derived-default pass, guard-disabled no-op);
+the dispatch-time `connector_vault_forbidden` mapping in
+[`backend/tests/test_operations_connector_vault_forbidden.py`](../../backend/tests/test_operations_connector_vault_forbidden.py).

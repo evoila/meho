@@ -17,6 +17,10 @@ batch verbs the console gained:
 * **Refresh** (``operator``) — a ``POST /ui/topology/refresh/{target_name}``
   renders all six :class:`RefreshResult` counts inline; an unknown target
   renders the 404 + near-miss hint, not an empty 200.
+* **No-populator callout** (#2093 / #2210) — a refresh against a product
+  whose connector inherits the base ``discover_topology`` no-op renders
+  the coverage-gap callout (naming the product + the populated
+  alternatives); a populator-backed refresh renders **no** callout.
 * **RBAC split** — the bulk panel + apply are hard-403'd for a plain
   ``operator`` (bulk = ``tenant_admin``); refresh succeeds for a plain
   ``operator`` (refresh = ``operator``) — verified against the real gate.
@@ -335,6 +339,32 @@ class _FakeConnector(Connector):
 
 def _register_fake() -> None:
     register_connector_v2(product="faketopo", version="", impl_id="", cls=_FakeConnector)
+
+
+class _NoPopulatorConnector(Connector):
+    """Connector inheriting the base ``discover_topology`` no-op default.
+
+    Mirrors :mod:`backend.tests.test_topology_refresh`'s no-populator
+    stand-in — the class the #2093 coverage-gap signal discriminates
+    against a populator that ran clean.
+    """
+
+    product = "nopop"
+
+    async def fingerprint(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def execute(
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+
+def _register_no_populator() -> None:
+    register_connector_v2(product="nopop", version="", impl_id="", cls=_NoPopulatorConnector)
 
 
 def _hints_2n1e() -> TopologyHints:
@@ -754,6 +784,58 @@ def test_topology_ui_refresh_renders_all_six_counts_for_operator() -> None:
     assert _count_edges(_TENANT_A) == 1
     # The reconcile changed the graph -> the refresh fired the re-pull trigger.
     assert response.headers.get("HX-Trigger") == "meho:topology-edge-changed"
+    # A populator ran -> no_populator_for_product is null -> the coverage-gap
+    # callout must NOT render (#2093 / #2210: null branch stays unchanged).
+    assert 'data-test="refresh-no-populator"' not in body
+    assert 'data-test="refresh-populated-products"' not in body
+
+
+def test_topology_ui_refresh_no_populator_renders_coverage_gap_callout() -> None:
+    """A populator-less product's refresh renders the coverage-gap callout.
+
+    #2093 gave :class:`RefreshResult` the ``no_populator_for_product`` +
+    ``populated_products`` signal and the CLI its coverage-gap note; #2210
+    surfaces the same signal in the console's refresh partial. Registers one
+    populated product (``faketopo``) and one populator-less product
+    (``nopop``), refreshes a ``nopop`` target, and asserts the callout names
+    the gap product + lists the populated alternative next to the (still
+    rendered) all-zero counts.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="argocd-style-target", product="nopop")
+    _register_fake()
+    _register_no_populator()
+
+    client, mock, csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        with patch(_PUBLISH, new=AsyncMock()):
+            response = client.post(
+                "/ui/topology/refresh/argocd-style-target",
+                headers=_csrf_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The counts still render (the callout supplements, never replaces them).
+    assert 'data-test="refresh-result"' in body
+    assert 'data-test="refresh-added-nodes"' in body
+    # The coverage-gap callout names the populator-less product...
+    assert 'data-test="refresh-no-populator"' in body
+    assert "nopop" in body
+    assert "has no topology populator" in body
+    # ...and lists the registered products that DO ship a populator.
+    assert 'data-test="refresh-populated-products"' in body
+    assert "faketopo" in body
+    # The base no-op discovered nothing and nothing pre-existed -> the graph
+    # is unchanged, so no re-pull trigger fired.
+    assert _count_nodes(_TENANT_A) == 0
+    assert response.headers.get("HX-Trigger") is None
 
 
 def test_topology_ui_refresh_unknown_target_renders_404_near_miss() -> None:

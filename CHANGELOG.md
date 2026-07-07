@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- The MCP `tools/call` argument gate now asserts the `format` keywords
+  declared in tool `inputSchema`s (`uuid`, `date-time`): the
+  jsonschema validation call passes
+  `format_checker=Draft202012Validator.FORMAT_CHECKER` (with the new
+  `rfc3339-validator` dependency registering the `date-time` checker),
+  so a malformed UUID or non-RFC-3339 timestamp is rejected as JSON-RPC
+  `-32602` "Invalid params" before any tool handler runs — previously
+  `format` was annotation-only and such values reached in-handler
+  parsers, surfacing as `-32603` "Internal error" and defeating agent
+  self-correction. In-handler UUID/timestamp re-parses stay in place as
+  defense-in-depth.
 ### Security — CI supply-chain input pinning + Go CVE scanning
 
 - **Pinned the release/CI supply-chain inputs that still floated, and

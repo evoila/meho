@@ -127,11 +127,32 @@ production traffic cannot reach that branch.
 | `ipv6` | Full + compressed RFC 5952 forms |
 | `fqdn` | ≥2 labels with non-numeric TLD start |
 
+The secret-*value* part of `authorization_header`, `bearer_token`,
+and `api_key` consumes any non-whitespace, non-quote byte
+(`patterns.py::_VALUE_CHARS`, bounded by `_VALUE_MAX`): the value is
+captured to its natural delimiter — whitespace, closing quote, or end
+of blob. The earlier alphanumeric-plus-`. _ - + / =` class stopped at
+the first punctuation byte, so a value like `P@ssw0rd!withMore` was
+matched only partially (tail leaked) or not at all (whole value
+leaked). The labelled-context requirement, not the value alphabet, is
+what keeps opaque IDs (Git SHAs, build hashes) from false-positiving.
+
 Calibration notes (over-match vs under-match) are inline in
 `patterns.py`. The Tier-1 posture deliberately leans toward
 **over-redaction**: a false positive on a benign UUID is recoverable
 via a scoped rule, but a missed secret is the failure the parent goal
 (#800) cannot accept.
+
+Beyond the connector-*result* boundary, the dispatch **error
+builders** (`operations/_errors.py`) route every free-text diagnostic
+they emit — `extras.exception_message`, `extras.upstream_message`,
+`extras.detail`, and the `error` summary tails built from them —
+through `_sanitize_free_text`: a Tier-1 pass with the packaged
+default policy (pinned via `get_default_policy()`, deliberately
+bypassing the resolver override table so a registered shadow-mode
+policy cannot disable it), followed by the 256-char cap. Redaction
+runs **before** the cap so a secret straddling the cap boundary
+cannot survive truncation as an unmatchable cleartext fragment.
 
 ## Action semantics
 

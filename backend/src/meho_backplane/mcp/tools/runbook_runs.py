@@ -167,11 +167,14 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
 def _parse_run_id(tool: str, raw: Any) -> uuid.UUID:
     """Parse the ``run_id`` argument as a :class:`uuid.UUID`.
 
-    The wire shape carries ``run_id`` as a string (the inputSchema sets
-    ``format: "uuid"`` but the Anthropic Messages API only validates the
-    string type, not the format); a malformed value surfaces as
-    ``-32602`` rather than a generic ``-32603`` so the agent can
-    self-correct.
+    The wire shape carries ``run_id`` as a string. The server-side
+    ``tools/call`` gate now asserts ``format: "uuid"`` (the handlers
+    module passes ``Draft202012Validator.FORMAT_CHECKER``), so a
+    malformed value is normally rejected there as ``-32602``; this
+    re-parse stays as defense-in-depth (the Anthropic Messages API
+    validates only the string type, and the value may also arrive via
+    paths that skip the schema gate) and preserves the same ``-32602``
+    projection so the agent can self-correct.
     """
     try:
         return uuid.UUID(str(raw))

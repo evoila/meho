@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import pytest
 
+from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.patterns import (
     NAMED_PATTERNS,
     PATTERN_NAMES,
     get_pattern,
 )
+from meho_backplane.redaction.policy import RedactionPolicy, RedactionRule
 
 # The full named-pattern catalogue called out in the task body. The
 # test below uses this list as the source of truth -- if a pattern is
@@ -58,6 +60,14 @@ _AUTH_TOKEN_FIXTURE_POS = "auth_token" + ": " + "at_abcdefgh" + "1234"
 _SESSION_TOKEN_FIXTURE_POS = "session_token" + ": " + "st_abcdefgh" + "1234"
 _SECRET_ID_FIXTURE_POS = "secret_id" + ": " + "11111111-2222" + "-3333-aaaa"
 _PRIVATE_KEY_FIXTURE_POS = "private_key" + ": " + "MIIEvQIBADA" + "NBgkq"
+# Punctuated-value fixtures (meho-internal hardening): values carrying
+# bytes outside the pre-widening restrictive class must be captured to
+# their natural delimiter (whitespace / closing quote / end of blob)
+# and redacted whole. Assembled from fragments for the same
+# gitleaks-avoidance reason as the fixtures above.
+_PUNCT_QUOTED_FIXTURE = "password" + ": " + "'s3cr3tValue" + "!'"
+_PUNCT_LEADING_AT_FIXTURE = "password" + "=" + "P@ssw0rd" + "!withMore"
+_PUNCT_DOLLAR_HASH_FIXTURE = "password" + ": " + "hunter2" + "$plus#tail"
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -150,6 +160,18 @@ def test_get_pattern_unknown_raises() -> None:
         (
             "api_key",
             "password: 's3cr3tValue!'",
+            True,
+        ),
+        # api_key: punctuated values -- the leading/embedded punctuation
+        # must not break or truncate the match
+        (
+            "api_key",
+            _PUNCT_LEADING_AT_FIXTURE,
+            True,
+        ),
+        (
+            "api_key",
+            _PUNCT_DOLLAR_HASH_FIXTURE,
             True,
         ),
         (
@@ -304,6 +326,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "api_key=AKIAIOSFODNN7EXAMPLE", True),
     ("api_key", "the resource id is 12345-abcdef", False),
     ("api_key", "password: 's3cr3tValue!'", True),
+    ("api_key", _PUNCT_LEADING_AT_FIXTURE, True),
+    ("api_key", _PUNCT_DOLLAR_HASH_FIXTURE, True),
     ("api_key", _CLIENT_SECRET_FIXTURE_POS, True),
     ("api_key", _TOKEN_FIXTURE_POS, True),
     ("api_key", _REFRESH_TOKEN_FIXTURE_POS, True),
@@ -323,3 +347,62 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("fqdn", "vcenter.lab.example.com", True),
     ("fqdn", "version 1.2.3", False),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Full-value capture through the engine (meho-internal hardening)
+# ---------------------------------------------------------------------------
+#
+# ``test_pattern_matches_or_not`` only proves *a* match occurs; these
+# cases prove the **entire** secret value -- including any punctuated
+# tail the pre-widening character class used to stop at -- is replaced,
+# with no cleartext fragment of the value surviving in the output.
+
+_API_KEY_ONLY_POLICY = RedactionPolicy(
+    id="test-api-key-full-capture",
+    version=1,
+    rules=(
+        RedactionRule(
+            name="strip-api-key",
+            pattern="api_key",
+            action="redact",
+            reason="full-value capture regression",
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("sample", "value_fragments"),
+    [
+        # Trailing punctuation inside a quoted value: the old class
+        # stopped before ``!`` and left the tail + closing quote.
+        (_PUNCT_QUOTED_FIXTURE, ["s3cr3tValue", "Value!"]),
+        # Value beginning with an out-of-class byte run: the old class
+        # produced no match at all and the whole password leaked.
+        (_PUNCT_LEADING_AT_FIXTURE, ["P@ssw0rd", "ssw0rd!withMore", "withMore"]),
+        # ``$`` / ``#`` mid-value: the old class produced no match on
+        # the 7-char leading run and the whole value leaked.
+        (_PUNCT_DOLLAR_HASH_FIXTURE, ["hunter2", "$plus", "#tail", "plus", "tail"]),
+    ],
+)
+def test_punctuated_secret_value_fully_redacted(
+    sample: str,
+    value_fragments: list[str],
+) -> None:
+    """The whole punctuated value is replaced -- no cleartext fragment."""
+    payload = "dispatch failed for " + sample + " during login"
+    result = redact(payload, _API_KEY_ONLY_POLICY)
+    redacted = result.redacted
+    assert isinstance(redacted, str)
+    assert "[REDACTED:api_key]" in redacted
+    for fragment in value_fragments:
+        assert fragment not in redacted, (
+            f"cleartext fragment {fragment!r} of the secret value survived redaction: {redacted!r}"
+        )
+    # The non-secret context around the match is preserved -- the
+    # widened class must not swallow neighbouring prose.
+    assert redacted.startswith("dispatch failed for ")
+    assert redacted.endswith(" during login")
+    assert len(result.manifest) == 1
+    assert result.manifest[0].pattern == "api_key"

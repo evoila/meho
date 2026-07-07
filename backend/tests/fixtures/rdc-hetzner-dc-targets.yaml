@@ -159,7 +159,7 @@ targets:
     aliases: [holo-1-vcenter, vc-mgmt-h1]
     product: vcenter
     host: 10.1.1.10
-    secret_ref: secret/rdc-hetzner-dc/holodeck/1-shared-sso     # 1P item TBD; default Holodeck creds 'administrator@vsphere.local' / 'VMware123!VMware123!'
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-shared-sso     # 1P item TBD; default Holodeck SSO credential for 'administrator@vsphere.local' — rotate and store in Vault at this secret_ref
     sso_realm: vsphere.local
     vpn_required: true
     notes: |
@@ -170,8 +170,9 @@ targets:
       vCenter version
       9.0.2; healthy from HoloRouter probe 2026-05-05 (HTTPS 200). 1P credential item
       `holodeck-1-shared-sso` not yet created — operator action: create LOGIN item
-      with `username=administrator@vsphere.local` + `password=VMware123!VMware123!` (or
-      rotated value, see § "Credentials decision" pattern in INVENTORY).
+      with `username=administrator@vsphere.local` and the default Holodeck SSO
+      credential — rotate it and store the value in Vault at this target's
+      `secret_ref` (see § "Credentials decision" pattern in INVENTORY).
 
   - name: holodeck-1-sddc
     aliases: [holo-1-sddc, sddcmanager-h1]
@@ -195,9 +196,10 @@ targets:
     notes: |
       holodeck-1 env NSX Manager VIP (3-node cluster — node IPs 10.1.1.21/22/23, VIP 10.1.1.20
       / FQDN `nsx-mgmt-a.site-a.vcf.lab`). Local `admin` user; not SSO-federated by default.
-      Healthy from HoloRouter probe 2026-05-05 (HTTPS 302). 1P item TBD; default Holodeck
-      cred is `admin` / `VMware123!VMware123!` per kb. See `kb/nsx-9.0-overview.md` for the
-      session-auth gotcha behind envoy front-door.
+      Healthy from HoloRouter probe 2026-05-05 (HTTPS 302). 1P item TBD; the local
+      `admin` user ships with the default Holodeck credential per kb — rotate it and
+      store it in Vault at this target's `secret_ref`. See `kb/nsx-9.0-overview.md`
+      for the session-auth gotcha behind envoy front-door.
 
   - name: holodeck-1-ops
     aliases: [holo-1-ops, ops-h1]

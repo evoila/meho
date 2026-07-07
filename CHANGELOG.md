@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — targets test fixture secret-ref hygiene
+
+- Align the internal-lab targets test fixture
+  (`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`) with its own
+  Vault-`secret_ref`-only convention: three operator-note remnants that
+  inlined a well-known lab-default credential string are replaced with
+  rotate-and-store-in-Vault guidance pointing at each target's
+  `secret_ref`, so the fixture models the secrets-stay-in-Vault pattern
+  end to end and stays trivially clean under the zero-tolerance
+  TruffleHog secret scan. Fixture prose only — no entry added or
+  removed, no code or schema change.
+  (evoila-bosnia/meho-internal#158)
+
 ### Fixed — /ui/memory tag-datalist URL rewrite on page load
 
 - **The `/ui/memory` tag-autocomplete `<datalist>` no longer rewrites the browser URL to `/ui/memory/tags?tag=&scope=all` on every page load** (#2069): the datalist's `hx-trigger="load"` options fetch inherited the ancestor filter form's `hx-push-url="true"` and `hx-include="closest form"` (htmx 2.0.9 resolves both closest-ancestor-wins, the same inheritance that #1709 had to override for `hx-target`), so each load pushed a stale `/ui/memory/tags` URL into browser history and dragged the form's `tag`/`scope` inputs into the request query string. #1709 (v0.15.0) pinned `hx-target="this"` and fixed the worse grid-clobber half but left these two inherited attributes unscoped. The datalist now also carries `hx-push-url="false"` and `hx-include="none"`, so its load-time fetch leaves the address bar and history untouched and sends no inherited inputs; the card grid (`#memory-cards`) and the options fetch itself are unchanged. The existing regression test now guards all three inherited attributes. Template attribute + test + docs only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

@@ -462,6 +462,69 @@ func TestBuildIngestRequestSpecInfoVersionsCompatible(t *testing.T) {
 	})
 }
 
+// TestBuildIngestRequestTenantID — the --tenant-id flag (#2209)
+// threads onto the request body as the write scope for the ingested
+// rows; an unset flag leaves the field nil (the omit-equals-global
+// semantics the REST contract documents since #2085). Scope is
+// orthogonal to the catalog/manual split, so it rides both shapes.
+func TestBuildIngestRequestTenantID(t *testing.T) {
+	tenant := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+	t.Run("manual mode sends tenant_id", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product:  "vmware",
+			Version:  "9.0",
+			ImplID:   "vmware-rest",
+			Specs:    []string{"https://specs.example.test/vcenter.yaml"},
+			TenantID: tenant.String(),
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.TenantId == nil || *body.TenantId != tenant {
+			t.Errorf("TenantId = %v, want %s", body.TenantId, tenant)
+		}
+	})
+
+	t.Run("catalog mode sends tenant_id", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Catalog:  "vmware/9.0",
+			TenantID: tenant.String(),
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.TenantId == nil || *body.TenantId != tenant {
+			t.Errorf("TenantId = %v, want %s", body.TenantId, tenant)
+		}
+	})
+
+	t.Run("unset leaves the field nil (global scope)", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product: "vmware",
+			Version: "9.0",
+			ImplID:  "vmware-rest",
+			Specs:   []string{"https://specs.example.test/vcenter.yaml"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.TenantId != nil {
+			t.Errorf("TenantId = %v, want nil", *body.TenantId)
+		}
+	})
+
+	t.Run("non-UUID value fails locally", func(t *testing.T) {
+		_, err := buildIngestRequest(ingestOptions{
+			Catalog:  "vmware/9.0",
+			TenantID: "not-a-uuid",
+		})
+		if err == nil || !strings.Contains(err.Error(), "not a valid UUID") {
+			t.Errorf("want local UUID-parse error, got %v", err)
+		}
+	})
+}
+
 // ---------- renderers ----------
 
 // TestPrintIngestSummaryDryRun — dry-run header + counts; no

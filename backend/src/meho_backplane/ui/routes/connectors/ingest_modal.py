@@ -18,7 +18,12 @@ Task #1886 (T2). The ingest on-ramp the T1 registry list
   :func:`ingest_endpoint` **in-process** (the ``forms_router.py``
   pattern, never the Bearer route), and branches on the response: a
   dry-run renders the sync parse counts (writes nothing); a real ingest
-  renders the job-poll fragment seeded with the 202 ``job_id``.
+  renders the job-poll fragment seeded with the 202 ``job_id``. The
+  ``scope`` field (#2209) picks the write scope: ``global`` (default)
+  leaves ``tenant_id`` unset (the omit-equals-global REST contract per
+  #2085); ``tenant`` sends the authenticated operator's own tenant
+  UUID for a tenant-curated ingest (derived server-side, never posted
+  by the client).
 * ``GET  /ui/connectors/registry/ingest/jobs/{job_id}`` -- the job poll.
   Calls :func:`get_ingest_job_endpoint` in-process and renders
   ``_ingest_job_status.html``; while ``status == "running"`` the fragment
@@ -321,6 +326,8 @@ def _build_ingest_request(
     impl_id: str,
     spec_uris: list[str],
     dry_run: bool,
+    scope: str,
+    operator_tenant_id: UUID,
 ) -> IngestRequest:
     """Build exactly one :class:`IngestRequest` shape from the form fields.
 
@@ -335,7 +342,24 @@ def _build_ingest_request(
     fields) raises the friendly conflict error rather than reaching the
     validator's raw ``catalog_entry_conflict`` 422. ``async`` is left at
     its default (``True``) so a non-dry-run submit kicks the async job.
+
+    ``scope`` (#2209) selects the write scope orthogonally to the shape
+    split: ``"global"`` leaves ``tenant_id`` unset (the built-in /
+    global scope, the REST contract's omit-equals-global default per
+    #2085); ``"tenant"`` pins the ingest to the operator's own tenant.
+    The UUID is derived server-side from the *authenticated* operator —
+    the form posts only the discriminator, never a raw UUID the handler
+    would have to distrust (the REST route 403s a foreign UUID anyway,
+    but a tampered value should not get that far). An unknown value is
+    a tampered form and raises the friendly :class:`ValueError`.
     """
+    if scope == "global":
+        tenant_id: UUID | None = None
+    elif scope == "tenant":
+        tenant_id = operator_tenant_id
+    else:
+        raise ValueError("Unknown write scope; reopen the modal and try again.")
+
     if mode == "catalog":
         entry = catalog_entry.strip()
         if not entry:
@@ -350,7 +374,7 @@ def _build_ingest_request(
                 "Supply a catalog entry OR an explicit product / version / impl_id / "
                 "spec URL set, never both. Clear the fields on the other tab and re-submit."
             )
-        return IngestRequest(catalog_entry=entry, dry_run=dry_run)
+        return IngestRequest(catalog_entry=entry, dry_run=dry_run, tenant_id=tenant_id)
 
     if mode == "explicit":
         product_v = product.strip()
@@ -376,6 +400,7 @@ def _build_ingest_request(
             impl_id=impl_id_v,
             specs=[SpecSource(uri=uri) for uri in uris],
             dry_run=dry_run,
+            tenant_id=tenant_id,
         )
 
     raise ValueError("Unknown ingest mode; reopen the modal and try again.")
@@ -436,6 +461,7 @@ async def submit_ingest(
     impl_id: str,
     spec_uris: list[str],
     dry_run: bool,
+    scope: str,
     session_ctx: UISessionContext,
     operator: Operator,
 ) -> HTMLResponse:
@@ -446,6 +472,12 @@ async def submit_ingest(
     a 200 sync body renders the dry-run counts; a 202 body seeds the
     job-poll fragment. A domain ``HTTPException`` (catalog / explicit 422,
     400 spec-parse, 503 LLM-unavailable) renders the shared inline panel.
+
+    ``scope`` (#2209) is the modal's write-scope discriminator:
+    ``"global"`` (the default) ingests under the built-in / global scope
+    (``tenant_id`` unset, matching the REST/CLI/MCP omit-equals-global
+    contract); ``"tenant"`` sends the authenticated operator's own
+    ``tenant_id`` for a tenant-curated ingest.
     """
     if len(spec_uris) > _MAX_SPEC_URIS:
         return _render_error_panel(
@@ -463,6 +495,8 @@ async def submit_ingest(
             impl_id=impl_id,
             spec_uris=spec_uris,
             dry_run=dry_run,
+            scope=scope,
+            operator_tenant_id=operator.tenant_id,
         )
     except ValueError as exc:
         # Friendly pre-check error -- the operator mixed / omitted a shape.
@@ -491,6 +525,7 @@ async def submit_ingest(
     _log.info(
         "ui_connector_ingest_started",
         job_id=job_id,
+        write_scope=scope,
         tenant_id=str(operator.tenant_id),
         operator_sub=operator.sub,
     )

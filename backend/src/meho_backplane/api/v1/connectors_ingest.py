@@ -52,8 +52,12 @@ accepts an optional ``tenant_id`` in the body (#2085) that selects
 the *write* scope — omitted / ``null`` targets the built-in / global
 scope (matching the MCP sibling's "omit = global"), the operator's
 own tenant UUID targets their tenant namespace, and any other UUID
-is rejected 403 by the service-layer guard, so cross-tenant writes
-remain impossible. No read or edit surface accepts a tenant id from
+is rejected with a synchronous 403 on **both** the sync and async
+branches: the route runs the shared scope predicate
+(:meth:`IngestionPipelineService.authorize_scope`) eagerly, before
+the async branch creates its job row (#2208), and the service layer
+re-runs it as defence-in-depth, so cross-tenant writes remain
+impossible. No read or edit surface accepts a tenant id from
 the body or query string — cross-tenant probes are impossible by
 construction. The one nuance: the ``operator`` role sees only their
 own tenant's connectors **and** built-ins (``tenant_id IS NULL``);
@@ -124,8 +128,10 @@ The service-layer exceptions map to HTTP status codes uniformly:
   shared builder so the REST 422 body and the MCP -32602 ``data``
   member can't drift.
 * :class:`PermissionError` (raised by
-  :meth:`IngestionPipelineService._authorize` when a service-layer
-  caller bypasses the route gate) → 403.
+  :meth:`IngestionPipelineService.authorize_scope` — eagerly at the
+  route on both ingest branches (#2208), and again inside the
+  service layer as defence-in-depth when a sibling caller bypasses
+  the route gate) → 403.
 * :class:`LlmClientUnavailable` → 503 Service Unavailable.
 * :class:`ValueError` (the catch-all the edit verbs raise on
   empty-body / out-of-enum input) → 400.
@@ -378,6 +384,33 @@ def get_llm_client_factory() -> LlmClientFactory:
                 " poll via ``GET /api/v1/connectors/ingest/jobs/{job_id}``."
             ),
         },
+        # 403 foreign ``tenant_id`` -- declared explicitly so the spec
+        # documents that BOTH branches reject a cross-tenant write scope
+        # synchronously (#2208). The route checks
+        # :meth:`IngestionPipelineService.authorize_scope` eagerly,
+        # before the async branch mints its job row; without the eager
+        # check the async path returned 202 + a failed job minted under
+        # the *foreign* scope, which the caller's poll could never see
+        # (the job read gate is tenant-scoped), so "authz denied" was
+        # indistinguishable from "pipeline crashed". Plain-string
+        # ``detail`` -- the same body shape the sync path has always
+        # returned for the service-layer PermissionError mapping.
+        403: {
+            "description": (
+                "The body's ``tenant_id`` is neither omitted/null "
+                "(built-in / global scope) nor the caller's own tenant "
+                "UUID. Rejected synchronously on both the sync and "
+                "async branches; no job row is created."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"detail": {"type": "string"}},
+                    },
+                },
+            },
+        },
     },
 )
 async def ingest_endpoint(
@@ -434,8 +467,11 @@ async def ingest_endpoint(
     body's optional ``tenant_id`` selects the write scope with the
     MCP sibling ``meho.connector.ingest``'s semantics — omitted /
     ``null`` → built-in / global (``tenant_id IS NULL``), own tenant
-    UUID → tenant-curated, any other UUID → 403 from
-    :meth:`IngestionPipelineService._authorize`; both sit behind the
+    UUID → tenant-curated, any other UUID → **synchronous 403 on
+    both branches** (#2208) via the eager route-level
+    :func:`_authorize_write_scope_or_403` gate (run before the async
+    branch creates its job row; the service layer re-runs the same
+    predicate as defence-in-depth). Both scopes sit behind the
     route's ``tenant_admin`` gate. The dedup is scope-aware: an
     explicit re-ingest under the *other* scope shadow-copies.
     """
@@ -451,21 +487,12 @@ async def ingest_endpoint(
     # closed identically. The service raises :class:`ProductImplIdMismatch`,
     # which :func:`_raise_ingest_http_error` maps onto the same 422
     # ``product_impl_id_mismatch`` envelope this route returned before.
-    # The catalog-driven shape resolves its opt-in band from the catalog
-    # row (``catalog_compatible``); the explicit-quadruple shape carries
-    # the operator-supplied band on the body itself (T1 #1646). The two
-    # shapes are mutually exclusive (the ``IngestRequest`` validator
-    # rejects a body that sets both), so exactly one of these is ever
-    # non-None — fold them into one value the pipeline cross-check honours.
-    spec_info_versions_compatible = catalog_compatible or (
-        tuple(resolved.spec_info_versions_compatible)
-        if resolved.spec_info_versions_compatible is not None
-        else None
-    )
+    spec_info_versions_compatible = _fold_compat_band(resolved, catalog_compatible)
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,
     )
+    _authorize_write_scope_or_403(service, resolved.tenant_id)
     if body.dry_run or not body.async_:
         return await _run_sync_ingest(
             service=service,
@@ -479,6 +506,52 @@ async def ingest_endpoint(
         operator=operator,
         spec_info_versions_compatible=spec_info_versions_compatible,
     )
+
+
+def _fold_compat_band(
+    resolved: IngestRequest,
+    catalog_compatible: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Fold the two compat-band sources into one pipeline argument.
+
+    The catalog-driven shape resolves its opt-in
+    ``spec_info_versions_compatible`` band from the catalog row
+    (*catalog_compatible*); the explicit-quadruple shape carries the
+    operator-supplied band on the body itself (T1 #1646). The two
+    shapes are mutually exclusive (the :class:`IngestRequest`
+    validator rejects a body that sets both), so at most one source
+    is ever non-None — fold them into the single value the pipeline
+    cross-check honours.
+    """
+    return catalog_compatible or (
+        tuple(resolved.spec_info_versions_compatible)
+        if resolved.spec_info_versions_compatible is not None
+        else None
+    )
+
+
+def _authorize_write_scope_or_403(
+    service: IngestionPipelineService,
+    tenant_id: UUID | None,
+) -> None:
+    """Eager route-level tenant-scope gate for both ingest branches (#2208).
+
+    The async branch mints the job row and detaches the pipeline
+    before the service layer's
+    :meth:`IngestionPipelineService.authorize_scope` would run, so
+    without this check a foreign ``tenant_id`` got a 202 + a failed
+    job scoped to the *foreign* tenant — unpollable by the caller
+    (the job read gate is tenant-scoped), indistinguishable from a
+    pipeline crash. Checking at the route makes both branches fail
+    the same request the same way: a synchronous 403 with the same
+    plain-string detail the sync path's PermissionError mapping has
+    always returned. The service-layer re-check inside ``ingest()``
+    stays as defence-in-depth for the CLI / MCP siblings.
+    """
+    try:
+        service.authorize_scope(tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(http_status.HTTP_403_FORBIDDEN, str(exc)) from exc
 
 
 async def _run_sync_ingest(
@@ -540,6 +613,14 @@ async def _spawn_async_ingest(
     scope (``resolved.tenant_id``; ``None`` = built-in / global,
     #2085), mirroring the MCP async path — a global ingest's job is
     a built-in job, pollable by tenant_admins.
+
+    Pre-condition (#2208): the route has already run
+    :meth:`IngestionPipelineService.authorize_scope` against
+    ``resolved.tenant_id``, so the job row minted below is always in
+    a scope the caller may poll. Callers must not reach this helper
+    with an unauthorised foreign scope — the job read gate is
+    tenant-scoped, and a foreign-scoped job row is invisible to the
+    caller (the 202-then-unpollable-failure this task fixed).
     """
     assert resolved.product is not None, "post-resolution invariant: product must be set"
     assert resolved.version is not None, "post-resolution invariant: version must be set"
@@ -1037,8 +1118,10 @@ async def _run_ingest_with_http_mapping(
     try:
         # Write scope is the body-resolved ``tenant_id`` (``None`` =
         # built-in / global, #2085), matching the MCP surface's
-        # omit-equals-global semantics; the service-layer ``_authorize``
-        # rejects cross-tenant UUIDs with PermissionError → 403 below.
+        # omit-equals-global semantics. The route already 403'd a
+        # cross-tenant UUID eagerly (#2208); the service-layer
+        # ``authorize_scope`` re-check still maps PermissionError →
+        # 403 below as defence-in-depth.
         return await service.ingest(
             product=body.product,
             version=body.version,
@@ -1075,9 +1158,10 @@ def _raise_ingest_http_error(
     if isinstance(exc, LlmClientUnavailable):
         raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     if isinstance(exc, PermissionError):
-        # Defence-in-depth — the route's _require_admin already gates this,
-        # but the service-level guard might catch a cross-tenant write that
-        # slipped through.
+        # Defence-in-depth — the route's _require_admin + the eager
+        # authorize_scope gate (#2208) already reject this, but the
+        # service-level guard might catch a cross-tenant write that
+        # slipped through a future refactor.
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, str(exc)) from exc
     if isinstance(exc, VersionMismatchError):
         # G0.9-T8 (#740). 422 (not 400) because the request was syntactically

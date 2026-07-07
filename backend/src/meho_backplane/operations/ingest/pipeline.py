@@ -415,15 +415,21 @@ class IngestionPipelineService:
             return self._explicit_sessionmaker
         return get_sessionmaker()
 
-    def _authorize(self, tenant_id: UUID | None) -> None:
+    def authorize_scope(self, tenant_id: UUID | None) -> None:
         """Mirror :meth:`ReviewService._authorize_scope` for ingest paths.
 
         Built-in ingests require ``tenant_admin``; tenant-curated
-        ingests require the operator's tenant_id to match. The route
-        layer enforces ``tenant_admin`` minimum on the ingest endpoint
-        already, but the service-layer guard is defence-in-depth so
-        the CLI / MCP siblings get the same isolation even if they
-        skip the route decorator.
+        ingests require the operator's tenant_id to match. Raises
+        :class:`PermissionError` on a violation.
+
+        Public because it is the single tenant-scope predicate for
+        ingest writes, checked at two layers on purpose: the REST
+        route calls it eagerly *before* minting the async job row
+        (#2208 — otherwise a foreign ``tenant_id`` got a 202 plus a
+        failed job minted under the foreign scope, unpollable by the
+        caller), and :meth:`ingest` re-runs it as defence-in-depth so
+        the CLI / MCP siblings that hit the service layer directly
+        get the same isolation even if they skip the route gate.
         """
         if tenant_id is None:
             if self._operator.tenant_role is not TenantRole.TENANT_ADMIN:
@@ -610,7 +616,7 @@ class IngestionPipelineService:
         inside the declared band even if they differ from the
         operator's ``version`` label.
         """
-        self._authorize(tenant_id)
+        self.authorize_scope(tenant_id)
         # Round-trip guard runs first — before the spec-vs-label
         # cross-check (which fetches each spec's ``info.version``) and
         # before either dispatch path — so a divergent product is

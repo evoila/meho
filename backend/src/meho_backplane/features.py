@@ -236,11 +236,28 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
     ``depends_on="agent_runtime"`` instead of a separate
     ``missing_env`` so the operator's remediation chain is one step
     deep ("configure agent_runtime, the queue activates").
+
+    ``effective_posture`` surfaces the resolved four-eyes stance
+    (#2087): ``"four_eyes_enforced"`` when
+    :attr:`Settings.approval_allow_self_approval` is ``False`` (the
+    fail-closed default — requester != approver enforced by
+    :func:`~meho_backplane.operations.approval_queue.approve_request`),
+    ``"single_operator_break_glass"`` when the emergency
+    ``APPROVAL_ALLOW_SELF_APPROVAL=true`` escape is live. One GET on
+    ``/ready`` tells an operator (or auditor) whether the deploy is
+    running with the break-glass flag set, without grepping the
+    values file. The field reports posture, not health — it never
+    affects ``configured``.
     """
     agent_runtime = _agent_runtime_block(settings)
     return {
         "configured": agent_runtime["configured"],
         "depends_on": "agent_runtime",
+        "effective_posture": (
+            "single_operator_break_glass"
+            if settings.approval_allow_self_approval
+            else "four_eyes_enforced"
+        ),
     }
 
 
@@ -270,7 +287,9 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "..."},
           "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "..."},
           "audit_replay":   {"configured": true,   "capture_mode": "...", "missing_env": []},
-          "approval_queue": {"configured": <bool>, "depends_on": "agent_runtime"},
+          "approval_queue": {"configured": <bool>, "depends_on": "agent_runtime",
+                             "effective_posture": "four_eyes_enforced" |
+                                                  "single_operator_break_glass"},
           "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
         }
     """

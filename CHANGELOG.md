@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `/ready` surfaces the approval four-eyes posture
+
+- **`GET /ready` → `features.approval_queue` now carries an
+  `effective_posture` field** (#2087): `"four_eyes_enforced"` on the
+  fail-closed default, `"single_operator_break_glass"` when the deploy
+  set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true` escape — one
+  GET tells an operator or auditor whether self-approval is currently
+  possible, without grepping the values file.
+  `docs/codebase/approvals.md` now also documents how to audit a
+  break-glass self-approval to code truth: the flag emits the
+  `approval_self_approval_break_glass` WARNING log event and the
+  decision audit row identifies a self-approval as
+  `payload.principal_sub == payload.reviewed_by` — there is **no**
+  `self_approved` audit field (a first-class marker would be net-new,
+  separately scoped work), and the endorsed single-operator posture
+  remains the agent-requester recipe, not the flag.
+
 ### Fixed — async ingest rejects a foreign tenant_id synchronously
 
 - **`POST /api/v1/connectors/ingest` with `async: true` and a foreign

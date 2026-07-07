@@ -53,6 +53,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.targets.ssrf_guard import assert_public_destination
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import Target as TargetORM
@@ -346,6 +347,25 @@ class TargetCreate(BaseModel):
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
 
+    @field_validator("host", "fqdn")
+    @classmethod
+    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+        """SSRF guard (evoila-bosnia/meho-internal#153).
+
+        A non-public destination (private / loopback / link-local /
+        metadata / CGNAT — any non-globally-routable address) is a
+        structured 422 at this boundary unless the operator-configured
+        ``MEHO_TARGET_SSRF_ALLOWLIST`` exempts it. The guard screens the
+        httpx-normalized *dialed* host, so a value carrying URL
+        structure cannot screen as one destination and dial another —
+        see :mod:`meho_backplane.targets.ssrf_guard` for the full
+        contract (fail-open on unresolvable hostnames; the connect path
+        re-checks the *resolved* address before every dispatch).
+        """
+        if value is not None:
+            assert_public_destination(value)
+        return value
+
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetCreate:
         """Reject a target that both pins a CA *and* disables verification.
@@ -454,6 +474,20 @@ class TargetUpdate(BaseModel):
     @classmethod
     def _validate_ca_pin(cls, value: str | None) -> str | None:
         return validate_ca_pin_pem(value)
+
+    @field_validator("host", "fqdn")
+    @classmethod
+    def _reject_non_public_destination(cls, value: str | None) -> str | None:
+        """SSRF guard (evoila-bosnia/meho-internal#153) — same as create.
+
+        ``None`` is the PATCH absent-marker and passes untouched; a
+        non-null ``host``/``fqdn`` is screened exactly like
+        :class:`TargetCreate` so update cannot be used to re-point an
+        existing target into private space.
+        """
+        if value is not None:
+            assert_public_destination(value)
+        return value
 
     @model_validator(mode="after")
     def _ca_pin_excludes_insecure(self) -> TargetUpdate:

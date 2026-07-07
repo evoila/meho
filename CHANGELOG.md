@@ -90,6 +90,37 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — target-destination SSRF guard (create/update + connect)
+
+- **Targets can no longer be pointed at non-public addresses unless the
+  deployment explicitly allowlists them** (evoila-bosnia/meho-internal#153):
+  `POST`/`PATCH /api/v1/targets` now reject a `host`/`fqdn` that is — or
+  resolves to — a private, loopback, link-local (including
+  `169.254.0.0/16` cloud-metadata), ULA, multicast, unspecified, or
+  otherwise reserved address with a structured 422 that never echoes the
+  resolved IP; and the HTTP connector transport re-screens the
+  **resolved** address immediately before every dispatch (closing the
+  DNS-rebind window between create and connect), refusing with a
+  structured `connector_error` before any request or credential leaves
+  the backplane. The rejection classes extend the existing OpenAPI
+  spec-fetch guard with a `not is_global` posture, so every
+  non-globally-routable address — including carrier-grade NAT
+  `100.64.0.0/10` — is blocked. Both layers screen the
+  **httpx-normalized dialed host**, never the raw string: a `host`
+  value carrying URL structure cannot screen as one destination and
+  dial another — values embedding credentials, a query, or a fragment
+  are refused outright, while path- or port-bearing values (the GitHub
+  connector's documented `owner/repo` host shapes stay valid) are
+  screened on the host component they actually dial.
+  **Deployment impact (action likely required):** MEHO
+  deployments register on-prem appliances on RFC 1918 space as a matter
+  of course — set the new `MEHO_TARGET_SSRF_ALLOWLIST` env var (comma-
+  separated CIDR ranges, bare IPs, and/or hostname literals, e.g.
+  `10.0.0.0/8,192.168.0.0/16,vcenter.lab.internal`) to opt your trusted
+  internal ranges back in. The allowlist is range-scoped — everything
+  outside it stays blocked, so the guard is never globally disabled.
+  Existing target rows are unaffected at rest (reads/lists still work);
+  the guard bites on the next create, update, or dispatch.
 ### Security
 
 - Bound the `/mcp` transport and the memory/knowledge MCP tool inputs

@@ -1745,9 +1745,10 @@ validation — useful as a fast feedback loop when editing
 
 Both targets install GoReleaser into `cli/bin/` on first run
 (pinned to v2.15.4 for developer reproducibility). The GHA workflow
-uses `goreleaser/goreleaser-action@<sha>` with `version: '~> v2'`
-so security and bug-fix releases land automatically — the v2 major
-schema is what matters for stability, not the patch version.
+uses `goreleaser/goreleaser-action@<sha>` with the same exact pin
+(`version: 'v2.15.4'`), so the CI release pipeline and the local
+dry-run build artefacts with the identical GoReleaser build. Bump
+the workflow pin and `cli/Makefile`'s `GORELEASER_VERSION` together.
 
 ### Reproducible-build limits
 

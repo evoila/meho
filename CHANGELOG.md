@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — CI supply-chain input pinning + Go CVE scanning
+
+- **Pinned the release/CI supply-chain inputs that still floated, and
+  added Go dependency CVE scanning** (#155): the GoReleaser build used
+  by the signed CLI release pipeline is pinned to the exact patch
+  `v2.15.4` (was `~> v2`, i.e. "latest v2.x at run time"), matching
+  `cli/Makefile`'s `GORELEASER_VERSION` so CI releases and the local
+  `make release-dry-run` use the identical GoReleaser build; the
+  testcontainers VCSim image is pinned to the `v0.55.1` release tag
+  (was `:latest`) in all three CI jobs, matching the pinning
+  convention of the sibling pgvector/valkey/Vault test images; and the
+  `go-lint-test` CI job now runs `govulncheck ./...` (pinned
+  `golang.org/x/vuln@v1.5.0`) against the `cli/` module, so known CVEs
+  reachable from the CLI's call graph fail CI instead of going
+  unnoticed. Workflow + docs only — no runtime code change.
 ### Security — untrusted-content envelope on stored agent text
 
 - Agent-authored stored text is now re-served to LLM-facing read

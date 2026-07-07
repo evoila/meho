@@ -110,6 +110,27 @@ connector-related release-notes line.
   PermissionError"`. The service-layer guard remains as
   defence-in-depth; no REST/OpenAPI change (MCP-only).
 
+### Fixed — operator console surfaces the topology no-populator coverage gap
+
+- **The console's topology refresh partial now renders the #2093
+  coverage-gap signal**: when a refreshed target's connector ships no
+  topology populator (`no_populator_for_product` set on the
+  `RefreshResult`), the result fragment shows a warning callout naming
+  the product and listing the registered products that do ship a
+  populator — matching the CLI note — instead of bare all-zero counts
+  that read as a clean no-op. Server-rendered Jinja conditional only;
+  no route, HTMX, or OpenAPI change. (#2210)
+### Added — tenant-scope affordance on the CLI + UI ingest on-ramps
+
+- **`meho connector ingest` gains `--tenant-id` and the
+  `/ui/connectors/registry` ingest modal gains a Write-scope select**
+  (#2209): both human on-ramps can now target a tenant-curated ingest
+  without hand-crafting raw REST/MCP bodies. Omitting the flag (or
+  picking "Global") keeps the built-in / global scope — the
+  omit-equals-global contract the REST route + MCP tool share since
+  #2085; the UI derives the tenant UUID server-side from the
+  authenticated operator, and the CLI validates the UUID locally
+  before any request leaves the machine.
 ### Fixed — async ingest rejects a foreign tenant_id synchronously
 
 - **`POST /api/v1/connectors/ingest` with `async: true` and a foreign

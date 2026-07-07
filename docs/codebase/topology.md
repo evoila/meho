@@ -179,7 +179,10 @@ identity against `Connector.discover_topology`
 (`refresh._has_populator`), which correctly classifies the
 operator-aware keyword-only override on `KubernetesConnector` and the
 auto-shim subclasses that inherit the base default. The CLI `refresh`
-verb appends a human-readable note when the signal is set.
+verb appends a human-readable note when the signal is set, and the
+operator console's refresh partial
+(`ui/templates/topology/_refresh_result.html`) renders the same note
+as a warning callout next to the counts (#2210).
 
 ### `TopologyNode` — frozen Pydantic v2 (read half)
 

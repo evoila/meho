@@ -14,6 +14,12 @@
   nodes and edges — plus ``duration_ms``. When the reconcile changed the
   graph the POST response also carries ``HX-Trigger:
   meho:topology-edge-changed`` so an open graph view re-pulls.
+
+  When the result carries ``no_populator_for_product`` (#2093 / #2210) a
+  warning callout names the coverage gap — the target's product ships no
+  topology populator, so the all-zero counts above are expected, not a
+  clean no-op — and lists ``populated_products`` as the products that DO
+  refresh meaningfully (wording mirrors the CLI's coverage-gap note).
 -#}
 <div
   data-test="refresh-result"
@@ -51,4 +57,23 @@
       <dd class="font-mono" data-test="refresh-removed-edges">{{ result.removed_edges }}</dd>
     </div>
   </dl>
+  {% if result.no_populator_for_product %}
+    <div
+      data-test="refresh-no-populator"
+      class="alert alert-warning flex-col items-start gap-1 text-xs"
+      role="note"
+    >
+      <p>
+        Product <span class="font-mono">{{ result.no_populator_for_product }}</span>
+        has no topology populator — the zero counts are a coverage gap, not a
+        clean no-op.
+      </p>
+      {% if result.populated_products %}
+        <p data-test="refresh-populated-products" class="opacity-70">
+          Products with populators:
+          <span class="font-mono">{{ result.populated_products | join(", ") }}</span>
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
 </div>

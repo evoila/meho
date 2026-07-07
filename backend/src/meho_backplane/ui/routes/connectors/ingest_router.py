@@ -91,6 +91,10 @@ def build_ingest_router() -> APIRouter:
         impl_id: str = Form(default="", max_length=IMPL_ID_MAX),
         spec_uri: list[str] = Form(default_factory=list),
         dry_run: bool = Form(default=False),
+        # Write scope (#2209): ``global`` (the omit-equals-global REST
+        # default per #2085) or ``tenant`` (the operator's own tenant,
+        # resolved server-side -- the form never posts a raw UUID).
+        scope: str = Form(default="global", max_length=16),
         session_ctx: UISessionContext = _require_session_dep,
         operator: Operator = _require_admin_dep,
     ) -> HTMLResponse:
@@ -104,6 +108,7 @@ def build_ingest_router() -> APIRouter:
             impl_id=impl_id,
             spec_uris=spec_uri,
             dry_run=dry_run,
+            scope=scope,
             session_ctx=session_ctx,
             operator=operator,
         )

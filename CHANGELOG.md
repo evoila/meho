@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — MCP async ingest rejects a foreign tenant_id eagerly
+
+- **`meho.connector.ingest` with `async: true` and a foreign
+  `tenant_id` now returns an immediate structured JSON-RPC `-32602`
+  denial — the same envelope and message as the sync MCP path —
+  instead of a success-shaped job handle plus a `failed` job the
+  caller could never poll** (#2214; the MCP twin of REST #2208): the
+  tool handler runs the shared tenant-scope predicate
+  (`IngestionPipelineService.authorize_scope`) eagerly, before the
+  inline/async branch split, so no job row is minted and no pipeline
+  task is detached for an unauthorised write scope. The denial rides
+  the MCP error envelope (there is no HTTP-403 on that transport) and
+  carries the same diagnostic string as the REST 403 `detail`.
+  Previously the async path minted the job under the *requested*
+  foreign tenant — unpollable via the tenant-scoped
+  `meho.connector.ingest_status` gate — and the sync path's
+  `PermissionError` degraded to an opaque `-32603 "internal error:
+  PermissionError"`. The service-layer guard remains as
+  defence-in-depth; no REST/OpenAPI change (MCP-only).
+
 ### Fixed — async ingest rejects a foreign tenant_id synchronously
 
 - **`POST /api/v1/connectors/ingest` with `async: true` and a foreign

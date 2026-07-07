@@ -102,8 +102,17 @@ connector-related release-notes line.
   **resolved** address immediately before every dispatch (closing the
   DNS-rebind window between create and connect), refusing with a
   structured `connector_error` before any request or credential leaves
-  the backplane. The rejection classes mirror the existing OpenAPI
-  spec-fetch guard. **Deployment impact (action likely required):** MEHO
+  the backplane. The rejection classes extend the existing OpenAPI
+  spec-fetch guard with a `not is_global` posture, so every
+  non-globally-routable address — including carrier-grade NAT
+  `100.64.0.0/10` — is blocked. Both layers screen the
+  **httpx-normalized dialed host**, never the raw string: a `host`
+  value carrying URL structure cannot screen as one destination and
+  dial another — values embedding credentials, a query, or a fragment
+  are refused outright, while path- or port-bearing values (the GitHub
+  connector's documented `owner/repo` host shapes stay valid) are
+  screened on the host component they actually dial.
+  **Deployment impact (action likely required):** MEHO
   deployments register on-prem appliances on RFC 1918 space as a matter
   of course — set the new `MEHO_TARGET_SSRF_ALLOWLIST` env var (comma-
   separated CIDR ranges, bare IPs, and/or hostname literals, e.g.

@@ -25,13 +25,17 @@ This module is the single guard both enforcement layers share:
   or a hostname that was unresolvable at create time, is caught here on
   every dispatch.
 
-The rejection classes mirror the existing spec-fetch guard at
+The rejection classes extend the existing spec-fetch guard at
 ``operations/ingest/openapi.py`` (``_assert_fetchable_remote_url``):
-:mod:`ipaddress` ``is_private`` / ``is_loopback`` / ``is_link_local`` /
-``is_reserved`` / ``is_multicast`` / ``is_unspecified`` — covering at
-minimum ``127.0.0.0/8``, ``10.0.0.0/8``, ``172.16.0.0/12``,
-``192.168.0.0/16``, ``169.254.0.0/16``, ``::1``, ``fc00::/7``,
-``fe80::/10``. That guard is a different sink and is deliberately not
+anything that is not globally routable (:mod:`ipaddress`
+``not is_global`` — which adds carrier-grade NAT ``100.64.0.0/10``)
+plus the explicit ``is_private`` / ``is_loopback`` / ``is_link_local``
+/ ``is_reserved`` / ``is_multicast`` / ``is_unspecified`` union —
+covering at minimum ``127.0.0.0/8``, ``10.0.0.0/8``,
+``172.16.0.0/12``, ``192.168.0.0/16``, ``169.254.0.0/16``,
+``100.64.0.0/10``, ``::1``, ``fc00::/7``, ``fe80::/10`` (see
+:func:`_is_blocked` for why the union stays alongside ``is_global``).
+That guard is a different sink and is deliberately not
 modified or reused directly (it fails closed on unresolvable hostnames
 and rejects with an ingest-specific error type); the *pattern* is
 shared, per evoila-bosnia/meho-internal#153.
@@ -59,6 +63,19 @@ re-check screens the answer before any request is issued.
 address(es) — a caller probing hostnames through the create API must not
 be able to use the guard as an internal-DNS oracle. The message names
 only the env-var remediation.
+
+**Screen what you dial.** The transport composes its base URL as
+``https://{host}`` (``HttpConnector._base_url``), and httpx *normalizes*
+that string — userinfo, an embedded port, a path, query, or fragment
+inside the stored value are parsed out as URL structure, so the address
+the socket reaches is ``httpx.URL(...).host``, never the raw string.
+The guard therefore screens exactly that normalized host at both
+layers (see :func:`_dialed_host`): values carrying credentials, a
+query, or a fragment are refused outright (no supported target shape
+uses them), while path- and port-bearing values — the GitHub
+connector documents ``owner/repo`` / ``api.github.com/repos/owner/repo``
+``host`` shapes as an operator-facing contract — are retained but
+screened on the host component they actually dial.
 """
 
 from __future__ import annotations
@@ -68,6 +85,8 @@ import ipaddress
 import os
 import socket
 from typing import Final
+
+import httpx
 
 __all__ = [
     "TARGET_SSRF_ALLOWLIST_ENV",
@@ -138,15 +157,68 @@ def _parse_allowlist() -> tuple[
 
 
 def _is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """True when *addr* falls in any non-public class the guard rejects."""
+    """True when *addr* falls in any non-public class the guard rejects.
+
+    ``not addr.is_global`` is the primary predicate — anything the IANA
+    special-purpose registries mark non-globally-routable is blocked,
+    which covers every explicit class below *plus* carrier-grade NAT
+    ``100.64.0.0/10`` (``is_private=False`` yet squarely internal). The
+    explicit classes are retained as a union, not replaced, because
+    ``is_global`` is not a superset in either family: global-scope
+    multicast (IPv4 ``224.0.0.1``, IPv6 ``ff0e::/16``) reports
+    ``is_global=True`` and must still be refused as a dial destination.
+    """
     return (
-        addr.is_private
+        not addr.is_global
+        or addr.is_private
         or addr.is_loopback
         or addr.is_link_local
         or addr.is_reserved
         or addr.is_multicast
         or addr.is_unspecified
     )
+
+
+def _dialed_host(candidate: str) -> str:
+    """Return the exact host httpx will dial for ``https://{candidate}``.
+
+    Closes the normalize-vs-screen divergence: the transport builds
+    ``https://{host}`` and httpx parses URL structure *out of* the
+    stored value, so screening the raw string lets a value that carries
+    such structure be screened as one thing and dialed as another. This
+    helper resolves the value the same way the transport does and hands
+    back the host component, so every downstream check (IP-literal
+    screen, allowlist match, DNS resolution) operates on the dialed
+    host by construction.
+
+    Rejections (all :class:`TargetDestinationBlockedError`, fail-closed):
+
+    * **Unparseable** — a value httpx cannot parse cannot be
+      screened-as-dialed (the transport would refuse it at client build
+      time too).
+    * **Userinfo / query / fragment** — refused outright: no supported
+      target ``host`` shape carries them, and they exist only to make a
+      stored value read differently from where it dials.
+
+    A path suffix or an embedded port is *not* structurally refused —
+    the GitHub connector documents path-bearing ``host`` shapes
+    (``owner/repo``, ``api.github.com/repos/owner/repo``) as an
+    operator-facing contract — but the value is screened on the host
+    component it actually dials, which is the security property.
+    """
+    try:
+        url = httpx.URL(f"https://{candidate}")
+    except httpx.InvalidURL as exc:
+        raise TargetDestinationBlockedError(
+            "target host could not be parsed as a dialable destination; "
+            "provide a bare hostname or IP address literal"
+        ) from exc
+    if not url.host or url.userinfo or url.query or url.fragment:
+        raise TargetDestinationBlockedError(
+            "target host must not embed URL structure (credentials, query, "
+            "or fragment); provide a bare hostname or IP address literal"
+        )
+    return url.host
 
 
 def _resolve_addrs(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
@@ -177,18 +249,26 @@ def assert_public_destination(host: str) -> None:
     """Reject *host* when it is, or resolves to, a non-public address.
 
     *host* may be an IPv4/IPv6 literal (bracketed IPv6 URL form
-    accepted) or a hostname. IP literals are checked directly; hostnames
-    are first matched against the allowlist's hostname entries (an
-    allowlisted name is trusted verbatim — no resolution round-trip) and
-    otherwise resolved via :func:`_resolve_addrs`, with **every**
-    resolved address screened (any blocked, non-allowlisted candidate
-    rejects, matching the ingest guard's posture).
+    accepted) or a hostname. IP literals are checked directly. Anything
+    else is first normalized to the host httpx will actually dial via
+    :func:`_dialed_host` (values embedding credentials, a query, or a
+    fragment are refused outright; a path- or port-bearing value is
+    reduced to its dialed host) — so a stored value cannot be screened
+    as one destination and dialed as another. The dialed host is then
+    re-checked as an IP literal (an embedded-port form like
+    ``<ip>:<port>`` normalizes back to a screenable literal), matched
+    against the allowlist's hostname entries (an allowlisted name is
+    trusted verbatim — no resolution round-trip), and otherwise
+    resolved via :func:`_resolve_addrs`, with **every** resolved
+    address screened (any blocked, non-allowlisted candidate rejects,
+    matching the ingest guard's posture).
 
     Raises:
         TargetDestinationBlockedError: The destination is non-public and
-            not exempted by :data:`TARGET_SSRF_ALLOWLIST_ENV`. The
-            message never includes the resolved address (no
-            internal-topology oracle).
+            not exempted by :data:`TARGET_SSRF_ALLOWLIST_ENV`, embeds
+            URL structure the guard refuses, or cannot be parsed as a
+            dialable destination. The message never includes the
+            resolved address (no internal-topology oracle).
     """
     candidate = host.strip()
     if not candidate:
@@ -200,9 +280,13 @@ def assert_public_destination(host: str) -> None:
     try:
         addrs = [ipaddress.ip_address(literal)]
     except ValueError:
-        if candidate.rstrip(".").lower() in hostnames:
-            return
-        addrs = _resolve_addrs(candidate)
+        dialed = _dialed_host(candidate)
+        try:
+            addrs = [ipaddress.ip_address(dialed)]
+        except ValueError:
+            if dialed.rstrip(".").lower() in hostnames:
+                return
+            addrs = _resolve_addrs(dialed)
     for addr in addrs:
         if not _is_blocked(addr):
             continue

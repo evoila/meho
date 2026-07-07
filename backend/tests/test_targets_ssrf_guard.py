@@ -18,6 +18,14 @@ Coverage matrix (per Task acceptance criteria):
 * ``MEHO_TARGET_SSRF_ALLOWLIST`` exempts CIDR ranges and hostname
   literals at both layers; with the allowlist empty the same target is
   rejected.
+* **Screen-what-you-dial** (review B1 hardening): a ``host`` value
+  carrying URL structure is screened on the httpx-normalized host the
+  transport actually dials — an embedded-port or path-bearing value
+  whose dialed host is non-public is rejected at create/update *and*
+  connect time; values embedding credentials, a query, or a fragment
+  are refused outright; a path-bearing value whose dialed host is
+  public still validates (the GitHub ``owner/repo`` host contract).
+* CGNAT ``100.64.0.0/10`` is blocked (``not is_global`` posture).
 * The rejection message never echoes the resolved address (no
   internal-topology oracle) and is excluded from the transport retry
   policy (deterministic verdict).
@@ -66,7 +74,24 @@ _NON_PUBLIC_HOSTS = [
     "10.0.0.1",
     "192.168.1.1",
     "169.254.169.254",
+    "100.64.0.1",  # carrier-grade NAT — blocked by the not-is_global posture
     "::1",
+]
+
+# Values with URL structure whose httpx-normalized *dialed* host is
+# non-public: the guard must screen the normalized host, not the raw
+# string (which parses as neither an IP literal nor a resolvable name).
+_STRUCTURED_NON_PUBLIC_HOSTS = [
+    "10.0.0.1:8443",  # embedded port
+    "192.168.1.1/health",  # path suffix
+]
+
+# URL structure the guard refuses outright — even around a public
+# literal, a target host has no business embedding these components.
+_REFUSED_STRUCTURE_HOSTS = [
+    "user@" + _PUBLIC_IP,  # userinfo
+    _PUBLIC_IP + "?q=1",  # query
+    _PUBLIC_IP + "#anchor",  # fragment
 ]
 
 
@@ -162,6 +187,65 @@ def test_unresolvable_hostname_passes_at_create(
 def test_target_update_all_none_still_valid(_guard_live: pytest.MonkeyPatch) -> None:
     update = TargetUpdate()
     assert update.host is None
+
+
+# ---------------------------------------------------------------------------
+# Screen-what-you-dial: values carrying URL structure (review B1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("host", _STRUCTURED_NON_PUBLIC_HOSTS + _REFUSED_STRUCTURE_HOSTS)
+def test_target_create_rejects_host_with_url_structure(
+    _guard_live: pytest.MonkeyPatch, host: str
+) -> None:
+    """The screened host equals the dialed host — URL structure cannot
+    make a non-public destination read as unresolvable."""
+    with pytest.raises(ValidationError):
+        TargetCreate(**_create_kwargs(host=host))
+
+
+@pytest.mark.parametrize("host", _STRUCTURED_NON_PUBLIC_HOSTS + _REFUSED_STRUCTURE_HOSTS)
+def test_target_update_rejects_host_with_url_structure(
+    _guard_live: pytest.MonkeyPatch, host: str
+) -> None:
+    with pytest.raises(ValidationError):
+        TargetUpdate(host=host)
+
+
+def test_target_create_rejects_fqdn_with_url_structure(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValidationError):
+        TargetCreate(**_create_kwargs(fqdn="10.0.0.1:8443"))
+
+
+def test_path_bearing_host_screens_its_dialed_host(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    """A path-bearing value is reduced to the host it dials, then screened.
+
+    The GitHub connector documents ``owner/repo`` /
+    ``api.github.com/repos/owner/repo`` ``host`` shapes as an
+    operator-facing contract, so path structure alone is not refused —
+    but the dialed host is screened exactly like a bare value: public
+    passes, non-public rejects.
+    """
+    _patch_resolver(_guard_live, _PUBLIC_IP)
+    target = TargetCreate(**_create_kwargs(host="api.example.com/repos/acme/demo"))
+    assert target.host == "api.example.com/repos/acme/demo"
+    _patch_resolver(_guard_live, "10.20.30.40")
+    with pytest.raises(ValidationError):
+        TargetCreate(**_create_kwargs(host="api.example.com/repos/acme/demo"))
+
+
+def test_refused_structure_is_rejected_before_allowlist(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    """Credentials/query/fragment in a host are refused unconditionally —
+    the allowlist exempts address ranges, never URL structure."""
+    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "0.0.0.0/0,::/0")
+    with pytest.raises(ValidationError):
+        TargetCreate(**_create_kwargs(host="user@" + _PUBLIC_IP))
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +412,39 @@ async def test_connect_recheck_catches_post_create_rebind(
             await connector._http_client(target)
     finally:
         await connector.aclose()
+
+
+async def test_connect_refuses_host_with_embedded_port_dialing_non_public(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    """Connect-layer screen-what-you-dial (review B1): a stored value
+    with URL structure — e.g. a legacy row that predates the guard — is
+    screened on its normalized dial host, deterministically (no DNS)."""
+    connector = _GuardProbeConnector()
+    with pytest.raises(SsrfBlockedError):
+        await connector._http_client(_make_target("10.0.0.1:8443"))
+    assert connector._clients == {}
+
+
+async def test_connect_refuses_path_bearing_host_resolving_non_public(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _patch_resolver(_guard_live, "10.20.30.40")
+    connector = _GuardProbeConnector()
+    with pytest.raises(SsrfBlockedError):
+        await connector._http_client(_make_target("svc.example.com/api"))
+    assert connector._clients == {}
+
+
+async def test_connect_refuses_host_with_refused_structure(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    """Credentials in a stored host are refused at connect even when the
+    dialed host itself is public."""
+    connector = _GuardProbeConnector()
+    with pytest.raises(SsrfBlockedError):
+        await connector._http_client(_make_target("user@" + _PUBLIC_IP))
+    assert connector._clients == {}
 
 
 # ---------------------------------------------------------------------------

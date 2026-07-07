@@ -352,12 +352,15 @@ class TargetCreate(BaseModel):
     def _reject_non_public_destination(cls, value: str | None) -> str | None:
         """SSRF guard (evoila-bosnia/meho-internal#153).
 
-        A private / loopback / link-local / metadata destination is a
+        A non-public destination (private / loopback / link-local /
+        metadata / CGNAT — any non-globally-routable address) is a
         structured 422 at this boundary unless the operator-configured
-        ``MEHO_TARGET_SSRF_ALLOWLIST`` exempts it — see
-        :mod:`meho_backplane.targets.ssrf_guard` for the full contract
-        (fail-open on unresolvable hostnames; the connect path re-checks
-        the *resolved* address before every dispatch).
+        ``MEHO_TARGET_SSRF_ALLOWLIST`` exempts it. The guard screens the
+        httpx-normalized *dialed* host, so a value carrying URL
+        structure cannot screen as one destination and dial another —
+        see :mod:`meho_backplane.targets.ssrf_guard` for the full
+        contract (fail-open on unresolvable hostnames; the connect path
+        re-checks the *resolved* address before every dispatch).
         """
         if value is not None:
             assert_public_destination(value)

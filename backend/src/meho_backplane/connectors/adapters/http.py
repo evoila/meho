@@ -402,9 +402,13 @@ class HttpConnector(Connector):
         # client is built or served. The create/update schema validators
         # already rejected a non-public literal, but the stored value can
         # be a hostname whose DNS answer changed since create (rebind) or
-        # was unresolvable then — this is the enforcement point. Runs
-        # before the cache lookup so a previously-pooled client for a
-        # now-rebinding hostname is refused too.
+        # was unresolvable then — this is the enforcement point. The
+        # guard screens the httpx-normalized *dialed* host, never the
+        # raw string, so a stored value that embeds URL structure —
+        # including rows that predate the guard — is screened on the
+        # host the transport actually reaches. Runs before the cache
+        # lookup so a previously-pooled client for a now-rebinding
+        # hostname is refused too.
         try:
             await assert_public_destination_async(str(target.host))
         except TargetDestinationBlockedError as exc:

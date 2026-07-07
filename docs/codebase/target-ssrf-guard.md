@@ -31,6 +31,9 @@ off-switch.
   - `assert_public_destination(host)` / `assert_public_destination_async(host)`
     — sync (schema-validator) and async (dispatch hot path, via
     `asyncio.to_thread`) entry points.
+  - `_dialed_host(candidate)` — normalizes a non-IP-literal value to
+    the host component httpx actually dials for `https://{candidate}`
+    (refusing credentials/query/fragment and unparseable values).
   - `_resolve_addrs(host)` — the single DNS seam
     (`socket.getaddrinfo`), monkeypatched by tests.
 - `meho_backplane/connectors/adapters/http.py` —
@@ -40,13 +43,25 @@ off-switch.
 
 1. **Create/update** — `TargetCreate`/`TargetUpdate` field validators on
    `host` and `fqdn` call `assert_public_destination`. An IP literal is
-   checked directly; a hostname is matched against allowlist hostname
-   entries and otherwise resolved, with every resolved address screened
-   (any blocked, non-allowlisted candidate rejects). Blocked classes
-   mirror the ingest spec-fetch guard
-   (`operations/ingest/openapi.py::_assert_fetchable_remote_url`):
-   `is_private` / `is_loopback` / `is_link_local` / `is_reserved` /
-   `is_multicast` / `is_unspecified`.
+   checked directly. Any other value is first normalized to the host
+   httpx will actually dial (`_dialed_host`: the host component of
+   `httpx.URL(f"https://{value}")`) — the transport composes its base
+   URL as `https://{host}`, so URL structure inside the stored value is
+   parsed *out* by httpx and the socket reaches the normalized host,
+   never the raw string. Values embedding credentials, a query, or a
+   fragment are refused outright (fail-closed, as are values httpx
+   cannot parse); path- or port-bearing values are retained but reduced
+   to their dialed host, which is then re-checked as an IP literal
+   (`<ip>:<port>` normalizes back to a screenable literal), matched
+   against allowlist hostname entries, and otherwise resolved, with
+   every resolved address screened (any blocked, non-allowlisted
+   candidate rejects). Blocked classes extend the ingest spec-fetch
+   guard (`operations/ingest/openapi.py::_assert_fetchable_remote_url`):
+   `not is_global` — which adds CGNAT `100.64.0.0/10` — plus the
+   explicit `is_private` / `is_loopback` / `is_link_local` /
+   `is_reserved` / `is_multicast` / `is_unspecified` union (kept
+   alongside `is_global` because global-scope multicast reports
+   `is_global=True` in both address families).
 2. **Connect** — `HttpConnector._http_client` awaits
    `assert_public_destination_async(target.host)` on **every**
    acquisition, before the pool lookup, so a pooled client for a
@@ -60,6 +75,13 @@ off-switch.
 
 Design choices:
 
+- **Screen what you dial.** Both layers screen the httpx-normalized
+  dial host, so a value cannot screen as one destination and dial
+  another. Path structure alone is *not* refused because the GitHub
+  connector documents `owner/repo` / `api.github.com/repos/owner/repo`
+  `host` shapes as an operator-facing contract (its `_base_url`
+  override dials `api.github.com` regardless); the generic transport
+  still screens the host such a value would dial.
 - **Fail-open on unresolvable hostnames** at both layers. Split-horizon
   DNS is normal on-prem (the backplane may not share the target's
   resolver view at create time), and an unresolvable name cannot be
@@ -82,9 +104,9 @@ Design choices:
 
 ## Known issues
 
-- CGNAT `100.64.0.0/10` (`is_private=False`, `is_global=False`) is not
-  blocked — same gap exists in the ingest spec-fetch guard; a
-  `not is_global` posture would close both.
+- The ingest spec-fetch guard (`_assert_fetchable_remote_url`) still
+  lacks the `not is_global` posture this guard adopted, so CGNAT
+  `100.64.0.0/10` passes it — separate sink, adjacent follow-up.
 - The guard screens the transport's *intended* destination; it does not
   pin the subsequent httpx socket connect to the screened address
   (full DNS pinning would require a custom transport). The per-dispatch

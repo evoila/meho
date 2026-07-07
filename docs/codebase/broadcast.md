@@ -80,6 +80,31 @@ Three layers, separated for traceability:
   material, so no override path (`compute_effective_broadcast_detail` in
   `broadcast/overrides.py`) may upgrade them to full; a `full` tenant
   rule on these classes is clamped back to aggregate.
+
+  **Tier-1 floor on the dispatch path.** Classification is
+  allowlist-driven, so a secret-bearing op missing from the
+  `credential_*` allowlists (newly ingested, mis-registered, added
+  without a pin) would fall through to a full-detail class. The
+  dispatch publisher (`publish_broadcast` in `operations/_audit.py`)
+  therefore runs every params dict through `scrub_broadcast_params`
+  (`broadcast/events.py`): a key-name scrub (`password` /
+  `client_secret` / `sessionToken`-shaped keys — the Tier-1 engine
+  alone cannot catch these because a dict leaf carries no label) plus
+  a Tier-1 deterministic-redactor pass with the packaged default
+  policy (`Bearer ...` / `api_key=...` / `Authorization:` shapes
+  embedded in string values). Any detection collapses the broadcast
+  to aggregate-only regardless of `op_class`; no detection keeps
+  decision #3's full detail. Fail-closed: a scrub error yields
+  aggregate-only. Config scalars under secret-ish names
+  (`bind_secret_id: true`, `secret_id_ttl: 3600`) are exempt so
+  vetted Vault AppRole config writes keep their full mutation signal.
+  The static companion is `tests/test_broadcast_classifier_coverage.py`,
+  which enumerates every registered typed/composite op and fails CI
+  when an op whose parameter schema declares a secret-shaped property
+  still classifies to `write` / `other` — allowlist drift now breaks
+  the build instead of broadcasting raw params. The MCP publish path
+  (`mcp/handlers.py`) still relies on classification + overrides only
+  (out of scope for the dispatch-path hardening).
 - `Operator` (`auth/operator.py`) — the JWT-bound principal the SSE
   feed reads its `tenant_id` from. UUID.
 - `UISessionContext` (`ui/auth/middleware.py`) — the session-cookie

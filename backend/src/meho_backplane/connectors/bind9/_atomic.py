@@ -195,6 +195,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
 __all__ = [
@@ -786,11 +787,14 @@ def _interpret_pipeline_result(
     )
 
 
+# code-quality-allow: pre-existing 129-line staging/rollback primitive; the
+# length is the parameter-contract docstring for a safety-critical DDL-apply
+# seam, not logic complexity — refactor is out of scope for the #2155 fix.
 async def atomic_apply(
     connector: Bind9Connector,
     target: Any,
     *,
-    raw_jwt: str,
+    operator: Operator | None = None,
     sudo_password: str,
     audit_slice_path: str,
     zone_name: str = "",
@@ -827,9 +831,10 @@ async def atomic_apply(
         :meth:`~Bind9Connector._remote_bash_with_sudo`.
     target
         The remote bind9 target.
-    raw_jwt, sudo_password
+    operator, sudo_password
         Forwarded to ``_remote_bash_with_sudo``. The sudo password
-        invariants (no newlines / NUL) apply.
+        invariants (no newlines / NUL) apply; *operator* drives the
+        operator-context Vault credential read on an SSH pool miss.
     audit_slice_path
         The file the operation semantically edits (the affected
         zonefile, the primary config fragment, etc.). Used for
@@ -910,7 +915,7 @@ async def atomic_apply(
     proc = await connector._remote_bash_with_sudo(
         target,
         full_script,
-        raw_jwt=raw_jwt,
+        operator=operator,
         sudo_password=sudo_password,
         timeout=90.0,
     )

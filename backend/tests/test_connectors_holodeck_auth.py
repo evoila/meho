@@ -60,6 +60,7 @@ from meho_backplane.connectors.holodeck._pwsh import PwshRunError
 from meho_backplane.connectors.holodeck.connector import parse_photon_version
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.settings import get_settings
+from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
 # Environment fixtures
@@ -87,7 +88,9 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155) — resolved through the stubbed
+    # ``_resolve_secret`` seam against the module registry below.
+    secret_ref: str
     # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
     # id)``); a double missing either field hits ``AttributeError`` at the
     # pool (evoila/meho#1682). ``id`` defaults off ``name`` so distinct
@@ -98,6 +101,18 @@ class _StubTarget:
     def __post_init__(self) -> None:
         if not self.id:
             self.id = f"id-{self.name}"
+
+
+#: Path → secret-data registry the autouse ``_vault_secrets`` fixture
+#: routes ``SshConnector._resolve_secret`` through.
+_VAULT_SECRETS: dict[str, dict[str, Any]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _vault_secrets() -> Iterator[None]:
+    _VAULT_SECRETS.clear()
+    with stub_ssh_vault_secrets(_VAULT_SECRETS):
+        yield
 
 
 # Canary credentials the secret-leak assertions key on. The fake
@@ -112,31 +127,27 @@ _FAKE_KEY_FOOTER = "-----END " + "OPENSSH PRIVATE KEY" + "-----"
 _CANARY_PRIVATE_KEY = f"{_FAKE_KEY_HEADER}\nFAKE-CANARY-KEY-BODY\n{_FAKE_KEY_FOOTER}\n"
 
 
-def _password_target(name: str = "holorouter-pw") -> _StubTarget:
+def _target_with_secret(name: str, secret: dict[str, Any]) -> _StubTarget:
+    secret_path = f"meho/testing/holodeck/{name}"
+    _VAULT_SECRETS[secret_path] = secret
     return _StubTarget(
         name=name,
         host=f"{name}.test.invalid",
         port=22,
-        secret_ref={"username": "root", "password": _CANARY_PASSWORD},
+        secret_ref=secret_path,
     )
+
+
+def _password_target(name: str = "holorouter-pw") -> _StubTarget:
+    return _target_with_secret(name, {"username": "root", "password": _CANARY_PASSWORD})
 
 
 def _key_target(name: str = "holorouter-key") -> _StubTarget:
-    return _StubTarget(
-        name=name,
-        host=f"{name}.test.invalid",
-        port=22,
-        secret_ref={"username": "root", "ssh_private_key": _CANARY_PRIVATE_KEY},
-    )
+    return _target_with_secret(name, {"username": "root", "ssh_private_key": _CANARY_PRIVATE_KEY})
 
 
 def _no_cred_target(name: str = "holorouter-empty") -> _StubTarget:
-    return _StubTarget(
-        name=name,
-        host=f"{name}.test.invalid",
-        port=22,
-        secret_ref={"username": "root"},
-    )
+    return _target_with_secret(name, {"username": "root"})
 
 
 def _completed_process(*, stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:
@@ -262,7 +273,9 @@ async def test_auth_config_key_preferred_when_present() -> None:
     stub_key = MagicMock(name="stub-private-key")
     with patch("asyncssh.import_private_key", return_value=stub_key) as imp:
         auth = await connector._auth_config(_key_target())
-    imp.assert_called_once_with(_CANARY_PRIVATE_KEY)
+    # ``strip_credential_value`` trims the surrounding whitespace before
+    # the key reaches asyncssh (#1474); internal newlines are preserved.
+    imp.assert_called_once_with(_CANARY_PRIVATE_KEY.strip())
     assert auth == {"username": "root", "client_keys": [stub_key]}
     assert "password" not in auth
 
@@ -288,8 +301,8 @@ async def test_per_target_connection_isolation() -> None:
     target_a = _password_target("holorouter-a")
     target_b = _password_target("holorouter-b")
     with patch("asyncssh.connect", new=AsyncMock(side_effect=[conn_a, conn_b])):
-        a = await connector._connect(target_a, raw_jwt="")
-        b = await connector._connect(target_b, raw_jwt="")
+        a = await connector._connect(target_a)
+        b = await connector._connect(target_b)
     assert a is conn_a
     assert b is conn_b
     assert a is not b

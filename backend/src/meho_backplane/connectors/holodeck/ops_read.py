@@ -131,6 +131,7 @@ from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.holodeck.connector import HolodeckConnector
 
 __all__ = [
@@ -684,6 +685,7 @@ async def holodeck_config_show(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the Holodeck configuration dict from ``Get-HoloDeckConfig``.
 
@@ -695,7 +697,7 @@ async def holodeck_config_show(
     del params  # declared empty; intentionally ignored
     script = "Get-HoloDeckConfig | ConvertTo-Json -Depth 4 -Compress"
     try:
-        payload = await pwsh_run(self, target, script)
+        payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
         return {"config": None, "error": str(exc)}
     return {"config": payload}
@@ -705,6 +707,7 @@ async def holodeck_pod_list(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the active Holodeck nested-pod inventory.
 
@@ -722,7 +725,7 @@ async def holodeck_pod_list(
     del params  # declared empty; intentionally ignored
     script = "Get-HoloDeckPod | ConvertTo-Json -Depth 4"
     try:
-        payload = await pwsh_run(self, target, script)
+        payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
         return {"rows": [], "total": 0, "error": str(exc)}
     rows = _normalise_pwsh_json_array(payload)
@@ -733,6 +736,7 @@ async def holodeck_pod_info(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the per-pod detail dict for *pod_id*.
 
@@ -755,7 +759,7 @@ async def holodeck_pod_info(
     quoted_id = pod_id.replace("'", "''")
     script = f"Get-HoloDeckPod -Id '{quoted_id}' | ConvertTo-Json -Depth 4"
     try:
-        payload = await pwsh_run(self, target, script)
+        payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
         return {"pod": None, "error": str(exc)}
     return {"pod": payload}
@@ -765,6 +769,7 @@ async def holodeck_service_list(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return Photon services with the ``Holo*`` prefix and their status.
 
@@ -783,7 +788,7 @@ async def holodeck_service_list(
         "Select-Object Name,Status,DisplayName | ConvertTo-Json -Depth 4"
     )
     try:
-        payload = await pwsh_run(self, target, script)
+        payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:
         return {"rows": [], "total": 0, "error": str(exc)}
     rows = _normalise_pwsh_json_array(payload)
@@ -794,6 +799,7 @@ async def holodeck_k8s_exec(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Forward a **read-only** ``kubectl`` command to the in-appliance K8s.
 
@@ -846,16 +852,12 @@ async def holodeck_k8s_exec(
         }
     # The command is operator-supplied; run it verbatim via the pooled
     # SSH connection. The base adapter's ``_run_command`` already
-    # bounds the wall clock at 30s by default.
-    try:
-        proc = await self._run_command(target, raw_command, raw_jwt="")
-    except Exception as exc:
-        return {
-            "stdout": "",
-            "stderr": "",
-            "exit_status": None,
-            "error": str(exc),
-        }
+    # bounds the wall clock at 30s by default. Auth / transport
+    # failures propagate to the dispatcher's ``connector_error``
+    # branch (mirroring ``holodeck.about``) — swallowing them into a
+    # ``status="ok"`` envelope with empty stdout invites an agent to
+    # act on hollow output (#2155).
+    proc = await self._run_command(target, raw_command, operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     stderr = (proc.stderr or "") if hasattr(proc, "stderr") else ""
     if not isinstance(stdout, str):
@@ -877,6 +879,7 @@ async def holodeck_logs_tail(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Tail ``/holodeck-runtime/logs/<component>*.log`` for *N* lines.
 
@@ -927,7 +930,7 @@ async def holodeck_logs_tail(
         }
     cmd = f"tail -n {lines_raw} /holodeck-runtime/logs/{component}*.log"
     try:
-        proc = await self._run_command(target, cmd, raw_jwt="")
+        proc = await self._run_command(target, cmd, operator=operator)
     except Exception as exc:
         return {
             "files": [],
@@ -946,6 +949,7 @@ async def holodeck_networking_show(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Compose the FRR/BGP + DNS + DHCP networking snapshot.
 
@@ -974,18 +978,19 @@ async def holodeck_networking_show(
     """
     del params  # declared empty; intentionally ignored
 
-    bgp_text = await _safe_run_text(self, target, "vtysh -c 'show bgp summary'")
-    routes_text = await _safe_run_text(self, target, "vtysh -c 'show ip route'")
+    bgp_text = await _safe_run_text(self, target, "vtysh -c 'show bgp summary'", operator)
+    routes_text = await _safe_run_text(self, target, "vtysh -c 'show ip route'", operator)
     dns_zones_payload: Any
     try:
         dns_zones_payload = await pwsh_run(
             self,
             target,
             "Get-DnsServerZone | Select-Object ZoneName,ZoneType | ConvertTo-Json -Depth 4",
+            operator=operator,
         )
     except PwshRunError:
         dns_zones_payload = None
-    dhcp_text = await _safe_run_text(self, target, "cat /var/lib/dhcp/dhcpd.leases")
+    dhcp_text = await _safe_run_text(self, target, "cat /var/lib/dhcp/dhcpd.leases", operator)
 
     return parse_networking_payload(
         bgp_text=bgp_text,
@@ -999,6 +1004,7 @@ async def holodeck_disk_usage(
     self: HolodeckConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Report root-fs usage plus the fixed growth-dir set.
 
@@ -1028,10 +1034,10 @@ async def holodeck_disk_usage(
     """
     del params  # declared empty; intentionally ignored
 
-    df_root_text = await _safe_run_text(self, target, "df -B1 /")
+    df_root_text = await _safe_run_text(self, target, "df -B1 /", operator)
     dir_usages: list[tuple[str, str]] = []
     for path in GROWTH_DIRS:
-        du_text = await _safe_run_text(self, target, f"du -sb {shlex.quote(path)}")
+        du_text = await _safe_run_text(self, target, f"du -sb {shlex.quote(path)}", operator)
         dir_usages.append((path, du_text))
 
     return parse_disk_usage_output(df_root_text=df_root_text, dir_usages=dir_usages)
@@ -1076,6 +1082,7 @@ async def _safe_run_text(
     self: HolodeckConnector,
     target: Any,
     cmd: str,
+    operator: Operator | None = None,
 ) -> str:
     """Run *cmd* via plain SSH, return stdout text; failures -> empty string.
 
@@ -1086,7 +1093,7 @@ async def _safe_run_text(
     sub-section's ``ok`` to ``False`` when the input is empty.
     """
     try:
-        proc = await self._run_command(target, cmd, raw_jwt="")
+        proc = await self._run_command(target, cmd, operator=operator)
     except Exception:
         return ""
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""

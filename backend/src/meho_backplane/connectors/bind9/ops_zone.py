@@ -100,6 +100,7 @@ import dns.zone
 from meho_backplane.connectors.bind9.ops import Bind9Op
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.bind9.connector import Bind9Connector
 
 __all__ = [
@@ -304,6 +305,7 @@ async def bind9_zone_list(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.zone.list``.
 
@@ -313,7 +315,7 @@ async def bind9_zone_list(
     reducer-side-handle decision.
     """
     del params  # schema declares the param object empty
-    proc = await connector._run_command(target, "named-checkconf -p", raw_jwt="")
+    proc = await connector._run_command(target, "named-checkconf -p", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     output = stdout if isinstance(stdout, str) else ""
     rows = parse_named_checkconf_zones(output)
@@ -348,6 +350,7 @@ async def bind9_zone_read(
     connector: Bind9Connector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Handler for ``bind9.zone.read``.
 
@@ -376,7 +379,7 @@ async def bind9_zone_read(
     # named-checkconf invocation ``bind9.zone.list`` uses; cheap on
     # bind9 (parse-only, no zone transfer), so a duplicate call is
     # acceptable in v0.2.
-    checkconf = await connector._run_command(target, "named-checkconf -p", raw_jwt="")
+    checkconf = await connector._run_command(target, "named-checkconf -p", operator=operator)
     checkconf_stdout = (checkconf.stdout or "") if hasattr(checkconf, "stdout") else ""
     checkconf_output = checkconf_stdout if isinstance(checkconf_stdout, str) else ""
     zonefile_path = _resolve_zonefile_path(checkconf_output, zone_name)
@@ -394,7 +397,7 @@ async def bind9_zone_read(
     # a load-bearing safety primitive (the safe-sudo primitive in
     # :mod:`connector` carries that role for write paths).
     quoted_path = "'" + zonefile_path.replace("'", "'\\''") + "'"
-    cat_proc = await connector._run_command(target, f"cat {quoted_path}", raw_jwt="")
+    cat_proc = await connector._run_command(target, f"cat {quoted_path}", operator=operator)
     cat_stdout = (cat_proc.stdout or "") if hasattr(cat_proc, "stdout") else ""
     zonefile_text = cat_stdout if isinstance(cat_stdout, str) else ""
 

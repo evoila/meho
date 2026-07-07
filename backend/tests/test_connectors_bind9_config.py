@@ -68,6 +68,7 @@ from meho_backplane.connectors.bind9.ops_config import (
 )
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.settings import get_settings
+from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
 # Env fixture -- mirrors test_connectors_bind9_atomic.py
@@ -86,7 +87,20 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 # ---------------------------------------------------------------------------
 # Stub target + completed-process helper
+#
+# ``secret_ref`` is a Vault KV-v2 path STRING (#2155). The sudo-password
+# path resolves it through ``SshConnector._resolve_secret``, which the
+# autouse ``_vault_secrets`` fixture routes through the in-memory
+# registry below.
 # ---------------------------------------------------------------------------
+
+_VAULT_SECRETS: dict[str, dict[str, Any]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _vault_secrets() -> Iterator[None]:
+    with stub_ssh_vault_secrets(_VAULT_SECRETS):
+        yield
 
 
 @dataclass
@@ -94,14 +108,22 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155) — resolved through the stubbed
+    # ``_resolve_secret`` seam against the module registry.
+    secret_ref: str
 
 
-_TARGET = _StubTarget(
-    name="bind9-test",
+def _target_with_secret(name: str, secret: dict[str, Any], *, host: str, port: int | None) -> Any:
+    secret_path = f"meho/testing/bind9/{name}"
+    _VAULT_SECRETS[secret_path] = secret
+    return _StubTarget(name=name, host=host, port=port, secret_ref=secret_path)
+
+
+_TARGET = _target_with_secret(
+    "bind9-test",
+    {"username": "root", "password": "test-sudo-pwd"},  # NOSONAR -- unit-test stub
     host="bind9.test.invalid",
     port=22,
-    secret_ref={"username": "root", "password": "test-sudo-pwd"},  # NOSONAR -- unit-test stub
 )
 
 
@@ -330,11 +352,8 @@ class TestApplyFile:
     async def test_missing_sudo_password_raises(self) -> None:
         """target with no password -> ValueError, no remote IO."""
         connector = Bind9Connector()
-        bare_target = _StubTarget(
-            name="bare",
-            host="bare.invalid",
-            port=22,
-            secret_ref={"username": "root"},
+        bare_target = _target_with_secret(
+            "bare", {"username": "root"}, host="bare.invalid", port=22
         )
         with (
             patch.object(

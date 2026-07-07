@@ -82,8 +82,14 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
 ### Auth (inherited from `SshConnector._auth_config`)
 
-`_auth_config` is called by the base `SshConnector._connect` method before
-opening any TCP connection. It inspects `target.secret_ref`:
+`_auth_config(target, operator)` is called by the base
+`SshConnector._connect` method before opening any TCP connection.
+`target.secret_ref` is a Vault KV-v2 **path string** (never an embedded
+credential dict — the "bind9 anti-shape"); `_auth_config` first resolves
+it to the secret's data dict via the adapter's `_resolve_secret`
+(`_shared/vault_creds.load_vault_secret_data`, an operator-context read
+under the calling operator's Vault identity — #2155), then selects the
+auth flavour from the resolved dict:
 
 1. `ssh_private_key` present → parse via `asyncssh.import_private_key`,
    return `{username, client_keys=[key]}`. This is the key-preferred path
@@ -93,7 +99,15 @@ opening any TCP connection. It inspects `target.secret_ref`:
    `{username, password}`. This is the **default** path for the HoloRouter
    OVA, which ships with root password auth enabled.
 3. Neither set → `ValueError` (the base adapter's standard message). The
-   probe folds this into `ssh_auth_failed`.
+   probe folds this into `ssh_auth_failed`, together with the Vault
+   two-phase errors (`VaultClientError` / `VaultCredentialsReadError`).
+
+The operator is threaded from the dispatcher into every op handler
+(`dispatch_typed` passes it by signature-name introspection) down to
+`_run_command` / `pwsh_run`. Operator-less paths (`probe()`, readiness)
+fall back to the synthesised system operator, whose placeholder JWT
+Vault rejects — system-initiated calls cannot read per-target vendor
+credentials.
 
 The Holodeck connector intentionally does **not** override `_auth_config`.
 The inversion vs pfSense (key-only) is encoded in pfSense's override; the

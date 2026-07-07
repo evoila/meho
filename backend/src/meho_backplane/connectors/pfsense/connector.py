@@ -53,6 +53,11 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.vault_creds import (
+    VaultCredentialsReadError,
+    strip_credential_value,
+)
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS
 from meho_backplane.connectors.schemas import (
@@ -205,7 +210,9 @@ class PfSenseConnector(SshConnector):
     version = "2.7"
     impl_id = "pfsense-ssh"
 
-    async def _auth_config(self, target: Target) -> dict[str, Any]:
+    async def _auth_config(
+        self, target: Target, operator: Operator | None = None
+    ) -> dict[str, Any]:
         """Require ``ssh_private_key`` -- reject password auth.
 
         Overrides :meth:`SshConnector._auth_config` to enforce the
@@ -214,20 +221,27 @@ class PfSenseConnector(SshConnector):
         be used for SSH sessions. Password-based SSH on pfSense opens
         the console menu and hangs rather than providing a shell.
 
-        Raises :exc:`ValueError` when ``ssh_private_key`` is absent,
-        with a message directing the operator to configure SSH key
-        auth on the pfSense WebGUI and store the key in the target's
-        Vault secret under ``ssh_private_key``.
+        The secret itself resolves through the base adapter's
+        :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._resolve_secret`
+        (``target.secret_ref`` is a Vault KV-v2 path string read under
+        the operator's identity, #2155); only the key-only selection
+        policy lives here.
+
+        Raises :exc:`ValueError` when the resolved secret has no
+        ``ssh_private_key``, with a message directing the operator to
+        configure SSH key auth on the pfSense WebGUI and store the key
+        in the target's Vault secret under ``ssh_private_key``.
         """
-        secret: dict[str, Any] = getattr(target, "secret_ref", {}) or {}
-        username: str = secret.get("username", "admin")
-        private_key_text: str | None = secret.get("ssh_private_key")
-        if private_key_text:
-            key = asyncssh.import_private_key(private_key_text)
+        secret = await self._resolve_secret(target, operator)
+        username = strip_credential_value(secret.get("username", "admin"))
+        private_key_raw = secret.get("ssh_private_key")
+        if private_key_raw:
+            key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
             return {"username": username, "client_keys": [key]}
         raise ValueError(
             f"target '{getattr(target, 'name', target)!r}': pfSense connector requires "
-            f"ssh_private_key in secret_ref — password auth is not supported. "
+            f"ssh_private_key in the target's Vault secret — password auth is not "
+            f"supported. "
             f"The 'password' field in the Vault secret is the WebGUI break-glass "
             f"credential; configure SSH public-key auth on the pfSense WebGUI "
             f"(System > User Manager > admin > Authorized SSH Keys) and store the "
@@ -256,16 +270,28 @@ class PfSenseConnector(SshConnector):
         ``probe_method="ssh: cat /etc/version"`` mirrors the bind9
         sibling's ``probe_method="ssh: named -v"`` convention.
 
-        ``operator`` exists for ABC parity (G0.16-T4 #1306) — pfSense
-        authenticates via SSH key, not Vault OIDC, so the route operator
-        plays no role here.
+        ``operator`` is threaded to the SSH adapter's ``_auth_config``,
+        which resolves ``target.secret_ref`` (a Vault KV-v2 path string)
+        under the operator's identity on an SSH pool miss (#2155).
+        ``None`` (background callers) fails closed at Vault and maps to
+        ``reachable=False``.
         """
-        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
+        # Catch tuple: transport failures plus credential-resolution
+        # failures (ValueError — key missing from the resolved secret;
+        # VaultClientError / VaultCredentialsReadError — the two-phase
+        # Vault contract). An unresolvable credential is an unreachable
+        # target, not an unhandled exception (#986 discipline).
         try:
-            proc = await self._run_command(target, "cat /etc/version", raw_jwt="")
-        except (OSError, asyncssh.Error) as exc:
+            proc = await self._run_command(target, "cat /etc/version", operator=operator)
+        except (
+            OSError,
+            asyncssh.Error,
+            ValueError,
+            VaultClientError,
+            VaultCredentialsReadError,
+        ) as exc:
             _log.warning(
                 "pfsense_fingerprint_unreachable",
                 target=getattr(target, "name", None),
@@ -346,19 +372,22 @@ class PfSenseConnector(SshConnector):
 
         # Order matters: PermissionDenied (subclass of DisconnectError)
         # must be caught before DisconnectError; OSError is the TCP-
-        # level failure. ValueError from _auth_config (missing key)
-        # maps to auth_failed as well -- it's an auth configuration
-        # problem, not a network problem.
+        # level failure. Credential-resolution failures map to
+        # auth_failed: ValueError (no ssh_private_key in the resolved
+        # secret) and the Vault two-phase errors (VaultClientError /
+        # VaultCredentialsReadError) -- ``probe()`` carries no operator,
+        # so the Vault read runs under the synthesised system operator
+        # and fails closed. Auth configuration problems, not network
+        # problems.
         try:
-            conn = await self._connect(target, raw_jwt="")
+            conn = await self._connect(target)
         except asyncssh.PermissionDenied:
             return _result(False, "auth_failed")
         except asyncssh.DisconnectError:
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except ValueError:
-            # _auth_config raised: missing ssh_private_key.
+        except (ValueError, VaultClientError, VaultCredentialsReadError):
             return _result(False, "auth_failed")
 
         del conn  # connection is pooled; _run_command will reuse it
@@ -378,7 +407,7 @@ class PfSenseConnector(SshConnector):
         # an ``OSError`` subclass so ``_run_command``'s ``asyncio.wait_for``
         # expiry is covered.
         try:
-            version_proc = await self._run_command(target, "cat /etc/version", raw_jwt="")
+            version_proc = await self._run_command(target, "cat /etc/version")
         except (OSError, asyncssh.Error):
             return _result(False, "command_failed")
         stdout = (version_proc.stdout or "") if hasattr(version_proc, "stdout") else ""
@@ -392,6 +421,7 @@ class PfSenseConnector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Return the pfSense firewall's product/version/build snapshot.
 
@@ -411,7 +441,7 @@ class PfSenseConnector(SshConnector):
         carrying empty/None identity fields (#986).
         """
         del params  # declared empty in schema; intentionally ignored
-        result = await self.fingerprint(target)
+        result = await self.fingerprint(target, operator)
         self._assert_reachable(result)
         return {
             "vendor": result.vendor,
@@ -425,6 +455,7 @@ class PfSenseConnector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.version`` (G3.7-T2 #847).
 
@@ -438,12 +469,13 @@ class PfSenseConnector(SshConnector):
             pfsense_version as _pfsense_version,
         )
 
-        return await _pfsense_version(self, target, params)
+        return await _pfsense_version(self, target, params, operator)
 
     async def firewall_rules(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.firewall.rules`` (G3.7-T2 #847).
 
@@ -454,12 +486,13 @@ class PfSenseConnector(SshConnector):
             pfsense_firewall_rules as _pfsense_firewall_rules,
         )
 
-        return await _pfsense_firewall_rules(self, target, params)
+        return await _pfsense_firewall_rules(self, target, params, operator)
 
     async def firewall_state(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.firewall.state`` (G3.7-T2 #847).
 
@@ -475,12 +508,13 @@ class PfSenseConnector(SshConnector):
             pfsense_firewall_state as _pfsense_firewall_state,
         )
 
-        return await _pfsense_firewall_state(self, target, params)
+        return await _pfsense_firewall_state(self, target, params, operator)
 
     async def nat_rules(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.nat.rules`` (G3.7-T2 #847).
 
@@ -491,12 +525,13 @@ class PfSenseConnector(SshConnector):
             pfsense_nat_rules as _pfsense_nat_rules,
         )
 
-        return await _pfsense_nat_rules(self, target, params)
+        return await _pfsense_nat_rules(self, target, params, operator)
 
     async def interface_list(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.interface.list`` (G3.7-T2 #847).
 
@@ -507,12 +542,13 @@ class PfSenseConnector(SshConnector):
             pfsense_interface_list as _pfsense_interface_list,
         )
 
-        return await _pfsense_interface_list(self, target, params)
+        return await _pfsense_interface_list(self, target, params, operator)
 
     async def gateway_list(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.gateway.list`` (G3.7-T2 #847).
 
@@ -523,12 +559,13 @@ class PfSenseConnector(SshConnector):
             pfsense_gateway_list as _pfsense_gateway_list,
         )
 
-        return await _pfsense_gateway_list(self, target, params)
+        return await _pfsense_gateway_list(self, target, params, operator)
 
     async def config_show(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``pfsense.config.show`` (G3.7-T2 #847).
 
@@ -539,7 +576,7 @@ class PfSenseConnector(SshConnector):
             pfsense_config_show as _pfsense_config_show,
         )
 
-        return await _pfsense_config_show(self, target, params)
+        return await _pfsense_config_show(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

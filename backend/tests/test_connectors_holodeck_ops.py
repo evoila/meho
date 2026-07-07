@@ -68,6 +68,7 @@ from meho_backplane.connectors.holodeck.ops_read import (
     parse_networking_payload,
 )
 from meho_backplane.settings import get_settings
+from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
 # Environment fixture (settings cache requires the env vars to resolve)
@@ -102,19 +103,35 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). The canary credentials live in
+    # the stubbed Vault registry (see ``_vault_secrets`` below), so any
+    # code path that actually resolves the secret would surface the
+    # canaries — which the leak assertions then catch.
+    secret_ref: str
 
+
+_TARGET_SECRET_PATH = "meho/testing/holodeck/holorouter-test"
 
 _TARGET = _StubTarget(
     name="holorouter-test",
     host="holorouter.test.invalid",
     port=22,
-    secret_ref={
-        "username": "root",
-        "password": _CANARY_PASSWORD,
-        "ssh_private_key": _CANARY_SSH_KEY,
-    },
+    secret_ref=_TARGET_SECRET_PATH,
 )
+
+
+@pytest.fixture(autouse=True)
+def _vault_secrets() -> Iterator[None]:
+    with stub_ssh_vault_secrets(
+        {
+            _TARGET_SECRET_PATH: {
+                "username": "root",
+                "password": _CANARY_PASSWORD,
+                "ssh_private_key": _CANARY_SSH_KEY,
+            }
+        }
+    ):
+        yield
 
 
 def _proc(*, stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:
@@ -783,14 +800,20 @@ async def test_k8s_exec_truncates_long_stderr_at_4096_chars() -> None:
 
 
 @pytest.mark.asyncio
-async def test_k8s_exec_returns_envelope_on_ssh_failure() -> None:
-    """SSH connect/run exceptions land in the ``error`` field, not propagated."""
+async def test_k8s_exec_propagates_ssh_failure_as_connector_error() -> None:
+    """SSH connect/run exceptions propagate to the dispatcher (#2155 AC).
+
+    The pre-#2155 handler swallowed auth/transport failures into a
+    ``status="ok"`` envelope with empty stdout and ``result.error`` — an
+    agent reading ``status=ok`` would act on hollow output. The handler
+    now lets the exception escape so the dispatcher's ``connector_error``
+    branch reports a non-ok op, mirroring ``holodeck.about``.
+    """
     connector = HolodeckConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = OSError("connection refused")
-        result = await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
-    assert result["exit_status"] is None
-    assert "connection refused" in result["error"]
+        with pytest.raises(OSError, match="connection refused"):
+            await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
 
 
 # ---------------------------------------------------------------------------

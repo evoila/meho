@@ -71,6 +71,8 @@ import asyncssh
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
@@ -269,7 +271,7 @@ class Bind9Connector(SshConnector):
         target: Target,
         script: str,
         *,
-        raw_jwt: str,
+        operator: Operator | None = None,
         sudo_password: str,
         timeout: float = 60.0,
     ) -> asyncssh.SSHCompletedProcess:
@@ -337,9 +339,10 @@ class Bind9Connector(SshConnector):
             multiple lines, shell variables, and pipes. Must not
             include the sudo password -- the helper streams that
             separately via *sudo_password*.
-        raw_jwt
-            Forwarded to :meth:`_connect` for auth-context
-            propagation; unused by the helper itself.
+        operator
+            Forwarded to :meth:`_connect` for the operator-context
+            Vault credential read on an SSH pool miss; unused by the
+            helper itself.
         sudo_password
             The password sudo will read from stdin. Streamed as the
             first stdin line; never logged, never present in argv.
@@ -379,7 +382,7 @@ class Bind9Connector(SshConnector):
                 "sudo_password must be a single line: newline / carriage-return / NUL "
                 "characters would smuggle additional bash commands onto stdin"
             )
-        conn = await self._connect(target, raw_jwt)
+        conn = await self._connect(target, operator)
         # New wire shape (#697 fix): script bytes first, password
         # last, EOF immediately after. ``head -c <N>`` on the remote
         # reads exactly the script's byte count via unbuffered
@@ -441,32 +444,46 @@ class Bind9Connector(SshConnector):
         :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._assert_reachable`
         guard surface the failure consistently from ``about`` (#986).
 
-        ``operator`` exists for ABC parity (G0.16-T4 #1306) — bind9
-        authenticates via SSH key, not Vault OIDC, so the route operator
-        plays no role here.
+        ``operator`` is threaded to the SSH adapter's ``_auth_config``,
+        which resolves ``target.secret_ref`` (a Vault KV-v2 path string)
+        under the operator's identity on an SSH pool miss (#2155).
+        ``None`` (background callers) fails closed at Vault and maps to
+        ``reachable=False``.
         """
-        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
+        # Catch tuple: transport failures plus credential-resolution
+        # failures (ValueError — secret carries neither key nor
+        # password; VaultClientError / VaultCredentialsReadError — the
+        # two-phase Vault contract). An unresolvable credential is an
+        # unreachable target, not an unhandled exception (#986).
         try:
-            named_proc = await self._run_command(target, "named -v", raw_jwt="")
+            named_proc = await self._run_command(target, "named -v", operator=operator)
             banner_raw = (named_proc.stdout or "") if hasattr(named_proc, "stdout") else ""
             banner = banner_raw.strip() if isinstance(banner_raw, str) else ""
             version_triple = parse_named_version(banner)
 
-            os_proc = await self._run_command(target, "cat /etc/os-release", raw_jwt="")
+            os_proc = await self._run_command(target, "cat /etc/os-release", operator=operator)
             os_raw = (os_proc.stdout or "") if hasattr(os_proc, "stdout") else ""
             os_content = os_raw if isinstance(os_raw, str) else ""
             os_identifier: str | None = None
             if os_proc.exit_status == 0 and os_content.strip():
                 os_identifier = parse_os_release(os_content)
             if os_identifier is None:
-                debian_proc = await self._run_command(target, "cat /etc/debian_version", raw_jwt="")
+                debian_proc = await self._run_command(
+                    target, "cat /etc/debian_version", operator=operator
+                )
                 debian_raw = (debian_proc.stdout or "") if hasattr(debian_proc, "stdout") else ""
                 debian_content = debian_raw.strip() if isinstance(debian_raw, str) else ""
                 if debian_proc.exit_status == 0 and debian_content:
                     os_identifier = f"debian {debian_content}"
-        except (OSError, asyncssh.Error) as exc:
+        except (
+            OSError,
+            asyncssh.Error,
+            ValueError,
+            VaultClientError,
+            VaultCredentialsReadError,
+        ) as exc:
             _log.warning(
                 "bind9_fingerprint_unreachable",
                 target=getattr(target, "name", None),
@@ -557,13 +574,19 @@ class Bind9Connector(SshConnector):
         # first. asyncssh raises ``OSError`` from the underlying
         # socket layer when TCP itself fails.
         try:
-            await self._connect(target, raw_jwt="")
+            await self._connect(target)
         except asyncssh.PermissionDenied:
             return _result(False, "auth_failed")
         except asyncssh.DisconnectError:
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
+        except (ValueError, VaultClientError, VaultCredentialsReadError):
+            # Credential-resolution failure: ``probe()`` carries no
+            # operator, so the Vault read runs under the synthesised
+            # system operator and fails closed — an auth configuration
+            # problem, not a network problem.
+            return _result(False, "auth_failed")
 
         # Post-connect commands are guarded: a connection drop, an
         # ``asyncssh.Error``, or a timeout after a successful handshake
@@ -578,7 +601,7 @@ class Bind9Connector(SshConnector):
             # exact match so a different binary that happens to contain
             # ``named`` in its argv (``named.conf`` editor, etc.) does
             # not produce a false positive.
-            pgrep_proc = await self._run_command(target, "pgrep -x named", raw_jwt="")
+            pgrep_proc = await self._run_command(target, "pgrep -x named")
             if pgrep_proc.exit_status != 0:
                 return _result(False, "named_not_running")
 
@@ -587,9 +610,7 @@ class Bind9Connector(SshConnector):
             # non-zero exit means the config does not parse, which is the
             # "named is running but the config it would load on reload is
             # broken" failure mode operators most care about.
-            checkconf_proc = await self._run_command(
-                target, "named-checkconf -p > /dev/null", raw_jwt=""
-            )
+            checkconf_proc = await self._run_command(target, "named-checkconf -p > /dev/null")
         except (OSError, asyncssh.Error):
             return _result(False, "command_failed")
         if checkconf_proc.exit_status != 0:
@@ -601,6 +622,7 @@ class Bind9Connector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Return the bind9 nameserver's product / version / OS snapshot.
 
@@ -628,7 +650,7 @@ class Bind9Connector(SshConnector):
         carrying empty/None identity fields (#986).
         """
         del params  # declared empty in schema; intentionally ignored
-        result = await self.fingerprint(target)
+        result = await self.fingerprint(target, operator)
         self._assert_reachable(result)
         return {
             "vendor": result.vendor,
@@ -643,6 +665,7 @@ class Bind9Connector(SshConnector):
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.zone.list`` op (G3.4-T2 #588).
 
@@ -661,36 +684,39 @@ class Bind9Connector(SshConnector):
             bind9_zone_list as _bind9_zone_list,
         )
 
-        return await _bind9_zone_list(self, target, params)
+        return await _bind9_zone_list(self, target, params, operator)
 
     async def bind9_zone_read(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.zone.read`` op (G3.4-T2 #588)."""
         from meho_backplane.connectors.bind9.ops_zone import (
             bind9_zone_read as _bind9_zone_read,
         )
 
-        return await _bind9_zone_read(self, target, params)
+        return await _bind9_zone_read(self, target, params, operator)
 
     async def bind9_record_get(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.record.get`` op (G3.4-T2 #588)."""
         from meho_backplane.connectors.bind9.ops_record import (
             bind9_record_get as _bind9_record_get,
         )
 
-        return await _bind9_record_get(self, target, params)
+        return await _bind9_record_get(self, target, params, operator)
 
     async def bind9_record_add(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.record.add`` op (G3.4-T3 #589).
 
@@ -702,36 +728,39 @@ class Bind9Connector(SshConnector):
             bind9_record_add as _bind9_record_add,
         )
 
-        return await _bind9_record_add(self, target, params)
+        return await _bind9_record_add(self, target, params, operator)
 
     async def bind9_record_remove(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.record.remove`` op (G3.4-T3 #589)."""
         from meho_backplane.connectors.bind9.ops_record import (
             bind9_record_remove as _bind9_record_remove,
         )
 
-        return await _bind9_record_remove(self, target, params)
+        return await _bind9_record_remove(self, target, params, operator)
 
     async def bind9_config_show(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for the ``bind9.config.show`` op (G3.4-T2 #588)."""
         from meho_backplane.connectors.bind9.ops_config import (
             bind9_config_show as _bind9_config_show,
         )
 
-        return await _bind9_config_show(self, target, params)
+        return await _bind9_config_show(self, target, params, operator)
 
     async def bind9_config_apply_file(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``bind9.config.apply_file`` (G3.4-T4 #590).
 
@@ -743,12 +772,13 @@ class Bind9Connector(SshConnector):
             bind9_config_apply_file as _bind9_config_apply_file,
         )
 
-        return await _bind9_config_apply_file(self, target, params)
+        return await _bind9_config_apply_file(self, target, params, operator)
 
     async def bind9_config_apply_views(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``bind9.config.apply_views`` (G3.4-T4 #590).
 
@@ -760,12 +790,13 @@ class Bind9Connector(SshConnector):
             bind9_config_apply_views as _bind9_config_apply_views,
         )
 
-        return await _bind9_config_apply_views(self, target, params)
+        return await _bind9_config_apply_views(self, target, params, operator)
 
     async def bind9_config_backup(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``bind9.config.backup`` (G3.4-T4 #590).
 
@@ -778,12 +809,13 @@ class Bind9Connector(SshConnector):
             bind9_config_backup as _bind9_config_backup,
         )
 
-        return await _bind9_config_backup(self, target, params)
+        return await _bind9_config_backup(self, target, params, operator)
 
     async def bind9_config_reload(
         self,
         target: Target,
         params: dict[str, Any],
+        operator: Operator | None = None,
     ) -> dict[str, Any]:
         """Bound-method shim for ``bind9.config.reload`` (G3.4-T4 #590).
 
@@ -796,7 +828,7 @@ class Bind9Connector(SshConnector):
             bind9_config_reload as _bind9_config_reload,
         )
 
-        return await _bind9_config_reload(self, target, params)
+        return await _bind9_config_reload(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

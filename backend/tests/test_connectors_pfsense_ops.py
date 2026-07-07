@@ -84,14 +84,16 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). ``_run_command`` is mocked in
+    # this suite, so the path is never resolved.
+    secret_ref: str
 
 
 _TARGET = _StubTarget(
     name="pfsense-test",
     host="pfsense.test.invalid",
     port=22,
-    secret_ref={"username": "admin", "ssh_private_key": "dummy-key"},
+    secret_ref="meho/testing/pfsense/pfsense-test",
 )
 
 
@@ -443,7 +445,7 @@ async def test_pfsense_version_returns_structured_version() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(version_content)
         result = await connector.get_version(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "cat /etc/version", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "cat /etc/version", operator=None)
     assert result["version"] == "2.7.2-RELEASE"
     assert result["kernel"] == "FreeBSD 14.1-RELEASE-p5"
     assert "error" not in result or result.get("error") is None
@@ -471,7 +473,7 @@ async def test_pfsense_firewall_rules_runs_pfctl_sr() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(pfctl_output)
         result = await connector.firewall_rules(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -sr", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -sr", operator=None)
     assert result["total"] == 2
     assert result["rows"][0]["action"] == "pass"
     assert result["rows"][1]["action"] == "block"
@@ -503,7 +505,7 @@ async def test_pfsense_firewall_state_runs_pfctl_ss() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(state_output)
         result = await connector.firewall_state(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -ss", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -ss", operator=None)
     assert result["total"] == 2
     assert result["rows"][0]["proto"] == "tcp"
     assert result["rows"][1]["proto"] == "udp"
@@ -532,7 +534,7 @@ async def test_pfsense_nat_rules_runs_pfctl_sn() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(nat_output)
         result = await connector.nat_rules(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -sn", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "pfctl -sn", operator=None)
     assert result["total"] == 1
     assert result["rows"][0]["action"] == "nat"
 
@@ -548,7 +550,7 @@ async def test_pfsense_interface_list_runs_ifconfig_a() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(_IFCONFIG_SAMPLE)
         result = await connector.interface_list(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "ifconfig -a", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "ifconfig -a", operator=None)
     assert result["total"] == 2
     names = [r["name"] for r in result["rows"]]
     assert "em0" in names
@@ -576,7 +578,7 @@ async def test_pfsense_gateway_list_reads_config_xml() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(_CONFIG_XML_WITH_GATEWAYS)
         result = await connector.gateway_list(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "cat /cf/conf/config.xml", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "cat /cf/conf/config.xml", operator=None)
     assert result["total"] == 2
     names = [r["name"] for r in result["rows"]]
     assert "WAN_DHCP" in names
@@ -604,7 +606,7 @@ async def test_pfsense_config_show_returns_xml_and_length() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(xml_content)
         result = await connector.config_show(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "cat /cf/conf/config.xml", raw_jwt="")
+    mock_cmd.assert_awaited_once_with(_TARGET, "cat /cf/conf/config.xml", operator=None)
     assert result["config_xml"] == xml_content
     assert result["length"] == len(xml_content)
 

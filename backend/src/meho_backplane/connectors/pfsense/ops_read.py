@@ -67,6 +67,7 @@ from defusedxml.ElementTree import ParseError, fromstring
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.pfsense.connector import PfSenseConnector
 
 __all__ = [
@@ -478,6 +479,7 @@ async def pfsense_version(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return pfSense version details from ``/etc/version``.
 
@@ -490,7 +492,7 @@ async def pfsense_version(
     del params  # declared empty; intentionally ignored
     from meho_backplane.connectors.pfsense.connector import parse_pfsense_version
 
-    proc = await self._run_command(target, "cat /etc/version", raw_jwt="")
+    proc = await self._run_command(target, "cat /etc/version", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if not content.strip() or proc.exit_status != 0:
@@ -507,6 +509,7 @@ async def pfsense_firewall_rules(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the active pfSense firewall ruleset from ``pfctl -sr``.
 
@@ -515,7 +518,7 @@ async def pfsense_firewall_rules(
     optional direction, and the full unparsed rule line.
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "pfctl -sr", raw_jwt="")
+    proc = await self._run_command(target, "pfctl -sr", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():
@@ -528,6 +531,7 @@ async def pfsense_firewall_state(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the active pfSense state table from ``pfctl -ss``.
 
@@ -541,7 +545,7 @@ async def pfsense_firewall_state(
     through unchanged.
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "pfctl -ss", raw_jwt="")
+    proc = await self._run_command(target, "pfctl -ss", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():
@@ -554,6 +558,7 @@ async def pfsense_nat_rules(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the active pfSense NAT ruleset from ``pfctl -sn``.
 
@@ -563,7 +568,7 @@ async def pfsense_nat_rules(
     and the full unparsed rule line.
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "pfctl -sn", raw_jwt="")
+    proc = await self._run_command(target, "pfctl -sn", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():
@@ -576,6 +581,7 @@ async def pfsense_interface_list(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the pfSense interface list from ``ifconfig -a``.
 
@@ -585,7 +591,7 @@ async def pfsense_interface_list(
     ``status``, and ``media`` fields.
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "ifconfig -a", raw_jwt="")
+    proc = await self._run_command(target, "ifconfig -a", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():
@@ -598,6 +604,7 @@ async def pfsense_gateway_list(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the pfSense gateway list from ``/cf/conf/config.xml``.
 
@@ -608,7 +615,7 @@ async def pfsense_gateway_list(
     ``descr``, and ``defaultgw`` (bool).
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "cat /cf/conf/config.xml", raw_jwt="")
+    proc = await self._run_command(target, "cat /cf/conf/config.xml", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():
@@ -625,6 +632,7 @@ async def pfsense_config_show(
     self: PfSenseConnector,
     target: Any,
     params: dict[str, Any],
+    operator: Operator | None = None,
 ) -> dict[str, Any]:
     """Return the full pfSense configuration from ``/cf/conf/config.xml``.
 
@@ -636,7 +644,7 @@ async def pfsense_config_show(
     use ``pfsense.gateway.list`` for structured gateway data.
     """
     del params  # declared empty; intentionally ignored
-    proc = await self._run_command(target, "cat /cf/conf/config.xml", raw_jwt="")
+    proc = await self._run_command(target, "cat /cf/conf/config.xml", operator=operator)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
     content = stdout if isinstance(stdout, str) else ""
     if proc.exit_status != 0 and not content.strip():

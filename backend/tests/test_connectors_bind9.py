@@ -114,14 +114,16 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155). ``_connect`` / ``_run_command``
+    # are mocked in this suite, so the path is never resolved.
+    secret_ref: str
 
 
 _TARGET = _StubTarget(
     name="vcf-router-bind9",
     host="bind9.test.invalid",
     port=22,
-    secret_ref={"username": "root", "password": "irrelevant-for-mocked-tests"},  # NOSONAR
+    secret_ref="meho/testing/bind9/vcf-router-bind9",
 )
 
 
@@ -287,7 +289,6 @@ async def test_remote_bash_with_sudo_argv_holds_byte_count_streams_password_via_
         result = await connector._remote_bash_with_sudo(
             _TARGET,
             script,
-            raw_jwt="jwt",
             sudo_password="super-secret-password",  # NOSONAR
         )
     assert result.exit_status == 0
@@ -355,7 +356,6 @@ async def test_remote_bash_with_sudo_rejects_multiline_password(
         await connector._remote_bash_with_sudo(
             _TARGET,
             "echo body",
-            raw_jwt="jwt",
             sudo_password=injection_shape,
         )
     # Defense-in-depth: validation must run before any wire IO, so the
@@ -380,7 +380,6 @@ async def test_remote_bash_with_sudo_does_not_log_password(
         await connector._remote_bash_with_sudo(
             _TARGET,
             "rndc reload",
-            raw_jwt="jwt",
             sudo_password=secret,
         )
 
@@ -411,7 +410,6 @@ async def test_remote_bash_with_sudo_does_not_log_script_body(
         await connector._remote_bash_with_sudo(
             _TARGET,
             script,
-            raw_jwt="jwt",
             sudo_password="pwd",  # NOSONAR
         )
 
@@ -443,7 +441,7 @@ def test_remote_bash_with_sudo_signature_makes_misordering_unrepresentable() -> 
     # ``sudo_password`` is keyword-only -- the leading ``*,`` enforces
     # this. A caller cannot accidentally swap script and password.
     assert params["sudo_password"].kind == inspect.Parameter.KEYWORD_ONLY
-    assert params["raw_jwt"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert params["operator"].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:

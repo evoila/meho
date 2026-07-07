@@ -91,14 +91,16 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    # A Vault KV-v2 path STRING (#2155) — resolved through the stubbed
+    # ``_resolve_secret`` seam against the module registry.
+    secret_ref: str
 
 
 _TARGET = _StubTarget(
     name="bind9-test",
     host="bind9.test.invalid",
     port=22,
-    secret_ref={"username": "root", "password": "irrelevant"},  # NOSONAR
+    secret_ref="meho/testing/bind9/bind9-reads",
 )
 
 

@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — ssh-family connectors resolve `secret_ref` from Vault
+
+- **The SSH adapter now resolves `target.secret_ref` (a Vault KV-v2 path
+  string) through the operator-context Vault read, instead of consuming
+  the column as if it were the already-materialized secret dict**
+  (#2155): every ssh-family op (`holodeck-ssh`, `bind9-ssh`,
+  `pfsense-ssh`) failed in ~5ms against any real registered target with
+  `AttributeError: 'str' object has no attribute 'get'` — the adapter
+  implemented the documented "bind9 anti-shape" and never resolved the
+  Vault path at all. `SshConnector._auth_config` now reads the secret
+  via `_shared.vault_creds.load_vault_secret_data` under the request
+  operator's identity (the same seam the REST connector loaders use),
+  the operator is threaded through every ssh-family op handler +
+  `_run_command` / `pwsh_run` / the bind9 sudo-password lookup, and
+  operator-less paths (`probe()`, readiness) fail closed at Vault.
+  pfSense's key-only refusal is preserved. `holodeck.k8s.exec` now
+  surfaces auth/transport failures as a `connector_error` (mirroring
+  `holodeck.about`) rather than swallowing them into a `status: "ok"`
+  envelope with empty stdout. The `secret_ref` example in
+  `docs/cross-repo/holodeck-onboarding.md` is corrected to a
+  mount-relative path inside the meho-readable `secret/meho/*` subtree.
+
 ### Fixed — runbook run list surfaces the failed step state
 
 - **`GET /api/v1/runbooks/runs` (and `meho.runbook.list_runs`) now

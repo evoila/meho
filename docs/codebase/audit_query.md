@@ -212,6 +212,28 @@ RBAC: the five flat / self-scoped routes (`query`, `who-touched`,
 operator-gated MCP `query_audit` tool (including its self-session-only
 `shape="tree"` path).
 
+**Tenant-broadcast read surfaces (#2084).** Within a tenant, `query` and
+`show` are principal-agnostic by design: `POST /api/v1/audit/query` (with
+or without a `principal` filter) and `GET /api/v1/audit/show/{audit_id}`
+return rows for **every** principal in the calling tenant. Any `operator`
+/ `tenant_admin` in the tenant reads all principals' audit rows — there
+is **no per-principal role check** on either route, and filtering
+`principal` on another operator's sub is a supported forensic lookup.
+Only `my-recent` stays self-scoped: it binds
+`filters.principal = operator.sub`, so the caller sees their own rows
+only. Cross-**tenant** isolation is unchanged (the substrate's first
+WHERE clause is always `audit_log.tenant_id`; `show` → 404 on a foreign
+`audit_id`, per the module and `show` docstrings in
+`backend/src/meho_backplane/api/v1/audit.py`), and dispatch rows carry
+`payload.params_hash` — a SHA-256 over the canonicalised params
+(`operations/_validate.py::compute_params_hash`) — instead of the raw
+params, so a cross-principal-visible row never exposes sensitive
+operation arguments. Same shelf as the `who-touched` shortcut and the
+aggregate-only broadcast redaction; same category-2 doc-resolution
+shape as the kb same-slug cross-principal write semantics (#1327,
+`docs/codebase/kb.md`). Revisit if a finer role gradation (e.g.
+`tenant_member`) ever lands.
+
 The cross-session **replay** route
 (`GET /api/v1/audit/sessions/{session_id}/replay`) requires
 `tenant_admin` (#1843): it takes an *arbitrary* `session_id` and

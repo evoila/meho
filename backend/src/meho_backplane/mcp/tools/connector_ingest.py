@@ -79,6 +79,23 @@ time the pipeline raises, so a failure there flips the job to
 on the ``meho.connector.ingest_status`` response (same trade-off the
 REST async path makes). A missing / cross-tenant job id on the poll
 tool surfaces as ``-32602`` ``ingest_job_not_found``.
+
+One deliberate exception to the async-failures-surface-on-the-poll
+trade-off: a foreign ``tenant_id`` (neither omitted/``null`` nor the
+operator's own tenant) is rejected **eagerly on both paths** (#2214,
+the MCP twin of REST #2208). The handler runs the shared scope
+predicate :meth:`IngestionPipelineService.authorize_scope` before the
+inline/async branch split — before the async path mints its job row —
+and maps the :class:`PermissionError` onto a structured ``-32602``
+(MCP's only handler-error channel; there is no HTTP-403 on this
+transport). Without the eager check the async path returned a
+success-shaped handle plus a ``failed`` job minted under the *foreign*
+scope, which the caller's poll could never see (the job read gate is
+tenant-scoped), and the sync path's :class:`PermissionError` fell
+through the dispatcher's generic ``except Exception`` as an opaque
+``-32603 "internal error: PermissionError"`` with the message
+discarded. The service-layer re-check inside :meth:`ingest` stays as
+defence-in-depth.
 """
 
 from __future__ import annotations
@@ -186,6 +203,14 @@ async def _ingest_handler(
         operator,
         llm_client_factory=get_llm_client_factory(),
     )
+    # Eager tenant-scope gate, before the inline/async branch split —
+    # the MCP twin of the REST route's ``_authorize_write_scope_or_403``
+    # (#2208): the async branch below mints a job row and detaches the
+    # pipeline before the service-layer check would run, so the check
+    # must fire here for a foreign ``tenant_id`` to fail synchronously
+    # with a structured error instead of a success-shaped handle plus an
+    # unpollable ``failed`` job (#2214).
+    _authorize_write_scope_or_invalid_params(service, tenant_id)
     # Async offload only when the operator opted in *and* this is a real
     # write — ``dry_run`` is the parse-only fast path that never blocks
     # long enough to matter, so it stays inline and ``async`` is ignored
@@ -202,6 +227,40 @@ async def _ingest_handler(
         request=request,
         tenant_id=tenant_id,
     )
+
+
+def _authorize_write_scope_or_invalid_params(
+    service: IngestionPipelineService,
+    tenant_id: UUID | None,
+) -> None:
+    """Eager tool-level tenant-scope gate for both ingest paths (#2214).
+
+    The MCP twin of the REST route's ``_authorize_write_scope_or_403``
+    (#2208): runs the shared scope predicate
+    :meth:`IngestionPipelineService.authorize_scope` before the
+    inline/async branch split so a foreign ``tenant_id`` fails the same
+    request the same way on both paths — synchronously, before the
+    async path creates its job row or detaches the pipeline task.
+
+    The denial maps onto :class:`McpInvalidParamsError` (JSON-RPC
+    ``-32602``) carrying the shared :class:`PermissionError` message
+    verbatim — the same string the REST 403's plain ``detail`` carries,
+    so the cross-surface diagnostic can't drift. MCP tools return
+    errors in-envelope (there is no HTTP-403 on this transport); the
+    dispatcher's audit projection classifies the post-dispatch
+    ``McpInvalidParamsError`` as a 403 "denied" status (#1481), so the
+    audit row still records an authorization denial. Before this gate,
+    the sync path's :class:`PermissionError` degraded to an opaque
+    ``-32603 "internal error: PermissionError"`` via the dispatcher's
+    generic catch-all, and the async path minted a ``failed`` job under
+    the foreign scope that the caller's tenant-scoped poll could never
+    see. The service-layer re-check inside :meth:`ingest` stays as
+    defence-in-depth.
+    """
+    try:
+        service.authorize_scope(tenant_id)
+    except PermissionError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
 
 
 async def _run_inline_ingest(
@@ -294,6 +353,16 @@ async def _spawn_async_ingest(
     takes ``str | None`` for those descriptors, so no re-assert is
     needed here; the closure's stricter :meth:`ingest` call carries the
     ``# type: ignore`` that pins the runtime guarantee for mypy.
+
+    Pre-condition (#2214, mirroring REST #2208): the handler has
+    already run :meth:`IngestionPipelineService.authorize_scope`
+    against ``tenant_id`` via
+    :func:`_authorize_write_scope_or_invalid_params`, so the job row
+    minted below is always in a scope the caller may poll. Callers must
+    not reach this helper with an unauthorised foreign scope — the job
+    read gate is tenant-scoped, and a foreign-scoped job row is
+    invisible to the caller (the handle-then-unpollable-failure this
+    task fixed).
     """
     registry = get_job_registry()
     job = await registry.create(
@@ -444,7 +513,9 @@ _INGEST_DESCRIPTION: Final[str] = (
     "inline (async is ignored). "
     "The tenant_id parameter controls the write scope: omit it or pass "
     "null for built-in / global ingest (tenant_admin only); pass the "
-    "operator's own tenant UUID for tenant-scoped ingest. The REST "
+    "operator's own tenant UUID for tenant-scoped ingest. Any other "
+    "UUID is rejected immediately with an invalid-params error on both "
+    "the inline and async paths — no job is created. The REST "
     "endpoint POST /api/v1/connectors/ingest accepts the same optional "
     "tenant_id body field with identical semantics — omitted or null "
     "resolves to the built-in / global scope on both surfaces (#2085), "

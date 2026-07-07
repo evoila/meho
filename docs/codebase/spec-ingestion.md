@@ -1772,10 +1772,14 @@ Both delegate to `ReviewService.delete_connector`
   converters are Node/web-service tools (`swagger2openapi`/oas-kit,
   `converter.swagger.io`), and an in-house converter is a large
   correctness surface the review queue can't backstop, so the
-  documented decision (#1532) is to reject-with-remedy rather than
-  convert in-process. The `harbor/2.x` catalog row and
+  documented decision (#1532, reaffirmed for the VCF Automation case
+  in #2090) is to reject-with-remedy rather than convert in-process.
+  The product-agnostic convert-then-ingest runbook lives at
+  [`connector-ingestion.md` § "Product ships only Swagger 2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
+  (VCF Automation's vra-sdk-go fragments are the worked example);
+  the `harbor/2.x` catalog row and
   [`harbor-onboarding.md`](../cross-repo/harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion)
-  carry the operator-facing conversion runbook for the exemplar
+  carry the Harbor-specific conversion runbook for the other exemplar
   2.0-only surface.
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,

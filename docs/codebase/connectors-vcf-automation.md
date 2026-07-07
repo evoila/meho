@@ -312,6 +312,24 @@ payload per plane.
   Operators who need that string call the wrapper directly; the curated
   ingest in #836 will route through the structured `/cloudapi/*` and
   `/iaas/api/*` paths instead.
+- The VCFA tenant/consumption plane's only *vendor-published*
+  machine-readable surface is the 8 **Swagger 2.0** fragments vendored
+  under [`vmware/vra-sdk-go`
+  `swagger/`](https://github.com/vmware/vra-sdk-go/tree/v0.6.5/swagger)
+  (`vra-project.json` … `vra-iaas.json`); the provider/management plane
+  ships no swagger artifact at all. The ingest parser is
+  OpenAPI-3.x-only by decision (#2090, reaffirming #1532) and rejects
+  native 2.0 with a structured `UnsupportedSpecError` naming the
+  conversion on-ramp — convert with `swagger2openapi` /
+  `converter.swagger.io` first, then ingest the 3.x output (see the
+  ["Product ships only Swagger
+  2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
+  runbook section, which uses VCFA as the worked example). This is
+  **orthogonal to the curated 11-op read core**: `VCFA_CORE_OPS` is
+  sourced from the OpenAPI-3.x `vcf-automation-9.0/cloudapi.yaml` +
+  `iaas.yaml` documents, so lighting up the core never touches the
+  vra-sdk-go 2.0 fragments — converting them only *widens* the surface
+  beyond the curated core.
 - `--resolve`-style DNS override (consumer-wrapper-only) has no direct
   httpx equivalent in the connector — operators are expected to make the
   appliance's FQDN resolvable on the meho-backplane host (typical: split-DNS
@@ -326,6 +344,9 @@ payload per plane.
   (skeleton — this Task); [G3.6-T11 #836](https://github.com/evoila/meho/issues/836)
   (dual-plane spec ingestion + read ops); [G3.6-T12 #840](https://github.com/evoila/meho/issues/840)
   (CLI verbs + E2E + onboarding doc).
+- Swagger-2.0 on-ramp decision: [#2090](https://github.com/evoila/meho/issues/2090)
+  (parser stays OpenAPI-3.x-only; convert vra-sdk-go fragments
+  out-of-band — see Known issues above).
 - Parent Initiative: [G3.6 #369](https://github.com/evoila/meho/issues/369).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
 - Adapter dependency: [G0.2 #223](https://github.com/evoila/meho/issues/223)

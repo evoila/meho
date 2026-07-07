@@ -321,13 +321,23 @@ async def handle_tools_call(
         # ``$schema``, but the default is the library's "latest known"
         # pointer and would slide forward on a future major bump. Pinning
         # here decouples MEHO's schema dialect from the library's release
-        # cadence. ``jsonschema.validate`` raises ``ValidationError`` on the
+        # cadence. ``format_checker`` makes the ``format`` keywords the
+        # tool schemas declare (``uuid``, ``date-time``) load-bearing:
+        # per JSON Schema 2020-12 ``format`` is annotation-only unless a
+        # checker is supplied, so without it a malformed UUID sailed past
+        # this gate and blew up inside the handler as a ``-32603``
+        # internal error instead of the self-correctable ``-32602``.
+        # ``date-time`` assertion requires the ``rfc3339-validator``
+        # dependency — jsonschema registers that checker only when the
+        # package is importable (a guard test pins the registration).
+        # ``jsonschema.validate`` raises ``ValidationError`` on the
         # first failure; we surface it as INVALID_PARAMS.
         try:
             jsonschema.validate(
                 instance=arguments,
                 schema=defn.inputSchema,
                 cls=jsonschema.Draft202012Validator,
+                format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
             )
         except jsonschema.ValidationError as exc:
             status_code = 400

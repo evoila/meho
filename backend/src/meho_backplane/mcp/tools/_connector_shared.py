@@ -124,10 +124,14 @@ def _coerce_tenant_id(raw: Any) -> UUID | None:
 
     The JSON-Schema-validated value is always either a UUID string or
     ``None``; the helper preserves ``None`` and parses the string. A
-    malformed UUID surfaces at JSON-Schema validation time (because of
-    the ``format: uuid`` annotation interpreted by
-    :mod:`jsonschema`'s format-checker chain). This helper assumes the
-    schema validator has already run.
+    malformed UUID is rejected at JSON-Schema validation time as a
+    ``-32602`` — the ``tools/call`` gate in
+    :mod:`meho_backplane.mcp.handlers` passes
+    ``format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER``,
+    which asserts the ``format: uuid`` keyword rather than treating it
+    as an annotation. The ``UUID(raw)`` re-parse below stays as
+    defense-in-depth for any path that reaches this helper without the
+    schema gate.
     """
     if raw is None:
         return None

@@ -109,7 +109,65 @@ Authoring tips:
 - Give each operation a `summary` and `description` — these feed the LLM grouping pass and the agent's `when_to_use` retrieval, so a one-line `summary` is worth more than a bare path.
 - A bad path-param shape or a malformed `$ref` surfaces under `--dry-run` before any DB write; iterate on the file until the dry-run op count matches what you intended.
 
-> **Why not auto-derive the spec?** Parsing vendor HTML/Markdown into OpenAPI, or deriving ops from a typed client, is a deliberately **deferred** capability ([initiative #1529 out-of-scope](https://github.com/evoila/meho/issues/1529)). A small hand-authored spec is the cheaper answer than an HTML→OpenAPI inference engine — author the ops you need, not the vendor's whole surface. Conform to [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html) or [3.1.1](https://spec.openapis.org/oas/v3.1.1.html); the parser rejects Swagger 2.0 with a conversion-path remedy (see [`connector-catalog.md`](connector-catalog.md)).
+> **Why not auto-derive the spec?** Parsing vendor HTML/Markdown into OpenAPI, or deriving ops from a typed client, is a deliberately **deferred** capability ([initiative #1529 out-of-scope](https://github.com/evoila/meho/issues/1529)). A small hand-authored spec is the cheaper answer than an HTML→OpenAPI inference engine — author the ops you need, not the vendor's whole surface. Conform to [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html) or [3.1.1](https://spec.openapis.org/oas/v3.1.1.html); the parser rejects Swagger 2.0 with a conversion-path remedy (see [the next section](#product-ships-only-swagger-20)).
+
+#### Product ships only Swagger 2.0
+
+Some products publish a machine-readable spec, but only as **Swagger
+2.0** (a.k.a. OpenAPI 2.0 — the root key is `swagger: "2.0"` instead
+of `openapi: 3.x.y`). The ingest parser is OpenAPI-3.x-only **by
+decision** (#2090, reaffirming #1532): it does not convert 2.0
+in-process, because the maintained 2.0→3.0 converters are
+Node/web-service tools and a hand-rolled Python converter is a large
+correctness surface the operator review queue can't backstop.
+Handing ingest a native 2.0 document is rejected with a structured
+`UnsupportedSpecError` whose message names this exact on-ramp (the
+`_SWAGGER_2_CONVERSION_REMEDIATION` string in
+`backend/src/meho_backplane/operations/ingest/openapi.py`, shipped in
+#1542).
+
+The supported path is **convert once out-of-band, then ingest the 3.x
+output** like any other spec:
+
+```bash
+# Option A — swagger2openapi CLI (Node; the de-facto oas-kit converter)
+npx swagger2openapi swagger.json -o openapi3.yaml
+
+# Option B — the hosted converter (no local Node toolchain)
+curl -sS https://converter.swagger.io/api/convert \
+  -H 'Content-Type: application/json' \
+  --data-binary @swagger.json -o openapi3.json
+```
+
+The conversion is lossless for the request/response surface ingest
+consumes (`parameters[in=body]` → `requestBody`, `definitions` →
+`components.schemas`); the converted document goes through the same
+`--dry-run` → ingest → review → enable pipeline as a native 3.x spec.
+
+Worked example — **VCF Automation** (the live 2.0-only case, #2090):
+VMware ships no OpenAPI-3.x appliance spec for the VCFA
+tenant/consumption plane; the only machine-readable surface is the
+8 Swagger 2.0 fragments vendored under
+[`vmware/vra-sdk-go` `swagger/`](https://github.com/vmware/vra-sdk-go/tree/v0.6.5/swagger)
+(`vra-project.json`, `vra-iaas.json`, …). Each fragment converts and
+dry-runs individually:
+
+```bash
+npx swagger2openapi vra-iaas.json -o vra-iaas-openapi3.yaml
+meho connector ingest \
+  --product vcfa --version 9.0 --impl vcfa-rest \
+  --spec file:///abs/path/vra-iaas-openapi3.yaml \
+  --dry-run
+```
+
+Note this only **widens** VCF Automation's surface: the connector's
+curated 11-op read core is sourced from OpenAPI-3.x documents
+(`cloudapi.yaml` + `iaas.yaml`) and works without any 2.0
+conversion — see
+[`connectors-vcf-automation.md`](../codebase/connectors-vcf-automation.md).
+The other shipped exemplar is Harbor 2.x, whose product-specific
+conversion runbook lives in
+[`harbor-onboarding.md`](harbor-onboarding.md#spec-ingest-swagger-20--openapi-3x-conversion).
 
 Validate the spec before committing to a tenant-wide ingestion:
 

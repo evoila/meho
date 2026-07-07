@@ -94,6 +94,19 @@ connector-related release-notes line.
 
 - **`POST /api/v1/connectors/ingest` with no `tenant_id` in the body now ingests under the built-in / global scope (`tenant_id IS NULL`), matching the MCP tool `meho.connector.ingest`'s documented "omit = global" semantics** (#2085): previously the REST route silently resolved omission to the *caller's JWT tenant*, so a consumer following the MCP-documented body minted a caller-tenant shadow copy of an existing global row (the scope-aware dedup never matches across scopes; the v0.14.0 dogfood hit this as a 136-op duplicate). The request schema gains an optional `tenant_id` field with a documented resolution: omitted / `null` → global (tenant_admin — already the route's gate), your own tenant UUID → tenant-curated scope, any other UUID → 403. **Migration recipe:** clients that relied on the old caller-tenant default add `"tenant_id": "<your-tenant-uuid>"` to the ingest body; bodies without it now write global rows. The `meho connector ingest` CLI verb and the `/ui/connectors/registry/ingest` modal drive this route and inherit the new global default.
 
+### Security
+
+- The MCP `tools/call` argument gate now asserts the `format` keywords
+  declared in tool `inputSchema`s (`uuid`, `date-time`): the
+  jsonschema validation call passes
+  `format_checker=Draft202012Validator.FORMAT_CHECKER` (with the new
+  `rfc3339-validator` dependency registering the `date-time` checker),
+  so a malformed UUID or non-RFC-3339 timestamp is rejected as JSON-RPC
+  `-32602` "Invalid params" before any tool handler runs — previously
+  `format` was annotation-only and such values reached in-handler
+  parsers, surfacing as `-32603` "Internal error" and defeating agent
+  self-correction. In-handler UUID/timestamp re-parses stay in place as
+  defense-in-depth.
 ### Security — CI supply-chain input pinning + Go CVE scanning
 
 - **Pinned the release/CI supply-chain inputs that still floated, and

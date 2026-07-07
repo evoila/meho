@@ -65,6 +65,49 @@ func TestRefreshHappyPath(t *testing.T) {
 			t.Errorf("refresh summary missing %q in %q", want, out)
 		}
 	}
+	// #2093 — no no_populator_for_product on the wire, no coverage-gap
+	// note in the summary.
+	if strings.Contains(out, "no topology populator") {
+		t.Errorf("refresh summary carries a spurious no-populator note: %q", out)
+	}
+}
+
+// TestRefreshNoPopulatorNote — an all-zero refresh carrying the #2093
+// no_populator_for_product signal renders the coverage-gap note (and
+// the populated-products hint) instead of a bare zero-count summary a
+// consumer would misread as a clean no-op. The happy-path test above
+// covers the inverse: no signal, no note.
+func TestRefreshNoPopulatorNote(t *testing.T) {
+	product := "argocd"
+	populated := []string{"k8s"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/topology/refresh/argocd-1", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.RefreshResult{
+			TargetId:              mustUUID(t, fakeTargetUUID),
+			DurationMs:            1.5,
+			NoPopulatorForProduct: &product,
+			PopulatedProducts:     &populated,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runRefresh(cmd, refreshOptions{Target: "argocd-1", BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRefresh: %v; stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`no topology populator`,
+		`"argocd"`,
+		"products with populators: k8s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refresh summary missing %q in %q", want, out)
+		}
+	}
 }
 
 // TestRefreshJSON — --json round-trips the raw RefreshResult shape.

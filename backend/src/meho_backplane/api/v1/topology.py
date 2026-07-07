@@ -577,6 +577,14 @@ async def refresh(
     registered connector supports returns 422 ``no_matching_connector``;
     a resolution tie returns 409 ``ambiguous_connector`` with the
     candidate ``(product, version, impl_id)`` triples.
+
+    A target whose connector resolves but ships **no topology
+    populator** (the base ``discover_topology`` no-op) still returns
+    200 with all-zero counts, but the body carries an explicit
+    ``no_populator_for_product`` slug plus the ``populated_products``
+    that do refresh meaningfully (#2093) — distinguishing the
+    coverage-gap no-op from a populator run that reconciled zero
+    changes (both fields null).
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_REFRESH,

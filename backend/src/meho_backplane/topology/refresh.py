@@ -45,13 +45,14 @@ from decimal import Decimal
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
@@ -91,6 +92,16 @@ class RefreshResult(BaseModel):
     one of added / updated / removed (or none, when unchanged). The same
     holds for edges. ``duration_ms`` is wall-clock for the whole
     resolve + discover + reconcile + commit cycle.
+
+    ``no_populator_for_product`` discriminates the two all-zero-count
+    no-op classes (#2093): ``None`` means the resolved connector ships a
+    topology populator (a ``discover_topology`` override) and the counts
+    reflect a real reconcile — all-zero is "populator ran clean, nothing
+    changed". A product slug means the connector inherits the base-class
+    no-op default, so the refresh was a no-op **by coverage gap**, not by
+    graph convergence; ``populated_products`` then lists the registered
+    products that DO ship a populator so a consumer can identify the gap
+    without reading meho source.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +114,24 @@ class RefreshResult(BaseModel):
     removed_nodes: int
     removed_edges: int
     duration_ms: float
+    no_populator_for_product: str | None = Field(
+        default=None,
+        description=(
+            "Set to the target's product slug when the resolved connector "
+            "has no topology populator (inherits the base-class "
+            "discover_topology no-op), so the all-zero counts are a "
+            "coverage gap rather than a clean no-op. Null when a "
+            "populator ran."
+        ),
+    )
+    populated_products: tuple[str, ...] | None = Field(
+        default=None,
+        description=(
+            "Registered products that DO ship a topology populator, "
+            "sorted. Only present alongside no_populator_for_product so "
+            "the consumer can see which products refresh meaningfully."
+        ),
+    )
 
 
 def _node_key(kind: str, name: str) -> tuple[str, str]:
@@ -868,6 +897,8 @@ async def _apply_reconcile(
     hints: TopologyHints,
     audit_id: uuid.UUID,
     started: float,
+    no_populator_for_product: str | None,
+    populated_products: tuple[str, ...] | None,
 ) -> RefreshResult:
     """Run the node + edge diff + history writes + audit write in one txn.
 
@@ -921,6 +952,8 @@ async def _apply_reconcile(
             removed_nodes=removed_nodes,
             removed_edges=removed_edges,
             duration_ms=(time.perf_counter() - started) * 1000.0,
+            no_populator_for_product=no_populator_for_product,
+            populated_products=populated_products,
         )
         await _write_audit_and_broadcast(
             session=session,
@@ -930,6 +963,42 @@ async def _apply_reconcile(
             result=result,
         )
     return result
+
+
+def _has_populator(connector_cls: type[Connector]) -> bool:
+    """Return ``True`` when *connector_cls* overrides the base populator no-op.
+
+    :meth:`Connector.discover_topology` ships a base-class default that
+    returns an empty :class:`TopologyHints` (G9.1-T2 #449) so every
+    connector stays refreshable without per-product topology work. That
+    default made a coverage gap indistinguishable from a clean no-op on
+    the wire (#2093); the identity check against the base function is
+    the discriminator. Function identity (not ``hasattr``) is the right
+    probe: an override anywhere in the MRO — including the
+    operator-aware keyword-only variant on ``KubernetesConnector`` —
+    replaces the class attribute, while auto-shim subclasses that
+    inherit the base default compare identical.
+    """
+    return connector_cls.discover_topology is not Connector.discover_topology
+
+
+def _populated_products() -> tuple[str, ...]:
+    """Sorted product slugs whose registered connector ships a populator.
+
+    Derived from the v2 registry snapshot (v1 registrations mirror into
+    v2 as ``(product, "", "")``), deduped across version/impl entries.
+    Registry state is process-local and small (tens of entries), so the
+    scan per no-populator refresh is negligible.
+    """
+    return tuple(
+        sorted(
+            {
+                product
+                for (product, _version, _impl_id), cls in all_connectors_v2().items()
+                if product and _has_populator(cls)
+            }
+        )
+    )
 
 
 async def _invoke_discover_topology(
@@ -1002,6 +1071,10 @@ async def refresh_target_topology(
 
     Returns:
         A :class:`RefreshResult` with the disjoint per-class counts.
+        When the resolved connector ships no topology populator, the
+        result additionally carries ``no_populator_for_product`` +
+        ``populated_products`` so the all-zero counts are readable as a
+        coverage gap rather than a clean no-op (#2093).
     """
     started = time.perf_counter()
     target_id: uuid.UUID = target.id
@@ -1013,6 +1086,18 @@ async def refresh_target_topology(
     connector: Connector = get_or_create_connector_instance(connector_cls)
     hints: TopologyHints = await _invoke_discover_topology(connector, target, operator)
 
+    # #2093 — discriminate the two all-zero-count no-op classes. A
+    # connector inheriting the base discover_topology no-op returns an
+    # empty snapshot every time; stamping the gap on the result (rather
+    # than skipping the reconcile) keeps the refresh semantics intact —
+    # the empty snapshot still soft-deletes stale nodes this target
+    # adopted earlier, and the audit/broadcast contract is unchanged.
+    no_populator_for_product: str | None = None
+    populated_products: tuple[str, ...] | None = None
+    if not _has_populator(connector_cls):
+        no_populator_for_product = discovered_by
+        populated_products = _populated_products()
+
     audit_id = uuid.uuid4()
     result = await _apply_reconcile(
         operator=operator,
@@ -1021,6 +1106,8 @@ async def refresh_target_topology(
         hints=hints,
         audit_id=audit_id,
         started=started,
+        no_populator_for_product=no_populator_for_product,
+        populated_products=populated_products,
     )
 
     # Transaction committed (audit row included). Broadcast is fail-open.
@@ -1049,5 +1136,6 @@ async def refresh_target_topology(
         removed_nodes=result.removed_nodes,
         removed_edges=result.removed_edges,
         duration_ms=round(result.duration_ms, 2),
+        no_populator_for_product=result.no_populator_for_product,
     )
     return result

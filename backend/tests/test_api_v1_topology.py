@@ -22,6 +22,11 @@ Coverage matrix (G9.1-T5 / Task #453 acceptance criteria):
   ``no_matching_connector`` and :class:`AmbiguousConnectorResolution`
   as 409 ``ambiguous_connector`` with candidates, not a bare
   ``text/plain`` 500 from FastAPI's default handler.
+* **refresh no-populator signal → wire** — #2093: the
+  ``no_populator_for_product`` / ``populated_products`` fields the
+  service stamps for a populator-less product pass through the
+  ``response_model`` unfiltered (and serialise as nulls when a
+  populator ran).
 * **RBAC** — every route requires ``operator`` minimum; ``read_only``
   gets 403.
 * **Unauthenticated** — every route returns 401 without a token.
@@ -517,11 +522,62 @@ def test_refresh_wraps_service_and_returns_result(client: TestClient) -> None:
     body = resp.json()
     assert body["target_id"] == str(target_id)
     assert body["added_nodes"] == 3
+    # #2093 — a populator-backed refresh serialises the no-populator
+    # signal as explicit nulls, keeping the two no-op classes
+    # discriminable on the wire.
+    assert body["no_populator_for_product"] is None
+    assert body["populated_products"] is None
     # The resolved target (not the raw name) is handed to the service.
     assert refresh.call_args.args[0].name == "vc-1"
     # resolve_target is tenant-scoped to the JWT's tenant_id.
     assert resolve.call_args.args[1] == _TENANT_ID
     assert resolve.call_args.args[2] == "vc-1"
+
+
+def test_refresh_no_populator_signal_passes_through_to_wire(client: TestClient) -> None:
+    """The #2093 coverage-gap signal survives response-model serialisation.
+
+    The service stamps ``no_populator_for_product`` + ``populated_products``
+    when the resolved connector inherits the base ``discover_topology``
+    no-op; this test pins the route's ``response_model=RefreshResult``
+    contract — the signal fields reach the JSON body unfiltered so a
+    consumer can distinguish the all-zero coverage-gap no-op from a
+    clean populator run with a single field check.
+    """
+    key, token = _token(TenantRole.OPERATOR)
+    target_id = uuid.uuid4()
+
+    class _FakeTarget:
+        id = target_id
+        name = "argocd-1"
+        product = "argocd"
+
+    result = RefreshResult(
+        target_id=target_id,
+        added_nodes=0,
+        added_edges=0,
+        updated_nodes=0,
+        updated_edges=0,
+        removed_nodes=0,
+        removed_edges=0,
+        duration_ms=1.5,
+        no_populator_for_product="argocd",
+        populated_products=("k8s",),
+    )
+    resolve = AsyncMock(return_value=_FakeTarget())
+    refresh = AsyncMock(return_value=result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.resolve_target", resolve),
+        patch("meho_backplane.api.v1.topology.refresh_target_topology", refresh),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post("/api/v1/topology/refresh/argocd-1", headers=_authed(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["no_populator_for_product"] == "argocd"
+    assert body["populated_products"] == ["k8s"]
+    assert body["added_nodes"] == 0
 
 
 def test_refresh_no_matching_connector_returns_structured_422(client: TestClient) -> None:

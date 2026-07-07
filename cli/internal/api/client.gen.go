@@ -4366,15 +4366,31 @@ type ReassignRunResponse struct {
 // one of added / updated / removed (or none, when unchanged). The same
 // holds for edges. “duration_ms“ is wall-clock for the whole
 // resolve + discover + reconcile + commit cycle.
+//
+// “no_populator_for_product“ discriminates the two all-zero-count
+// no-op classes (#2093): “None“ means the resolved connector ships a
+// topology populator (a “discover_topology“ override) and the counts
+// reflect a real reconcile — all-zero is "populator ran clean, nothing
+// changed". A product slug means the connector inherits the base-class
+// no-op default, so the refresh was a no-op **by coverage gap**, not by
+// graph convergence; “populated_products“ then lists the registered
+// products that DO ship a populator so a consumer can identify the gap
+// without reading meho source.
 type RefreshResult struct {
-	AddedEdges   int                `json:"added_edges"`
-	AddedNodes   int                `json:"added_nodes"`
-	DurationMs   float32            `json:"duration_ms"`
-	RemovedEdges int                `json:"removed_edges"`
-	RemovedNodes int                `json:"removed_nodes"`
-	TargetId     openapi_types.UUID `json:"target_id"`
-	UpdatedEdges int                `json:"updated_edges"`
-	UpdatedNodes int                `json:"updated_nodes"`
+	AddedEdges int     `json:"added_edges"`
+	AddedNodes int     `json:"added_nodes"`
+	DurationMs float32 `json:"duration_ms"`
+
+	// NoPopulatorForProduct Set to the target's product slug when the resolved connector has no topology populator (inherits the base-class discover_topology no-op), so the all-zero counts are a coverage gap rather than a clean no-op. Null when a populator ran.
+	NoPopulatorForProduct *string `json:"no_populator_for_product"`
+
+	// PopulatedProducts Registered products that DO ship a topology populator, sorted. Only present alongside no_populator_for_product so the consumer can see which products refresh meaningfully.
+	PopulatedProducts *[]string          `json:"populated_products"`
+	RemovedEdges      int                `json:"removed_edges"`
+	RemovedNodes      int                `json:"removed_nodes"`
+	TargetId          openapi_types.UUID `json:"target_id"`
+	UpdatedEdges      int                `json:"updated_edges"`
+	UpdatedNodes      int                `json:"updated_nodes"`
 }
 
 // RejectRequestBody POST body for “…/reject“.

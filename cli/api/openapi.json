@@ -1805,7 +1805,7 @@
           "topology"
         ],
         "summary": "Refresh",
-        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.",
+        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.\n\nConnector-resolution failures inside the service surface as\nstructured JSON rather than a bare 500 (#2092): a ``product`` no\nregistered connector supports returns 422 ``no_matching_connector``;\na resolution tie returns 409 ``ambiguous_connector`` with the\ncandidate ``(product, version, impl_id)`` triples.\n\nA target whose connector resolves but ships **no topology\npopulator** (the base ``discover_topology`` no-op) still returns\n200 with all-zero counts, but the body carries an explicit\n``no_populator_for_product`` slug plus the ``populated_products``\nthat do refresh meaningfully (#2093) \u2014 distinguishing the\ncoverage-gap no-op from a populator run that reconciled zero\nchanges (both fields null).",
         "operationId": "refresh_api_v1_topology_refresh__target_name__post",
         "parameters": [
           {
@@ -23761,6 +23761,21 @@
           "duration_ms": {
             "type": "number",
             "title": "Duration Ms"
+          },
+          "no_populator_for_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "No Populator For Product",
+            "description": "Set to the target's product slug when the resolved connector has no topology populator (inherits the base-class discover_topology no-op), so the all-zero counts are a coverage gap rather than a clean no-op. Null when a populator ran."
+          },
+          "populated_products": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Populated Products",
+            "description": "Registered products that DO ship a topology populator, sorted. Only present alongside no_populator_for_product so the consumer can see which products refresh meaningfully."
           }
         },
         "type": "object",
@@ -23775,7 +23790,7 @@
           "duration_ms"
         ],
         "title": "RefreshResult",
-        "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle."
+        "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle.\n\n``no_populator_for_product`` discriminates the two all-zero-count\nno-op classes (#2093): ``None`` means the resolved connector ships a\ntopology populator (a ``discover_topology`` override) and the counts\nreflect a real reconcile \u2014 all-zero is \"populator ran clean, nothing\nchanged\". A product slug means the connector inherits the base-class\nno-op default, so the refresh was a no-op **by coverage gap**, not by\ngraph convergence; ``populated_products`` then lists the registered\nproducts that DO ship a populator so a consumer can identify the gap\nwithout reading meho source."
       },
       "RejectRequestBody": {
         "properties": {

@@ -1837,6 +1837,7 @@ type BodyUiConnectorsRegistryIngestSubmitUiConnectorsRegistryIngestPost struct {
 	ImplId       *string `json:"impl_id,omitempty"`
 	Mode         *string `json:"mode,omitempty"`
 	Product      *string `json:"product,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
 
 	// SessionCtx Per-request session identity exposed on ``request.state``.
 	//

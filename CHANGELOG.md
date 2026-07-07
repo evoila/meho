@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — tenant-scope affordance on the CLI + UI ingest on-ramps
+
+- **`meho connector ingest` gains `--tenant-id` and the
+  `/ui/connectors/registry` ingest modal gains a Write-scope select**
+  (#2209): both human on-ramps can now target a tenant-curated ingest
+  without hand-crafting raw REST/MCP bodies. Omitting the flag (or
+  picking "Global") keeps the built-in / global scope — the
+  omit-equals-global contract the REST route + MCP tool share since
+  #2085; the UI derives the tenant UUID server-side from the
+  authenticated operator, and the CLI validates the UUID locally
+  before any request leaves the machine.
+
 ### Fixed — operations/call target failures all ride the 200 envelope
 
 - **`POST /api/v1/operations/call` (and `/preview`) now honor the

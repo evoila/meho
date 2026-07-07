@@ -150,6 +150,18 @@ connector-related release-notes line.
 
 ### Security
 
+- Hardened the dispatch broadcast feed against classification drift.
+  Broadcast request params now run through a Tier-1 pass — a
+  secret-shaped key-name scrub plus the deterministic named-pattern
+  redactor — before the payload is built, and any secret detection
+  collapses the broadcast to aggregate-only regardless of op class, so
+  a secret-bearing op missing from the `credential_*` allowlists no
+  longer ships its raw params to co-tenant feed subscribers. A new
+  classifier-coverage test enumerates every registered typed/composite
+  operation and fails CI when an op declaring secret-shaped parameters
+  is not pinned to a `credential_*` class. Benign write broadcasts
+  keep their full mutation detail.
+
 - Hardened Tier-1 redaction at the connector boundary and the dispatch
   error path. The `authorization_header` / `bearer_token` / `api_key`
   named patterns now capture a labelled secret's value to its natural

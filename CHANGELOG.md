@@ -116,6 +116,19 @@ connector-related release-notes line.
   through to `connector_error` unchanged. (#2091)
 
 
+
+### Security — targets test fixture secret-ref hygiene
+
+- Align the internal-lab targets test fixture
+  (`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`) with its own
+  Vault-`secret_ref`-only convention: three operator-note remnants that
+  inlined a well-known lab-default credential string are replaced with
+  rotate-and-store-in-Vault guidance pointing at each target's
+  `secret_ref`, so the fixture models the secrets-stay-in-Vault pattern
+  end to end and stays trivially clean under the zero-tolerance
+  TruffleHog secret scan. Fixture prose only — no entry added or
+  removed, no code or schema change.
+  (evoila-bosnia/meho-internal#158)
 ### Security — runbook verify dispatch fails closed on Vault-backed credential reads
 
 - **The runbook `operation_call` verify dispatch's synthetic operator now carries an empty `raw_jwt`, so an operator-context Vault credential read refuses locally before any Vault contact** (evoila-bosnia/meho-internal#157): the runbook run service reconstructs a minimum-shape `Operator` from `operator_sub` for the verify dispatch; it previously carried a non-empty placeholder `raw_jwt` that bypassed the shared credential reader's empty-JWT fail-closed guard (`_resolve_secret_ref`), so the placeholder was forwarded to Vault's JWT/OIDC login and only rejected server-side after a live network round-trip. The synthetic operator now follows the empty-string synthetic-operator convention (same shape as the topology scheduler's refresh operator): a verify `op_id` resolving to a Vault-backed connector fails closed with a structured `VaultCredentialsReadError` refusal before Vault is touched, the step transitions to `failed`, and the dispatched verify's audit identity (`sub` / `tenant_id`) is unchanged. Non-Vault typed in-process verify ops dispatch exactly as before. Hardening only — no FastAPI route/schema change, OpenAPI snapshot unchanged.

@@ -1169,7 +1169,12 @@ operator-facing HTTP surface. RBAC: read paths (GET /, GET
 (`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
 /enable`, `POST /enable-reads`, `POST /disable`, `DELETE /{id}`)
 require `tenant_admin`. Tenant scoping derives from the JWT — there
-is no body / query parameter that can override the operator's tenant.
+is no body / query parameter that can override the operator's tenant
+— with one deliberate exception: `POST /ingest` accepts an optional
+body `tenant_id` that selects the *write* scope (#2085; omitted /
+null = built-in / global, own tenant UUID = tenant-curated, any
+other UUID → 403 from the service-layer guard), so cross-tenant
+writes remain impossible.
 
 **Bulk read-class enable (G0.25-T7 #1749).** `POST
 /{id}/enable-reads` flips `is_enabled=true` on every *ingested*
@@ -1203,23 +1208,28 @@ instead of 404'ing, and a tenant+built-in ambiguous label raises a
 409 `connector_scope_ambiguous` instead of silently flipping one
 scope (G0.26-T1 #1801).
 
-**Cross-surface write-scope contract (#1699).** The two ingest
-surfaces intentionally default to *different* write scopes:
-`POST /ingest` (and the `meho connector ingest` CLI verb that drives
-it) always writes under the calling operator's `tenant_id`, while
-the MCP tool `meho.connector.ingest` accepts an optional `tenant_id`
-argument and targets the built-in / global scope
-(`tenant_id IS NULL`) when the argument is omitted (tenant_admin
-only). The dedup lookup in `operations/ingest/_upsert.py` scopes its
-natural-key match by `tenant_id`, so re-ingesting the same spec
-under the other scope matches nothing and re-inserts every operation
-as a shadow copy in the other namespace — by design (the namespaces
-are isolated), but surprising when an operator mixes surfaces
-expecting an idempotent re-ingest. Both surfaces document the
-contract (the route docstring, the MCP tool description, and the
-registered-row `next_step` rationale all name the right surface per
-scope); the cross-surface behaviour is pinned by
-`test_cross_surface_reingest_under_global_scope_creates_shadow_copy`
+**Cross-surface write-scope contract (#2085, superseding the #1699
+divergence).** Both ingest surfaces resolve the write scope the same
+way: `POST /ingest` (and the `meho connector ingest` CLI verb that
+drives it) accepts an optional body `tenant_id` with the same
+semantics as the MCP tool `meho.connector.ingest`'s argument —
+omitted or `null` targets the built-in / global scope (`tenant_id IS
+NULL`, tenant_admin only), the operator's own tenant UUID targets
+their tenant-curated namespace, and any other UUID is rejected 403
+by `IngestionPipelineService._authorize`. Under the previous #1699
+contract the REST route hard-coded the caller's JWT tenant, so a
+consumer following the MCP-documented "omit for global" body
+silently minted a caller-tenant shadow copy of an existing global
+row (the v0.14.0 cycle-10 dogfood hit this as a 136-op duplicate).
+The dedup lookup in `operations/ingest/_upsert.py` still scopes its
+natural-key match by `tenant_id`, so *explicitly* re-ingesting the
+same spec under the other scope matches nothing and re-inserts every
+operation as a shadow copy in the other namespace — by design (the
+namespaces are isolated). All surfaces document the shared contract
+(the route docstring, the `IngestRequest.tenant_id` schema
+description, the MCP tool description, and the registered-row
+`next_step` rationale); the cross-surface parity is pinned by
+`test_omitted_tenant_id_resolves_global_on_both_surfaces`
 in `tests/test_api_v1_connectors_ingest.py`.
 
 **Shared scope resolution (`get_review_payload` + `enable_reads`,

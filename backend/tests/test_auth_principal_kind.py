@@ -14,8 +14,10 @@ Coverage matrix (per acceptance criteria):
   ``PrincipalKind.SERVICE``.
 * A JWT whose ``principal_kind`` claim is absent produces
   ``PrincipalKind.USER`` (graceful fallback — all pre-G11.2 tokens).
-* A JWT whose ``principal_kind`` claim has an unknown value produces
-  ``PrincipalKind.USER`` with a structured-log warning (no exception).
+* A JWT whose ``principal_kind`` claim has an unknown value is rejected
+  with HTTP 401 (detail ``unknown_principal_kind``) after a
+  structured-log warning — fail-closed, mirroring the unknown
+  ``tenant_role`` handling at the same layer.
 * A custom ``JWT_PRINCIPAL_KIND_CLAIM_NAME`` env-var shifts the claim
   lookup to the renamed field.
 """
@@ -217,14 +219,23 @@ def test_absent_claim_defaults_to_user() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Graceful fallback — unknown claim value
+# Fail-closed — unknown claim value
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_claim_value_defaults_to_user(
+@pytest.mark.parametrize("bogus_kind", ["robot", "bogus", "USER", "Agent", ""])
+def test_unknown_claim_value_rejected_with_401(
+    bogus_kind: str,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """An unknown ``principal_kind`` value → ``PrincipalKind.USER`` + warning log.
+    """A present-but-unrecognised ``principal_kind`` → 401 + warning log.
+
+    ``principal_kind`` is the discriminator agent-vs-human authorization
+    branches on, so an issuer-signed value outside the closed enum is
+    rejected (``unknown_principal_kind``) instead of being silently
+    coerced to the human-user default — the same fail-closed contract as
+    an unknown ``tenant_role``. Case-variant spellings and the empty
+    string are "present but unrecognised", not "absent", so they 401 too.
 
     structlog routes its output through :class:`PrintLoggerFactory` (stdout)
     in the test environment, so the warning shows up in ``capfd`` rather than
@@ -237,16 +248,18 @@ def test_unknown_claim_value_defaults_to_user(
             return_value=httpx.Response(200, json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL})
         )
         r.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=_public_jwks(key)))
-        token = _mint(key, principal_kind="robot")
+        token = _mint(key, principal_kind=bogus_kind)
         with TestClient(app) as client:
             resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["principal_kind"] == "user"
-    # structlog emits to stdout; capfd captures that surface.
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["detail"] == "unknown_principal_kind"
+    # The structured warning (claim_name + offending value) is emitted
+    # before the 401 is raised; structlog emits to stdout in tests.
     out, _ = capfd.readouterr()
     assert "unknown_principal_kind" in out, (
         f"Expected 'unknown_principal_kind' in structlog stdout; got: {out!r}"
     )
+    assert "principal_kind" in out
 
 
 # ---------------------------------------------------------------------------

@@ -234,7 +234,7 @@ def _load_migration_0023() -> object:
     from pathlib import Path
 
     path = (
-        Path(__file__).resolve().parent.parent
+        Path(__file__).resolve().parent.parent.parent
         / "alembic"
         / "versions"
         / "0023_create_approval_request.py"

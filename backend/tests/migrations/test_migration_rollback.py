@@ -85,19 +85,18 @@ from meho_backplane.db.engine import (
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
+from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from tests._oidc_jwt_helpers import ISSUER as _ISSUER
+from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
+from tests._oidc_jwt_helpers import mint_token as _mint_token
+from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
+from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 from tests.fixtures.synthetic_n_plus_1 import (
     FUTURE_JSONB_FIELD_DEFAULT,
     FUTURE_TEXT_FIELD_DEFAULT,
     SYNTHETIC_N_PLUS_1_COLUMNS,
     apply_synthetic_n_plus_1_migration,
 )
-
-from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
-from ._oidc_jwt_helpers import ISSUER as _ISSUER
-from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
-from ._oidc_jwt_helpers import mint_token as _mint_token
-from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
-from ._oidc_jwt_helpers import public_jwks as _public_jwks
 
 # ---------------------------------------------------------------------------
 # Docker-availability skip — same shape as test_db_engine.TestPostgresIntegration

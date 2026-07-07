@@ -9,6 +9,16 @@
 //
 //   - `meho secret move --from <kind>:<ref> --to <kind>:<ref> --reason R`
 //     → secret.move
+//   - `meho secret read --target <vault> <mount> <path> --field <f>`
+//     → vault.kv.read (client-side field extraction)
+//
+// The `read` verb is the odd one out in this tree: it does NOT dispatch
+// against the synthetic secret-broker connector. It is a thin, pipe-only
+// wrapper over the existing audited `vault.kv.read` op (connector
+// `vault-1.x`) that extracts one field client-side and writes only its raw
+// value to stdout — the emergency credential path (#2146). It binds its
+// own package-local dispatch.New("vault-1.x") in read.go, separate from
+// this package's secret-broker `conn`.
 //
 // The move is references-not-values: the operator names a `--from` and a
 // `--to` `<kind>:<ref>` reference and a `--reason`; the backplane reads
@@ -74,14 +84,17 @@ func NewRootCmd() *cobra.Command {
 			"(product=\"secret\", version=\"1.x\", impl_id=\"secret-broker\")).\n" +
 			"It dispatches through POST /api/v1/operations/call with\n" +
 			"connector_id=\"secret-broker-1.x\" pre-baked.\n\n" +
-			"The single verb today is `move`, which copies a credential from\n" +
-			"one store to another server-side. The move is\n" +
-			"references-not-values: you name a --from and --to '<kind>:<ref>'\n" +
-			"reference and a --reason; the backplane reads, transfers, and\n" +
-			"re-writes the material. The secret value is NEVER passed on the\n" +
-			"command line, so it never lands in shell history, ps output, or\n" +
-			"the op params; the response returns only the move status, the\n" +
-			"value's SHA-256, and its byte length.\n\n" +
+			"`move` copies a credential from one store to another server-side.\n" +
+			"The move is references-not-values: you name a --from and --to\n" +
+			"'<kind>:<ref>' reference and a --reason; the backplane reads,\n" +
+			"transfers, and re-writes the material. The secret value is NEVER\n" +
+			"passed on the command line, so it never lands in shell history, ps\n" +
+			"output, or the op params; the response returns only the move\n" +
+			"status, the value's SHA-256, and its byte length.\n\n" +
+			"`read` is the pipe-only emergency credential path: it dispatches\n" +
+			"the audited vault.kv.read op (connector vault-1.x, NOT the broker),\n" +
+			"extracts one --field client-side, and writes only that raw value to\n" +
+			"stdout. It refuses to run when stdout is a terminal.\n\n" +
 			"move is change-class (it requires approval): an unapproved\n" +
 			"dispatch parks at status=awaiting_approval until a human approves\n" +
 			"through the approval queue.\n\n" +
@@ -90,6 +103,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newMoveCmd())
+	cmd.AddCommand(newReadCmd())
 	return cmd
 }
 

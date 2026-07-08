@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-08
+
 ### Fixed — ssh-family connectors resolve `secret_ref` from Vault
 
 - **The SSH adapter now resolves `target.secret_ref` (a Vault KV-v2 path
@@ -558,6 +560,209 @@ connector-related release-notes line.
   redactor **before** the 256-char cap, so a credential embedded in a
   stringified connector exception or upstream error body no longer
   reaches the response/audit envelope in cleartext.
+
+### Added — hetzner-rest connector: minimal spec + live Vault auth
+
+- **`hetzner-rest-2026.04` connector ingests a hand-authored minimal OpenAPI 3.0 spec and un-stubs its Vault credential read** (#2180): the Hetzner Robot Webservice publishes no OpenAPI document, so this ships `hetzner_robot_minimal.yaml` as package data (list/get servers, vSwitch get + membership, per-server firewall get/set, rDNS, `server_addon` order). Ingesting it reuses the hand-coded `HetznerRobotConnector` (no `GenericRestConnector` shim), so ingested ops resolve via `resolve_connector`, and `load_credentials_from_vault` now performs a live operator-context KV-v2 read via the shared `load_basic_credentials` helper (system-operator calls fail closed). Ship-state: **loader-wired (State 2)** — the curated read core is enabled and executes end-to-end against a real Robot account; the declared write ops (vSwitch/firewall mutation, `server_addon` order) are ingested for corpus coverage but **not enabled** (wire-format-faithful write dispatch stays the G3.x write-surface work).
+
+### Added — vmware `host.network_uplinks` read composite
+
+- **`vmware.composite.host.network_uplinks` returns per-host physical NIC link-state/speed and proxy-switch/uplink association** (#2178): reads `config.network.pnic` + `config.network.proxySwitch` off a per-host `RetrievePropertiesEx` — the pnic-to-uplink mapping the plain vSphere Automation REST surface can't reproduce (drives physical switch-port-occupancy reasoning). Registered `safety_level="safe"` / `requires_approval=False` per the #508 read-composite pattern; the per-host read is best-effort (a failed read nulls the network detail with a `read_note` rather than sinking the composite). Lands in the existing `host` group; registered composite total 5→6 read / 13→14 total. No new auth model — `vmware-rest-9.0` stays State 2.
+
+### Added — vmware `host.vsan_health` read composite
+
+- **`vmware.composite.host.vsan_health` surfaces per-cluster vSAN health (test groups + overall status)** (#2187): queries `VsanQueryVcClusterHealthSummary` on the `vsan-cluster-health-system` singleton scoped to the target cluster's `ClusterComputeResource` — the `govc vsan.health.*` equivalent the plain REST surface can't reproduce. Registered `safety_level="safe"` / `requires_approval=False` per the #508 pattern; best-effort (a vSAN-disabled cluster or rejected health call nulls `groups`/`overall_health` with a `read_note`). Registered composite total 14→15 (7 read + 8 write). No new auth model — `vmware-rest-9.0` stays State 2.
+
+### Added — holodeck `disk.usage` read op for pre-eviction disk diagnosis
+
+- **`holodeck.disk.usage` reports root-fs usage (`df -B1 /`) plus `du -sb` over a fixed growth-dir set** (#2168): the complete pre-eviction diagnostic signal for the 74 GB root fs that fills on VCF-9.x backup accumulation (Initiative #2145). The measured dirs (`/var/backups`, `/holodeck-runtime`) are a module constant with **no path parameter** (empty-object schema, `additionalProperties: False`), so it can never become an arbitrary `du`; `safety_level="safe"`, `requires_approval=False`, `read-only` tag. `percent_used` is computed from byte counts (not `df`'s rounded `Use%`); a failed sub-command flips only that entry's `ok`. Op count for `holodeck-ssh-9.0` 8→9; connector remains State 2 (`shared_service_account` inline loader live).
+
+### Fixed — vmware `datastore.usage` composite null capacity on partial-detail builds
+
+- **`vmware.composite.datastore.usage` now sources `capacity`/`free_space` from the listing row when the per-datastore detail omits them** (#2175): on some vCenter builds (observed 8.0.3 against the 9.0 spec) `Datastore.Info` populated `free_space` but not `capacity`, so the composite surfaced `capacity=null` and `%`-full was uncomputable off the composite alone. The row-builder now falls back to the already-fetched `GET:/vcenter/datastore` listing row (`entry.get(...)`) — detail still wins when present, `null` only when neither source carries it. No schema change (`capacity`/`free_space` already typed `["integer","null"]`); `vmware-rest-9.0` stays State 2 (`shared_service_account` live).
+
+### Fixed — retire the registered-stub-twin vcf-logs orphan (migration 0052)
+
+- **Data-only Alembic migration `0052` retires the stale long-product `vcf-logs` ingest orphan that migration `0049` missed** (#2185): `0049`'s per-op `EXISTS` twin probe matched nothing when the short (`vrli`) representation is a 0-row v2 class-registry stub at a divergent version (`9.0` vs the orphan's `9.0.2`), so the 136-op orphan survived every upgrade (the #2068 finding / #1910 review-shadow dead weight). `0052`'s predicate keys on the orphan's **own** attributes (`tenant_id IS NULL` + a `_PRODUCT_SPLITS` long product + the `parse_connector_id` `impl_id` rule) with no DB twin probe — safe because each split's short product is a registered connector class. Preserves `0049`'s guards (tenant rows untouched; non-split `impl_id` families left alone; `endpoint_descriptor` + `operation_group` retired together; `downgrade()` a documented no-op).
+
+### Fixed — assert enabled gh composite L2 backings at connector load
+
+- **`gh-rest-3` now asserts every enabled composite dispatching raw L2 sub-ops has a matching backing at connector load, raising `UnbackedEnabledCompositeError` otherwise** (#2186): `gh.composite.pr_status_summary` ships enabled but its three raw-REST L2 sub-ops only land after `meho connector ingest --catalog gh/3`, so a fresh-deploy dispatch trips `composite_l2_missing`. #1757 already surfaces the op as `unbacked` with a catalog `next_step` and returns a structured dispatch error, but nothing stopped a future composite from shipping enabled with no backing at all. The new `_register_and_assert_composite_backings` check reads the spec's own `sub_op_ids` (asserting the wiring, not DB state), so the inconsistency is non-regressible without crashing fresh deploys where the L2 ops are legitimately absent until ingest. The composite stays listed-but-unbacked (`is_enabled` unchanged) — this is a safety net, not a wire-up.
+
+### Fixed — reconcile `/review` op count + structured not-ingested 404
+
+- **`GET /connectors/{id}/review` now reconciles its op count with the listing and returns a structured `connector_not_ingested` 404 for registered-but-not-ingested connectors** (#2134): review's `total_op_count` summed only ops in rendered groups while `GET /connectors` counts every `EndpointDescriptor` row, so they disagreed by the ungrouped-op count (a consumer saw 136 vs 135). Adds an **additive** `ungrouped_op_count` (`total_op_count` semantics unchanged, so existing consumers are unaffected) such that `total_op_count + ungrouped_op_count` reconciles exactly to the listing's `operation_count`. Separately, `/review` returned a bare-string 404 for a registered built-in with 0 ingested ops (e.g. `vrli-rest-9.0`); it now raises the same structured `ConnectorNotIngestedError` (shared `connector_not_ingested_404` mapper) that `/operations/groups` returns, while unknown / tenant-curated / cross-tenant ids keep the deliberate plain-string 404. CLI OpenAPI snapshot regenerated for the new field.
+
+### Fixed — fold a relative OpenAPI `servers[].url` base into ingested op paths
+
+- **An ingested connector whose spec declares a relative `servers[].url`
+  base (e.g. vRLI's `servers: [{url: "/api/v2"}]`) now dispatches to the
+  full base-prefixed path instead of 404ing** (#2075, closes #1796):
+  ingested dispatch built the request URL as `host:port + op_path`,
+  dropping the server base, so an op resolved to `host:port/<version>`
+  rather than `host:port/api/v2/<version>`. Per the reporter's
+  lowest-blast-radius option, `_server_base_path` extracts and normalises
+  the first server's relative URL and `_fold_server_base` joins it onto
+  each op's `path` / `op_id` **at ingest time** (collapsing the double
+  slash a trailing-slash base produces) — so dispatch is unchanged (no new
+  descriptor column, no dispatch-path edit). **Absolute** server bases
+  (`https://other-host/...`) stay out of scope: MEHO dispatches against
+  the operator-configured target host, never a spec-declared one (the
+  SSRF / topology boundary).
+
+### Security — holodeck approval-gated remediation writes (G3.18-T2)
+
+- **Three tightly-bounded remediation write ops added to `holodeck-ssh` behind four-eyes approval** (#2169): `holodeck.k8s.pods.gc` (delete Failed/Succeeded pods only), `holodeck.backups.prune` (keep newest-N under `/var/backups/**`), and `holodeck.images.import` (`ctr images import` restricted to `/root/containerd-images/*.tar`), all `safety_level="dangerous"` + `requires_approval=True`. A USER dispatch parks at `needs-approval` via the dispatcher `policy_gate`; handler bodies run only on the `_approved=True` resume path, and the `DISPATCH` audit row is written on execute. Each handler validates inputs against a fixed allowlist and rejects before composing the command, then `shlex.quote`s every interpolated token. Op count for `holodeck-ssh-9.0` 8→11. Retires the un-audited hand-run root-SSH recovery path that fixed the #2145 backup-fill outage.
+
+### Security — harbor `robot.create` gated behind four-eyes approval
+
+- **`harbor.robot.create` flipped to `requires_approval=True` so credential minting parks for a second operator** (#2173): the op mints a robot credential (`credential_mint`-classified) but shipped `requires_approval=False`, and the non-agent policy gate (`_non_agent_verdict`) keys the verdict solely on `requires_approval` — so a human `tenant_admin` could mint a Harbor robot credential with no second-operator approval. It now parks at `awaiting_approval` until approved via `POST /api/v1/approvals/{id}/decide`. `harbor.robot.delete` stays ungated (a recoverable `caution`-class access revoke, mirroring the bind9 precedent). Adds a no-bypass invariant asserting every `credential_mint` harbor op is approval-required.
+
+### Security — bind9 dangerous config-apply ops require approval
+
+- **`bind9.config.apply_file` and `bind9.config.apply_views` flipped to `requires_approval=True`, closing a non-agent four-eyes bypass** (#2126): both perform full DNS-config / view-tree replacement and shipped `safety_level="dangerous"` + `requires_approval=False`. Because the non-agent policy gate keys only on `requires_approval` (not `safety_level`), a human `tenant_admin` got `AUTO_EXECUTE` and could overwrite live DNS with no four-eyes step (the agent path already floored `dangerous`→needs-approval via `_SAFETY_CEILING`). Both now route through park→approve→resume for all principals; adds a `test_no_dangerous_op_bypasses_approval` invariant so a future bind9 write op can't reintroduce the gap.
+
+### Added — the policy-gate verdict is stamped on the audit row
+
+- **Every governed `call_operation` audit row now carries its `PermissionVerdict`** (#2129): a new nullable, CHECK-constrained `audit_log.policy_decision` column (migration `0051`) records `auto-execute` / `needs-approval` / `deny`, populated from a dispatch-scoped `policy_decision_var` contextvar the dispatcher binds right after the gate decides — the same cross-cutting seam already used for `run_id` / `work_ref` / `agent_session_id`, so both the dispatch-row writer and the approval-queue writer are covered by one change (the parked `approval.request` row correctly carries `needs-approval`). Surfaced on `AuditEntry`, so `POST /api/v1/audit/query` and `GET /audit/my-recent` support `WHERE policy_decision = '<verdict>'` with no join or `payload` parse. Rows where no gate ran (pre-gate usage errors, the approval-decision row, system-internal writers) stay `NULL`. OpenAPI snapshot regenerated.
+
+### Added — `search_docs` carries an out-of-corpus grounding signal
+
+- **`SearchDocsResponse` and the MCP `search_docs` tool payload now include a server-computed `grounded: bool`** (#2131): a caller can finally distinguish "the corpus has no answer" from a real hit and honor the doc-search contract (empty/not-grounded → do not silently fall back to training data). The verdict is presence-based and deterministic (`grounded ⇔ ≥1 chunk` — no model call, no read of the opaque corpus `score`), computed by a new shared `retrieval_is_grounded()` seam extracted from `ask_docs`'s empty-evidence check, so both surfaces share one verdict with no divergent threshold. OpenAPI snapshot regenerated.
+
+### Added — `meho secret read` pipe-only raw-field emergency path
+
+- **New `meho secret read --target <vault> <mount> <path> --field <f>` CLI verb** (#2224): the pipe-only emergency credential path writes **only the raw field value** to stdout — no key, envelope, quoting, or trailing newline — so `$(meho secret read …)` or a piped sshpass-class consumer gets exactly the credential bytes. It dispatches the existing audited `vault.kv.read` op (connector `vault-1.x`), extracting `--field` client-side, so the read rides the standard `/api/v1/operations/call` audit row (closing the un-audited local-Vault-read incident gap). Guardrails: refuses before dispatching if stdout is a real terminal (`stdoutIsTTY` seam), routes all errors to stderr, and leaves stdout empty on any failure so a consumer never eats an error string as a secret. CLI only — no new REST route or OpenAPI change.
+
+### Fixed — doc citations no longer leak the storage backend
+
+- **`search_docs` / `ask_docs` citation `source_url` is now backend-agnostic** (#2128): citations carried the corpus's raw object path (`gs://meho-knowledge-vmware-corpus/docs/...`), leaking the storage backend identity plus the internal bucket name and directory layout — a breach of the `doc-corpus` "the agent never sees the backend" contract. A new `normalize_source_ref()` in the shared `citation_links` seam is applied in `_project_chunk` (the single place every `DocsChunk` is born, so response chunks, ask_docs citations, the MCP wire, and the synthesis prompt are all covered): a KB / already-`https` source resolves to its canonical public URL, and a community/unrecognized `gs://` or missing source becomes an opaque `meho://docs/<collection>/<chunk_id>` ref. The raw `gs://` path is never emitted; the corpus adapter's `CorpusChunk.source_url` stays raw (normalization is applied at MEHO's projection boundary).
+
+### Fixed — `meho docs search` applies the same gate as REST `search_docs`
+
+- **The CLI `docs` tree no longer keys visibility on a client-side capability pre-check** (#2182): `meho docs search` decoded the stored JWT for a bare-`meho-docs` capability and hid the whole `docs` tree with `addon_not_provisioned` (exit 5) before any network call, while the REST route only enforces the per-collection `meho-docs:<collection>` entitlement server-side — so a tenant entitled via REST could still be refused on the CLI. Per the recorded #2109 decision (reconcile to one server-gated op), the client-side pre-check is removed entirely (`Capability` / `tenantHasDocsCapability` / `capabilitiesFromJWT` / `loadStoredToken` / `errNotProvisioned` and the `provisioned` plumbing deleted): the tree is always visible, every verb defers to the backplane, and a per-collection entitlement miss surfaces as the route's `not_entitled` 403, which the CLI already renders as `insufficient_role` (exit 5). The separate MCP-tool `required_capability="meho-docs"` gate is unchanged. CLI only.
+
+### Fixed — JSONFlux serializes the inline sample once, bounded by bytes
+
+- **The JSONFlux inline sample is now serialized exactly once and byte-bounded** (#134): the reducer serialized a duplicate summary copy of the sample and had no serialized-size ceiling, so object-heavy list ops could overflow the MCP result ceiling. The summary duplicate is dropped (keeping `handle.sample_rows`, whose length still feeds the audit `sample_rows_returned` field) and the inline sample is capped by a new named `jsonflux_sample_byte_budget` setting (default 4096); the `result_query` recovery path is unchanged.
+
+### Fixed — dict-of-arrays detail ops skip JSONFlux list reduction
+
+- **JSONFlux no longer collapses a single-object detail op into one of its sibling arrays** (#2184): for a flat detail object like `k8s.pod.info`, whose sibling arrays (`containers` / `container_statuses` / `volumes` / `conditions`) are coordinate fields of one object, the reducer's largest-list fallback would — once the projection cleared the byte threshold — materialize the longest array (`conditions`) into a handle and silently drop every sibling, including the `container_statuses` an operator actually reads. `_detect_collection` in `jsonflux_reducer.py` now treats a keyless dict as a paginable collection only when it has **exactly one** list-valued field (the `k8s.logs` shape); a dict with **more than one** list-valued field is a dict-of-arrays detail object and passes through verbatim, so no sub-array is ever selected as the collection. This is the structural fix (one collection = a list; several coordinate arrays = an object) rather than a k8s-specific ranking band-aid, and `k8s.logs` still reduces via the single-list branch.
+
+### Added — discard verb for unpublished draft runbook templates
+
+- **A `discard` leg completes the runbook template CRUD lifecycle, deleting a `(tenant, slug, version)` row only when `status == "draft"`** (#2127): a draft (typo'd slug, wrong steps) previously had no removal path but the publish-then-deprecate workaround, since `/deprecate` refuses a draft. Added across both operator surfaces on one backplane — `RunbookTemplateService.discard()` (published/deprecated versions raise `TemplateNotDraftError` pointing at `deprecate` so lifecycle history is never erased; a missing triple raises `TemplateNotFoundError`), REST `POST /api/v1/runbooks/templates/{slug}/discard` (`tenant_admin` only, `audit_op_id="runbook.discard_template"`), and MCP `meho.runbook.discard_template` sharing the service method. `POST /{slug}/discard` mirrors the `publish`/`deprecate` verbs and avoids DELETE-with-body's undefined semantics. OpenAPI snapshot + generated client regenerated; runbook tool-count invariant bumped eleven→twelve.
+
+### Fixed — runbooks-UI abort 403 is CSRF, not RBAC/opacity
+
+- **The `/ui/runbooks/runs/<id>/abort` `403` vs `/api/v1/.../abort` `200` differential is now documented as a CSRF rejection, and the client surfaces it** (#2183): the `/ui` abort route sits on the same operator floor as REST (`require_ui_session`, `caller_is_admin=probe.is_tenant_admin`) — a genuine assignee denial there renders an inline HTTP-200 fragment, never a 403 — so the only 403 on a `/ui/*` POST is the double-submit-cookie middleware (raw curl carries a Bearer JWT but no `meho_csrf` cookie; `/api/v1/*` is CSRF-exempt). `docs/codebase/ui.md` + the driver docstring gain a CSRF-requirement section; `session-expiry.js` branches on `x-csrf-rejection-reason` (htmx 2.0.9 won't swap 4xx bodies, so the client is the only surface) to show a "token expired — refresh and retry" banner, leaving a bare RBAC 403 untouched; and `_render_detail` threads `admin_lift_degraded` so a `tenant_admin` whose role lift silently soft-failed (JWKS/session hiccup → `operator is None`) gets a diagnostic + retry link instead of being dropped onto the restricted opacity banner. Docs + template + tests only; OpenAPI snapshot byte-identical.
+
+### Fixed — expired runbooks sessions re-auth instead of the opacity banner
+
+- **The runbooks detail read surface now re-raises the terminal `session_expired` 401 from `_resolve_role` instead of swallowing it to a degraded operator** (#2120): the surface recomputes the admin verdict per request by re-verifying the session's stored access token, but a broad `except` degraded a genuine `tenant_admin` whose token had aged out onto the opacity-restricted banner ("complete a run to unlock") — browser-dependent (tokens expire independently) and locking template authors out of their own drafts. The terminal expiry now propagates to the app-level handler (`ui/auth/errors.py`, G0.25 #1694), which 302-redirects the browser to `/ui/auth/login?return_to=…`; after re-login the fresh token lifts the real role and full steps render. Transient / malformed-token lifts still fail soft to the restricted view, preserving the anti-enumeration posture and the never-5xx guarantee.
+
+### Fixed — expired sessions re-auth in the connectors `resolve_role_probe`
+
+- **`resolve_role_probe` (`ui/routes/connectors/operator.py`) now re-raises the terminal `session_expired` 401 instead of returning a no-privileges probe on any failure** (#2121): the sibling of #2120 on the connectors surface — a broad `except Exception` swallowed the terminal expiry, silently degrading a `tenant_admin` whose token aged out to a no-privileges render on both the connectors detail page (`GET /ui/connectors/{name}`) and the runbooks run-driver POSTs (`driver.py` / `driver_render.py`) that read `caller_is_admin` from this probe. The terminal expiry now propagates to the app-level handler for a re-login redirect; transient / malformed-token failures still fail soft to the no-privileges probe so the read surface never 5xxes. The strict `resolve_operator_or_403` write gate (already propagating) is unchanged.
+
+### Fixed — runbooks authoring surface (preview, draft edit, empty body)
+
+- **Three defects on the `/ui/runbooks` authoring surface are repaired** (#2122): (D1) the step-body live preview used the shadow-DOM piercing combinator `hx-target="closest .flex-wrap >> .runbook-step-preview"`, invalid in htmx target resolution / `Element.closest()`, so Preview threw a `SyntaxError` and never fired — retargeted to `next .runbook-step-preview`; (D2) a draft detail page offered only Publish, forcing authors to publish a possibly-broken first cut to reach an Edit button — added an in-place Edit link to the shared `/ui/runbooks/<slug>/edit` editor (the engine's `update_or_fork` mutates a draft in place, leaving no vestigial version); (D3) empty `ManualStep.body` / `OperationCallStep.body` were plain `str` and `""` passed — added `min_length=1` so an empty body is a 422 at request validation across both REST and MCP via the shared schema.
+
+### Fixed — runbook editor writes bind a canonical audit op_id
+
+- **The UI editor write path (`handle_editor_submit`, `POST /ui/runbooks/new` + `POST /ui/runbooks/<slug>/edit`) now binds `audit_op_id` (`runbook.draft_template` on create, `runbook.edit_template` on edit) + `audit_op_class="write"` + `audit_slug` before dispatch** (#2124): previously a UI-authored template write was audited under a path-derived / `ui.view.*` op id, so an op-id-scoped audit query for `runbook.*` missed it. The chassis `AuditMiddleware` now records the row under the canonical op id, mirroring the REST `POST`/`PATCH` and run-driver routes. REST-path audit (already correct) and the target-scoped `who-touched` / payload-nested `my-recent` query surfaces were confirmed working-as-designed and left unchanged.
+
+### Fixed — empty runbooks list `target_kind` filter no longer blanks the catalog
+
+- **The `/ui/runbooks` + `/ui/runbooks/list` `target_kind` query param now coerces empty → `None` (the `EMPTY_STR_TO_NONE` the `status` param already had)** (#2125): an empty `?target_kind=` reached `RunbookTemplateService.list_templates` as `""` and applied `WHERE target_kind = ''`, matching nothing — so the post-deprecate `runbooks-refresh` (which re-fetches `/ui/runbooks/list` with an empty target-kind input in `hx-include`) emptied the whole catalog after every deprecate. The `max_length` guard moves onto the inner `str` branch via `StringConstraints` so it isn't applied to the coerced `None`.
+
+### Fixed — byte-identical runbook template edit skips the no-op fork
+
+- **`update_or_fork` now dedups a byte-identical edit of a published template instead of minting a redundant `v=max+1` draft** (#2132): published versions are immutable so an edit forks a draft, but with no dedup an accidental Edit → Submit of the pre-populated UI form created a draft differing only in metadata, polluting version history. A new `_body_matches` helper compares the four author-supplied body fields (title / description / target_kind / steps, in storage shape) against the source; on a match it skips the fork and returns the unchanged source (`forked_from=None`). Engine-side seam, so both the UI editor and REST `PATCH` inherit the dedup. `EditTemplateResponse.status` widened from `Literal["draft"]` to `Literal["draft","published","deprecated"]` (additive to the wire) so the no-op return honestly reports the unchanged source's status; the UI keys on `forked_from`, so no consumer breaks. CLI snapshot + docs updated.
+
+### Fixed — htmx-process Alpine-cloned editor steps so step 2+ previews fire
+
+- **The runbook authoring editor now hands the form root to `htmx.process` on new step subtrees, so per-step live previews fire beyond the first step** (#2225): each step's Body textarea carries `hx-post="/ui/runbooks/preview"`, but the step markup lives inside an Alpine `<template x-for>` loop — htmx only binds `hx-*` on DOM it renders itself, so Alpine-cloned steps (via **+ Add step**, or any step past the first on an edit) were never htmx-processed and issued no preview POST. A `processSteps()` helper (idempotent — htmx skips already-initialised nodes) folds into a shared `rescan()` run on first render, every `htmx:afterSettle`, and after each add/remove click. Also scoped the form's inherited `hx-disabled-elt` with `hx-disinherit="hx-disabled-elt"` — it had leaked `find button[type=submit]` into each descendant preview POST, matching nothing and logging a warning once per preview — keeping the value on the form's own submit.
+
+### Added — global htmx 401 session-expiry safety net
+
+- **Background htmx requests now surface a mid-session token expiry instead of dying silently** (#2055): a single global `htmx:beforeOnLoad` listener on `<body>` (`session-expiry.js`, loaded from `_head_assets.html` after `htmx.min.js`) intercepts every response before swap and, **only** on `xhr.status === 401`, `preventDefault()`s the dead swap and reveals a fixed recovery banner linking to `/ui/auth/login?return_to=<current path>` (matching the server handler's `quote(full_path)` contract). Previously htmx 2.0.9's default `[45]..` handling swallowed the JSON 401 on `Accept: */*` XHRs — the server redirect (#1694) only fires on full-page `Accept: text/html` navigations — leaving the operator with a dead control and no signal. Every non-401 status (2xx swap, 422 form re-render, 403 CSRF) returns early untouched; client-side app-shell JS only, no route or OpenAPI change.
+
+### Fixed — token-consuming /ui/* lifts route through the refresh-on-401 seam
+
+- **Nine per-route operator lifts that re-verified the stored access token with a bare `load_session` + `verify_jwt_for_audience` now go through `load_fresh_session` + `verify_access_token_with_refresh`** (#2056): an expired-but-refreshable token used to 401 mid-session even though the session cookie and refresh token were still valid (the `ui-memory-create-401-token-expired-no-refresh` signal). Every token-consuming `/ui/*` lift now shares the single RFC 9700 refresh chokepoint (`ui/auth/refresh.py`, #1694) — mirroring the `approvals` / `corpus` / `retrieval` precedent — refreshing once and failing soft to the documented `session_expired` terminal state instead of a bare 401. Server-rendered Jinja / BFF only; no OpenAPI change.
+
+### Fixed — expired OAuth-callback-state raw-JSON dead-end
+
+- **An expired OAuth callback `state` on `GET /ui/auth/callback` no longer dead-ends on a raw-JSON `400 {"detail":"authorization_failed"}` in the browser** (#2176): the recoverable branch of `_exchange_or_translate` (expired/mismatched `state`, verifier-store miss, `MismatchingStateError`) now raises a distinct `authorization_state_expired` detail, and the `ui.auth.errors` handler intercepts it on the callback path to return a `303 /ui/auth/login` one-click restart for HTML navigations (no `return_to`, no cookie touched — it's pre-session) while scripted callers keep the structured body. The genuine IdP `?error=` decline (`authorization_failed`) and the token-endpoint `502` stay distinguishable and are not collapsed into "start over". Server-rendered Jinja / BFF only; no OpenAPI change.
+
+### Fixed — empty topology kind/q filters coerced to no-filter
+
+- **The `/ui/topology` "All kinds" option and name search now return rows again** (#2133): the `kind` filter treated an empty string as an exact-match value (`WHERE kind = ''`), returning zero rows — and because the filter form co-submits `kind` on every search keystroke (`hx-include="closest form"`), name search always rode with `kind=` and returned nothing too. Coerces `"" -> None` on `kind` (and defensively `q`) via the shared `EMPTY_STR_TO_NONE` `BeforeValidator` — the pattern #2125 applied to the runbooks `target_kind` filter — across both the table and graph branches that share the params, with `max_length` moved onto the inner `str` branch via `StringConstraints` so it isn't applied to the produced `None`. Server-rendered Jinja query params only; no OpenAPI change.
+
+### Fixed — targeted 422 hint for cross-surface memory write fields
+
+- **`POST /api/v1/memory` now names the correct REST field when an MCP-surface field name is sent** (#2147): a Pydantic v2 `@model_validator(mode="before")` on `RememberBody` runs ahead of extra-field rejection and raises a targeted `ValueError` for exactly `ttl` (message names `expires_at`, ISO-8601) and top-level `tags` (message names `metadata.tags`), instead of a generic `extra_forbidden` 422 that named no correct field. Any other unknown field still gets the standard `extra_forbidden`; accepted shapes, defaults, and semantics are unchanged, and the intentional MCP↔REST split (`mcp/tools/memory.py` translates `ttl`/`tags` by design) stays. Validation-message only; no OpenAPI change.
+
+### Fixed — topology table sort-direction toggle re-renders the `<thead>`
+
+- **The topology table sort-direction toggle is no longer frozen** (#140): the HTMX swap replaced only `<tbody id="topology-table-body">`, leaving the `<thead>` (server-computed `next_dir` links + active-column arrow) stale. The sortable head is extracted into a shared partial (`_table_head.html`) that `table.html` includes in place for the full page and `_table_rows.html` re-emits out-of-band (`hx-swap-oob`, wrapped in a `<template>` per the htmx 2.0.9 table-element OOB caveat) on every swap. Route change is context-only (`is_fragment`/`oob` flag); server-rendered Jinja only, OpenAPI snapshot unaffected.
+
+### Fixed — topology node drawer renders beside the table, not off-screen
+
+- **The topology node-detail drawer no longer stacks ~1300px below the fold** (#141): the table (and graph) and the drawer are wrapped in a shared `lg:grid` so the drawer renders beside them, with an `hx-on::after-swap` `scrollIntoView` for the narrow/stacked case, and `self-start` on both the placeholder and the swapped-in fragment roots (`_drawer.html`, `_drawer_not_found.html`) so found and not-found states render as top-aligned cards. Server-rendered Jinja template + CSS only; no route or OpenAPI change.
+
+### Fixed — topology graph `?selected` cross-link selects/centers/opens the node
+
+- **Arriving at `?view=graph&selected=<id>` now selects, centers, and opens the node** (#142): the `layoutstop` cross-link handler is registered before the initial Cytoscape layout runs — the graph is constructed without the inline `layout:` option, the tap/layout-switch/cross-link listeners are attached, then `cy.layout(layoutOptions("cose-bilkent", false)).run()` is called. With `animate:false` cose-bilkent completing layout synchronously in-tick, the old constructor-`layout:` ordering emitted `layoutstop` before the `cy.one("layoutstop")` listener attached, so the cross-link never fired. Client-side topology-graph JS only; no route or OpenAPI change.
+
+### Security — enforce JWT `exp` as an essential claim
+
+- **A JWT that omits `exp` is now rejected with `401 missing_exp`** (#2057) instead of being accepted as a non-expiring token. `_decode_with_jwks` now marks `exp` `{"essential": True}` in its `claims_options`, so authlib's `claims.validate()` turns an absent `exp` into a `MissingClaimError` (previously it only checked expiry *when `exp` was present*, so an `exp`-less token decoded cleanly and the route returned 200). `_classify_missing_claim` maps that to the specific `missing_exp` 401 code, mirroring the existing `missing_sub` handling, per RFC 9068 §2.2.1 which makes `exp` REQUIRED on access tokens. A present-but-malformed `exp` already failed closed via authlib (`invalid_claim`); tokens that omit the claim are the only newly-rejected case. Realms must ensure their access tokens carry `exp`. No schema change.
+
+### Security — tenant-scope `count_known_ops` to close a cross-tenant oracle
+
+- **The `known_op_count` returned in the `unknown_op` error payload is now scoped to the caller's tenant** (#2058), closing a cross-tenant op-count / connector-existence oracle on the dispatch error path. `count_known_ops` previously counted enabled `endpoint_descriptor` rows by `(product, version, impl_id)` with no tenant predicate, so a tenant-A caller probing a connector private to tenant B learned its enabled-op count (info disclosure, IDOR-adjacent). The fix mirrors the in-repo `connector_exists()` precedent — `(tenant_id IS NULL) OR (tenant_id == caller)` — and threads the caller's tenant through every call site: `dispatch` / `preview_dispatch` pass `operator.tenant_id`, while the operator-less typed-connector chassis shims (holodeck / pfsense / kubernetes / bind9) pass `tenant_id=None` (collapsing to global rows only, matching their own descriptor query). No schema change.
+
+### Security — confine KB ingest to `KB_INGEST_ROOT` (path-traversal / LFI)
+
+- **The server-side KB bulk-ingest surface (`POST /api/v1/kb/ingest`, `meho kb ingest`) is now confined to a pinned `KB_INGEST_ROOT` directory** (default `/opt/meho/kb-ingest`) (#2059), closing a path-traversal / local-file-inclusion hole where a `tenant_admin` could ingest any `.md` anywhere on the backplane host into their corpus. The new `_resolve_within_ingest_root` helper resolves both the root and the requested directory (`Path.resolve` follows symlinks and collapses `..`) and raises `KbIngestRootError` unless the resolved path lands inside the root — rejecting both `..` traversal payloads and escaping symlinks before any file is read, including in dry-run mode. The route maps the error to a structured `400 kb_ingest_path_outside_root`, matching the existing `directory_not_found` / `not_a_directory` shape. **Deploy impact:** the Helm chart surfaces the root as `config.kbIngestRoot` → `KB_INGEST_ROOT` (configmap + values + schema), but does not pre-create or mount it — operators that ingest must mount their KB content under the root or repoint `KB_INGEST_ROOT`; a chassis-only deploy that never ingests carries the default harmlessly. New `settings.kb_ingest_root` field; no API schema change (OpenAPI snapshot unchanged).
+
+### Security — clickjacking-defence headers on `/ui/*`
+
+- **Every `/ui/*` response now carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`** (#2060), so the operator console can no longer be loaded in an `<iframe>` for a clickjacking attack (previously it shipped no framing protection at all). A new pure-ASGI `UIFramingHeadersMiddleware` (`ui/security_headers.py`) stamps both headers (CSP Level 2 plus the legacy `X-Frame-Options` fallback, per the OWASP Clickjacking Defense cheat sheet) and is registered **outermost** in `main.py` so they land even on the 302-to-login the inner session middleware short-circuits on (a framed login page is itself a clickjacking surface). It is `/ui/`-prefix-scoped, so `/api/*` and `/mcp` JSON responses pass through unstamped, and the CSP is deliberately `frame-ancestors`-only so it cannot break the console's HTMX + Alpine inline-script render; `setdefault` preserves any route that sets its own `frame-ancestors`. Middleware-only change — OpenAPI snapshot regenerated with no diff.
+
+### Security — sandbox the JSONFlux DuckDB query engine
+
+- **The JSONFlux `QueryEngine`'s in-memory DuckDB connection is now hardened at construction** (#2061), closing a latent arbitrary-file-read / SSRF / untrusted-extension sink. Data only ever enters the engine via in-memory Arrow tables (`conn.register`) — DuckDB never reads a file or URL itself — but the connection previously opened with no config restrictions, so arbitrary SQL (e.g. a future `result_query` drill-in) could reach external access. `_harden_connection` now runs `SET enable_external_access=false`, `SET allow_community_extensions=false`, then `SET lock_configuration=true` **last** (it freezes all further config, so the preceding `SET`s must precede it), per the DuckDB securing guide. No legitimate path relied on DuckDB external access, so the jsonflux/query suite passes unchanged. Backend-internal change; no schema change.
+
+### Security — pin the pooled httpx client to same-origin redirects only
+
+- **The shared per-target pooled `httpx.AsyncClient` no longer follows redirects across origins** (#2062), closing an open-redirect SSRF / auth-token-forwarding hole. The client defaulted to `follow_redirects=True`, so a `3xx` from a vendor session-create/login `POST` was transparently replayed to its `Location`; httpx strips `Authorization` cross-origin but **not** vendor auth headers (NSX's `X-XSRF-TOKEN`) nor — on a method-preserving `307`/`308` — the credential request body, so an off-origin redirect could harvest the login secret and session token. The new `_SameOriginRedirectClient` is built `follow_redirects=False` and re-implements a bounded, same-origin-only redirect loop in `send()`: a benign same-origin trailing-slash `301` (vcsim's `/rest` mount, some appliances) is still followed so no vendor flow regresses, but a cross-origin `Location` is refused and the unfollowed `3xx` returned — the request is never replayed off-origin, so no header or body crosses the origin boundary. Centralised at the one pooled-construction point, so every HTTP connector (NSX, VCF/vmware session-login) is covered with no per-sink edit. No schema change.
+
+### Security — require HTTPS for the backplane URL
+
+- **The `meho` CLI now enforces a transport-security policy on the backplane URL** (#2063), preventing the `meho login` bearer token from being transmitted in cleartext. Both `meho login` and the shared resolver previously accepted any scheme, so a plaintext `http://` backplane sent the token in the clear on every request. `backplane.NormaliseURL` now accepts `https://` always, accepts plaintext `http://` only for a loopback host (`localhost` / `127.0.0.0/8` / `::1`), and rejects `http://` to any routed host. `meho login` is stricter at first contact — it normalises via `NormaliseURLAllowHTTP(arg, allowHTTP=false)` (https-only even for loopback) and adds an `--insecure-allow-http` opt-in (mirroring the existing `--insecure-skip-tls-verify` flag) that permits a localhost plaintext backplane for local dev; the flag never permits plaintext to a routed host. A bare host with no scheme is rejected as a parse error (no scheme is silently assumed). Go-only change; no `cli/api/` regeneration needed.
+
+### Security — reject `${...}` substitution in runbook `op_id` at publish
+
+- **A runbook step's or verify's `op_id` may no longer contain a `${...}` substitution token** (#2064), closing a parameter-injection-into-operation-identity hole. The publish-time substitution validator walked step `body`, op-call `params`, verify `params`, and verify `expect`, but skipped both `op_id` fields — so a `${...}` token in `op_id` reached storage unchecked and was substituted at run time (`run_service.py` `_substitute_string`), letting an operator-supplied run parameter redirect a published step/verify to a *different* operation. The new `validate_op_id_static` helper holds `op_id` to a stricter rule than the other fields — operation identity must be static, so **no** substitution is legal there, not even an allowlisted `${run.target}` / `${run.params.X}` — and is wired into the template-body validator. Such a template is now refused at publish (`422`, `disallowed substitution in op_id: …`) instead of silently substituted at dispatch; the runtime substitution is left in place as harmless defence-in-depth (a static `op_id` passes through unchanged). OpenAPI snapshot regenerated with no diff.
+
+### Changed — FastAPI 0.137 adopted
+
+- **The backend now requires FastAPI `>=0.137.1,<0.138`** (#2054, closes #1819): the deliberate `>=0.136.3,<0.137` hold (0.137 nested routes out of `app.routes` and leaked a handler-500 at `TestClient` teardown) is lifted now that the test suite is adapted to the 0.137 router-tree and exception internals — the OpenAPI-paths assertions walk the new nested router shape and the TestClient teardown uses `ASGITransport`. Dependency pin + test-compat only; no runtime behavior change.
+
+### Changed — CI supply-chain + gate hardening
+
+- **The `helm install + helm test` job is now a required check** (#2052, closes #349): its `continue-on-error` escape hatch is removed so a broken chart smoke fails the build instead of passing silently.
+- **Database-migration tests run only when migration files change** (#2140): the alembic/migration suite is relocated to `backend/tests/migrations/`, excluded from the unit lane, and driven by a dedicated conditional `python-migration-tests` CI job gated on a `changes`-detection step — so the heavy migration suite no longer runs on every PR, only when `backend/alembic/**`, `backend/tests/migrations/**`, or the migration tooling changes.
+- **The Python dependency license gate now allows `MIT-0`** (#2197): the MIT-0 (No Attribution) license is added to the allowlist so a compliant transitive dependency no longer red-flags the license check.
+
+### Changed — dependency bumps
+
+- Bumped: `actions/setup-python` 6.2.0→6.3.0 (#2095), `azure/setup-helm` 5.0.0→5.0.1 (#2097), `actions/setup-go` 6.4.0→6.5.0 (#2098), `redis` 8.0.0→8.0.1 (#2100), `google-auth` 2.55.0→2.55.1 (#2102), `ruff` 0.15.18→0.15.20 (#2103), `alembic` 1.18.4→1.18.5 (#2104), `presidio-analyzer` 2.2.362→2.2.363 (#2105), `asyncssh` 2.23.1→2.24.0 (#2106), and `joserfc` (#2118, #2141).
 
 ## [0.19.0] - 2026-06-22
 

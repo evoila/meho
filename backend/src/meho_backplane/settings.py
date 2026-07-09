@@ -918,6 +918,14 @@ class Settings(BaseModel):
     # reusing the GcloudConnector impersonation chain. No effect on Vault
     # installs. Chart wiring lands with the GSM Helm surface in #2231.
     gsm_impersonate_sa: str = Field(default="")
+    # #2231 (Initiative #2227) — the GCP project the GSM credential backend
+    # reads under when a ``secret_ref`` (or the ``/api/v1/health`` federation
+    # probe) names no explicit project. Empty (the default) is correct for
+    # every Vault install; a ``gsm``-backend install sets it via
+    # ``config.gsmProject`` → ``GSM_PROJECT`` so the health federation proof
+    # can address ``gsm:<project>/<probe-secret>`` without a hard-coded
+    # project. No effect on Vault installs.
+    gsm_project: str = Field(default="")
     # #2232 (Initiative #2227) — GCP Workload Identity Federation (WIF) for
     # the GSM credential backend's per-operator path. When
     # ``gsm_wif_audience`` is set, a ``gsm:`` read exchanges the operator's
@@ -1499,6 +1507,11 @@ def get_settings() -> Settings:
         # Optional impersonation SA for the GSM credential backend (#2230).
         # Empty/whitespace-only ⇒ direct-ADC read (no impersonation).
         gsm_impersonate_sa=os.environ.get("GSM_IMPERSONATE_SA", "").strip(),
+        # GCP project the GSM backend + health federation probe read under
+        # (#2231). Empty is correct for Vault installs; a gsm-backend install
+        # sets it via ``config.gsmProject``. Whitespace is stripped so a
+        # blank chart value round-trips as empty.
+        gsm_project=os.environ.get("GSM_PROJECT", "").strip(),
         # GSM Workload Identity Federation (#2232). All optional; an empty
         # ``GSM_WIF_AUDIENCE`` (the default) leaves the Phase-1 SA-direct path
         # in force. ``GSM_WIF_SUBJECT_TOKEN_TYPE`` falls back to the OIDC-JWT

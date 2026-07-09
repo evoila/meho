@@ -120,6 +120,25 @@ connector-related release-notes line.
   Per-operator GCP federation and the Helm surface are deferred to #2232 /
   #2231. (#2230)
 
+### Added — Helm `gsm.*` surface + backend-agnostic `/api/v1/health` federation proof
+
+- Deploy a **Vault-free, GCP-native** install: the chart gains a top-level
+  `gsm.*` block (`enabled`, `project`, and inert Phase-2 (#2232)
+  `workloadIdentityFederation.{poolId,providerId,serviceAccount}` stubs)
+  plus `config.credentialBackend` / `config.gsmProject` /
+  `config.gsmImpersonateSa`, rendered into the backplane env as
+  `CREDENTIAL_BACKEND` / `GSM_PROJECT` / `GSM_IMPERSONATE_SA`.
+  `values.schema.json` now requires `vault.address` **only when**
+  `config.credentialBackend: vault` and requires `gsm.enabled: true` +
+  `gsm.project` when it is `gsm`, so a GSM-only overlay passes schema
+  validation with a blank Vault address (see
+  `deploy/values-examples/values-gsm-example.yaml`). (#2231)
+- The `GET /api/v1/health` federation proof is now **backend-agnostic**:
+  it dispatches on `config.credentialBackend` — a Vault install keeps the
+  unchanged `vault.kv.read` path (zero migration), while a GSM install
+  reads its probe secret (`gsm:<project>/meho-test-federation`) through the
+  credential-backend seam and reports the same `vault` status shape. (#2231)
+
 ## [0.20.0] - 2026-07-08
 
 ### Fixed — ssh-family connectors resolve `secret_ref` from Vault

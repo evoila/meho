@@ -204,9 +204,16 @@ the broker moves one opaque value and reports only its SHA-256
 backend returns a named-field payload a connector session builder
 consumes. Same shape, different contract.
 
-Chart wiring (`config.credentialBackend` → `CREDENTIAL_BACKEND` in the
-Helm configmap) lands with the GSM Helm surface in #2231; the setting is
-already read here so a value flows the moment the chart exposes it.
+Chart wiring landed with the GSM Helm surface (#2231): the configmap
+renders `config.credentialBackend` → `CREDENTIAL_BACKEND`, `config.gsmProject`
+→ `GSM_PROJECT`, and `config.gsmImpersonateSa` → `GSM_IMPERSONATE_SA`, and
+`values.schema.json` requires `vault.address` only when
+`credentialBackend: vault` (a `gsm` install passes with a blank Vault
+address). The same `credential_backend` setting also drives the
+`GET /api/v1/health` federation proof: `vault` keeps the unchanged
+`vault.kv.read` dispatch, while `gsm` reads
+`gsm:<gsmProject>/meho-test-federation` through this seam
+(`api/v1/health.py:_probe_backend_federation`).
 
 ## GCP Secret Manager backend (gsm)
 

@@ -3591,13 +3591,21 @@ type HealthResponse struct {
 	// it for downstream Vault forward-auth only.
 	Operator OperatorIdentity `json:"operator"`
 
-	// Vault Vault federation-chain status.
+	// Vault Federation-chain status for the deployment's credential backend.
 	//
-	// ``reachable`` is true when the OIDC login succeeded (TCP + TLS +
-	// JWT forward all worked). ``read_ok`` is true when the test secret
-	// read succeeded against the resulting Vault token. ``detail`` carries
-	// a short structured string for the CLI to render on failure paths —
-	// never an unbounded exception message.
+	// The field is named ``vault`` on :class:`HealthResponse` for wire
+	// compatibility (it predates the credential-backend seam), but the value
+	// reflects whichever backend ``config.credentialBackend`` selects: the
+	// Vault OIDC-login + KV read on a Vault install, or the configured
+	// backend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM
+	// install) through the credential-backend seam.
+	//
+	// ``reachable`` is true when the backend was reached — on Vault, the OIDC
+	// login succeeded (TCP + TLS + JWT forward); on a seam backend, the store
+	// was addressable (config resolved, backend registered). ``read_ok`` is
+	// true when the probe secret read succeeded. ``detail`` carries a short
+	// structured string for the CLI to render on failure paths — a class name
+	// or error code, never an unbounded exception message or a secret value.
 	Vault VaultStatus `json:"vault"`
 }
 
@@ -6027,13 +6035,21 @@ type ValidationError_Loc_Item struct {
 	union json.RawMessage
 }
 
-// VaultStatus Vault federation-chain status.
+// VaultStatus Federation-chain status for the deployment's credential backend.
 //
-// “reachable“ is true when the OIDC login succeeded (TCP + TLS +
-// JWT forward all worked). “read_ok“ is true when the test secret
-// read succeeded against the resulting Vault token. “detail“ carries
-// a short structured string for the CLI to render on failure paths —
-// never an unbounded exception message.
+// The field is named “vault“ on :class:`HealthResponse` for wire
+// compatibility (it predates the credential-backend seam), but the value
+// reflects whichever backend “config.credentialBackend“ selects: the
+// Vault OIDC-login + KV read on a Vault install, or the configured
+// backend's probe-secret read (“gsm:<project>/<probe-secret>“ on a GSM
+// install) through the credential-backend seam.
+//
+// “reachable“ is true when the backend was reached — on Vault, the OIDC
+// login succeeded (TCP + TLS + JWT forward); on a seam backend, the store
+// was addressable (config resolved, backend registered). “read_ok“ is
+// true when the probe secret read succeeded. “detail“ carries a short
+// structured string for the CLI to render on failure paths — a class name
+// or error code, never an unbounded exception message or a secret value.
 type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`

@@ -48,6 +48,7 @@ import respx
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from meho_backplane.api.v1.runbook_templates import router as runbook_templates_router
@@ -58,6 +59,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.runbooks.hydration_errors import TEMPLATE_BODY_VALIDATION_FAILED
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateResponse,
     DiscardTemplateResponse,
@@ -74,6 +76,7 @@ from meho_backplane.runbooks.service import (
     TemplateNotDraftError,
     TemplateNotFoundError,
     TemplateNotPublishedError,
+    _steps_from_storage,
 )
 from meho_backplane.settings import get_settings
 
@@ -533,6 +536,94 @@ def test_show_admin_ok(client: TestClient) -> None:
     body = response.json()
     assert body["slug"] == "rotate-cert"
     assert body["steps"][0]["id"] == "revoke-old-cert"
+
+
+def _hydration_validation_error() -> ValidationError:
+    """Return the real :class:`ValidationError` a legacy empty-body row raises.
+
+    Built by round-tripping a poisoned step dict through the same
+    :func:`_steps_from_storage` hydration sink the service uses, so the
+    error the mocked service raises is byte-for-byte the one production
+    would raise on a #2122-poisoned row.
+    """
+    poisoned = [
+        {
+            "id": "revoke",
+            "title": "Revoke",
+            "body": "",
+            "type": "manual",
+            "verify": {"type": "confirm", "prompt": "Done?"},
+        }
+    ]
+    try:
+        _steps_from_storage(poisoned)  # type: ignore[arg-type]
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected _steps_from_storage to reject an empty body")
+
+
+def test_show_admin_hydration_failure_returns_structured_500(client: TestClient) -> None:
+    """AC #3: a poisoned stored body → structured 500 envelope, not text/plain (admin)."""
+    key, token = _admin_token()
+    fake_show = AsyncMock(side_effect=_hydration_validation_error())
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/cert-rotate?version=2", headers=_authed(token)
+        )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    detail = response.json()["detail"]
+    assert detail["error"] == TEMPLATE_BODY_VALIDATION_FAILED
+    assert detail["slug"] == "cert-rotate"
+    assert detail["version"] == 2
+    assert detail["errors"][0]["type"] == "string_too_short"
+    assert detail["errors"][0]["loc"] == ["steps", 0, "manual", "body"]
+    assert "migration 0054" in detail["message"]
+
+
+def test_show_operator_hydration_failure_returns_structured_500(client: TestClient) -> None:
+    """AC #3: the operator path (authorized) also surfaces the structured 500 envelope."""
+    key, token = _operator_token()
+    fake_show = AsyncMock(side_effect=_hydration_validation_error())
+    fake_predicate = AsyncMock(return_value=True)  # operator has a completed run
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/cert-rotate?version=1", headers=_authed(token)
+        )
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["error"] == TEMPLATE_BODY_VALIDATION_FAILED
+    assert detail["slug"] == "cert-rotate"
+    assert detail["version"] == 1
+
+
+def test_show_route_declares_structured_500_in_openapi() -> None:
+    """AC #3/#4: the 500 envelope is declared on the show route in OpenAPI."""
+    from meho_backplane.main import app
+
+    responses = app.openapi()["paths"]["/api/v1/runbooks/templates/{slug}"]["get"]["responses"]
+    assert "500" in responses
+    schema = responses["500"]["content"]["application/json"]["schema"]
+    detail_props = schema["properties"]["detail"]["properties"]
+    assert detail_props["error"]["enum"] == [TEMPLATE_BODY_VALIDATION_FAILED]
+    assert set(schema["properties"]["detail"]["required"]) == {
+        "error",
+        "slug",
+        "version",
+        "errors",
+        "message",
+    }
 
 
 def test_show_admin_unchanged(client: TestClient) -> None:

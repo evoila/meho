@@ -99,7 +99,11 @@ from meho_backplane.mcp.registry import (
     ToolDefinition,
     register_mcp_tool,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
+from meho_backplane.runbooks.hydration_errors import (
+    TEMPLATE_BODY_VALIDATION_FAILED,
+    build_template_body_validation_detail,
+)
 from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
@@ -159,6 +163,35 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
     consistent ``"<tool>: <detail>"`` message shape.
     """
     return McpInvalidParamsError(f"{tool}: {exc}")
+
+
+def _to_template_body_validation_internal_error(
+    slug: str,
+    version: int | None,
+    exc: ValidationError,
+) -> McpInternalError:
+    """Wrap a stored-template hydration ``ValidationError`` as a structured ``-32603``.
+
+    The stored ``steps`` JSONB fails re-validation back through
+    :class:`~meho_backplane.runbooks.schemas.RunbookTemplateBody` (the
+    documented fail-closed read posture) -- typically a legacy empty step
+    body predating the #2122 non-empty-body constraint. This is a
+    *server-side* data fault the caller cannot fix by reshaping params, so
+    it maps to :class:`McpInternalError` (``-32603``) with structured
+    ``data`` -- not the generic ``-32603 "internal error: ValidationError"``
+    the dispatcher catch-all would otherwise emit. The ``data`` envelope is
+    the shared builder the REST route also uses, so the two transports
+    cannot drift.
+    """
+    detail = build_template_body_validation_detail(slug=slug, version=version, exc=exc)
+    _log.warning(
+        "runbook_template_body_validation_failed",
+        error=TEMPLATE_BODY_VALIDATION_FAILED,
+        slug=slug,
+        version=version,
+        errors=detail["errors"],
+    )
+    return McpInternalError(str(detail["message"]), data=detail)
 
 
 def _resolve_template_slug(tool: str, arguments: dict[str, Any]) -> str:
@@ -590,22 +623,28 @@ async def _show_template_handler(
     raw_version = arguments.get("version")
     requested_version = int(raw_version) if raw_version is not None else None
 
-    if operator.tenant_role == TenantRole.TENANT_ADMIN:
-        try:
-            response = await template_service.show_template(
-                tenant_id=operator.tenant_id, slug=slug, version=requested_version
+    # Wrap both branches so a hydration ``ValidationError`` from the stored
+    # ``steps`` (a legacy empty body predating #2122) surfaces as the
+    # structured ``-32603`` envelope instead of the dispatcher catch-all's
+    # opaque ``internal error: ValidationError``.
+    try:
+        if operator.tenant_role == TenantRole.TENANT_ADMIN:
+            try:
+                response = await template_service.show_template(
+                    tenant_id=operator.tenant_id, slug=slug, version=requested_version
+                )
+            except _INVALID_PARAMS_ERRORS as exc:
+                raise _to_invalid_params("meho.runbook.show_template", exc) from exc
+        else:
+            response = await _show_template_operator_path(
+                template_service=template_service,
+                run_service=RunbookRunService(),
+                operator=operator,
+                slug=slug,
+                requested_version=requested_version,
             )
-        except _INVALID_PARAMS_ERRORS as exc:
-            raise _to_invalid_params("meho.runbook.show_template", exc) from exc
-        return _mirror_template_slug(response.model_dump(mode="json"))
-
-    response = await _show_template_operator_path(
-        template_service=template_service,
-        run_service=RunbookRunService(),
-        operator=operator,
-        slug=slug,
-        requested_version=requested_version,
-    )
+    except ValidationError as exc:
+        raise _to_template_body_validation_internal_error(slug, requested_version, exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 

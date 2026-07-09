@@ -926,6 +926,34 @@ class Settings(BaseModel):
     # can address ``gsm:<project>/<probe-secret>`` without a hard-coded
     # project. No effect on Vault installs.
     gsm_project: str = Field(default="")
+    # #2232 (Initiative #2227) — GCP Workload Identity Federation (WIF) for
+    # the GSM credential backend's per-operator path. When
+    # ``gsm_wif_audience`` is set, a ``gsm:`` read exchanges the operator's
+    # Keycloak JWT at ``sts.googleapis.com`` for a short-lived federated
+    # token (google-auth ``identity_pool.Credentials``) so GCP's own audit
+    # attributes ``secretmanager.versions.access`` to the operator — mirroring
+    # the Vault ``vault_client_for_operator`` JIT contract. Empty (the
+    # default) leaves the Phase-1 SA-direct ADC path untouched (no behaviour
+    # change for Phase-1 installs). ``gsm_wif_audience`` is the full WIF
+    # provider resource name google-auth consumes (``//iam.googleapis.com/
+    # projects/<number>/locations/global/workloadIdentityPools/<pool>/
+    # providers/<provider>``); it already encodes the pool + provider.
+    # ``gsm_wif_pool_id`` /
+    # ``gsm_wif_provider_id`` are the ``gsm.workloadIdentityFederation.{poolId,providerId}``
+    # chart keys, threaded through for a fail-closed consistency check
+    # against the audience (a copy-paste mismatch fails the read with an
+    # actionable error) and for non-secret log attribution.
+    # ``gsm_wif_service_account`` optionally impersonates a target SA for the
+    # final read (reusing the Phase-1 impersonation intent at the STS layer);
+    # empty skips impersonation. ``gsm_wif_subject_token_type`` is the STS
+    # subject-token type for a Keycloak OIDC JWT. Chart wiring lands in #2231.
+    gsm_wif_audience: str = Field(default="")
+    gsm_wif_pool_id: str = Field(default="")
+    gsm_wif_provider_id: str = Field(default="")
+    gsm_wif_service_account: str = Field(default="")
+    gsm_wif_subject_token_type: str = Field(
+        default="urn:ietf:params:oauth:token-type:jwt", min_length=1
+    )
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1484,6 +1512,19 @@ def get_settings() -> Settings:
         # sets it via ``config.gsmProject``. Whitespace is stripped so a
         # blank chart value round-trips as empty.
         gsm_project=os.environ.get("GSM_PROJECT", "").strip(),
+        # GSM Workload Identity Federation (#2232). All optional; an empty
+        # ``GSM_WIF_AUDIENCE`` (the default) leaves the Phase-1 SA-direct path
+        # in force. ``GSM_WIF_SUBJECT_TOKEN_TYPE`` falls back to the OIDC-JWT
+        # type so a blank chart value never yields an empty (``min_length=1``
+        # rejected) token type.
+        gsm_wif_audience=os.environ.get("GSM_WIF_AUDIENCE", "").strip(),
+        gsm_wif_pool_id=os.environ.get("GSM_WIF_POOL_ID", "").strip(),
+        gsm_wif_provider_id=os.environ.get("GSM_WIF_PROVIDER_ID", "").strip(),
+        gsm_wif_service_account=os.environ.get("GSM_WIF_SERVICE_ACCOUNT", "").strip(),
+        gsm_wif_subject_token_type=(
+            os.environ.get("GSM_WIF_SUBJECT_TOKEN_TYPE", "").strip()
+            or "urn:ietf:params:oauth:token-type:jwt"
+        ),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

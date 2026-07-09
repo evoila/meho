@@ -29,6 +29,7 @@ What these cover:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,7 @@ from meho_backplane.connectors._shared import credential_backend as cb
 from meho_backplane.connectors._shared.gsm_creds import (
     GcpSecretManagerBackend,
     GcpSecretManagerReadError,
+    _WifConfig,
 )
 from meho_backplane.connectors._shared.vault_creds import (
     load_basic_credentials,
@@ -142,8 +144,6 @@ def _adc_loader_returning(creds: Any):
 
 
 def _json_secret(**fields: str) -> bytes:
-    import json
-
     return json.dumps(fields).encode("utf-8")
 
 
@@ -568,3 +568,285 @@ async def test_dispatch_gsm_ref_end_to_end_via_load_basic_credentials(
     creds = await load_basic_credentials(target, _make_operator())
 
     assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+
+
+# ---------------------------------------------------------------------------
+# Workload Identity Federation (per-operator, #2232)
+# ---------------------------------------------------------------------------
+
+_WIF_AUDIENCE = (
+    "//iam.googleapis.com/projects/123456/locations/global/"
+    "workloadIdentityPools/meho-pool/providers/keycloak"
+)
+_OPERATOR_JWT = "operator.keycloak.jwt-canary"
+
+
+def _wif_config(
+    *,
+    audience: str = _WIF_AUDIENCE,
+    pool_id: str = "meho-pool",
+    provider_id: str = "keycloak",
+    service_account: str = "",
+    subject_token_type: str = "urn:ietf:params:oauth:token-type:jwt",
+) -> _WifConfig:
+    return _WifConfig(
+        audience=audience,
+        pool_id=pool_id,
+        provider_id=provider_id,
+        service_account=service_account,
+        subject_token_type=subject_token_type,
+    )
+
+
+class _StsResponse:
+    """A ``google.auth.transport.Response``-shaped STS reply."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.status = 200
+        self.data = json.dumps(body).encode("utf-8")
+        self.headers: dict[str, str] = {}
+
+
+def _set_wif_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    """Pin the GSM_WIF_* env the settings factory reads, then clear the cache."""
+    env = {
+        "GSM_WIF_AUDIENCE": _WIF_AUDIENCE,
+        "GSM_WIF_POOL_ID": "meho-pool",
+        "GSM_WIF_PROVIDER_ID": "keycloak",
+    }
+    env.update(overrides)
+    for key, value in env.items():
+        if value == "":
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+
+
+def _wif_factory_returning(sentinel: Any) -> Any:
+    """A ``wif_credentials_factory`` double recording each call's kwargs."""
+    calls: list[dict[str, Any]] = []
+
+    def factory(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return sentinel
+
+    factory.calls = calls  # type: ignore[attr-defined]
+    return factory
+
+
+async def test_wif_builds_identity_pool_creds_and_exchanges_operator_jwt() -> None:
+    """AC1: a WIF read builds identity_pool.Credentials from the operator JWT
+    and does the STS exchange (STS endpoint mocked — no live GCP)."""
+    backend = GcpSecretManagerBackend()
+    creds = backend._build_wif_credentials(_OPERATOR_JWT, "gcp-lab-01", _wif_config())
+
+    from google.auth import identity_pool
+
+    assert isinstance(creds, identity_pool.Credentials)
+    assert creds._audience == _WIF_AUDIENCE
+
+    captured: dict[str, Any] = {}
+
+    def fake_request(url: str, method: str = "GET", body: Any = None, **_: Any) -> _StsResponse:
+        captured["url"] = url
+        captured["body"] = body
+        return _StsResponse(
+            {
+                "access_token": "federated-token-xyz",
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+        )
+
+    creds.refresh(fake_request)
+
+    assert creds.token == "federated-token-xyz"
+    assert captured["url"] == "https://sts.googleapis.com/v1/token"
+    # The operator's JWT is the subject token in the STS exchange body.
+    assert _OPERATOR_JWT.encode("utf-8") in captured["body"]
+
+
+async def test_wif_selected_when_audience_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC4: an install with WIF configured routes the operator-context read
+    through the WIF path, not the SA-direct ADC path."""
+    _set_wif_env(monkeypatch)
+    sentinel_creds = object()
+    wif_factory = _wif_factory_returning(sentinel_creds)
+    client = _FakeClient(payload=_json_secret(username=_CANARY_USERNAME, password=_CANARY_PASSWORD))
+    adc = _adc_loader_returning(_SourceCreds())
+    backend = GcpSecretManagerBackend(
+        adc_loader=adc,
+        client_factory=_factory_for(client),
+        wif_credentials_factory=wif_factory,
+    )
+
+    data = await backend.load_secret_data(
+        "my-project/db-creds", _make_operator(_OPERATOR_JWT), target_name="gcp-lab-01"
+    )
+
+    assert data == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    # The WIF credential (not the ADC source) reached the client.
+    assert client.credentials is sentinel_creds
+    # The operator JWT was forwarded to the WIF builder; ADC was untouched.
+    assert wif_factory.calls[-1]["operator_jwt"] == _OPERATOR_JWT  # type: ignore[attr-defined]
+    assert adc.calls == []  # type: ignore[attr-defined]
+
+
+async def test_wif_credential_minted_fresh_per_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC2: a fresh federated credential is built per read — no cross-request
+    caching of the operator-scoped credential."""
+    _set_wif_env(monkeypatch)
+    built: list[object] = []
+
+    def wif_factory(**_: Any) -> object:
+        cred = object()
+        built.append(cred)
+        return cred
+
+    client = _FakeClient(payload=_json_secret(k="v"))
+    backend = GcpSecretManagerBackend(
+        client_factory=_factory_for(client),
+        wif_credentials_factory=wif_factory,
+    )
+
+    await backend.load_secret_data("p/s", _make_operator(_OPERATOR_JWT), target_name="t")
+    first = client.credentials
+    await backend.load_secret_data("p/s", _make_operator(_OPERATOR_JWT), target_name="t")
+    second = client.credentials
+
+    # Two reads → two distinct credential objects; nothing cached on the backend.
+    assert len(built) == 2
+    assert first is not second
+    assert not hasattr(backend, "_cached_wif_credentials")
+
+
+async def test_wif_impersonation_url_set_when_sa_configured() -> None:
+    """AC3: SA impersonation is applied when a service account is configured."""
+    backend = GcpSecretManagerBackend()
+    creds = backend._build_wif_credentials(
+        _OPERATOR_JWT,
+        "gcp-lab-01",
+        _wif_config(service_account="reader@my-project.iam.gserviceaccount.com"),
+    )
+
+    assert creds._service_account_impersonation_url == (
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+        "reader@my-project.iam.gserviceaccount.com:generateAccessToken"
+    )
+
+
+async def test_wif_impersonation_skipped_when_sa_absent() -> None:
+    """AC3: SA impersonation is skipped when no service account is configured."""
+    backend = GcpSecretManagerBackend()
+    creds = backend._build_wif_credentials(_OPERATOR_JWT, "gcp-lab-01", _wif_config())
+
+    assert creds._service_account_impersonation_url is None
+
+
+async def test_sa_direct_used_when_wif_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC4: an install without WIF configured cleanly uses the Phase-1
+    SA-direct ADC path (no behaviour change)."""
+    _set_wif_env(monkeypatch, GSM_WIF_AUDIENCE="", GSM_WIF_POOL_ID="", GSM_WIF_PROVIDER_ID="")
+    source = _SourceCreds()
+    adc = _adc_loader_returning(source)
+    client = _FakeClient(payload=_json_secret(k="v"))
+    wif_factory = _wif_factory_returning(object())
+    backend = GcpSecretManagerBackend(
+        adc_loader=adc,
+        client_factory=_factory_for(client),
+        impersonate_sa="",
+        wif_credentials_factory=wif_factory,
+    )
+
+    await backend.load_secret_data("p/s", _make_operator(_OPERATOR_JWT), target_name="t")
+
+    # SA-direct ADC ran; the WIF builder was never called.
+    assert client.credentials is source
+    assert adc.calls  # type: ignore[attr-defined]
+    assert wif_factory.calls == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("pool_id", "provider_id"),
+    [
+        ("wrong-pool", "keycloak"),
+        ("meho-pool", "wrong-provider"),
+    ],
+)
+async def test_wif_audience_pool_provider_mismatch_fails_closed(
+    pool_id: str, provider_id: str
+) -> None:
+    """AC4: a declared pool / provider that disagrees with the audience fails
+    closed with an actionable error."""
+    backend = GcpSecretManagerBackend()
+
+    with pytest.raises(GcpSecretManagerReadError) as exc:
+        backend._build_wif_credentials(
+            _OPERATOR_JWT,
+            "gcp-lab-01",
+            _wif_config(pool_id=pool_id, provider_id=provider_id),
+        )
+
+    msg = str(exc.value)
+    assert "gcp-lab-01" in msg
+    assert "inconsistent" in msg
+
+
+async def test_wif_empty_operator_jwt_fails_closed() -> None:
+    """The WIF path fails closed on an empty operator JWT (defence in depth
+    behind the shared loader's pre-dispatch guard)."""
+    backend = GcpSecretManagerBackend()
+
+    with pytest.raises(GcpSecretManagerReadError) as exc:
+        backend._build_wif_credentials("", "gcp-lab-01", _wif_config())
+
+    assert "no operator JWT" in str(exc.value)
+
+
+async def test_wif_log_event_carries_auth_path_and_no_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WIF read logs auth_path/pool/provider attribution — never a token."""
+    _set_wif_env(monkeypatch)
+    client = _FakeClient(payload=_json_secret(username=_CANARY_USERNAME, password=_CANARY_PASSWORD))
+    backend = GcpSecretManagerBackend(
+        client_factory=_factory_for(client),
+        wif_credentials_factory=_wif_factory_returning(object()),
+    )
+
+    with capture_logs() as captured:
+        await backend.load_secret_data(
+            "my-project/db-creds", _make_operator(_OPERATOR_JWT), target_name="gcp-lab-01"
+        )
+
+    blob = repr(captured)
+    assert _OPERATOR_JWT not in blob
+    assert _CANARY_PASSWORD not in blob
+    event = next(e for e in captured if e["event"] == "gsm_secret_accessed")
+    assert event["auth_path"] == "wif"
+    assert event["wif_pool"] == "meho-pool"
+    assert event["wif_provider"] == "keycloak"
+
+
+async def test_wif_end_to_end_via_shared_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC5: a gsm: ref with WIF configured resolves through the shared loader
+    end-to-end under the operator path."""
+    _set_wif_env(monkeypatch)
+    client = _FakeClient(payload=_json_secret(username=_CANARY_USERNAME, password=_CANARY_PASSWORD))
+    sentinel = object()
+    fake_backend = GcpSecretManagerBackend(
+        client_factory=_factory_for(client),
+        wif_credentials_factory=_wif_factory_returning(sentinel),
+    )
+    original = cb.CREDENTIAL_BACKEND_REGISTRY["gsm"]
+    cb.CREDENTIAL_BACKEND_REGISTRY["gsm"] = fake_backend
+    try:
+        target = _Target(secret_ref="gsm:my-project/db-creds")
+        creds = await load_basic_credentials(target, _make_operator(_OPERATOR_JWT))
+    finally:
+        cb.CREDENTIAL_BACKEND_REGISTRY["gsm"] = original
+
+    assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    assert client.credentials is sentinel

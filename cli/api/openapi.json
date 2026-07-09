@@ -25391,6 +25391,7 @@
               "pfsense",
               "postgres",
               "prometheus",
+              "proxmox",
               "sddc",
               "vault",
               "vcfa",

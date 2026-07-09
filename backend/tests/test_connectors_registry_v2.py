@@ -593,6 +593,27 @@ def test_argocd_connector_registered_under_v2_triple_and_wildcard() -> None:
     assert snapshot[wildcard] is ArgoCdConnector
 
 
+def test_proxmox_connector_registered_under_v2_triple_and_wildcard() -> None:
+    """ProxmoxConnector package registers under (proxmox, 8.x, proxmox-api) + wildcard.
+
+    #2238 ships dual registration from day one per G0.15-T6: the versioned
+    triple ``("proxmox", "8.x", "proxmox-api")`` and the wildcard fallback
+    ``("proxmox", "", "")`` both resolve to the connector. Same idempotent-
+    registration pattern as the Harbor / argocd tests above.
+    """
+    from meho_backplane.connectors.proxmox import ProxmoxConnector
+
+    _ensure_registered_v2(ProxmoxConnector)
+    wildcard = ("proxmox", "", "")
+    if wildcard not in all_connectors_v2():
+        register_connector_v2(product="proxmox", version="", impl_id="", cls=ProxmoxConnector)
+
+    snapshot = all_connectors_v2()
+    versioned = ("proxmox", "8.x", "proxmox-api")
+    assert snapshot[versioned] is ProxmoxConnector
+    assert snapshot[wildcard] is ProxmoxConnector
+
+
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
     """VcfAutomationConnector package registers under (vcfa, 9.0, vcfa-rest).
 

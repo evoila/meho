@@ -333,6 +333,7 @@ const (
 	K8s        TargetCreateProduct = "k8s"
 	Keycloak   TargetCreateProduct = "keycloak"
 	Loki       TargetCreateProduct = "loki"
+	Mongodb    TargetCreateProduct = "mongodb"
 	Nsx        TargetCreateProduct = "nsx"
 	Pfsense    TargetCreateProduct = "pfsense"
 	Postgres   TargetCreateProduct = "postgres"

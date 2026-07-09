@@ -77,11 +77,18 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import vault_client_for_operator
+from meho_backplane.connectors._shared.credential_backend import (
+    register_credential_backend,
+    resolve_credential_backend,
+    split_credential_ref,
+)
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "DEFAULT_BASIC_CREDENTIAL_FIELDS",
     "DEFAULT_KV_MOUNT",
     "BasicCredentialsTargetLike",
+    "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "load_basic_credentials",
     "load_vault_secret_data",
@@ -216,48 +223,25 @@ def _is_api_path_shaped(secret_ref: str) -> bool:
     return len(segments) >= 2 and segments[1] == "data"
 
 
-def _resolve_secret_ref(target: BasicCredentialsTargetLike, operator: Operator) -> str:
-    """Validate the pre-read preconditions and return the KV-v2 path.
+def _require_secret_ref(target: BasicCredentialsTargetLike) -> str:
+    """Return *target*'s stripped ``secret_ref`` or raise if unconfigured.
 
-    Three fail-closed guards, all raising :class:`VaultCredentialsReadError`
-    *before* Vault is touched:
+    The one **backend-agnostic** precondition — every credential backend
+    needs a ref to resolve — so it runs in the shared loader before the
+    scheme is split and the backend is dispatched. A target with
+    ``secret_ref=None`` is unconfigured → :class:`VaultCredentialsReadError`.
+    The stripped value is returned so trailing whitespace never slips into
+    the scheme split or the downstream store read.
 
-    * empty ``operator.raw_jwt`` — an operator-context read requires an
-      authenticated operator. System-initiated calls (topology scheduler,
-      readiness probe) carry ``raw_jwt=""`` and must error here rather
-      than silently falling back to a backplane identity (the decision's
-      system-call carve-out).
-    * unset ``target.secret_ref`` — the target is unconfigured.
-    * API-path-shaped ``secret_ref`` — a value embedding the mount or the
-      ``/data/`` API segment (``secret/data/…``, ``kv/data/…``,
-      ``data/…``). hvac inserts ``/data/`` itself, so such a value
-      silently double-resolves to a 404; we reject it with an actionable
-      error rather than guessing operator intent (no auto-stripping).
-
-    Returns the stripped ``secret_ref`` path so trailing whitespace never
-    slips into the hvac call.
+    Backend-specific guards (the operator-JWT carve-out, the Vault KV-v2
+    API-path shape check) live in the resolved backend, not here — a
+    non-Vault backend does not share them.
     """
-    if not operator.raw_jwt:
-        raise VaultCredentialsReadError(
-            "operator-context credential read requires an authenticated operator; "
-            f"target={target.name!r} has no operator JWT (system-initiated calls "
-            "cannot read per-target vendor credentials)"
-        )
     if not target.secret_ref:
         raise VaultCredentialsReadError(
-            f"target {target.name!r} has no secret_ref configured; cannot read "
-            "its basic credentials from Vault"
+            f"target {target.name!r} has no secret_ref configured; cannot resolve its credentials"
         )
-    secret_ref = target.secret_ref.strip()
-    if _is_api_path_shaped(secret_ref):
-        raise VaultCredentialsReadError(
-            f"target {target.name!r} has a KV-v2 API-path-shaped secret_ref "
-            f"{secret_ref!r}; secret_ref must be the logical KV-v2 path relative "
-            "to the mount (e.g. 'targets/<id>'). Drop the 'secret/data/' / "
-            "'kv/data/' / 'data/' prefix — Vault adds the '/data/' segment for "
-            "KV-v2 reads, so a prefixed value double-resolves to a 404."
-        )
-    return secret_ref
+    return target.secret_ref.strip()
 
 
 def _extract_fields(
@@ -286,6 +270,122 @@ def _extract_fields(
             )
         credentials[field] = strip_credential_value(secret_data[field])
     return credentials
+
+
+class VaultCredentialBackend:
+    """The Vault KV-v2 credential backend — today's behaviour, unchanged.
+
+    Registered under kind ``"vault"`` (and the schemeless default), so a
+    schemeless ``targets/<id>`` ref and an explicit ``vault:targets/<id>``
+    ref resolve through exactly this read. It owns the Vault-specific
+    fail-closed guard:
+
+    * API-path-shaped ``secret_ref`` — a value embedding the mount or the
+      ``/data/`` API segment (``secret/data/…``, ``kv/data/…``,
+      ``data/…``). hvac inserts ``/data/`` itself, so such a value
+      silently double-resolves to a 404; reject it with an actionable
+      error rather than guessing operator intent (no auto-stripping).
+      This is a KV-v2 wire-format concern, so it stays on the Vault path
+      only (AC #4).
+
+    The empty-``raw_jwt`` operator-context precondition is **not** here:
+    it runs once in the shared loader (:func:`_resolve_and_load`) before
+    the backend is dispatched, matching today's ordering (the guard fires
+    before any settings read or store access). It reflects the
+    operator-context Vault model that is the only backend today; a future
+    backend that reads under a deployment identity would relax it there.
+    """
+
+    async def load_secret_data(
+        self,
+        secret_ref: str,
+        operator: Operator,
+        *,
+        target_name: str,
+        mount: str = DEFAULT_KV_MOUNT,
+    ) -> dict[str, object]:
+        """Read *secret_ref* as a KV-v2 secret under *operator*'s identity.
+
+        Applies the API-path guard, opens
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator`
+        (JWT/OIDC login forwarding ``operator.raw_jwt``), reads the secret
+        off the event loop (``asyncio.to_thread`` — hvac is synchronous),
+        and structurally unwraps the nested ``data["data"]`` to the flat
+        secret-field dict.
+        """
+        if _is_api_path_shaped(secret_ref):
+            raise VaultCredentialsReadError(
+                f"target {target_name!r} has a KV-v2 API-path-shaped secret_ref "
+                f"{secret_ref!r}; secret_ref must be the logical KV-v2 path relative "
+                "to the mount (e.g. 'targets/<id>'). Drop the 'secret/data/' / "
+                "'kv/data/' / 'data/' prefix — Vault adds the '/data/' segment for "
+                "KV-v2 reads, so a prefixed value double-resolves to a 404."
+            )
+
+        async with vault_client_for_operator(operator) as client:
+            payload = await asyncio.to_thread(
+                client.secrets.kv.v2.read_secret_version,
+                path=secret_ref,
+                mount_point=mount,
+                raise_on_deleted_version=False,
+            )
+
+        return _structural_unwrap(payload, target_name=target_name)
+
+
+#: The Vault backend is stateless, so a single shared instance serves every
+#: read. Registered at import time under ``"vault"``; ``vault_creds`` is
+#: imported by every connector session module, so the kind is always
+#: present before any credential resolution runs.
+register_credential_backend("vault", VaultCredentialBackend())
+
+
+async def _resolve_and_load(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    mount: str,
+) -> tuple[str, dict[str, object]]:
+    """Resolve *target*'s ``secret_ref`` to its secret-field dict via dispatch.
+
+    The shared backend-agnostic path both public loaders funnel through:
+
+    1. Enforce the operator-context precondition (empty ``operator.raw_jwt``
+       fails closed) and require a configured ``secret_ref``. Both run
+       before any settings read or store access, matching today's ordering
+       — a system-initiated call fails closed without needing chassis
+       configuration.
+    2. Split the scheme — schemeless refs resolve through the deployment
+       default (``config.credentialBackend`` / ``CREDENTIAL_BACKEND``,
+       default ``vault``); an explicit ``<kind>:`` prefix selects that
+       backend.
+    3. Dispatch to the resolved backend (:class:`UnknownCredentialBackendError`
+       on an unregistered kind) to read the store secret.
+
+    Returns ``(store_ref, secret_data)`` — the scheme-stripped store ref
+    is handed back so the caller can name it in a missing-field error.
+    """
+    # Operator-context precondition. System-initiated calls (topology
+    # scheduler, readiness probe, the runbook verify dispatch's synthetic
+    # operator) carry ``raw_jwt=""`` and must fail closed rather than
+    # silently fall back to a backplane identity — the decision's
+    # system-call carve-out. Runs before the settings read / dispatch so a
+    # system operator fails closed without needing chassis config, exactly
+    # as before the seam. Reflects the operator-context model of today's
+    # only backend (Vault); a deployment-identity backend would relax it.
+    if not operator.raw_jwt:
+        raise VaultCredentialsReadError(
+            "operator-context credential read requires an authenticated operator; "
+            f"target={target.name!r} has no operator JWT (system-initiated calls "
+            "cannot read per-target vendor credentials)"
+        )
+    ref = _require_secret_ref(target)
+    kind, store_ref = split_credential_ref(ref, default_backend=get_settings().credential_backend)
+    backend = resolve_credential_backend(kind)
+    secret_data = await backend.load_secret_data(
+        store_ref, operator, target_name=target.name, mount=mount
+    )
+    return store_ref, secret_data
 
 
 async def load_basic_credentials(
@@ -349,20 +449,14 @@ async def load_basic_credentials(
         rejected the JWT for the role). Propagated verbatim so callers
         can distinguish login-phase from read-phase failure.
     """
-    # Fail-closed precondition guards (empty JWT / unset secret_ref) run
-    # before Vault is touched; returns the stripped KV-v2 path.
-    path = _resolve_secret_ref(target, operator)
-
-    async with vault_client_for_operator(operator) as client:
-        payload = await asyncio.to_thread(
-            client.secrets.kv.v2.read_secret_version,
-            path=path,
-            mount_point=mount,
-            raise_on_deleted_version=False,
-        )
-
-    secret_data = _structural_unwrap(payload, target_name=target.name)
-    credentials = _extract_fields(secret_data, fields, target_name=target.name, secret_ref=path)
+    # Scheme-dispatched resolution: the unset-secret_ref guard runs before
+    # any backend is touched, then the ref's scheme (schemeless/``vault:``
+    # → the Vault KV-v2 read) selects the backend. ``store_ref`` is the
+    # scheme-stripped ref, named in a missing-field error.
+    store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
+    credentials = _extract_fields(
+        secret_data, fields, target_name=target.name, secret_ref=store_ref
+    )
 
     # Log only non-secret attribution: target / host / the field *names*
     # requested — never a credential value. The returned dict is
@@ -412,17 +506,7 @@ async def load_vault_secret_data(
     read-phase precondition / unwrap failures raise
     :class:`VaultCredentialsReadError`.
     """
-    path = _resolve_secret_ref(target, operator)
-
-    async with vault_client_for_operator(operator) as client:
-        payload = await asyncio.to_thread(
-            client.secrets.kv.v2.read_secret_version,
-            path=path,
-            mount_point=mount,
-            raise_on_deleted_version=False,
-        )
-
-    secret_data = _structural_unwrap(payload, target_name=target.name)
+    _store_ref, secret_data = await _resolve_and_load(target, operator, mount=mount)
 
     # Log only the field-name set (no values). Sorted for a stable log
     # shape that diff-friendly observability tooling can pattern-match

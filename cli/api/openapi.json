@@ -25388,6 +25388,7 @@
               "keycloak",
               "nsx",
               "pfsense",
+              "prometheus",
               "sddc",
               "vault",
               "vcfa",

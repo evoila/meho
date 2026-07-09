@@ -26,8 +26,10 @@ into request auth:
 * **Ticket** — one ``POST /api2/json/access/ticket`` mints a ticket + a
   ``CSRFPreventionToken``; the ticket rides as the ``PVEAuthCookie`` cookie
   and the CSRF token is attached on every write (ticket auth is *not*
-  CSRF-exempt). Tickets last ~2h; the cached ticket is dropped and re-minted
-  on a 401.
+  CSRF-exempt). Tickets last ~2h; the minted ticket is cached and is **not**
+  auto-re-minted on expiry — a 401 after expiry surfaces as a
+  ``connector_error`` (transparent re-mint is a documented future
+  follow-up). Token auth (preferred) has no such expiry.
 
 Self-signed TLS
 ===============

@@ -25390,6 +25390,7 @@
               "nsx",
               "pfsense",
               "postgres",
+              "prometheus",
               "sddc",
               "vault",
               "vcfa",

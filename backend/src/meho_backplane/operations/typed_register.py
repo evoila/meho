@@ -139,6 +139,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.composite_invariant import (
+    assert_registered_composites_have_no_ingested_dispatch,
+)
 from meho_backplane.operations.embed import (
     build_embedding_text,
     compute_embedding_text_hash,
@@ -406,6 +409,31 @@ async def run_typed_op_registrars(
     mirrors the schema-template amortization in ``tests/conftest.py``
     (#793/#898) — replay a once-computed artifact instead of recomputing
     it per test.
+
+    Two-world invariant (#2252)
+    ---------------------------
+
+    After the descriptor rows are in place — via a real registrar pass or
+    the amortized snapshot replay — every registered composite is swept for
+    a two-world violation
+    (:func:`~meho_backplane.operations.composite_invariant.assert_registered_composites_have_no_ingested_dispatch`):
+    a code-shipped op whose declared sub-op resolves to an ``ingested`` row
+    fails the boot closed. The sweep runs on **every** path (fresh pass and
+    replay) because the violation is a function of live descriptor state,
+    not of which registration path produced the rows.
+    """
+    await _run_typed_op_registrars(embedding_service=embedding_service)
+    await assert_registered_composites_have_no_ingested_dispatch()
+
+
+async def _run_typed_op_registrars(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Populate descriptor rows via a real registrar pass or the amortized replay.
+
+    Split from :func:`run_typed_op_registrars` so the two-world invariant
+    sweep runs on every path regardless of which branch produced the rows.
     """
     if get_settings().test_amortize_typed_op_registrars:
         fingerprint = _registrar_fingerprint()

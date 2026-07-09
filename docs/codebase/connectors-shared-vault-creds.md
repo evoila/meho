@@ -252,19 +252,60 @@ it runs off the event loop via `asyncio.to_thread` (the hvac precedent).
 The structlog `gsm_secret_accessed` event carries only `target` /
 `project` / `secret_name` / resolved `version` / `field` name.
 
+**Per-operator path — Workload Identity Federation (Phase 2, #2232).**
+When `GSM_WIF_AUDIENCE` is set, a `gsm:` read runs under the **operator's**
+identity instead of MEHO's SA. The backend builds a fresh
+`google.auth.identity_pool.Credentials` (external-account) per read whose
+subject-token supplier returns `operator.raw_jwt`; google-auth exchanges
+that JWT at `https://sts.googleapis.com/v1/token` for a short-lived
+federated token against the configured Workload Identity Pool + OIDC
+provider, optionally impersonates `GSM_WIF_SERVICE_ACCOUNT` (via the IAM
+`generateAccessToken` URL) for the final read, and the token is discarded
+when the credential goes out of scope. This restores *GCP-layer*
+per-operator attribution — GCP's audit log names the operator — mirroring
+the Vault `vault_client_for_operator` JIT contract (`auth/vault.py:198`): a
+fresh credential per operation, never cached across requests. Selection is
+per-read: WIF configured ⇒ operator path; unconfigured ⇒ the Phase-1
+SA-direct path, unchanged (no behaviour change for Phase-1 installs).
+
+The settings (`GSM_WIF_*`, #2231's chart keys map onto them):
+
+- `GSM_WIF_AUDIENCE` — the full WIF provider resource name google-auth
+  consumes, `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+  Non-empty ⇒ WIF enabled (the selection predicate).
+- `GSM_WIF_POOL_ID` / `GSM_WIF_PROVIDER_ID` — the operator-facing
+  `gsm.workloadIdentityFederation.{poolId,providerId}` chart keys. Checked
+  for consistency against the audience (a copy-paste mismatch fails the
+  read closed) and logged for non-secret attribution.
+- `GSM_WIF_SERVICE_ACCOUNT` — optional SA to impersonate; empty ⇒ no
+  impersonation.
+- `GSM_WIF_SUBJECT_TOKEN_TYPE` — STS subject-token type; defaults to
+  `urn:ietf:params:oauth:token-type:jwt` (Keycloak OIDC JWT).
+
+**GCP-side prerequisite.** The Workload Identity Pool + OIDC provider must
+be created out-of-band and configured to **trust the MEHO Keycloak
+issuer** (the provider's issuer URI = the Keycloak realm issuer, audience =
+the MEHO client). The impersonated SA (when set) must grant the pool
+principal `roles/iam.workloadIdentityUser`, and the SA (or the pool
+principal directly) must hold `roles/secretmanager.secretAccessor` on the
+secret. MEHO never creates key material — the federation is keyless.
+
 **Operator-JWT guard interaction.** The shared loader's empty-`raw_jwt`
 fail-closed guard (`_resolve_and_load`) still runs before dispatch, so a
-system-initiated call (`raw_jwt=""`) cannot resolve a `gsm:` ref either —
-identical to Vault today. Phase 1 deliberately keeps that guard rather than
-relaxing it for the deployment-identity backend; a future change that
-needs system-context GSM reads would move the guard into
-`VaultCredentialBackend`.
+system-initiated call (`raw_jwt=""` — health probe, scheduler) cannot
+resolve a `gsm:` ref: there is no operator JWT to exchange, so the WIF
+exchange is never reached and the call fails closed upstream. That guard is
+**load-bearing** for the WIF path; the backend also fails closed on an
+empty JWT as defence in depth. MEHO's own audit attribution is unchanged in
+both paths (the audit row carries the Keycloak `sub`).
 
 **Test seams.** The backend takes injectable `adc_loader` (replaces
-`google.auth.default`) and `client_factory` (replaces
-`SecretManagerServiceClient`) so the unit suite drives parse / decode /
-impersonation / error / no-secret-in-logs behaviour with a canned payload
-and no live GCP (`tests/test_connectors_gsm_creds.py`).
+`google.auth.default`), `client_factory` (replaces
+`SecretManagerServiceClient`), and `wif_credentials_factory` (replaces the
+real `identity_pool.Credentials` builder) so the unit suite drives parse /
+decode / impersonation / WIF-selection / STS-exchange / error /
+no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
+— no live GCP (`tests/test_connectors_gsm_creds.py`).
 
 ## Dependencies
 
@@ -282,9 +323,14 @@ and no live GCP (`tests/test_connectors_gsm_creds.py`).
   `SecretManagerServiceClient.access_secret_version(name=...)` →
   `response.payload.data` (bytes). Synchronous; wrapped in
   `asyncio.to_thread`.
-- **`google-auth`** (already a dep) — `google.auth.default()` for the ADC
+- **`google-auth`** (2.55.1 resolved) — `google.auth.default()` for the ADC
   source and `google.auth.impersonated_credentials.Credentials` for the
-  optional SA impersonation the `gsm` backend reuses from `GcloudConnector`.
+  optional SA-direct impersonation the `gsm` backend reuses from
+  `GcloudConnector`. The WIF path (#2232) uses
+  `google.auth.identity_pool.Credentials` (external-account) with a
+  duck-typed `subject_token_supplier` returning `operator.raw_jwt`,
+  `service_account_impersonation_url` for the optional target-SA
+  impersonation, and `token_url=https://sts.googleapis.com/v1/token`.
 
 ## Known issues
 

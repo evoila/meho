@@ -462,3 +462,77 @@ def test_gsm_impersonate_sa_reads_and_strips_env(
         assert get_settings().gsm_impersonate_sa == "reader@proj.iam.gserviceaccount.com"
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #2232 (Initiative #2227) — GSM_WIF_* Workload Identity Federation knobs
+# ---------------------------------------------------------------------------
+
+
+def test_gsm_wif_defaults_are_empty_or_oidc_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset GSM_WIF_* ⇒ empty audience/pool/provider/SA (SA-direct path) and
+    the OIDC-JWT subject-token type default."""
+    _base_env(monkeypatch)
+    for key in (
+        "GSM_WIF_AUDIENCE",
+        "GSM_WIF_POOL_ID",
+        "GSM_WIF_PROVIDER_ID",
+        "GSM_WIF_SERVICE_ACCOUNT",
+        "GSM_WIF_SUBJECT_TOKEN_TYPE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.gsm_wif_audience == ""
+        assert settings.gsm_wif_pool_id == ""
+        assert settings.gsm_wif_provider_id == ""
+        assert settings.gsm_wif_service_account == ""
+        assert settings.gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:jwt"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_wif_reads_and_strips_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set GSM_WIF_* values are read and surrounding whitespace stripped."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv(
+        "GSM_WIF_AUDIENCE",
+        "  //iam.googleapis.com/projects/123/locations/global/"
+        "workloadIdentityPools/meho-pool/providers/keycloak \n",
+    )
+    monkeypatch.setenv("GSM_WIF_POOL_ID", " meho-pool ")
+    monkeypatch.setenv("GSM_WIF_PROVIDER_ID", " keycloak ")
+    monkeypatch.setenv("GSM_WIF_SERVICE_ACCOUNT", " reader@proj.iam.gserviceaccount.com ")
+    monkeypatch.setenv("GSM_WIF_SUBJECT_TOKEN_TYPE", " urn:ietf:params:oauth:token-type:id_token ")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.gsm_wif_audience == (
+            "//iam.googleapis.com/projects/123/locations/global/"
+            "workloadIdentityPools/meho-pool/providers/keycloak"
+        )
+        assert settings.gsm_wif_pool_id == "meho-pool"
+        assert settings.gsm_wif_provider_id == "keycloak"
+        assert settings.gsm_wif_service_account == "reader@proj.iam.gserviceaccount.com"
+        assert settings.gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:id_token"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_wif_subject_token_type_blank_falls_back_to_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank GSM_WIF_SUBJECT_TOKEN_TYPE falls back to the OIDC-JWT type
+    rather than an empty (min_length=1 rejected) value."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("GSM_WIF_SUBJECT_TOKEN_TYPE", "   ")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:jwt"
+    finally:
+        get_settings.cache_clear()

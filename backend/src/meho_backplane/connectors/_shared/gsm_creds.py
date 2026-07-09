@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""GCP Secret Manager credential backend (SA-direct, #2230).
+"""GCP Secret Manager credential backend (SA-direct + WIF, #2230 / #2232).
 
 The second :class:`~meho_backplane.connectors._shared.credential_backend.CredentialBackend`
 after Vault — registered under kind ``"gsm"`` on the #2229 resolver seam so
@@ -24,11 +24,32 @@ service-account JSON key ever enters the flow, honouring the consumer
 org's ``constraints/iam.disableServiceAccountKeyCreation`` policy the same
 way the GCloud connector does: by never using key material at all.
 
-Per-operator GCP federation (STS token exchange, #2232) is **out of
-scope** here. MEHO's own audit attribution is unaffected — the audit row
+Per-operator GCP federation — Workload Identity Federation (#2232)
+=================================================================
+
+Phase 2 adds a **per-operator** read path alongside the SA-direct one.
+When Workload Identity Federation is configured (``GSM_WIF_AUDIENCE`` set),
+a ``gsm:`` read exchanges the calling operator's validated Keycloak JWT
+(``operator.raw_jwt``) at ``sts.googleapis.com`` for a short-lived
+federated token via google-auth ``identity_pool.Credentials``, optionally
+impersonates a target SA, then does the one ``secretmanager.versions.access``
+and discards the token. This restores *GCP-layer* per-operator attribution
+— GCP's own audit log names the operator, not MEHO's platform SA — mirroring
+the Vault ``vault_client_for_operator`` JIT contract (``auth/vault.py:198``):
+a fresh credential per operation, no caching across requests.
+
+Selection is per-read: WIF configured ⇒ the operator path; WIF unconfigured
+⇒ the Phase-1 SA-direct ADC path, unchanged (no behaviour change for
+Phase-1 installs). The shared loader's empty-``raw_jwt`` fail-closed guard
+(``vault_creds._resolve_and_load``) runs *before* dispatch, so a
+system-initiated call (``raw_jwt=""`` — health probe, scheduler) never
+reaches the WIF exchange: there is no operator JWT to exchange, so it fails
+closed upstream. That guard is load-bearing for the WIF path.
+
+MEHO's own audit attribution is unchanged in both paths — the audit row
 still carries the Keycloak ``sub`` (the policy/audit seam is untouched by
-this backend). What Phase 1 does not yet have is *GCP-layer* per-operator
-attribution: every GSM read is attributed to MEHO's SA, not the operator.
+this backend). Phase 1 alone lacks *GCP-layer* per-operator attribution;
+Phase 2's WIF path is what supplies it.
 
 Ref grammar and field selection
 ===============================
@@ -64,6 +85,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
@@ -94,6 +116,20 @@ _IMPERSONATION_LIFETIME = 3600
 
 #: Default version alias when the ref pins no explicit version.
 _LATEST_VERSION = "latest"
+
+#: The GCP Security Token Service endpoint the WIF path exchanges the
+#: operator JWT at (#2232). Pinned explicitly rather than deriving from
+#: google-auth's ``token_url`` default so the exchange target is auditable
+#: in this module and stable across google-auth versions.
+_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
+
+#: Template for the IAM Credentials ``generateAccessToken`` URL google-auth's
+#: external-account flow calls to impersonate the target SA after the STS
+#: exchange. ``projects/-`` lets IAM resolve the SA's project from its email.
+_IAM_IMPERSONATION_URL_TEMPLATE = (
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+    "{service_account}:generateAccessToken"
+)
 
 
 class GcpSecretManagerReadError(Exception):
@@ -213,23 +249,132 @@ def _decode_payload(
     return {field: decoded[field]}
 
 
+class _OperatorJwtSubjectTokenSupplier:
+    """Return the operator's Keycloak JWT as the WIF STS subject token.
+
+    Implements the google-auth
+    ``google.auth.identity_pool.SubjectTokenSupplier`` interface structurally
+    (google-auth duck-types the supplier — it only calls
+    :meth:`get_subject_token` — so no import of the abstract base is needed
+    and the google imports stay lazy). One supplier is built per read and
+    holds exactly that read's operator JWT, so the exchanged subject token is
+    always the calling operator's — never a cached or shared token. The
+    supplier itself does no caching, matching the JIT contract: identity-pool
+    credentials do not cache the subject token, and a fresh
+    ``identity_pool.Credentials`` is built per read.
+    """
+
+    def __init__(self, operator_jwt: str) -> None:
+        self._operator_jwt = operator_jwt
+
+    def get_subject_token(self, context: Any, request: Any) -> str:
+        """Return the operator JWT (the ``context`` / ``request`` are unused).
+
+        ``context`` (audience + subject-token type) and ``request`` (an HTTP
+        transport) are part of the google-auth supplier signature but not
+        needed here: the subject token is the already-validated bearer JWT the
+        operator presented, forwarded bit-for-bit like the Vault OIDC login.
+        """
+        return self._operator_jwt
+
+
+@dataclass(frozen=True)
+class _WifConfig:
+    """Resolved Workload Identity Federation settings for the operator path.
+
+    Built from ``Settings`` by :func:`_resolve_wif_config`. ``audience`` is
+    the full WIF provider resource name google-auth's ``identity_pool``
+    consumes; ``pool_id`` / ``provider_id`` are the chart-facing
+    ``gsm.workloadIdentityFederation.{poolId,providerId}`` keys, checked for
+    consistency against the audience. ``service_account`` is the optional SA
+    to impersonate for the final read; empty ⇒ no impersonation.
+    """
+
+    audience: str
+    pool_id: str
+    provider_id: str
+    service_account: str
+    subject_token_type: str
+
+
+def _resolve_wif_config() -> _WifConfig | None:
+    """Return the WIF config when configured, else ``None`` (SA-direct).
+
+    WIF is "configured" when ``gsm_wif_audience`` is non-empty — that is the
+    single value google-auth strictly needs (it encodes the pool + provider).
+    An install that leaves it blank cleanly uses the Phase-1 SA-direct path,
+    so a Phase-1 deployment sees no behaviour change.
+    """
+    settings = get_settings()
+    audience = settings.gsm_wif_audience.strip()
+    if not audience:
+        return None
+    return _WifConfig(
+        audience=audience,
+        pool_id=settings.gsm_wif_pool_id.strip(),
+        provider_id=settings.gsm_wif_provider_id.strip(),
+        service_account=settings.gsm_wif_service_account.strip(),
+        subject_token_type=settings.gsm_wif_subject_token_type.strip(),
+    )
+
+
+def _assert_wif_audience_consistent(wif_config: _WifConfig, target_name: str) -> None:
+    """Fail closed when the declared pool / provider disagree with the audience.
+
+    ``gsm_wif_audience`` is the value google-auth actually uses; ``pool_id`` /
+    ``provider_id`` are the operator-facing chart keys. When either is set it
+    must appear in the audience resource name at its exact segment — a
+    mismatch is a copy-paste misconfiguration that would silently federate
+    against the wrong pool, so it raises :class:`GcpSecretManagerReadError`
+    naming the target rather than proceeding. Both empty ⇒ no check (the
+    audience alone is authoritative).
+    """
+    audience = wif_config.audience
+    pool_marker = f"/workloadIdentityPools/{wif_config.pool_id}/providers/"
+    if wif_config.pool_id and pool_marker not in audience:
+        raise GcpSecretManagerReadError(
+            f"gsm WIF config for target {target_name!r} is inconsistent: "
+            f"GSM_WIF_POOL_ID={wif_config.pool_id!r} is not the pool named in "
+            "GSM_WIF_AUDIENCE; the audience and the declared pool must match"
+        )
+    if wif_config.provider_id and not audience.endswith(f"/providers/{wif_config.provider_id}"):
+        raise GcpSecretManagerReadError(
+            f"gsm WIF config for target {target_name!r} is inconsistent: "
+            f"GSM_WIF_PROVIDER_ID={wif_config.provider_id!r} is not the provider named "
+            "in GSM_WIF_AUDIENCE; the audience and the declared provider must match"
+        )
+
+
 class GcpSecretManagerBackend:
     """Resolve ``gsm:`` refs via GCP Secret Manager under SA-direct ADC.
 
     Registered under kind ``"gsm"``. Stateless apart from the injected test
     seams, so a single shared instance serves every read.
 
-    The two injection points keep the unit tests off live GCP:
+    Selection is per-read (#2232): when Workload Identity Federation is
+    configured (``Settings.gsm_wif_audience`` set), the read runs under the
+    **operator's** identity — the operator JWT is exchanged at the GCP STS
+    for a short-lived federated token; otherwise the Phase-1 SA-direct ADC
+    path runs unchanged.
+
+    The injection points keep the unit tests off live GCP:
 
     * ``adc_loader`` replaces ``google.auth.default`` (returns
       ``(credentials, project)``), so a test supplies a fake ADC source.
     * ``client_factory`` replaces ``SecretManagerServiceClient`` (called
       with ``credentials=``), so a test returns a stub whose
       ``access_secret_version`` yields a canned payload without any RPC.
+    * ``wif_credentials_factory`` replaces the real
+      ``identity_pool.Credentials`` builder on the WIF path, so a test can
+      assert the built credentials reach the client and that a fresh one is
+      minted per read without a live STS exchange. ``None`` ⇒ the real
+      builder (:meth:`_build_wif_credentials`).
 
-    ``impersonate_sa`` overrides the settings-derived impersonation SA
-    (``None`` ⇒ read ``Settings.gsm_impersonate_sa`` at call time, matching
-    how ``vault_creds`` reads ``credential_backend`` per-call).
+    ``impersonate_sa`` overrides the settings-derived SA-direct impersonation
+    SA (``None`` ⇒ read ``Settings.gsm_impersonate_sa`` at call time, matching
+    how ``vault_creds`` reads ``credential_backend`` per-call). It applies to
+    the SA-direct path only; the WIF path's SA impersonation is driven by
+    ``Settings.gsm_wif_service_account``.
     """
 
     def __init__(
@@ -238,10 +383,12 @@ class GcpSecretManagerBackend:
         adc_loader: Callable[..., tuple[Any, Any]] | None = None,
         client_factory: Callable[..., Any] | None = None,
         impersonate_sa: str | None = None,
+        wif_credentials_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._adc_loader = adc_loader
         self._client_factory = client_factory
         self._impersonate_sa = impersonate_sa
+        self._wif_credentials_factory = wif_credentials_factory
 
     async def load_secret_data(
         self,
@@ -253,19 +400,31 @@ class GcpSecretManagerBackend:
     ) -> dict[str, object]:
         """Read *secret_ref* from GCP Secret Manager and return its field dict.
 
-        ``operator`` is accepted for the
-        :class:`~meho_backplane.connectors._shared.credential_backend.CredentialBackend`
-        contract but not forwarded to GCP — Phase 1 reads under MEHO's own
-        ADC identity, not the operator's (per-operator GCP federation is
-        #2232). ``mount`` is a Vault-KV concept with no GSM analogue and is
-        ignored. The synchronous ``access_secret_version`` RPC runs off the
+        When Workload Identity Federation is configured (#2232), the read runs
+        under *operator*'s identity: ``operator.raw_jwt`` is exchanged at the
+        GCP STS for a short-lived federated token so GCP audits the read to
+        the operator. Otherwise Phase 1's SA-direct path reads under MEHO's
+        own ADC identity and ``operator`` is unused. The shared loader's
+        empty-``raw_jwt`` guard runs before dispatch, so an operator reaching
+        the WIF exchange always carries a JWT to exchange.
+
+        ``mount`` is a Vault-KV concept with no GSM analogue and is ignored.
+        The synchronous ``access_secret_version`` RPC (and the blocking
+        google-auth credential refresh / STS exchange it drives) runs off the
         event loop via ``asyncio.to_thread``, matching the hvac precedent in
         ``vault_creds``.
         """
         project, secret, version, field = _parse_gsm_ref(secret_ref, target_name=target_name)
+        wif_config = _resolve_wif_config()
 
         payload_bytes, resolved_name = await asyncio.to_thread(
-            self._access_sync, project, secret, version, target_name
+            self._access_sync,
+            project,
+            secret,
+            version,
+            target_name,
+            operator.raw_jwt,
+            wif_config,
         )
 
         secret_data = _decode_payload(
@@ -277,7 +436,8 @@ class GcpSecretManagerBackend:
         )
 
         # Non-secret attribution only: target / project / secret / the
-        # resolved version name / the requested field name. Never a value.
+        # resolved version name / the requested field name / which auth path
+        # ran (and, on WIF, the pool + provider). Never a value, never a token.
         _log.info(
             "gsm_secret_accessed",
             target=target_name,
@@ -285,6 +445,9 @@ class GcpSecretManagerBackend:
             secret_name=secret,
             version=resolved_name or version,
             field=field,
+            auth_path="wif" if wif_config is not None else "sa_direct",
+            wif_pool=wif_config.pool_id if wif_config is not None else None,
+            wif_provider=wif_config.provider_id if wif_config is not None else None,
         )
         return secret_data
 
@@ -293,21 +456,33 @@ class GcpSecretManagerBackend:
     # ------------------------------------------------------------------
 
     def _access_sync(
-        self, project: str, secret: str, version: str, target_name: str
+        self,
+        project: str,
+        secret: str,
+        version: str,
+        target_name: str,
+        operator_jwt: str,
+        wif_config: _WifConfig | None,
     ) -> tuple[bytes, str]:
         """Build credentials, access the secret version, return ``(bytes, name)``.
 
         Runs in a thread (``asyncio.to_thread``) because the google-cloud
-        client and ``google.auth`` credential refresh both perform blocking
-        transport under the hood. Access-denied, not-found, and transport
-        failures are re-raised as :class:`GcpSecretManagerReadError` with an
-        actionable message naming project / secret (AC #5) — not a bare
-        ``google.api_core`` exception.
+        client and ``google.auth`` credential refresh — including the WIF STS
+        exchange — all perform blocking transport under the hood. Credential
+        selection is per-call: *wif_config* present ⇒ the operator-context WIF
+        path (a fresh federated credential built from *operator_jwt*, never
+        cached across reads); ``None`` ⇒ the Phase-1 SA-direct ADC path.
+        Access-denied, not-found, and transport failures are re-raised as
+        :class:`GcpSecretManagerReadError` with an actionable message naming
+        project / secret (AC #5) — not a bare ``google.api_core`` exception.
         """
         import google.api_core.exceptions as gcp_exceptions
         from google.cloud import secretmanager
 
-        credentials = self._build_credentials(target_name)
+        if wif_config is not None:
+            credentials = self._build_wif_credentials(operator_jwt, target_name, wif_config)
+        else:
+            credentials = self._build_credentials(target_name)
         factory = self._client_factory or secretmanager.SecretManagerServiceClient
         client = factory(credentials=credentials)
 
@@ -380,6 +555,70 @@ class GcpSecretManagerBackend:
             target_scopes=[_GCP_CLOUD_PLATFORM_SCOPE],
             lifetime=_IMPERSONATION_LIFETIME,
         )
+
+    def _build_wif_credentials(
+        self, operator_jwt: str, target_name: str, wif_config: _WifConfig
+    ) -> Any:
+        """Build a per-operator WIF (external-account) credential (#2232).
+
+        Constructs ``google.auth.identity_pool.Credentials`` that exchange
+        *operator_jwt* at the GCP STS (``sts.googleapis.com``) for a
+        short-lived federated token against the configured Workload Identity
+        Pool + OIDC provider, optionally impersonating
+        ``wif_config.service_account`` for the final read. A **fresh**
+        credential is built on every call — never stored on the instance — so
+        the operator-scoped token is minted per operation and discarded when
+        the credential goes out of scope, matching the Vault JIT contract.
+
+        Fails closed with :class:`GcpSecretManagerReadError` when the operator
+        JWT is empty (defence in depth behind the shared loader's pre-dispatch
+        guard), when the declared pool / provider disagree with the audience
+        (a copy-paste misconfiguration), or when google-auth rejects the
+        external-account config — never a bare ``google.auth`` exception.
+        """
+        if not operator_jwt:
+            raise GcpSecretManagerReadError(
+                f"WIF operator-context read for target {target_name!r} has no operator "
+                "JWT to exchange; a system-initiated call cannot federate to GCP "
+                "(the empty-raw_jwt guard should have failed this upstream)"
+            )
+        _assert_wif_audience_consistent(wif_config, target_name)
+
+        service_account = wif_config.service_account
+        impersonation_url = (
+            _IAM_IMPERSONATION_URL_TEMPLATE.format(service_account=service_account)
+            if service_account
+            else None
+        )
+
+        if self._wif_credentials_factory is not None:
+            return self._wif_credentials_factory(
+                operator_jwt=operator_jwt,
+                wif_config=wif_config,
+                service_account_impersonation_url=impersonation_url,
+                target_name=target_name,
+            )
+
+        from google.auth import exceptions as auth_exceptions
+        from google.auth import identity_pool
+
+        supplier = _OperatorJwtSubjectTokenSupplier(operator_jwt)
+        try:
+            return identity_pool.Credentials(  # type: ignore[no-untyped-call]
+                audience=wif_config.audience,
+                subject_token_type=wif_config.subject_token_type,
+                token_url=_STS_TOKEN_URL,
+                subject_token_supplier=supplier,
+                service_account_impersonation_url=impersonation_url,
+                scopes=[_GCP_CLOUD_PLATFORM_SCOPE],
+            )
+        except (ValueError, auth_exceptions.GoogleAuthError) as exc:
+            raise GcpSecretManagerReadError(
+                f"gsm WIF config for target {target_name!r} is invalid: google-auth "
+                f"rejected the external-account credential ({type(exc).__name__}); "
+                "check GSM_WIF_AUDIENCE, GSM_WIF_SUBJECT_TOKEN_TYPE, and "
+                "GSM_WIF_SERVICE_ACCOUNT"
+            ) from exc
 
     def _resolve_impersonate_sa(self) -> str:
         """The impersonation SA — the constructor override or the setting.

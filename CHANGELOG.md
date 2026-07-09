@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — GCP Secret Manager backend Phase 2 (per-operator Workload Identity Federation)
+
+- The `gsm` credential backend now supports a **per-operator** read path via
+  Keycloak→GCP-STS Workload Identity Federation. When `GSM_WIF_AUDIENCE` is
+  set, a `gsm:` read exchanges the operator's Keycloak JWT
+  (`operator.raw_jwt`) at `sts.googleapis.com` for a short-lived federated
+  token (google-auth `identity_pool.Credentials`), optionally impersonates
+  `GSM_WIF_SERVICE_ACCOUNT`, does the one `secretmanager.versions.access`,
+  and discards the token — so GCP's own audit log attributes the read to the
+  operator, mirroring Vault's per-operator JIT contract. A fresh credential
+  is minted per read (never cached). Installs that leave `GSM_WIF_AUDIENCE`
+  unset keep the Phase-1 SA-direct path unchanged. The GCP-side Workload
+  Identity Pool + OIDC provider must trust the MEHO Keycloak issuer; no
+  service-account key material is ever used. New `GSM_WIF_AUDIENCE` /
+  `GSM_WIF_POOL_ID` / `GSM_WIF_PROVIDER_ID` / `GSM_WIF_SERVICE_ACCOUNT` /
+  `GSM_WIF_SUBJECT_TOKEN_TYPE` settings; the Helm surface lands in #2231.
+  (#2232)
+
 ### Added — GCP Secret Manager credential backend (Phase 1, SA-direct)
 
 - Resolve a target's `gsm:<project>/<secret>[#field]` `secret_ref` through

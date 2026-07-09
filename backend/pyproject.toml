@@ -314,6 +314,15 @@ ignore_missing_imports = true
 module = ["asyncssh.*"]
 ignore_missing_imports = true
 
+# asyncpg ships no type stubs / ``py.typed`` marker. The postgres
+# connector (#2236) is the first to import it directly in the typed
+# tree — the app DB layer reaches asyncpg only via SQLAlchemy, so the
+# untyped surface never surfaced before. Drop this override if upstream
+# later ships stubs.
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
 # pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.
 # Used by :mod:`meho_backplane.ui.routes.memory.render` for the
 # server-side Markdown code-block syntax highlighter; the call sites

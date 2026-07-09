@@ -25389,6 +25389,7 @@
               "loki",
               "nsx",
               "pfsense",
+              "prometheus",
               "proxmox",
               "sddc",
               "vault",

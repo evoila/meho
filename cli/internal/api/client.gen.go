@@ -335,6 +335,7 @@ const (
 	Loki       TargetCreateProduct = "loki"
 	Nsx        TargetCreateProduct = "nsx"
 	Pfsense    TargetCreateProduct = "pfsense"
+	Postgres   TargetCreateProduct = "postgres"
 	Prometheus TargetCreateProduct = "prometheus"
 	Sddc       TargetCreateProduct = "sddc"
 	Vault      TargetCreateProduct = "vault"

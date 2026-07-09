@@ -625,6 +625,32 @@ class VmwareRestConnector(HttpConnector):
             params=params,
         )
 
+    async def host_usage(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.usage`` -- per-host CPU/memory load + hardware + maintenance.
+
+        The first vmware **typed** op (``source_kind="typed"``): a bound
+        method the dispatcher binds to this connector instance and invokes
+        with ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        per-host ``summary.quickStats`` / ``summary.hardware`` /
+        ``runtime.inMaintenanceMode`` directly on the connector session via
+        PropertyCollector -- no ``dispatch_child``, no ingested descriptor
+        -- so it works on a fresh boot with zero catalog ingest. The plain
+        REST host summary reports only liveness, not load.
+
+        Delegates to :func:`~meho_backplane.connectors.vmware_rest.typed_ops.host_usage_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"hosts": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops import host_usage_impl
+
+        return await host_usage_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

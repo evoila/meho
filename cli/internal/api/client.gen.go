@@ -335,6 +335,7 @@ const (
 	Loki     TargetCreateProduct = "loki"
 	Nsx      TargetCreateProduct = "nsx"
 	Pfsense  TargetCreateProduct = "pfsense"
+	Proxmox  TargetCreateProduct = "proxmox"
 	Sddc     TargetCreateProduct = "sddc"
 	Vault    TargetCreateProduct = "vault"
 	Vcfa     TargetCreateProduct = "vcfa"

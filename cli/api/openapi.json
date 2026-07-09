@@ -25389,6 +25389,7 @@
               "loki",
               "nsx",
               "pfsense",
+              "proxmox",
               "sddc",
               "vault",
               "vcfa",

@@ -297,7 +297,7 @@ jobs:
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
         # lock change still reuse the prior model blob.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ github.workspace }}/.fastembed-cache
           key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
@@ -573,7 +573,7 @@ jobs:
         # Same shared model cache the required lane uses — the unit suite this
         # job re-runs instantiates the embedding model, so it must be warm here
         # too. Keyed identically so the two jobs share one cache entry.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ github.workspace }}/.fastembed-cache
           key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}

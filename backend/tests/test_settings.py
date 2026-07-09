@@ -380,3 +380,54 @@ def test_vault_tenant_scope_prefix_rejects_malformed_templates(raw: str) -> None
             vault_kv_tenant_scope_prefix=raw,
         )
     assert "VAULT_KV_TENANT_SCOPE_PREFIX" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# #2229 (Initiative #2227) — CREDENTIAL_BACKEND env knob
+# ---------------------------------------------------------------------------
+
+
+def test_credential_backend_defaults_to_vault_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``CREDENTIAL_BACKEND`` → ``vault`` (zero migration for existing installs)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("CREDENTIAL_BACKEND", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "vault"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_credential_backend_reads_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``CREDENTIAL_BACKEND`` names the schemeless default backend."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "gsm"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n"])
+def test_credential_backend_blank_env_falls_back_to_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """A blank / whitespace-only value falls back to ``vault``, never an empty kind.
+
+    A blank chart value must not yield an unknown ("") backend kind — the
+    ``min_length=1`` field would reject it and every credential read would
+    fail. The env loader coerces blank to the ``vault`` default.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("CREDENTIAL_BACKEND", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "vault"
+    finally:
+        get_settings.cache_clear()

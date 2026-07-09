@@ -41,6 +41,9 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultRoleDeniedError
+from meho_backplane.connectors._shared.credential_backend import (
+    UnknownCredentialBackendError,
+)
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_BASIC_CREDENTIAL_FIELDS,
     DEFAULT_KV_MOUNT,
@@ -445,3 +448,70 @@ async def test_no_secret_value_in_log_events(
     serialised = repr(captured)
     assert _CANARY_PASSWORD not in serialised
     assert _CANARY_USERNAME not in serialised
+
+
+# ---------------------------------------------------------------------------
+# Scheme dispatch (#2229) — vault: / schemeless are today's behaviour;
+# an unknown scheme fails loudly instead of a silent Vault attempt.
+# ---------------------------------------------------------------------------
+
+
+async def test_explicit_vault_scheme_resolves_identically_to_schemeless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``vault:targets/<id>`` reads the same KV-v2 path as the schemeless form.
+
+    The scheme is stripped before the read, so the Vault call addresses
+    the bare logical path — byte-for-byte the schemeless behaviour.
+    """
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+
+    creds = await load_basic_credentials(
+        _Target(secret_ref="vault:targets/vc-lab-01"), _make_operator("op.jwt")
+    )
+
+    assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    # The scheme is stripped: the read addresses the logical path, not
+    # ``vault:targets/vc-lab-01``.
+    assert fake.secrets.kv.v2.read_calls[-1] == {
+        "path": "targets/vc-lab-01",
+        "mount_point": DEFAULT_KV_MOUNT,
+    }
+
+
+async def test_unknown_scheme_raises_no_backend_error_without_touching_vault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``gsm:`` ref (backend lands in #2230) fails loudly, never a silent Vault read."""
+    fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+
+    with pytest.raises(UnknownCredentialBackendError) as exc:
+        await load_basic_credentials(
+            _Target(secret_ref="gsm:my-project/vc-lab-01"), _make_operator()
+        )
+
+    msg = str(exc.value)
+    assert "no credential backend registered for kind 'gsm'" in msg
+    # Vault was never reached — dispatch failed before any login / read.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+async def test_explicit_vault_scheme_still_enforces_api_path_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The KV-v2 API-path guard stays on the vault-kind path (AC #4).
+
+    ``vault:secret/data/foo`` strips to ``secret/data/foo`` — an
+    API-path-shaped ref — and is rejected by the Vault backend's guard.
+    """
+    fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+
+    with pytest.raises(VaultCredentialsReadError) as exc:
+        await load_basic_credentials(_Target(secret_ref="vault:secret/data/foo"), _make_operator())
+
+    assert "API-path-shaped secret_ref" in str(exc.value)
+    assert fake.secrets.kv.v2.read_calls == []

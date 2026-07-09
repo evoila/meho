@@ -899,6 +899,16 @@ class Settings(BaseModel):
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
     vault_scheduler_token: str = Field(default="", repr=False)
+    # #2229 (Initiative #2227) — names the credential backend a schemeless
+    # target ``secret_ref`` resolves through. ``vault`` (the default) keeps
+    # every existing install on today's Vault KV-v2 read with no config
+    # change: a schemeless ``targets/<id>`` ref and an explicit
+    # ``vault:targets/<id>`` ref both dispatch to the Vault backend. A
+    # scheme-prefixed ref (``gsm:<project>/<secret>`` once #2230 registers
+    # the GSM backend) overrides this per-target. Setting it is a no-op for
+    # Vault installs. Chart wiring (``config.credentialBackend`` →
+    # ``CREDENTIAL_BACKEND``) lands with the GSM Helm surface in #2231.
+    credential_backend: str = Field(default="vault", min_length=1)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1445,6 +1455,10 @@ def get_settings() -> Settings:
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
         vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
+        # Empty / whitespace-only ``CREDENTIAL_BACKEND`` falls back to the
+        # ``vault`` default so a blank chart value never yields an unknown
+        # ("") backend kind (``min_length=1`` on the field would reject it).
+        credential_backend=(os.environ.get("CREDENTIAL_BACKEND", "").strip() or "vault"),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

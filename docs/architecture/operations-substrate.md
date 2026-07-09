@@ -313,6 +313,12 @@ async def vmware_vm_create_composite(
 
 Spelling the contract as a `typing.Protocol` rather than a raw `Callable` alias gives mypy + Pyright the keyword-argument shape (`connector_id` / `op_id` / `params` / `target`) so handler call sites are structurally type-checked. The Protocol → factory split also keeps the import graph one-directional (composite handlers depend on the contract; the dispatcher depends on the handlers).
 
+### Direct-session sub-calls (`connector` seam, #2251)
+
+`dispatch_child` is not the only sub-call capability. A composite handler can instead (or additionally) declare a `connector` parameter; `dispatch_composite` then forwards the connector instance the dispatcher already resolved for the composite's `target` (via `_resolve_connector_instance`). A handler that opts in issues sub-calls through the connector's own session (`connector._get_json` / `connector._post_json` + `connector.mount_op_path`) with **no** `endpoint_descriptor` lookup — the "two-world" posture (Goal #2247) that keeps a code-shipped op's dispatch path off a mutable catalog row.
+
+Both seams are forwarded **only when the handler declares the matching parameter**, so the `dispatch_child`-only handlers above are unchanged, and the registration guard (`validate_composite_handler_signature`) accepts a handler declaring either or both. Taking the direct path deliberately drops the per-sub-op audit row, param validation, recursion bound, and policy/broadcast that `dispatch_child` provides; those trade-offs — and why per-sub-op policy stays load-bearing for *write* composites — are documented on the "Why `dispatch_child` not direct httpx" note in [`connectors/vmware_rest/composites/_read.py`](../../backend/src/meho_backplane/connectors/vmware_rest/composites/_read.py). No shipped composite uses the direct seam yet; the incremental migrations are Initiative #2248/#2249.
+
 ### `parent_audit_id` semantics
 
 The composite branch builds the `dispatch_child` callable via [`get_dispatch_child(...)`](../../backend/src/meho_backplane/operations/composite.py), passing the parent's `audit_id`. The factory closes over `parent_audit_id` and binds it on `parent_audit_id_var` for the duration of each child dispatch. The child's audit row reads the contextvar via `parent_audit_id_var.get()` and writes the UUID to its `audit_log.parent_audit_id` column.

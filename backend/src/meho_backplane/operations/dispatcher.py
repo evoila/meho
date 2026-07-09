@@ -555,6 +555,11 @@ async def _run_source_kind_branch(
             target=target,
             params=params,
             dispatch_child=dispatch_child,
+            # Forward the instance the resolver already built for this
+            # composite's target (#2251). ``dispatch_composite`` hands it
+            # to the handler only when the handler declares a ``connector``
+            # parameter, so ``dispatch_child``-only handlers are untouched.
+            connector_instance=connector_instance,
         )
     # The DB CHECK constraint on source_kind prevents this in practice;
     # the explicit raise keeps the dispatcher's error contract honest

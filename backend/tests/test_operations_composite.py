@@ -194,9 +194,64 @@ class _NoOpVaultConnector(Connector):
         raise NotImplementedError
 
 
+#: Records ``(path, kwargs)`` for every ``_get_json`` the direct-session
+#: composite issues, so the test can assert the sub-call hit the
+#: connector's own session rather than the catalog dispatch path.
+_direct_session_calls: list[tuple[str, dict[str, Any]]] = []
+
+
+class _DirectSessionConnector(Connector):
+    """Resolver-satisfying connector exposing a stubbed session method.
+
+    Stands in for a real ``HttpConnector`` subclass (e.g.
+    ``VmwareRestConnector``) whose ``_get_json`` a direct-session
+    composite calls instead of routing sub-ops through ``dispatch_child``
+    (#2251). The stub records each call and returns a canned payload so
+    the test can assert the sub-call fired without any HTTP transport.
+    """
+
+    product = "directsvc"
+    version = "1.x"
+    impl_id = "directsvc"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+    async def _get_json(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        _direct_session_calls.append((path, kwargs))
+        return {"path": path, "rows": [{"id": 1}]}
+
+
 # ---------------------------------------------------------------------------
 # Module-level handlers used as test fixtures
 # ---------------------------------------------------------------------------
+
+
+async def _direct_session_composite(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: _DirectSessionConnector,
+) -> dict[str, Any]:
+    """Composite that reaches its sub-op through the connector session.
+
+    Declares ``connector`` (not ``dispatch_child``), so the dispatcher
+    forwards the resolved connector instance and the sub-call runs
+    through ``connector._get_json`` with no descriptor lookup (#2251).
+    """
+    payload = await connector._get_json(f"/inventory/{params['kind']}")
+    return {"rows": payload["rows"]}
 
 
 async def _child_handler(
@@ -611,6 +666,90 @@ async def test_dispatch_composite_two_children_produces_audit_tree(
     assert tree[parent.id].parent_audit_id is None
     for child in child_rows:
         assert tree[child.id].parent_audit_id == parent.id
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_direct_session_bypasses_descriptor_lookup(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``connector``-declaring composite calls the session directly (#2251).
+
+    The handler issues its sub-call through ``connector._get_json`` with
+    no ``dispatch_child``; the dispatcher forwards the resolved connector
+    instance and no *second* ``lookup_descriptor`` (the catalog round-trip
+    a ``dispatch_child`` sub-op would trigger) occurs.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+
+    _direct_session_calls.clear()
+
+    register_connector_v2(
+        product="directsvc",
+        version="",
+        impl_id="",
+        cls=_DirectSessionConnector,
+    )
+    session.add(
+        EndpointDescriptor(
+            id=uuid.uuid4(),
+            tenant_id=None,
+            product="directsvc",
+            version="1.x",
+            impl_id="directsvc",
+            op_id="directsvc.composite.inventory",
+            source_kind="composite",
+            method=None,
+            path=None,
+            handler_ref="tests.test_operations_composite._direct_session_composite",
+            summary="Direct-session composite.",
+            description="Composite that dispatches via the connector session.",
+            tags=[],
+            parameter_schema={"type": "object"},
+            response_schema=None,
+            llm_instructions=None,
+            safety_level="safe",
+            requires_approval=False,
+            is_enabled=True,
+            embedding=stub_embedding_service.encode_one.return_value,
+            custom_description=None,
+            custom_notes=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    # Count descriptor lookups: the top-level composite op resolves one;
+    # a direct-session sub-call must resolve none (that's the whole point).
+    real_lookup = dispatcher_module.lookup_descriptor
+    lookup_calls = {"n": 0}
+
+    async def _counting_lookup(**kwargs: Any) -> Any:
+        lookup_calls["n"] += 1
+        return await real_lookup(**kwargs)
+
+    monkeypatch.setattr(dispatcher_module, "lookup_descriptor", _counting_lookup)
+
+    operator = _make_operator()
+    target = _FakeTarget(product="directsvc")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="directsvc-1.x",
+        op_id="directsvc.composite.inventory",
+        target=target,
+        params={"kind": "hosts"},
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result == {"rows": [{"id": 1}]}
+    # The sub-call hit the connector's stubbed session exactly once.
+    assert _direct_session_calls == [("/inventory/hosts", {})]
+    # Only the top-level op resolved a descriptor -- the sub-call did not.
+    assert lookup_calls["n"] == 1
 
 
 @pytest.mark.asyncio

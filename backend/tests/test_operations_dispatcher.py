@@ -916,6 +916,42 @@ async def test_dispatch_module_level_handler_no_target_still_dispatches(
     assert result.result["target_is_none"] is True
 
 
+def test_handler_requires_target_true_for_connector_declaring_composite() -> None:
+    """A module-level composite declaring ``connector`` requires a target (#2255).
+
+    The direct-session substrate (#2251) resolves the connector instance
+    *from* the target and forwards it; dispatching with ``target=None``
+    would leave ``connector=None`` and crash the handler on its first
+    session call. The guard surfaces ``target_required`` instead -- the
+    carry-forward from PR #2261's review for the I-B migrations.
+    """
+    from meho_backplane.operations.dispatcher import _handler_requires_target
+
+    assert (
+        _handler_requires_target(
+            "tests.fixtures.composites.handlers.composite_connector_only_handler"
+        )
+        is True
+    )
+
+
+def test_handler_requires_target_false_for_dispatch_child_only_composite() -> None:
+    """A module-level ``dispatch_child``-only composite still needs no target.
+
+    Regression guard: extending the check to ``connector``-declaring
+    handlers must not sweep in the existing ``dispatch_child``-only
+    handlers, which keep dispatching with ``connector_instance=None``.
+    """
+    from meho_backplane.operations.dispatcher import _handler_requires_target
+
+    assert (
+        _handler_requires_target(
+            "tests.fixtures.composites.handlers.composite_dispatch_child_handler"
+        )
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
     stub_embedding_service: AsyncMock,

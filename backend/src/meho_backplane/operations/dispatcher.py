@@ -356,15 +356,25 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 
 
 def _handler_requires_target(handler_ref: str) -> bool:
-    """True when *handler_ref* names a connector-bound (self-first) handler.
+    """True when *handler_ref* reaches its connector *through* the target.
 
     Keys the no-target guard on **handler shape**, not just
-    ``source_kind`` — a typed/composite handler whose first parameter is
-    ``self`` is a connector method that only binds to its instance
-    *through* a resolved target, so dispatching it with ``target=None``
-    is a usage error (G0.20-T6 #1506). A module-level handler (no
-    ``self``) genuinely needs no target and must keep dispatching with
-    ``connector_instance=None``.
+    ``source_kind``. Two shapes require a target:
+
+    * A typed/composite handler whose first parameter is ``self`` is a
+      connector method that only binds to its instance *through* a
+      resolved target, so dispatching it with ``target=None`` is a usage
+      error (G0.20-T6 #1506).
+    * A module-level composite handler that declares a ``connector``
+      parameter opts into the direct-session substrate (#2251): the
+      dispatcher forwards the connector instance it resolved from the
+      target, so ``target=None`` leaves ``connector=None`` and the
+      handler crashes on its first session call. Surfacing it as
+      ``target_required`` here fails cleanly instead (the carry-forward
+      guard for the I-B direct-session migrations, #2255 / #2253).
+
+    A module-level handler that declares neither shape genuinely needs no
+    target and must keep dispatching with ``connector_instance=None``.
 
     Mirrors the first-parameter check :func:`dispatch_typed` uses for its
     self-guard so the two stay in agreement on what "unbound" means.
@@ -379,7 +389,9 @@ def _handler_requires_target(handler_ref: str) -> bool:
     except (ImportError, TypeError):
         return False
     param_names = list(inspect.signature(handler).parameters.keys())
-    return bool(param_names) and param_names[0] == "self"
+    if param_names and param_names[0] == "self":
+        return True
+    return "connector" in param_names
 
 
 async def _resolve_connector_instance(

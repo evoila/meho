@@ -64,8 +64,6 @@ from meho_backplane.operations._audit import (
     step_id_var,
 )
 from meho_backplane.operations.composite import (
-    CompositeL2DependencyDisabled,
-    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
 )
@@ -97,8 +95,6 @@ from meho_backplane.operations.typed_register import (
 
 __all__ = [
     "AgentRunAuditMeta",
-    "CompositeL2DependencyDisabled",
-    "CompositeL2DependencyMissing",
     "CompositeOpHandler",
     "CompositeRecursionLimitExceeded",
     "DispatchChild",

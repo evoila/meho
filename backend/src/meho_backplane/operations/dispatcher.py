@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: file-size — pre-existing dispatcher debt (>1200 lines on
-# main before #1601, which adds only an import + a structured-exception catch
-# branch); a split into per-phase modules is its own refactor task, out of
-# scope for the composite_l2_disabled classification fix.
+# code-quality-allow: file-size — pre-existing dispatcher debt (>1200 lines);
+# a split into per-phase modules is its own refactor task, out of scope here.
 
 """``dispatch()`` -- the single entry point every operation flows through.
 
@@ -248,8 +246,6 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     result_ambiguous_connector,
     result_awaiting_approval,
-    result_composite_l2_disabled,
-    result_composite_l2_missing,
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
@@ -288,8 +284,6 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
-    CompositeL2DependencyDisabled,
-    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
     get_dispatch_child,
@@ -636,9 +630,9 @@ async def _execute_and_audit(
     Wraps the dispatch's success path (steps 6-9) so the main
     :func:`dispatch` body stays a flat sequence of phase calls.
     Failures inside the branch land as ``handler_unreachable`` /
-    ``composite_l2_missing`` / ``connector_error`` :class:`OperationResult`
-    shapes; the audit row still gets written before the return so the
-    operator-visible record is consistent with the dispatcher's reply.
+    ``connector_error`` :class:`OperationResult` shapes; the audit row
+    still gets written before the return so the operator-visible record
+    is consistent with the dispatcher's reply.
 
     G11.4-T2 (#1071) inserts the connector-boundary redaction
     middleware between the handler's raw return and the JSONFlux
@@ -781,12 +775,6 @@ async def _run_branch_with_error_handling(
     Both paths write the audit row before returning so the operator-
     visible record is consistent with the structured failure.
 
-    G0.14-T10 (#1151) adds a structured ``composite_l2_missing`` catch
-    ahead of the generic ``except Exception`` so the vmware composite
-    pre-flight signal (the catalog-command remediation step) survives
-    the audit + reduce pipeline rather than collapsing into the
-    opaque ``connector_error`` envelope.
-
     G0.23-T1 (#1627) adds the symmetric ``connector_unsupported``
     catch for :exc:`NotImplementedError` -- the deliberate "this
     connector doesn't do that" signal (unsupported
@@ -860,53 +848,6 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
         return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
-    except CompositeL2DependencyDisabled as l2_disabled_exc:
-        # #1601: pre-flight found L2 sub-ops present in the catalog but
-        # disabled. Distinct from ``composite_l2_missing`` below -- the
-        # catalog is already ingested, so the remediation is to re-enable
-        # the op (``edit-op --enable``), not to re-ingest. Structured
-        # ``composite_l2_disabled`` per
-        # ``docs/codebase/error-message-shape.md``; sits ahead of the
-        # generic ``except Exception`` so the structured shape wins. The
-        # disabled / missing catches are disjoint (the pre-flight raises
-        # at most one), so their order relative to each other is moot.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_composite_l2_disabled(
-            op_id,
-            l2_disabled_exc.disabled_op_ids,
-            l2_disabled_exc.connector_id,
-            duration_ms,
-        )
-    except CompositeL2DependencyMissing as l2_exc:
-        # G0.14-T10 (#1151): pre-flight detected missing L2 sub-ops.
-        # Structured ``composite_l2_missing`` per
-        # ``docs/codebase/error-message-shape.md`` rather than the
-        # generic ``connector_error`` below. The catch sits ahead of
-        # the generic ``except Exception`` so the structured shape wins.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_composite_l2_missing(
-            op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, duration_ms
-        )
     except NotImplementedError as nie_exc:
         # G0.23-T1 (#1627): a connector raising NotImplementedError is a
         # deliberate "I don't do this" -- VmwareRestConnector.auth_headers

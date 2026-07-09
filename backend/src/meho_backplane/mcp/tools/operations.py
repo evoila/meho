@@ -305,10 +305,7 @@ register_mcp_tool(
             "exclude relevant hits. Returns the top N operations ranked "
             "by combined lexical + semantic match. Inspect each hit's "
             "`safety_level` and `requires_approval` before calling "
-            "`call_operation` on it; if a hit is `unbacked=true` (a "
-            "composite whose L2 sub-ops aren't ingested), run its "
-            "`next_step.verb` first — dispatching it as-is fails with "
-            "`composite_l2_missing`. Arguments: `connector_id` (required), "
+            "`call_operation` on it. Arguments: `connector_id` (required), "
             "`query` (required, free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
             "`connector_id` is `<impl_id>-<version>` (NOT the bare "
@@ -374,31 +371,12 @@ register_mcp_tool(
                             "fused_score": {"type": "number"},
                             "bm25_score": {"type": ["number", "null"]},
                             "cosine_score": {"type": ["number", "null"]},
-                            # G0.25-T6 (#1757): a composite that is enabled
-                            # but whose L2 sub-ops aren't ingested yet is
-                            # flagged ``unbacked=true`` with the catalog-
-                            # ingest ``next_step`` so an agent self-corrects
-                            # to the ingest verb before dispatching into a
-                            # ``composite_l2_missing`` dead end. Both stay
-                            # falsy for ordinary ops and fully-backed
-                            # composites.
-                            "unbacked": {"type": "boolean"},
-                            "next_step": {
-                                "type": ["object", "null"],
-                                "properties": {
-                                    "verb": {"type": "string"},
-                                    "rationale": {"type": "string"},
-                                },
-                                "required": ["verb", "rationale"],
-                                "additionalProperties": False,
-                            },
                         },
                         "required": [
                             "op_id",
                             "safety_level",
                             "requires_approval",
                             "fused_score",
-                            "unbacked",
                         ],
                     },
                 },

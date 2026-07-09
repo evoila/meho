@@ -66,15 +66,14 @@ dispatching ingested `endpoint_descriptor` rows, the composite works on
 a fresh deploy with **no gh catalog ingest** — the pre-#1757
 "enabled-but-`composite_l2_missing`" dead-end (#2050) is gone by
 construction, not papered over by a listing marker. Consequently
-`_register.py` no longer registers a `composite_backing` entry for the
-composite and no longer runs the
-`_register_and_assert_composite_backings` connector-load guard that
-raised `UnbackedEnabledCompositeError`. That gh-only guard class is
-retained (dormant) in `_register.py` because the platform-level
-registration-time invariant (#2252) supersedes it; the class and the
-preflight apparatus are removed wholesale in #2259. Regressions where a
+`_register.py` registers no `composite_backing` entry for the composite
+and no longer runs the `_register_and_assert_composite_backings`
+connector-load guard that raised `UnbackedEnabledCompositeError`. That
+gh-only guard class — and the whole vmware/github failure-coping
+apparatus — is deleted (Task #2259); the platform-wide registration-time
+invariant (#2252) is the sole remaining check. Regressions where a
 code-shipped op accidentally dispatches an ingested row are caught by
-the #2252 platform invariant, not the retired gh-specific check.
+the #2252 platform invariant, not a retired gh-specific check.
 
 Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
 intentionally conservative: an unexpected payload shape collapses to

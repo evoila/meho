@@ -119,9 +119,6 @@
                     {% if hit.requires_approval %}
                       <span class="badge badge-outline badge-xs" title="Requires approval">approval</span>
                     {% endif %}
-                    {% if hit.unbacked %}
-                      <span class="badge badge-warning badge-xs" title="Composite op whose sub-operations are not ingested">unbacked</span>
-                    {% endif %}
                   </div>
                   {% if hit.summary %}
                     <p class="mt-0.5 truncate text-xs opacity-70">{{ hit.summary }}</p>

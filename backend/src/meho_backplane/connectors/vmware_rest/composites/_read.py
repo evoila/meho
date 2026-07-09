@@ -62,10 +62,18 @@ migration:
 * **(3) Per-sub-op policy-gate + broadcast is evaded** -- acceptable
   for **read** composites (the top-level op is already gated), but
   **load-bearing for write** composites whose sub-ops may be
-  approval-gated, so the write composites keep ``dispatch_child``.
-  Migrating a write composite to the direct path must first resolve how
-  the top-level policy/approval gate still covers the now-internal
-  writes (Initiative #2249, the property-3 question).
+  approval-gated. A write composite on the direct path re-applies the
+  gate per governed sub-call through the reusable seam
+  :func:`~meho_backplane.operations.composite.enforce_subop_policy`
+  (Task #2254): the handler calls it before each direct write sub-call
+  with the sub-op's declared ``safety_level`` / ``requires_approval``,
+  and returns the seam's ``awaiting_approval`` / ``denied``
+  :class:`OperationResult` verbatim when the gate does not clear -- so
+  an approval-gated sub-op still queues instead of executing. The
+  curated composite's own top-level ``requires_approval`` remains the
+  primary governing decision (Initiative #2249); the seam guarantees no
+  internal write drops below the governance it had under
+  ``dispatch_child``.
 
 Error handling
 --------------

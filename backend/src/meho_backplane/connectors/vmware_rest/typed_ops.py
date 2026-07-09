@@ -67,7 +67,9 @@ if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_USAGE_OP",
+    "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_TYPED_OPS",
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
     "VmwareTypedOp",
@@ -366,7 +368,24 @@ async def host_usage_impl(
 # Op metadata + registrar
 # ---------------------------------------------------------------------------
 
-#: Curated ``when_to_use`` blurb for the host-usage group.
+# The other two vmware typed reads (#2258) live in sibling modules so
+# each file stays inside the code-quality file-length budget. They are
+# imported here -- after ``VmwareTypedOp`` and ``_unwrap_value`` are
+# defined -- to break the import cycle (the sibling modules import both
+# names from this module). E402 is expected: moving these to the top
+# would re-introduce the cycle.
+from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (  # noqa: E402
+    HOST_NETWORK_UPLINKS_GROUP_KEY,
+    HOST_NETWORK_UPLINKS_WHEN_TO_USE,
+    VMWARE_HOST_NETWORK_UPLINKS_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (  # noqa: E402
+    HOST_VSAN_HEALTH_GROUP_KEY,
+    HOST_VSAN_HEALTH_WHEN_TO_USE,
+    VMWARE_HOST_VSAN_HEALTH_OP,
+)
+
+#: Curated ``when_to_use`` blurb per typed-op group.
 #: ``register_typed_operation`` requires a non-empty string whenever
 #: ``group_key`` is set (typed_register ``_validate_when_to_use_pairing``).
 VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
@@ -381,6 +400,8 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "plain vCenter REST host summary (liveness only) cannot supply. "
         "Read-only."
     ),
+    HOST_NETWORK_UPLINKS_GROUP_KEY: HOST_NETWORK_UPLINKS_WHEN_TO_USE,
+    HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -450,10 +471,15 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 )
 
 #: The typed ops :class:`VmwareRestConnector` registers at lifespan
-#: startup. One op today (``vmware.host.usage``); the tuple shape lets
-#: future typed reads (the C2 pattern this establishes) join without
-#: touching the registrar.
-VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (VMWARE_HOST_USAGE_OP,)
+#: startup: ``vmware.host.usage`` (#2257) plus ``host.network_uplinks`` +
+#: ``host.vsan_health`` (#2258, re-shipped from the former composites).
+#: The tuple shape lets future typed reads join without touching the
+#: registrar.
+VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
+    VMWARE_HOST_USAGE_OP,
+    VMWARE_HOST_NETWORK_UPLINKS_OP,
+    VMWARE_HOST_VSAN_HEALTH_OP,
+)
 
 
 async def register_vmware_typed_operations(

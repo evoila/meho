@@ -909,6 +909,15 @@ class Settings(BaseModel):
     # Vault installs. Chart wiring (``config.credentialBackend`` →
     # ``CREDENTIAL_BACKEND``) lands with the GSM Helm surface in #2231.
     credential_backend: str = Field(default="vault", min_length=1)
+    # #2230 (Initiative #2227) — optional service account the GCP Secret
+    # Manager credential backend impersonates when resolving a
+    # ``gsm:<project>/<secret>`` ref. Empty (the default) reads Secret
+    # Manager directly under the pod's own GKE Workload Identity ADC
+    # (``google.auth.default()``); a non-empty SA email wraps that ADC
+    # source in ``google.auth.impersonated_credentials`` targeting the SA,
+    # reusing the GcloudConnector impersonation chain. No effect on Vault
+    # installs. Chart wiring lands with the GSM Helm surface in #2231.
+    gsm_impersonate_sa: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1459,6 +1468,9 @@ def get_settings() -> Settings:
         # ``vault`` default so a blank chart value never yields an unknown
         # ("") backend kind (``min_length=1`` on the field would reject it).
         credential_backend=(os.environ.get("CREDENTIAL_BACKEND", "").strip() or "vault"),
+        # Optional impersonation SA for the GSM credential backend (#2230).
+        # Empty/whitespace-only ⇒ direct-ADC read (no impersonation).
+        gsm_impersonate_sa=os.environ.get("GSM_IMPERSONATE_SA", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

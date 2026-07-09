@@ -17,6 +17,11 @@ Exports:
   reusable operator-context Vault KV-v2 basic-credentials reader
   (G3.9-T2 #941). Every REST connector loader resolves a target's
   ``secret_ref`` to vendor credentials through it.
+* :mod:`meho_backplane.connectors._shared.gsm_creds` — the GCP Secret
+  Manager credential backend (#2230), registered under kind ``gsm`` on the
+  #2229 resolver seam. Imported here so its ``register_credential_backend``
+  call runs eagerly (as ``vault_creds`` does for ``vault``) and the ``gsm``
+  kind is present before any credential resolution.
 * :mod:`meho_backplane.connectors._shared.cache_key` — the canonical
   tenant-unique ``(tenant_id, id)`` per-target cache key (#1642). Every
   connector credential / session / client cache derives its key here so
@@ -29,9 +34,10 @@ rather than growing this package into a god-module.
 
 from meho_backplane.connectors._shared import (
     cache_key,
+    gsm_creds,
     system_operator,
     vault_creds,
     vcf_auth,
 )
 
-__all__ = ["cache_key", "system_operator", "vault_creds", "vcf_auth"]
+__all__ = ["cache_key", "gsm_creds", "system_operator", "vault_creds", "vcf_auth"]

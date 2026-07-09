@@ -338,6 +338,7 @@ const (
 	Pfsense    TargetCreateProduct = "pfsense"
 	Postgres   TargetCreateProduct = "postgres"
 	Prometheus TargetCreateProduct = "prometheus"
+	Proxmox    TargetCreateProduct = "proxmox"
 	Sddc       TargetCreateProduct = "sddc"
 	Vault      TargetCreateProduct = "vault"
 	Vcfa       TargetCreateProduct = "vcfa"

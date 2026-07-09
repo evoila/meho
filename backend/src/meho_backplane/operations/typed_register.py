@@ -474,8 +474,10 @@ type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
 #: ``self`` that disappears at bind time. The shape contract is
 #: enforced at registration time by
 #: :func:`validate_composite_handler_signature`, which asserts the
-#: handler exposes a ``dispatch_child`` parameter -- the only positional
-#: distinction from typed handlers.
+#: handler exposes a ``dispatch_child`` and/or a ``connector`` parameter
+#: -- the sub-call-capability distinction from typed handlers (#2251
+#: added the direct-session ``connector`` seam alongside
+#: ``dispatch_child``).
 type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any]]]
 
 
@@ -604,30 +606,45 @@ def _handler_parameter_names(handler: Any) -> list[str]:
 
 
 def validate_composite_handler_signature(handler: Any) -> None:
-    """Assert *handler* accepts a ``dispatch_child`` parameter.
+    """Assert *handler* declares at least one sub-call capability.
 
-    Composite handlers receive
-    ``dispatch_child: DispatchChild`` from the dispatcher at invocation
-    time
-    (:func:`~meho_backplane.operations._branches.dispatch_composite`).
-    Registering a handler without it would surface the failure as a
-    :exc:`TypeError` at first dispatch -- late, with poor signal.
-    Checking the signature at registration time fails fast with an
-    operator-readable message and the handler's dotted path.
+    A composite is defined by *how it reaches its sub-ops*. The
+    dispatcher offers two seams
+    (:func:`~meho_backplane.operations._branches.dispatch_composite`),
+    and a composite handler opts into either or both by declaring the
+    matching parameter:
+
+    * ``dispatch_child`` -- the catalog-routed
+      :class:`~meho_backplane.operations.composite.DispatchChild`
+      callable (audit-tree linkage, bounded recursion, per-sub-op
+      policy/broadcast + param validation).
+    * ``connector`` -- the direct-session substrate (#2251): the
+      resolved connector instance, so the handler issues sub-calls
+      through the connector's own session with no ``endpoint_descriptor``
+      lookup.
+
+    A handler declaring **neither** is not a composite -- it has no way
+    to reach a sub-op -- and would surface the failure as a
+    :exc:`TypeError` at first dispatch (missing keyword), late and with
+    poor signal. Checking the signature at registration time fails fast
+    with an operator-readable message and the handler's dotted path.
 
     Raises
     ------
     HandlerSignatureError
-        Handler's parameters do not include ``dispatch_child``.
+        Handler's parameters include neither ``dispatch_child`` nor
+        ``connector``.
     """
     param_names = _handler_parameter_names(handler)
-    if "dispatch_child" not in param_names:
+    if "dispatch_child" not in param_names and "connector" not in param_names:
         module = getattr(handler, "__module__", "<unknown>")
         qualname = getattr(handler, "__qualname__", repr(handler))
         raise HandlerSignatureError(
             f"composite handler {module}.{qualname} "
             f"must accept a 'dispatch_child' parameter "
-            f"(per meho_backplane.operations.composite.DispatchChild); "
+            f"(per meho_backplane.operations.composite.DispatchChild) "
+            f"and/or a 'connector' parameter (the resolved connector "
+            f"instance, for direct-session sub-calls); "
             f"signature is ({', '.join(param_names)})"
         )
 
@@ -1168,8 +1185,9 @@ async def register_composite_operation(
     one private upsert path (:func:`_register_in_session`) -- they
     differ in (a) the column they write to ``source_kind`` (this one
     writes ``"composite"``), (b) the handler-signature contract they
-    enforce (this one rejects handlers without ``dispatch_child``),
-    and (c) the policy defaults (this one defaults
+    enforce (this one rejects handlers that declare neither
+    ``dispatch_child`` nor ``connector``), and (c) the policy defaults
+    (this one defaults
     ``safety_level="dangerous"`` and ``requires_approval=True``).
 
     Parameters
@@ -1186,11 +1204,14 @@ async def register_composite_operation(
         Must be a module-level function or bound method (closure /
         lambda / :class:`functools.partial` rejected via
         :func:`derive_handler_ref`'s contract -- shared with the typed
-        helper). The handler MUST accept a ``dispatch_child``
-        parameter; the dispatcher's composite branch
+        helper). The handler MUST accept a ``dispatch_child`` and/or a
+        ``connector`` parameter; the dispatcher's composite branch
         (:func:`~meho_backplane.operations._branches.dispatch_composite`)
-        passes a :class:`~meho_backplane.operations.composite.DispatchChild`
-        callable in by keyword. Handlers missing the parameter raise
+        passes the
+        :class:`~meho_backplane.operations.composite.DispatchChild`
+        callable and/or the resolved connector instance in by keyword,
+        matching whichever the handler declares (#2251). A handler
+        declaring neither has no way to reach a sub-op and raises
         :class:`HandlerSignatureError` at registration time -- not
         first dispatch -- so the failure surfaces in lifespan.
     summary, description, parameter_schema, response_schema, group_key, when_to_use, tags
@@ -1232,8 +1253,9 @@ async def register_composite_operation(
         bounded enum, or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
-        Handler does not accept a ``dispatch_child`` parameter, **or**
-        the natural key is already registered with
+        Handler accepts neither a ``dispatch_child`` nor a
+        ``connector`` parameter, **or** the natural key is already
+        registered with
         ``source_kind="typed"`` -- cross-kind re-registration is
         rejected at lookup time so a dispatch-time :exc:`TypeError`
         cannot surface from an inconsistent persisted row. Subclass

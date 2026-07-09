@@ -31,65 +31,50 @@ multiple L2 sub-ops into one governed call. T4 ships the first one,
   exactly one row; future T7+ Tasks add `release_health`,
   `board_snapshot`, etc., on the same pattern.
 - **`composites/_read.py`** — module-level `async def` handlers. The
-  T4 handler `pr_status_summary_composite` dispatches three L2 sub-ops:
-  the PR call sequentially (drives the head SHA used in the next step),
-  then the check-runs and reviews calls in parallel via
-  `asyncio.gather`. Partial-failure tolerance is part of the contract
-  — a failure on either secondary surfaces as `null` for that field
-  plus `checks_status="unknown"` / `review_status="unknown"`, never
-  bailing mid-flight. The PR sub-call itself is non-optional.
+  handler `pr_status_summary_composite` declares a `connector` parameter
+  and issues its three reads through the resolved `GitHubRestConnector`'s
+  own session (`connector._get_json` against `connector.mount_op_path`)
+  with no `endpoint_descriptor` lookup — the #2251 direct-session
+  substrate (migrated at #2255). The PR read fires sequentially (drives
+  the head SHA used in the next step), then the check-runs and reviews
+  reads fire in parallel via `asyncio.gather`. Partial-failure tolerance
+  is part of the contract — a failure on either secondary read surfaces
+  as `null` for that field plus `checks_status="unknown"` /
+  `review_status="unknown"`, never bailing mid-flight. The PR read itself
+  is non-optional; its failure (an `httpx.HTTPStatusError`, or a
+  `RuntimeError` on a malformed payload) propagates to the dispatcher's
+  `connector_error` branch.
 - **`composites/schemas.py`** — JSON-Schema 2020-12 parameter and
   response contracts. `additionalProperties=False` on params so operator
   typos surface as clear validation errors; response schemas describe
   the seven-key envelope and the two pre-computed status enums.
 - **`composites/_preflight.py`** — per-process cache of which composites
   have already validated that every declared L2 sub-op is registered in
-  `endpoint_descriptor`. Same lazy-resolve design as the vmware-rest
-  precedent (G0.14-T10 #1183): if any sub-op is missing, the helper
-  raises `CompositeL2DependencyMissing` with the missing op-ids plus
-  the catalog command `meho connector ingest --catalog gh/v3`. The
-  dispatcher catches it and surfaces it as a structured
-  `composite_l2_missing` error per `docs/codebase/error-message-shape.md`.
+  `endpoint_descriptor`. **No longer wired into the composite handler**
+  after the #2255 direct-session migration (the handler dispatches zero
+  ingested rows, so there is no L2 dependency to pre-flight); the module
+  is retained pending the L2-apparatus retirement in #2259. Same
+  lazy-resolve design as the vmware-rest precedent (G0.14-T10 #1183).
 - **`composites/__init__.py`** — side-effect import that queues
   `register_github_composite_operations` onto the lifespan registrar
   list. The parent `github/__init__.py` imports this subpackage so the
   registrar lands during `_eager_import_connectors`.
 
-The preflight only fires at **dispatch** time, so a composite whose L2
-sub-ops are not ingested used to look fully enabled on the op listing
-and only dead-ended on the first call (`composite_l2_missing`). G0.25-T6
-(#1757) closes that gap on the **listing**: `_register.py` registers the
-composite's `(connector_id, sub_op_ids, catalog_command)` into the
-process-wide registry in `operations/composite_backing.py` at import
-time (the same `_SUB_OPS_PR_STATUS_SUMMARY` tuple the handler hands the
-preflight, so the two can't drift). `search_operations`
-(`operations/meta_tools.py`) consults
-`unbacked_composite_next_step` per composite hit and, when any raw L2
-sub-op is absent (or ingested-but-disabled — the probe is the
-preflight's enable-aware `lookup_descriptor`), flags the hit
-`unbacked=true` with a `next_step` carrying
-`meho connector ingest --catalog gh/3`. The marker is tenant-scoped and
-disappears once the catalog ingest lands the sub-ops, so the listing
-agrees with what the next dispatch would resolve. Ordinary ops and
-fully-backed composites never gain the marker. The MCP
-`search_operations` `outputSchema` carries the two fields so the agent
-transport sees the same shape.
-
-The listing marker keeps a *registered* composite honest, but nothing
-stopped a future composite from shipping **enabled** with no backing
-entry at all — it would then reappear on the listing as plainly enabled
-and dead-end at `composite_l2_missing` on first dispatch, exactly the
-pre-#1757 state. `_register.py`'s `_register_and_assert_composite_backings`
-closes that at **connector load** (#2050): after registering each
-composite's backing it asserts every enabled composite that dispatches
-raw L2 sub-ops has a backing whose `sub_op_ids` match the spec, raising
-`UnbackedEnabledCompositeError` otherwise. The check reads the spec's own
-`sub_op_ids` — the same `_register.py` spec ⇄ `_read.py` `_SUB_OPS_*`
-source of truth the preflight and the marker already share — so it
-asserts the *wiring*, not the DB state (legitimately empty on a fresh
-deploy before `meho connector ingest --catalog gh/3`). A composite added
-without its backing, or with a drifting sub-op tuple, fails loudly at
-import rather than regressing silently.
+**Fresh-deploy behaviour after the #2255 direct-session migration.**
+Because the handler now reads through the connector session rather than
+dispatching ingested `endpoint_descriptor` rows, the composite works on
+a fresh deploy with **no gh catalog ingest** — the pre-#1757
+"enabled-but-`composite_l2_missing`" dead-end (#2050) is gone by
+construction, not papered over by a listing marker. Consequently
+`_register.py` no longer registers a `composite_backing` entry for the
+composite and no longer runs the
+`_register_and_assert_composite_backings` connector-load guard that
+raised `UnbackedEnabledCompositeError`. That gh-only guard class is
+retained (dormant) in `_register.py` because the platform-level
+registration-time invariant (#2252) supersedes it; the class and the
+preflight apparatus are removed wholesale in #2259. Regressions where a
+code-shipped op accidentally dispatches an ingested row are caught by
+the #2252 platform invariant, not the retired gh-specific check.
 
 Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
 intentionally conservative: an unexpected payload shape collapses to
@@ -104,15 +89,17 @@ issue body) and `requires_approval=False`, overriding
 `register_composite_operation`'s `dangerous` / `True` defaults the same
 way the vmware-rest read composites do.
 
-**Known T4 dependency on the parser fix.** The catalog ingest (T3) is
-xfail-strict against the live spec because the G0.7 OpenAPI parser does
-not inline `#/components/responses/*` refs (GitHub uses these
-extensively). The composite registration is *not* blocked — the unit
-tests run unconditionally — but the live L1+L2 dispatch acceptance test
-at `backend/tests/integration/test_github_composite_dispatch.py` is
-xfail-strict pending a sibling parser-scope follow-up. Once that lands,
-both the T3 ingest test and the T4 dispatch test flip from xfail to
-xpass, and CI prompts the maintainer to remove the marks.
+**Live dispatch acceptance.** After the #2255 direct-session migration
+the live dispatch acceptance test at
+`backend/tests/integration/test_github_composite_dispatch.py` no longer
+depends on catalog ingest or a populated `endpoint_descriptor` table: it
+plugs an HTTPX-backed session stub into the handler's `connector`
+parameter and hits the real GitHub REST API. It is gated on
+`MEHO_GH_INGEST_LIVE=1` + `MEHO_GH_LIVE_PR=<owner/repo#number>` rather
+than xfail-strict. (The separate T3 catalog-ingest parser dependency —
+the G0.7 OpenAPI parser not inlining `#/components/responses/*` refs —
+still applies to the ~700 ingested L2 ops, but is orthogonal to this
+composite now that it reads through the session directly.)
 
 ## Key types
 

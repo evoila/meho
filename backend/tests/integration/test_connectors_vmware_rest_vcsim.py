@@ -31,15 +31,17 @@ dependency — respx runs in-process.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import respx
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import (
@@ -77,19 +79,77 @@ ABOUT_PAYLOAD: dict[str, Any] = {
 #: connector's ``_extract_session_token`` handles that shape.
 SESSION_TOKEN: str = "integration-mock-session-token"
 
+#: ``GET /vcenter/host`` listing (vCenter Automation REST). The
+#: ``vmware.host.usage`` typed op lists hosts here, then reads per-host
+#: utilisation via PropertyCollector. Bare-array modern shape.
+HOST_LISTING: list[dict[str, Any]] = [
+    {"host": "host-11", "name": "esx-a.test.invalid", "connection_state": "CONNECTED"},
+    {"host": "host-22", "name": "esx-b.test.invalid", "connection_state": "CONNECTED"},
+]
+
+#: A ``RetrievePropertiesEx`` ``RetrieveResult`` carrying the three
+#: WS-API host-usage properties the typed op requests. The respx handler
+#: echoes the queried host's moId back into the ``obj`` so a single
+#: static body serves every per-host POST.
+_RETRIEVE_QUICK_STATS: dict[str, Any] = {
+    "overallCpuUsage": 5200,
+    "overallMemoryUsage": 131072,
+    "uptime": 1728000,
+}
+_RETRIEVE_HARDWARE: dict[str, Any] = {
+    "cpuModel": "Intel(R) Xeon(R) Gold 6248R",
+    "cpuMhz": 3000,
+    "numCpuPkgs": 2,
+    "numCpuCores": 48,
+    "numCpuThreads": 96,
+    "memorySize": 274877906944,
+}
+
+
+def _retrieve_properties_response(request: httpx.Request) -> httpx.Response:
+    """Build a ``RetrieveResult`` echoing the POSTed host moId.
+
+    The typed op issues one RetrievePropertiesEx per host with the host's
+    MoRef in ``specSet[0].objectSet[0].obj.value``; the handler reflects
+    it back so the same static quickStats/hardware body serves every host.
+    """
+    body = json.loads(request.content)
+    moid = body["specSet"][0]["objectSet"][0]["obj"]["value"]
+    return httpx.Response(
+        200,
+        json={
+            "objects": [
+                {
+                    "obj": {"type": "HostSystem", "value": moid},
+                    "propSet": [
+                        {"name": "summary.quickStats", "val": _RETRIEVE_QUICK_STATS},
+                        {"name": "summary.hardware", "val": _RETRIEVE_HARDWARE},
+                        {"name": "runtime.inMaintenanceMode", "val": moid == "host-22"},
+                    ],
+                }
+            ]
+        },
+    )
+
 
 def _register_vcenter_routes(mock: respx.MockRouter) -> None:
     """Register the modern vCenter REST surface the connector calls.
 
     ``POST /api/session`` (200 → token; the modern path succeeds so the
     connector records ``/api/session`` as the established path),
-    ``GET /api/about`` (the fingerprint probe), and ``DELETE
-    /api/session`` (the ``aclose`` revoke against the established
-    path).
+    ``GET /api/about`` (the fingerprint probe), ``DELETE /api/session``
+    (the ``aclose`` revoke against the established path), plus the
+    ``vmware.host.usage`` surface: ``GET /api/vcenter/host`` and the
+    per-host ``POST /api/PropertyCollector/propertyCollector/RetrievePropertiesEx``
+    (both mounted onto ``/api`` by :meth:`VmwareRestConnector.mount_op_path`).
     """
     mock.post("/api/session").respond(200, json=SESSION_TOKEN)
     mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
     mock.delete("/api/session").respond(204)
+    mock.get("/api/vcenter/host").respond(200, json=HOST_LISTING)
+    mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+        side_effect=_retrieve_properties_response
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -216,3 +276,223 @@ async def test_aclose_revokes_session_against_vcsim(
     # teardown calls aclose() again — idempotent no-op on empty state.)
     assert connector._session_tokens == {}
     assert connector._clients == {}
+
+
+# ---------------------------------------------------------------------------
+# vmware.host.usage typed op (#2257) — end-to-end transport + mount routing
+# ---------------------------------------------------------------------------
+
+
+def _operator() -> Operator:
+    """Operator with a non-empty raw_jwt (the session-establish guard)."""
+    return Operator(
+        sub="op-host-usage-integration",
+        name="Host Usage Integration",
+        email=None,
+        raw_jwt="<integration-raw-jwt>",
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+@pytest.mark.asyncio
+async def test_host_usage_over_modern_mount_returns_per_host_utilisation(
+    vcsim_connector: tuple[VmwareRestConnector, _VcsimTarget],
+) -> None:
+    """host_usage() runs the full session → list → per-host RetrievePropertiesEx path.
+
+    The modern ``POST /api/session`` succeeds, so both the host listing
+    and the PropertyCollector call mount onto ``/api``. Exercises the real
+    connector transport (respx-intercepted) end to end — no dispatch_child,
+    no ingested descriptor.
+    """
+    connector, target = vcsim_connector
+
+    result = await connector.host_usage(_operator(), target, {})
+
+    rows = result["hosts"]
+    assert [r["id"] for r in rows] == ["host-11", "host-22"]
+    assert rows[0]["quick_stats"] == {
+        "overall_cpu_usage_mhz": 5200,
+        "overall_memory_usage_mb": 131072,
+        "uptime_seconds": 1728000,
+    }
+    assert rows[0]["hardware"]["num_cpu_cores"] == 48
+    assert rows[0]["hardware"]["memory_size_bytes"] == 274877906944
+    # The maintenance flag is echoed per host by the respx side-effect.
+    assert rows[0]["in_maintenance_mode"] is False
+    assert rows[1]["in_maintenance_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_host_usage_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target (modern /api/session 404s) mounts host.usage onto /rest.
+
+    Reproduces the vcsim / old-vCenter topology: ``POST /api/session``
+    404s, the connector falls back to the legacy
+    ``POST /rest/com/vmware/cis/session``, and every subsequent op —
+    including the typed host.usage listing + PropertyCollector call — must
+    route through ``/rest`` (not ``/api``) via ``mount_op_path``, or it
+    404s. This is the modern+legacy mount coverage the acceptance criteria
+    require.
+    """
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        # Modern session endpoint is absent (404) → legacy fallback.
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        # Ops are served ONLY under the legacy /rest mount; a request to
+        # the /api mount would 404 (unmocked → respx passthrough-less).
+        mock.get("/rest/vcenter/host").respond(200, json=HOST_LISTING)
+        mock.post("/rest/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+            side_effect=_retrieve_properties_response
+        )
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            result = await connector.host_usage(_operator(), vcsim_target, {})
+        finally:
+            await connector.aclose()
+
+    rows = result["hosts"]
+    assert [r["id"] for r in rows] == ["host-11", "host-22"]
+    assert rows[0]["hardware"]["cpu_mhz"] == 3000
+
+
+# ---------------------------------------------------------------------------
+# Read composite direct-session dispatch (#2253) — end-to-end transport +
+# mount routing with ZERO ingested descriptors (fresh-boot contract)
+# ---------------------------------------------------------------------------
+
+#: ``GET /vcenter/datastore`` listing (2-datastore seed, bare modern shape).
+_DATASTORE_LISTING: list[dict[str, Any]] = [
+    {"datastore": "datastore-11", "name": "ds-a", "type": "VMFS"},
+    {"datastore": "datastore-22", "name": "ds-b", "type": "NFS"},
+]
+
+#: Per-datastore ``GET /vcenter/datastore/{ds}`` detail bodies.
+_DATASTORE_DETAIL: dict[str, dict[str, Any]] = {
+    "datastore-11": {"capacity": 1000, "free_space": 400, "type": "VMFS"},
+    "datastore-22": {"capacity": 5000, "free_space": 2500, "type": "NFS"},
+}
+
+
+def _register_datastore_composite_routes(mock: respx.MockRouter, *, mount: str) -> None:
+    """Register the datastore-usage composite's sub-op surface under *mount*.
+
+    The composite issues, directly on the session (no ingested descriptor,
+    no dispatch_child): the datastore listing, one per-datastore detail
+    GET, and one per-datastore VM-placement GET (``filter.datastores``).
+    All are mounted onto ``mount`` (``/api`` modern or ``/rest`` legacy) by
+    ``mount_op_path``.
+    """
+    mock.get(f"{mount}/vcenter/datastore").respond(200, json=_DATASTORE_LISTING)
+    for ds_id, detail in _DATASTORE_DETAIL.items():
+        mock.get(f"{mount}/vcenter/datastore/{ds_id}").respond(200, json=detail)
+    # A single VM-placement stub serves every per-datastore ``filter.datastores``
+    # query; the composite only counts names, so one VM per datastore is enough.
+    mock.get(f"{mount}/vcenter/vm").respond(200, json=[{"name": "vm-x"}])
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_composite_over_modern_mount(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """The read composite aggregates directly on the session, mounted onto /api.
+
+    Exercises the full #2253 direct-session path end to end against the
+    real connector transport (respx-intercepted): session establish ->
+    ``mount_op_path`` -> ``_get_json`` per sub-op -> aggregation. No
+    ingested ``endpoint_descriptor`` rows exist here, proving the
+    fresh-boot / zero-catalog-ingest contract.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._read import (
+        datastore_usage_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        _register_datastore_composite_routes(mock, mount="/api")
+        mock.delete("/api/session").respond(204)
+        try:
+            out = await datastore_usage_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    rows = out["datastores"]
+    assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
+    assert rows[0]["capacity"] == 1000
+    assert rows[0]["free_space"] == 400
+    assert rows[0]["vm_count"] == 1
+    assert rows[0]["vm_names"] == ["vm-x"]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_composite_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target (modern /api/session 404s) mounts the composite onto /rest.
+
+    Reproduces the vcsim / old-vCenter topology: the modern session
+    endpoint 404s, the connector falls back to the legacy path, and every
+    composite sub-op must route through ``/rest`` via ``mount_op_path`` or
+    it 404s. This is the modern+legacy mount-fallback coverage the #2253
+    acceptance criteria require, on the composite path.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._read import (
+        datastore_usage_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        # Modern session endpoint absent (404) -> legacy fallback.
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        # Sub-ops served ONLY under the legacy /rest mount.
+        _register_datastore_composite_routes(mock, mount="/rest")
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            out = await datastore_usage_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    rows = out["datastores"]
+    assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
+    assert rows[1]["capacity"] == 5000

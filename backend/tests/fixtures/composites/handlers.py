@@ -91,6 +91,23 @@ async def composite_dispatch_child_handler(
     return {"sub_status": result.status, "sub_result": result.result}
 
 
+async def composite_connector_only_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: Any,
+) -> dict[str, Any]:
+    """A direct-session composite -- declares ``connector``, not ``dispatch_child``.
+
+    The #2251 substrate: the dispatcher forwards the resolved connector
+    instance and the handler issues sub-calls through the connector's own
+    session. Used by the guard test asserting
+    :func:`register_composite_operation` accepts a composite that reaches
+    its sub-op via ``connector`` alone.
+    """
+    return {"ok": True, "params": params}
+
+
 class CompositeHandlerHost:
     """A class with an async composite method.
 

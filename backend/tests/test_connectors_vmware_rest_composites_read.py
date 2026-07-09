@@ -1,42 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 6 vmware-rest read-composite handler functions.
+"""Unit tests for the 7 vmware-rest read-composite handler functions.
 
-Coverage matrix (G3.1-T5 / #508 acceptance criteria):
+Post-#2253 the read composites dispatch their sub-ops **directly on the
+connector session** -- ``connector._get_json`` / ``connector._post_json``
+mounted through ``connector.mount_op_path`` -- rather than through the
+catalog-routed ``dispatch_child`` seam. These tests therefore stub the
+connector session with a recording double and assert the call-shape
+contract: which HTTP method, against which mounted path, with what query
+/ body, in what order -- plus the aggregation the handler builds from the
+canned responses.
 
-* Per-composite: assert the correct sub-op_ids fire in the expected
-  order, with the right ``connector_id`` and ``params`` shape.
+Coverage matrix (carried over from G3.1-T5 / #508, mechanism swapped):
+
+* Per-composite: assert the correct sub-op paths fire in the expected
+  order, mounted onto the target's live prefix, with the right query /
+  body shape.
 * Aggregation correctness: the handler's returned dict matches the
-  spec sketched in #508's issue body.
+  spec sketched in #508's issue body -- byte-for-byte unchanged by the
+  dispatch-mechanism swap.
 * Envelope tolerance: ``{"value": [...]}`` (legacy) and bare lists
   (modern) both parse correctly.
-* Filter pass-through: ``filter_names`` / ``filter_dvs`` / ``moId``
-  / ``entity_moid`` flow into the sub-op params.
-* Error fan-out: a sub-op returning ``status="error"`` causes the
-  handler to raise ``RuntimeError`` (load-bearing for the dispatcher's
-  ``connector_error`` wrapping at the composite parent).
-
-Each test mocks ``dispatch_child`` as an :class:`AsyncMock`-style
-callable that returns canned ``OperationResult`` objects keyed on
-``op_id``. The handlers are invoked directly (no dispatcher in the
-loop) so the assertion target is the call-shape contract: which
-sub-ops, in what order, with what params.
+* Filter pass-through: ``filter_names`` / ``filter_dvs`` / ``moId`` /
+  ``entity_moid`` flow into the sub-op query / path / body.
+* Error fan-out: a load-bearing sub-op raising ``httpx.HTTPStatusError``
+  propagates out of the handler (the dispatcher's outer branch wraps it
+  as ``connector_error`` for the composite parent); best-effort legs
+  catch it and degrade.
+* Mount routing: every sub-op is mounted via ``mount_op_path`` so a
+  legacy/vcsim target (``/rest``) is reached correctly.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._read import (
-    CompositeSubOpError,
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
@@ -45,42 +50,6 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
-
-
-@pytest.fixture(autouse=True)
-def _prime_preflight_cache() -> Iterator[None]:
-    """Prime the L2 pre-flight cache so handler-direct tests skip the DB walk.
-
-    The handler-direct tests in this module bypass the dispatcher and call
-    the composite handlers as plain async functions. The G0.14-T10 (#1151)
-    pre-flight check would otherwise issue a
-    :func:`~meho_backplane.operations._lookup.lookup_descriptor` query
-    against an unconfigured session at the top of every handler. Priming
-    the per-process cache with each composite's op_id before the test
-    fires (and clearing it after) keeps these tests handler-direct
-    without re-shaping every fixture to stand up a DB session.
-
-    Per-composite preflight behaviour (cache miss -> DB walk; cache miss
-    on missing L2 -> structured exception) is exercised in the dedicated
-    module ``test_connectors_vmware_rest_composites_l2_preflight.py``
-    where a stub ``lookup_descriptor`` exercises both the all-present
-    and the missing-L2 code paths.
-    """
-    _preflight.reset_preflight_cache()
-    _preflight._PREFLIGHT_CACHE.update(
-        {
-            "vmware.composite.cluster.drs_recommendations",
-            "vmware.composite.event.tail",
-            "vmware.composite.performance.summary",
-            "vmware.composite.datastore.usage",
-            "vmware.composite.network.portgroup.audit",
-            "vmware.composite.host.network_uplinks",
-            "vmware.composite.host.vsan_health",
-        }
-    )
-    yield
-    _preflight.reset_preflight_cache()
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,100 +68,90 @@ def _make_operator() -> Operator:
     )
 
 
-class _RecordingDispatchChild:
-    """Lightweight ``dispatch_child`` stub that returns canned responses.
+class _RecordingConnector:
+    """Stub connector session that records sub-calls and serves canned JSON.
 
-    Avoids :class:`unittest.mock.AsyncMock` so the test reads as a plain
-    keyword-args call sequence and the matching ``DispatchChild``
-    Protocol shape is preserved (``AsyncMock.__call__`` doesn't enforce
-    keyword-only).
+    Stands in for :class:`VmwareRestConnector` on the direct-dispatch path:
+    the handlers call ``mount_op_path`` to resolve the live mount and then
+    ``_get_json`` / ``_post_json`` on the returned path. This double records
+    every call as ``{"method", "path", "query", "body"}`` and serves a
+    response keyed either by the resolved (mounted) path or, in list form,
+    sequentially -- the list form lets a test drive several calls to the
+    same path (e.g. per-portgroup ``GET /api/vcenter/vm``) with distinct
+    payloads. A canned value that is an :class:`Exception` is raised, which
+    is how the transport-failure paths are exercised.
+
+    ``mount_prefix`` selects the mount the fake ``mount_op_path`` applies
+    (``/api`` modern by default, ``/rest`` for the legacy/vcsim coverage),
+    so the tests assert the real mounted wire path.
     """
 
-    def __init__(self, responses: dict[str, Any] | list[Any]) -> None:
-        """Build a recording stub.
-
-        Parameters
-        ----------
-        responses:
-            Either a mapping of ``op_id -> result`` (the handler dispatches
-            each op once; subsequent calls reuse the same payload), or a
-            sequential list of ``OperationResult`` values returned in
-            order. The list form lets tests assert per-call payloads when
-            the same op_id is dispatched multiple times.
-        """
-        self._responses = responses
-        self._sequence_index = 0
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(
+    def __init__(
         self,
+        responses: dict[str, Any] | list[Any],
         *,
-        connector_id: str,
-        op_id: str,
-        params: dict[str, Any],
-        target: Any = None,
-    ) -> OperationResult:
-        # Record before serving so the assertion sees the call even
-        # if the handler raises on the (canned) result.
-        self.calls.append(
-            {
-                "connector_id": connector_id,
-                "op_id": op_id,
-                "params": dict(params),
-                "target": target,
-            }
-        )
+        mount_prefix: str = "/api",
+    ) -> None:
+        self._responses = responses
+        self._seq_index = 0
+        self._mount_prefix = mount_prefix
+        self.calls: list[dict[str, Any]] = []
+        self.mount_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        self.mount_calls.append(path)
+        return f"{self._mount_prefix}{path}"
+
+    async def _get_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        self.calls.append({"method": "GET", "path": path, "query": params, "body": None})
+        return self._serve(path)
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any:
+        self.calls.append({"method": "POST", "path": path, "query": None, "body": json})
+        return self._serve(path)
+
+    def _serve(self, path: str) -> Any:
         if isinstance(self._responses, dict):
-            payload = self._responses[op_id]
+            payload = self._responses[path]
         else:
-            payload = self._responses[self._sequence_index]
-            self._sequence_index += 1
-        if isinstance(payload, OperationResult):
-            return payload
-        return _ok_result(op_id, payload)
+            payload = self._responses[self._seq_index]
+            self._seq_index += 1
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
 
 
-def _ok_result(op_id: str, result: Any) -> OperationResult:
-    """Build an OK :class:`OperationResult` with ``result`` as the body."""
-    return OperationResult(
-        status="ok",
-        op_id=op_id,
-        result=result,
-        duration_ms=1.0,
-    )
+def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
+    """Build an ``httpx.HTTPStatusError`` whose ``str`` carries status + URL.
 
-
-def _err_result(op_id: str, error: str) -> OperationResult:
-    """Build an error :class:`OperationResult` for failure-fan-out tests."""
-    return OperationResult(
-        status="error",
-        op_id=op_id,
-        error=error,
-        duration_ms=1.0,
-    )
-
-
-def _connector_error_result(op_id: str, exception_message: str) -> OperationResult:
-    """Build a generic ``connector_error`` result the dispatcher emits for a 4xx/5xx.
-
-    Mirrors
-    :func:`meho_backplane.operations._errors.result_connector_error`: the
-    terse ``error`` summary plus the stringified ``httpx.HTTPStatusError``
-    (status line + URL) stashed under ``extras["exception_message"]``.
-    This is the exact shape a ``filter.datastores`` 400 (#1908) produces,
-    where the status code + offending URL live only in the
-    ``exception_message`` string (no structured ``http_status``).
+    Mirrors the shape ``raise_for_status`` raises when the connector
+    session hits a 4xx/5xx -- the status line + offending URL the
+    composite's best-effort note / load-bearing propagation surface.
     """
-    return OperationResult(
-        status="error",
-        op_id=op_id,
-        error="connector_error: HTTPStatusError",
-        duration_ms=1.0,
-        extras={
-            "error_code": "connector_error",
-            "exception_class": "HTTPStatusError",
-            "exception_message": exception_message,
-        },
+    reason = {400: "Bad Request", 401: "Unauthorized", 403: "Forbidden"}.get(status, "Error")
+    request = httpx.Request("GET", url)
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '{status} {reason}' for url '{url}'",
+        request=request,
+        response=response,
     )
 
 
@@ -202,14 +161,14 @@ def _connector_error_result(op_id: str, exception_message: str) -> OperationResu
 
 
 @pytest.mark.asyncio
-async def test_cluster_drs_recommendations_dispatches_summary_and_drs_in_order() -> None:
-    """Two sub-ops fire: cluster summary then DRS config, both with the cluster moid."""
+async def test_cluster_drs_recommendations_reads_summary_and_drs_in_order() -> None:
+    """Two GETs fire: cluster summary then DRS config, both mounted, cluster in path."""
     cluster_payload = {"name": "Cluster-A", "drs_enabled": True}
     drs_payload = {"enabled": True, "automation_level": "FULLY_AUTOMATED"}
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "GET:/vcenter/cluster/{cluster}": cluster_payload,
-            "GET:/vcenter/cluster/{cluster}/drs": drs_payload,
+            "/api/vcenter/cluster/domain-c123": cluster_payload,
+            "/api/vcenter/cluster/domain-c123/drs": drs_payload,
         }
     )
 
@@ -217,28 +176,28 @@ async def test_cluster_drs_recommendations_dispatches_summary_and_drs_in_order()
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c123"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
-    assert [c["op_id"] for c in dispatch.calls] == [
-        "GET:/vcenter/cluster/{cluster}",
-        "GET:/vcenter/cluster/{cluster}/drs",
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/cluster/domain-c123"),
+        ("GET", "/api/vcenter/cluster/domain-c123/drs"),
     ]
-    assert all(c["connector_id"] == "vmware-rest-9.0" for c in dispatch.calls)
-    assert all(c["params"] == {"cluster": "domain-c123"} for c in dispatch.calls)
-    assert out == {
-        "cluster": cluster_payload,
-        "drs": drs_payload,
-    }
+    # Both paths were mounted (spec-relative -> live prefix).
+    assert conn.mount_calls == [
+        "/vcenter/cluster/domain-c123",
+        "/vcenter/cluster/domain-c123/drs",
+    ]
+    assert out == {"cluster": cluster_payload, "drs": drs_payload}
 
 
 @pytest.mark.asyncio
 async def test_cluster_drs_recommendations_history_flag_surfaces_history_slice() -> None:
     """``include_recommendations_history=True`` surfaces ``history`` from the DRS payload."""
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "GET:/vcenter/cluster/{cluster}": {"name": "Cluster-A"},
-            "GET:/vcenter/cluster/{cluster}/drs": {
+            "/api/vcenter/cluster/domain-c1": {"name": "Cluster-A"},
+            "/api/vcenter/cluster/domain-c1/drs": {
                 "enabled": True,
                 "history": [{"recommendation_id": "rec-1", "reason": "load balance"}],
             },
@@ -248,9 +207,8 @@ async def test_cluster_drs_recommendations_history_flag_surfaces_history_slice()
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c1", "include_recommendations_history": True},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert "recommendations_history" in out
     assert out["recommendations_history"] == [
         {"recommendation_id": "rec-1", "reason": "load balance"}
     ]
@@ -259,19 +217,41 @@ async def test_cluster_drs_recommendations_history_flag_surfaces_history_slice()
 @pytest.mark.asyncio
 async def test_cluster_drs_recommendations_history_flag_default_omits_key() -> None:
     """Default ``include_recommendations_history=False`` omits the key."""
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "GET:/vcenter/cluster/{cluster}": {"name": "Cluster-A"},
-            "GET:/vcenter/cluster/{cluster}/drs": {"enabled": False, "history": [1, 2]},
+            "/api/vcenter/cluster/domain-c1": {"name": "Cluster-A"},
+            "/api/vcenter/cluster/domain-c1/drs": {"enabled": False, "history": [1, 2]},
         }
     )
     out = await cluster_drs_recommendations_composite(
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c1"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert "recommendations_history" not in out
+
+
+@pytest.mark.asyncio
+async def test_cluster_drs_recommendations_propagates_load_bearing_error() -> None:
+    """A load-bearing sub-op failure propagates as ``httpx.HTTPStatusError``.
+
+    Load-bearing for the dispatcher's outer branch: the composite parent
+    sees the failure as a structured ``connector_error`` result carrying
+    the underlying status + URL from ``str(exc)``.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/cluster/bogus": _http_error(404, "https://vc/api/vcenter/cluster/bogus"),
+        }
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await cluster_drs_recommendations_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"cluster": "bogus"},
+            connector=conn,  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -280,21 +260,23 @@ async def test_cluster_drs_recommendations_history_flag_default_omits_key() -> N
 
 
 @pytest.mark.asyncio
-async def test_event_tail_dispatches_query_events_with_default_mo_id() -> None:
-    """Default ``moId='EventManager'`` and ``max_events=100`` flow through."""
+async def test_event_tail_reads_query_events_with_default_mo_id() -> None:
+    """Default ``moId='EventManager'`` rides the path; ``max_events=100`` applied."""
     events_payload = [{"id": f"evt-{n}", "summary": f"event {n}"} for n in range(5)]
-    dispatch = _RecordingDispatchChild({"POST:/EventManager/{moId}/QueryEvents": events_payload})
+    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
     out = await event_tail_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert len(dispatch.calls) == 1
-    only = dispatch.calls[0]
-    assert only["op_id"] == "POST:/EventManager/{moId}/QueryEvents"
-    assert only["connector_id"] == "vmware-rest-9.0"
-    assert only["params"] == {"moId": "EventManager"}
+    assert len(conn.calls) == 1
+    only = conn.calls[0]
+    assert only["method"] == "POST"
+    assert only["path"] == "/api/EventManager/EventManager/QueryEvents"
+    # QueryEvents carries no method-arg body (parity: the pre-migration
+    # dispatch passed only the moId path param).
+    assert only["body"] is None
     assert out["events"] == events_payload
     assert out["count"] == 5
     assert out["moId"] == "EventManager"
@@ -305,12 +287,12 @@ async def test_event_tail_dispatches_query_events_with_default_mo_id() -> None:
 async def test_event_tail_caps_results_to_max_events() -> None:
     """The handler caps client-side to ``max_events``."""
     events_payload = [{"id": f"evt-{n}"} for n in range(200)]
-    dispatch = _RecordingDispatchChild({"POST:/EventManager/{moId}/QueryEvents": events_payload})
+    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": events_payload})
     out = await event_tail_composite(
         operator=_make_operator(),
         target=object(),
         params={"max_events": 7},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert len(out["events"]) == 7
     assert out["count"] == 7
@@ -318,16 +300,33 @@ async def test_event_tail_caps_results_to_max_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_tail_custom_mo_id_rides_the_path() -> None:
+    """A per-call ``moId`` override lands in the mounted path segment."""
+    conn = _RecordingConnector({"/api/EventManager/em-2/QueryEvents": []})
+    await event_tail_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"moId": "em-2"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.calls[0]["path"] == "/api/EventManager/em-2/QueryEvents"
+
+
+@pytest.mark.asyncio
 async def test_event_tail_tolerates_legacy_value_envelope() -> None:
     """A ``{"value": [...]}`` envelope on the sub-op response unwraps cleanly."""
-    dispatch = _RecordingDispatchChild(
-        {"POST:/EventManager/{moId}/QueryEvents": {"value": [{"id": "evt-1"}, {"id": "evt-2"}]}}
+    conn = _RecordingConnector(
+        {
+            "/api/EventManager/EventManager/QueryEvents": {
+                "value": [{"id": "evt-1"}, {"id": "evt-2"}]
+            }
+        }
     )
     out = await event_tail_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["count"] == 2
     assert out["events"] == [{"id": "evt-1"}, {"id": "evt-2"}]
@@ -336,13 +335,28 @@ async def test_event_tail_tolerates_legacy_value_envelope() -> None:
 @pytest.mark.asyncio
 async def test_event_tail_raises_on_non_list_payload() -> None:
     """Non-list payload from QueryEvents raises ``RuntimeError`` (audit-visible)."""
-    dispatch = _RecordingDispatchChild({"POST:/EventManager/{moId}/QueryEvents": {"not": "a list"}})
+    conn = _RecordingConnector({"/api/EventManager/EventManager/QueryEvents": {"not": "a list"}})
     with pytest.raises(RuntimeError, match="expected list"):
         await event_tail_composite(
             operator=_make_operator(),
             target=object(),
             params={},
-            dispatch_child=dispatch,
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_event_tail_propagates_load_bearing_error() -> None:
+    """QueryEvents transport failure propagates (no aggregation)."""
+    conn = _RecordingConnector(
+        [_http_error(400, "https://vc/api/EventManager/EventManager/QueryEvents")]
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await event_tail_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={},
+            connector=conn,  # type: ignore[arg-type]
         )
 
 
@@ -352,8 +366,8 @@ async def test_event_tail_raises_on_non_list_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_performance_summary_dispatches_two_sub_ops_in_order() -> None:
-    """QueryAvailablePerfMetric first, then QueryPerf -- both per-entity."""
+async def test_performance_summary_reads_two_sub_ops_in_order() -> None:
+    """QueryAvailablePerfMetric first, then QueryPerf -- both per-entity, method-args as body."""
     available_payload = [
         {"counterId": 1, "instance": ""},
         {"counterId": 2, "instance": "vmnic0"},
@@ -362,29 +376,26 @@ async def test_performance_summary_dispatches_two_sub_ops_in_order() -> None:
         {"counterId": 1, "value": 42},
         {"counterId": 2, "value": 100},
     ]
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric": (available_payload),
-            "POST:/PerformanceManager/{moId}/QueryPerf": samples_payload,
+            "/api/PerformanceManager/PerfMgr/QueryAvailablePerfMetric": available_payload,
+            "/api/PerformanceManager/PerfMgr/QueryPerf": samples_payload,
         }
     )
     out = await performance_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"entity_moid": "vm-1234"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert [c["op_id"] for c in dispatch.calls] == [
-        "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric",
-        "POST:/PerformanceManager/{moId}/QueryPerf",
+    assert [c["path"] for c in conn.calls] == [
+        "/api/PerformanceManager/PerfMgr/QueryAvailablePerfMetric",
+        "/api/PerformanceManager/PerfMgr/QueryPerf",
     ]
-    # Both calls use the default PerfMgr singleton + the entity moid.
-    assert dispatch.calls[0]["params"] == {"moId": "PerfMgr", "entity": "vm-1234"}
-    assert dispatch.calls[1]["params"] == {
-        "moId": "PerfMgr",
-        "entity": "vm-1234",
-        "interval_seconds": 20,
-    }
+    # The vi-json method arguments become the flat JSON request body; the
+    # PerfMgr singleton rides the path.
+    assert conn.calls[0]["body"] == {"entity": "vm-1234"}
+    assert conn.calls[1]["body"] == {"entity": "vm-1234", "interval_seconds": 20}
     assert out == {
         "entity_moid": "vm-1234",
         "perf_manager_moid": "PerfMgr",
@@ -400,17 +411,17 @@ async def test_performance_summary_caps_samples() -> None:
     """``max_samples`` caps the sample list client-side."""
     available = [{"counterId": 1}]
     samples = [{"counterId": 1, "value": n} for n in range(150)]
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric": available,
-            "POST:/PerformanceManager/{moId}/QueryPerf": samples,
+            "/api/PerformanceManager/PerfMgr/QueryAvailablePerfMetric": available,
+            "/api/PerformanceManager/PerfMgr/QueryPerf": samples,
         }
     )
     out = await performance_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"entity_moid": "vm-7", "max_samples": 12},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert len(out["samples"]) == 12
     assert out["max_samples_applied"] == 12
@@ -419,10 +430,10 @@ async def test_performance_summary_caps_samples() -> None:
 @pytest.mark.asyncio
 async def test_performance_summary_passes_through_interval_and_custom_perf_mgr() -> None:
     """Operator-supplied ``interval_seconds`` + ``perf_manager_moid`` propagate."""
-    dispatch = _RecordingDispatchChild(
+    conn = _RecordingConnector(
         {
-            "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric": [],
-            "POST:/PerformanceManager/{moId}/QueryPerf": [],
+            "/api/PerformanceManager/AltPerfMgr/QueryAvailablePerfMetric": [],
+            "/api/PerformanceManager/AltPerfMgr/QueryPerf": [],
         }
     )
     await performance_summary_composite(
@@ -433,10 +444,11 @@ async def test_performance_summary_passes_through_interval_and_custom_perf_mgr()
             "perf_manager_moid": "AltPerfMgr",
             "interval_seconds": 300,
         },
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert dispatch.calls[1]["params"]["moId"] == "AltPerfMgr"
-    assert dispatch.calls[1]["params"]["interval_seconds"] == 300
+    # AltPerfMgr rides the path; the interval rides the QueryPerf body.
+    assert conn.calls[1]["path"] == "/api/PerformanceManager/AltPerfMgr/QueryPerf"
+    assert conn.calls[1]["body"] == {"entity": "vm-99", "interval_seconds": 300}
 
 
 # ---------------------------------------------------------------------------
@@ -460,32 +472,30 @@ async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() ->
         "datastore-2": [{"name": "vm-c"}],
     }
 
-    sequence: list[OperationResult] = [_ok_result("GET:/vcenter/datastore", listing)]
+    sequence: list[Any] = [listing]
     for entry in listing:
-        sequence.append(
-            _ok_result("GET:/vcenter/datastore/{datastore}", detail_by_id[entry["datastore"]])
-        )
-        sequence.append(_ok_result("GET:/vcenter/vm", vms_by_ds[entry["datastore"]]))
-    dispatch = _RecordingDispatchChild(sequence)
+        sequence.append(detail_by_id[entry["datastore"]])
+        sequence.append(vms_by_ds[entry["datastore"]])
+    conn = _RecordingConnector(sequence)
 
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
     # 1 listing + 2 datastores * 2 sub-ops each = 5 calls total.
-    assert len(dispatch.calls) == 5
-    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/datastore"
-    # No filter -> params is empty mapping.
-    assert dispatch.calls[0]["params"] == {}
-    # Per-DS detail call includes the datastore moid.
-    assert dispatch.calls[1]["op_id"] == "GET:/vcenter/datastore/{datastore}"
-    assert dispatch.calls[1]["params"] == {"datastore": "datastore-1"}
+    assert len(conn.calls) == 5
+    assert conn.calls[0]["method"] == "GET"
+    assert conn.calls[0]["path"] == "/api/vcenter/datastore"
+    # No filter -> no query string.
+    assert conn.calls[0]["query"] is None
+    # Per-DS detail call embeds the datastore moid in the mounted path.
+    assert conn.calls[1]["path"] == "/api/vcenter/datastore/datastore-1"
     # Per-DS VM call uses ``filter.datastores`` with the moid.
-    assert dispatch.calls[2]["op_id"] == "GET:/vcenter/vm"
-    assert dispatch.calls[2]["params"] == {"filter.datastores": ["datastore-1"]}
+    assert conn.calls[2]["path"] == "/api/vcenter/vm"
+    assert conn.calls[2]["query"] == {"filter.datastores": ["datastore-1"]}
     # Final aggregated shape.
     assert out == {
         "datastores": [
@@ -513,60 +523,41 @@ async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() ->
 
 @pytest.mark.asyncio
 async def test_datastore_usage_capacity_falls_back_to_list_row_when_detail_omits_it() -> None:
-    """Detail without ``capacity`` (live 8.0.3 shape) -> capacity from the list row (#2078).
-
-    Some vCenter builds return a per-datastore detail ``Datastore.Info``
-    that populates ``free_space`` but omits ``capacity`` entirely. The
-    ``GET:/vcenter/datastore`` list row carries both fields, so the
-    composite must fall back to the list-row ``capacity`` rather than
-    silently emitting ``capacity: null`` (which leaves %-full
-    uncomputable, the whole reason to reach for the composite).
-    """
+    """Detail without ``capacity`` (live 8.0.3 shape) -> capacity from the list row (#2078)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 1000},
     ]
     sequence = [
-        _ok_result("GET:/vcenter/datastore", listing),
+        listing,
         # Detail carries free_space but NO ``capacity`` key at all.
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"free_space": 400, "type": "VMFS"}),
-        _ok_result("GET:/vcenter/vm", [{"name": "vm-a"}]),
+        {"free_space": 400, "type": "VMFS"},
+        [{"name": "vm-a"}],
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     row = out["datastores"][0]
-    # capacity sourced from the list row; free_space from the detail read.
     assert row["capacity"] == 1000
     assert row["free_space"] == 400
 
 
 @pytest.mark.asyncio
 async def test_datastore_usage_capacity_null_when_neither_detail_nor_list_carry_it() -> None:
-    """Neither detail nor list row carries ``capacity`` -> row ``capacity`` is null (#2078).
-
-    The fallback is best-effort: with no source for capacity the row must
-    still be schema-valid (``capacity`` typed ``["integer", "null"]``) and
-    the aggregation must not crash.
-    """
+    """Neither detail nor list row carries ``capacity`` -> row ``capacity`` is null (#2078)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
     ]
-    sequence = [
-        _ok_result("GET:/vcenter/datastore", listing),
-        # Detail lacks capacity; list row lacks capacity -> null, no crash.
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"free_space": 400}),
-        _ok_result("GET:/vcenter/vm", []),
-    ]
-    dispatch = _RecordingDispatchChild(sequence)
+    sequence = [listing, {"free_space": 400}, []]
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     row = out["datastores"][0]
     assert row["capacity"] is None
@@ -575,29 +566,19 @@ async def test_datastore_usage_capacity_null_when_neither_detail_nor_list_carry_
 
 @pytest.mark.asyncio
 async def test_datastore_usage_detail_capacity_wins_over_list_row() -> None:
-    """When the detail payload supplies ``capacity``, the detail value wins (#2078).
-
-    Guards the fallback against regressing the primary path: the list row
-    carries a stale/different capacity, but the detail read is the source
-    of truth whenever it provides the field.
-    """
+    """When the detail payload supplies ``capacity``, the detail value wins (#2078)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 1000},
     ]
-    sequence = [
-        _ok_result("GET:/vcenter/datastore", listing),
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 100, "free_space": 40}),
-        _ok_result("GET:/vcenter/vm", []),
-    ]
-    dispatch = _RecordingDispatchChild(sequence)
+    sequence = [listing, {"capacity": 100, "free_space": 40}, []]
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     row = out["datastores"][0]
-    # Detail's 100 wins over the list row's 1000.
     assert row["capacity"] == 100
     assert row["free_space"] == 40
 
@@ -605,41 +586,30 @@ async def test_datastore_usage_detail_capacity_wins_over_list_row() -> None:
 @pytest.mark.asyncio
 async def test_datastore_usage_filter_names_passes_through_to_listing() -> None:
     """``filter_names`` flows into the listing sub-op as ``filter.names``."""
-    sequence = [_ok_result("GET:/vcenter/datastore", [])]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector([[]])
     await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={"filter_names": ["ds-prod-1", "ds-prod-2"]},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert dispatch.calls[0]["params"] == {"filter.names": ["ds-prod-1", "ds-prod-2"]}
+    assert conn.calls[0]["query"] == {"filter.names": ["ds-prod-1", "ds-prod-2"]}
 
 
 @pytest.mark.asyncio
 async def test_datastore_usage_tolerates_legacy_envelope_on_listing() -> None:
     """``{"value": [...]}`` listing envelope is unwrapped."""
     sequence = [
-        _ok_result(
-            "GET:/vcenter/datastore",
-            {
-                "value": [
-                    {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
-                ]
-            },
-        ),
-        _ok_result(
-            "GET:/vcenter/datastore/{datastore}",
-            {"value": {"capacity": 10, "free_space": 5}},
-        ),
-        _ok_result("GET:/vcenter/vm", {"value": [{"name": "vm-x"}]}),
+        {"value": [{"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"}]},
+        {"value": {"capacity": 10, "free_space": 5}},
+        {"value": [{"name": "vm-x"}]},
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["datastores"][0]["capacity"] == 10
     assert out["datastores"][0]["vm_names"] == ["vm-x"]
@@ -649,69 +619,50 @@ async def test_datastore_usage_tolerates_legacy_envelope_on_listing() -> None:
 async def test_datastore_usage_skips_malformed_listing_entries() -> None:
     """Listing entries without a string ``datastore`` key are skipped silently."""
     sequence = [
-        _ok_result(
-            "GET:/vcenter/datastore",
-            [
-                {"datastore": "datastore-1", "name": "good"},
-                {"name": "missing-id"},  # no ``datastore`` key
-                "not-a-dict",
-            ],
-        ),
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 1}),
-        _ok_result("GET:/vcenter/vm", []),
+        [
+            {"datastore": "datastore-1", "name": "good"},
+            {"name": "missing-id"},  # no ``datastore`` key
+            "not-a-dict",
+        ],
+        {"capacity": 1},
+        [],
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    # Only the well-formed entry produces sub-ops + a result row.
     assert len(out["datastores"]) == 1
     assert out["datastores"][0]["id"] == "datastore-1"
 
 
 @pytest.mark.asyncio
 async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() -> None:
-    """A failed VM-placement sub-op keeps the row; vm_count/vm_names null + note (#1908).
-
-    The capacity/free/type read is load-bearing and has already succeeded
-    by the time the optional ``filter.datastores`` VM lookup runs. When
-    that lookup 400s (the version-skew filter param the issue hit), the
-    datastore row is still returned -- capacity/free/type intact -- with
-    ``vm_count``/``vm_names`` nulled and an ``enrichment_note`` recording
-    why, rather than the whole composite failing.
-    """
+    """A failed VM-placement sub-op keeps the row; vm_count/vm_names null + note (#1908)."""
     sequence = [
-        _ok_result(
-            "GET:/vcenter/datastore",
-            [
-                {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
-                {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
-            ],
-        ),
+        [
+            {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+            {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+        ],
         # datastore-1: detail OK, VM enrichment 400s -> best-effort skip.
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 100, "free_space": 40}),
-        _connector_error_result(
-            "GET:/vcenter/vm",
-            "Client error '400 Bad Request' for url "
-            "'https://vc/api/vcenter/vm?filter.datastores=datastore-1'",
-        ),
+        {"capacity": 100, "free_space": 40},
+        _http_error(400, "https://vc/api/vcenter/vm?filter.datastores=datastore-1"),
         # datastore-2: detail OK, VM enrichment OK -> fully enriched.
-        _ok_result("GET:/vcenter/datastore/{datastore}", {"capacity": 500, "free_space": 250}),
-        _ok_result("GET:/vcenter/vm", [{"name": "vm-c"}]),
+        {"capacity": 500, "free_space": 250},
+        [{"name": "vm-c"}],
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
     # All 5 sub-ops fired -- the failed VM leg did not short-circuit.
-    assert len(dispatch.calls) == 5
+    assert len(conn.calls) == 5
     rows = out["datastores"]
     assert len(rows) == 2
 
@@ -723,9 +674,8 @@ async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() ->
     assert ds1["type"] == "VMFS"
     assert ds1["vm_count"] is None
     assert ds1["vm_names"] is None
-    assert "enrichment_note" in ds1
-    # The note bubbles the sub-op id, its status, the 400, and the URL.
     note = ds1["enrichment_note"]
+    # The note names the sub-op, the 400, and the offending URL.
     assert "GET:/vcenter/vm" in note
     assert "400 Bad Request" in note
     assert "filter.datastores=datastore-1" in note
@@ -739,75 +689,41 @@ async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() ->
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_listing_error_bubbles_structured_detail() -> None:
-    """A load-bearing sub-op failure bubbles the sub-op's status code + URL (#1908).
-
-    Suggestion 2: the composite's failure envelope previously stopped at
-    ``connector_error: HTTPStatusError``; the actual 400 + offending URL
-    only showed on a manual replay. The raised
-    :class:`CompositeSubOpError` now folds the sub-op's diagnostic line
-    (status code + URL, from the stringified ``HTTPStatusError``) into its
-    message and exposes the sub-op's structured fields as attributes.
-    """
-    failing = _connector_error_result(
-        "GET:/vcenter/datastore",
-        "Client error '400 Bad Request' for url "
-        "'https://vc/api/vcenter/datastore?filter.names=bogus'",
+async def test_datastore_usage_listing_error_propagates() -> None:
+    """A load-bearing listing failure propagates; no per-DS calls fire."""
+    conn = _RecordingConnector(
+        [_http_error(400, "https://vc/api/vcenter/datastore?filter.names=bogus")]
     )
-    dispatch = _RecordingDispatchChild([failing])
-    with pytest.raises(CompositeSubOpError) as excinfo:
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
         await datastore_usage_composite(
             operator=_make_operator(),
             target=object(),
             params={},
-            dispatch_child=dispatch,
+            connector=conn,  # type: ignore[arg-type]
         )
     # No per-datastore calls fire after the listing fails.
-    assert len(dispatch.calls) == 1
-    exc = excinfo.value
-    # Backward-compatible substring (existing consumers string-match it).
-    assert "returned status='error'" in str(exc)
-    # The structured detail now rides the message.
-    assert "400 Bad Request" in str(exc)
-    assert "filter.names=bogus" in str(exc)
-    # And the sub-op's structured fields are addressable as attributes.
-    assert exc.op_id == "GET:/vcenter/datastore"
-    assert exc.status == "error"
-    assert exc.sub_op_extras["error_code"] == "connector_error"
+    assert len(conn.calls) == 1
+    message = str(excinfo.value)
+    assert "400 Bad Request" in message
+    assert "filter.names=bogus" in message
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_bubbles_structured_http_status_when_present() -> None:
-    """When a sub-op carried a structured ``http_status`` (403/422/auth), it bubbles too.
-
-    The generic 4xx path (400/404/5xx) carries the status + URL only in
-    ``exception_message``; the 403/422/401/440 builders instead extract a
-    structured ``http_status`` + ``upstream_message``. The bubble-up
-    prefers the structured form when it is present.
-    """
-    failing = OperationResult(
-        status="error",
-        op_id="GET:/vcenter/datastore",
-        error="connector_http_403: the upstream returned HTTP 403 Forbidden ...",
-        duration_ms=1.0,
-        extras={
-            "error_code": "connector_http_403",
-            "http_status": 403,
-            "upstream_message": "Resource not accessible by integration",
-            "permission_headers": {},
-        },
-    )
-    dispatch = _RecordingDispatchChild([failing])
-    with pytest.raises(CompositeSubOpError) as excinfo:
+async def test_datastore_usage_detail_error_propagates() -> None:
+    """A load-bearing per-datastore detail failure propagates (403)."""
+    sequence = [
+        [{"datastore": "datastore-1", "name": "ds-1"}],
+        _http_error(403, "https://vc/api/vcenter/datastore/datastore-1"),
+    ]
+    conn = _RecordingConnector(sequence)
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
         await datastore_usage_composite(
             operator=_make_operator(),
             target=object(),
             params={},
-            dispatch_child=dispatch,
+            connector=conn,  # type: ignore[arg-type]
         )
-    message = str(excinfo.value)
-    assert "HTTP 403" in message
-    assert "Resource not accessible by integration" in message
+    assert "403 Forbidden" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -816,14 +732,9 @@ async def test_datastore_usage_bubbles_structured_http_status_when_present() -> 
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_dispatches_three_phases() -> None:
+async def test_network_portgroup_audit_reads_three_phases() -> None:
     """DVS + portgroup listings + per-portgroup VM listings aggregate to the expected shape."""
     dvs_listing = [{"vds": "dvs-1", "name": "DVS-A"}]
-    # Generic ``GET:/vcenter/network`` summaries: ``{network, name,
-    # type}``. The summary carries no parent-DVS field, so ``dvs`` is
-    # resolved best-effort and is ``None`` for the real REST shape. The
-    # first entry carries a synthetic ``vds`` field to exercise the
-    # best-effort enrichment path against the DVS index.
     pg_listing = [
         {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED_PORTGROUP"},
         {"network": "pg-2", "name": "PG-B", "type": "DISTRIBUTED_PORTGROUP"},
@@ -832,30 +743,27 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
         "pg-1": [{"name": "vm-pg1-a"}, {"name": "vm-pg1-b"}],
         "pg-2": [],
     }
-    sequence: list[OperationResult] = [
-        _ok_result("GET:/vcenter/network/distributed-switches", dvs_listing),
-        _ok_result("GET:/vcenter/network", pg_listing),
-    ]
+    sequence: list[Any] = [dvs_listing, pg_listing]
     for pg in pg_listing:
-        sequence.append(_ok_result("GET:/vcenter/vm", vms_per_pg[pg["network"]]))
-    dispatch = _RecordingDispatchChild(sequence)
+        sequence.append(vms_per_pg[pg["network"]])
+    conn = _RecordingConnector(sequence)
 
     out = await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
     # 1 + 1 + 2 portgroups = 4 calls.
-    assert len(dispatch.calls) == 4
-    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/network/distributed-switches"
+    assert len(conn.calls) == 4
+    assert conn.calls[0]["path"] == "/api/vcenter/network/distributed-switches"
     # Portgroups come from the generic network resource, type-filtered.
-    assert dispatch.calls[1]["op_id"] == "GET:/vcenter/network"
-    assert dispatch.calls[1]["params"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[1]["path"] == "/api/vcenter/network"
+    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
     # Per-PG VM call uses ``filter.networks`` and the default power-state filter.
-    assert dispatch.calls[2]["op_id"] == "GET:/vcenter/vm"
-    assert dispatch.calls[2]["params"] == {
+    assert conn.calls[2]["path"] == "/api/vcenter/vm"
+    assert conn.calls[2]["query"] == {
         "filter.networks": ["pg-1"],
         "filter.power_states": ["POWERED_ON"],
     }
@@ -870,7 +778,6 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
             "vm_names": ["vm-pg1-a", "vm-pg1-b"],
         },
         {
-            # No ``vds`` on the generic Network summary -> dvs/dvs_name None.
             "id": "pg-2",
             "name": "PG-B",
             "dvs": None,
@@ -884,52 +791,38 @@ async def test_network_portgroup_audit_dispatches_three_phases() -> None:
 
 @pytest.mark.asyncio
 async def test_network_portgroup_audit_filter_dvs_scopes_dvs_listing_only() -> None:
-    """``filter_dvs`` scopes the DVS listing; the portgroup call is type-only.
-
-    The generic ``Network`` FilterSpec has no per-DVS filter, so
-    ``filter_dvs`` cannot narrow the portgroup set server-side -- it
-    flows only into the distributed-switches ``filter.vdses`` query,
-    narrowing the DVS index (and thus the ``dvs_name`` enrichment).
-    """
-    sequence = [
-        _ok_result("GET:/vcenter/network/distributed-switches", []),
-        _ok_result("GET:/vcenter/network", []),
-    ]
-    dispatch = _RecordingDispatchChild(sequence)
+    """``filter_dvs`` scopes the DVS listing; the portgroup call is type-only."""
+    sequence = [[], []]
+    conn = _RecordingConnector(sequence)
     await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
         params={"filter_dvs": "dvs-prod"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert dispatch.calls[0]["params"] == {"filter.vdses": ["dvs-prod"]}
+    assert conn.calls[0]["query"] == {"filter.vdses": ["dvs-prod"]}
     # Portgroup call is type-filtered only -- no ``filter.vdses``.
-    assert dispatch.calls[1]["params"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
 
 
 @pytest.mark.asyncio
 async def test_network_portgroup_audit_include_disconnected_drops_power_filter() -> None:
     """``include_disconnected_vms=True`` removes the ``POWERED_ON`` filter on the VM call."""
     sequence = [
-        _ok_result("GET:/vcenter/network/distributed-switches", []),
-        _ok_result(
-            "GET:/vcenter/network",
-            [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
-        ),
-        _ok_result("GET:/vcenter/vm", []),
+        [],
+        [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
+        [],
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
         params={"include_disconnected_vms": True},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    # VM call's params include ``filter.networks`` but NOT
-    # ``filter.power_states``.
-    vm_call = dispatch.calls[2]
-    assert "filter.networks" in vm_call["params"]
-    assert "filter.power_states" not in vm_call["params"]
+    vm_call = conn.calls[2]
+    assert "filter.networks" in vm_call["query"]
+    assert "filter.power_states" not in vm_call["query"]
 
 
 # ---------------------------------------------------------------------------
@@ -938,12 +831,7 @@ async def test_network_portgroup_audit_include_disconnected_drops_power_filter()
 
 
 def _retrieve_result(pnics: list[Any], proxy_switches: list[Any]) -> dict[str, Any]:
-    """Build a RetrievePropertiesEx RetrieveResult for one host.
-
-    Mirrors the WS-API ``RetrieveResult`` shape: an ``objects`` list of
-    ``ObjectContent``, each with a ``propSet`` of ``{name, val}`` pairs
-    keyed on the requested property paths.
-    """
+    """Build a RetrievePropertiesEx RetrieveResult for one host."""
     return {
         "objects": [
             {
@@ -959,13 +847,7 @@ def _retrieve_result(pnics: list[Any], proxy_switches: list[Any]) -> dict[str, A
 
 @pytest.mark.asyncio
 async def test_host_network_uplinks_lists_then_reads_props_per_host() -> None:
-    """Host listing + per-host RetrievePropertiesEx; aggregation matches the spec.
-
-    ``config.network.pnic`` flattens to device / mac / driver / link
-    state + speed; ``config.network.proxySwitch`` flattens to the DVS
-    backing with its uplink pnic device names (recovered from the
-    WS-API pnic keys).
-    """
+    """Host listing + per-host RetrievePropertiesEx; aggregation matches the spec."""
     listing = [
         {"host": "host-1", "name": "esx-1"},
         {"host": "host-2", "name": "esx-2"},
@@ -997,33 +879,28 @@ async def test_host_network_uplinks_lists_then_reads_props_per_host() -> None:
         ),
         "host-2": _retrieve_result(pnics=[], proxy_switches=[]),
     }
-    sequence: list[OperationResult] = [_ok_result("GET:/vcenter/host", listing)]
+    sequence: list[Any] = [listing]
     for entry in listing:
-        sequence.append(
-            _ok_result(
-                "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-                props_by_host[entry["host"]],
-            )
-        )
-    dispatch = _RecordingDispatchChild(sequence)
+        sequence.append(props_by_host[entry["host"]])
+    conn = _RecordingConnector(sequence)
 
     out = await host_network_uplinks_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
     # 1 listing + 2 hosts * 1 property read = 3 calls.
-    assert len(dispatch.calls) == 3
-    assert dispatch.calls[0]["op_id"] == "GET:/vcenter/host"
-    assert dispatch.calls[0]["params"] == {}
-    # Per-host property read targets the propertyCollector singleton and
-    # requests the two host-network config paths on the specific host.
-    prop_call = dispatch.calls[1]
-    assert prop_call["op_id"] == "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
-    assert prop_call["params"]["moId"] == "propertyCollector"
-    spec = prop_call["params"]["specSet"][0]
+    assert len(conn.calls) == 3
+    assert conn.calls[0]["method"] == "GET"
+    assert conn.calls[0]["path"] == "/api/vcenter/host"
+    # Per-host property read targets the propertyCollector singleton (in
+    # the path) and requests the two host-network config paths (in body).
+    prop_call = conn.calls[1]
+    assert prop_call["method"] == "POST"
+    assert prop_call["path"] == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    spec = prop_call["body"]["specSet"][0]
     assert spec["propSet"][0]["type"] == "HostSystem"
     assert spec["propSet"][0]["pathSet"] == [
         "config.network.pnic",
@@ -1063,7 +940,6 @@ async def test_host_network_uplinks_lists_then_reads_props_per_host() -> None:
         }
     ]
     assert "read_note" not in h1
-    # host-2: empty pnic/proxySwitch lists.
     assert hosts[1]["pnics"] == []
     assert hosts[1]["proxy_switches"] == []
 
@@ -1071,59 +947,48 @@ async def test_host_network_uplinks_lists_then_reads_props_per_host() -> None:
 @pytest.mark.asyncio
 async def test_host_network_uplinks_filter_hosts_passes_through_to_listing() -> None:
     """``filter_hosts`` flows into the host listing as ``filter.hosts``."""
-    dispatch = _RecordingDispatchChild([_ok_result("GET:/vcenter/host", [])])
+    conn = _RecordingConnector([[]])
     await host_network_uplinks_composite(
         operator=_make_operator(),
         target=object(),
         params={"filter_hosts": ["host-9", "host-10"]},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    assert dispatch.calls[0]["params"] == {"filter.hosts": ["host-9", "host-10"]}
+    assert conn.calls[0]["query"] == {"filter.hosts": ["host-9", "host-10"]}
 
 
 @pytest.mark.asyncio
 async def test_host_network_uplinks_property_read_is_best_effort_on_error() -> None:
-    """A failed per-host property read keeps the row; pnics/proxy_switches null + note.
-
-    The plain REST host listing has already identified the host by the
-    time the vi-json property read runs, so when that read errors the
-    host row is still returned -- pnics/proxy_switches nulled with a
-    ``read_note`` -- rather than the whole composite failing.
-    """
+    """A failed per-host property read keeps the row; pnics/proxy_switches null + note."""
     listing = [
         {"host": "host-1", "name": "esx-1"},
         {"host": "host-2", "name": "esx-2"},
     ]
     sequence = [
-        _ok_result("GET:/vcenter/host", listing),
+        listing,
         # host-1: property read 400s -> best-effort skip.
-        _connector_error_result(
-            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-            "Client error '400 Bad Request' for url "
-            "'https://vc/sdk/vim25/PropertyCollector/propertyCollector/RetrievePropertiesEx'",
+        _http_error(
+            400,
+            "https://vc/api/PropertyCollector/propertyCollector/RetrievePropertiesEx",
         ),
         # host-2: property read OK.
-        _ok_result(
-            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-            _retrieve_result(pnics=[], proxy_switches=[]),
-        ),
+        _retrieve_result(pnics=[], proxy_switches=[]),
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await host_network_uplinks_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
-    assert len(dispatch.calls) == 3
+    assert len(conn.calls) == 3
     rows = out["hosts"]
     assert len(rows) == 2
     h1 = rows[0]
     assert h1["id"] == "host-1"
     assert h1["pnics"] is None
     assert h1["proxy_switches"] is None
-    assert "read_note" in h1
     note = h1["read_note"]
     assert "POST:/PropertyCollector/{moId}/RetrievePropertiesEx" in note
     assert "400 Bad Request" in note
@@ -1136,18 +1001,15 @@ async def test_host_network_uplinks_property_read_is_best_effort_on_error() -> N
 async def test_host_network_uplinks_tolerates_legacy_value_envelope() -> None:
     """A ``{"value": ...}`` envelope on the listing and property read unwraps cleanly."""
     sequence = [
-        _ok_result("GET:/vcenter/host", {"value": [{"host": "host-1", "name": "esx-1"}]}),
-        _ok_result(
-            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-            {"value": _retrieve_result(pnics=[{"device": "vmnic0"}], proxy_switches=[])},
-        ),
+        {"value": [{"host": "host-1", "name": "esx-1"}]},
+        {"value": _retrieve_result(pnics=[{"device": "vmnic0"}], proxy_switches=[])},
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await host_network_uplinks_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["hosts"][0]["pnics"] == [
         {
@@ -1165,43 +1027,36 @@ async def test_host_network_uplinks_tolerates_legacy_value_envelope() -> None:
 async def test_host_network_uplinks_skips_malformed_listing_entries() -> None:
     """Listing entries without a string ``host`` key are skipped silently."""
     sequence = [
-        _ok_result(
-            "GET:/vcenter/host",
-            [
-                {"host": "host-1", "name": "good"},
-                {"name": "missing-id"},  # no ``host`` key
-                "not-a-dict",
-            ],
-        ),
-        _ok_result(
-            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
-            _retrieve_result(pnics=[], proxy_switches=[]),
-        ),
+        [
+            {"host": "host-1", "name": "good"},
+            {"name": "missing-id"},  # no ``host`` key
+            "not-a-dict",
+        ],
+        _retrieve_result(pnics=[], proxy_switches=[]),
     ]
-    dispatch = _RecordingDispatchChild(sequence)
+    conn = _RecordingConnector(sequence)
     out = await host_network_uplinks_composite(
         operator=_make_operator(),
         target=object(),
         params={},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
-    # Only the well-formed entry produces a property read + a result row.
     assert len(out["hosts"]) == 1
     assert out["hosts"][0]["id"] == "host-1"
 
 
 @pytest.mark.asyncio
-async def test_host_network_uplinks_raises_on_listing_error() -> None:
-    """A failed host listing surfaces as ``RuntimeError``; no per-host reads fire."""
-    dispatch = _RecordingDispatchChild([_err_result("GET:/vcenter/host", "permission denied")])
-    with pytest.raises(RuntimeError, match="returned status='error'"):
+async def test_host_network_uplinks_propagates_listing_error() -> None:
+    """A failed host listing propagates; no per-host reads fire."""
+    conn = _RecordingConnector([_http_error(403, "https://vc/api/vcenter/host")])
+    with pytest.raises(httpx.HTTPStatusError):
         await host_network_uplinks_composite(
             operator=_make_operator(),
             target=object(),
             params={},
-            dispatch_child=dispatch,
+            connector=conn,  # type: ignore[arg-type]
         )
-    assert len(dispatch.calls) == 1
+    assert len(conn.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1209,7 +1064,10 @@ async def test_host_network_uplinks_raises_on_listing_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-_VSAN_QUERY_OP = "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary"
+_VSAN_PATH = (
+    "/api/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+)
+_VSAN_OP = "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary"
 
 
 def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
@@ -1219,13 +1077,7 @@ def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_host_vsan_health_queries_health_summary_for_cluster() -> None:
-    """One health-service query fires, scoped to the cluster; groups + tests flatten.
-
-    ``VsanClusterHealthSummary.overallHealth`` surfaces as
-    ``overall_health``; each ``VsanClusterHealthGroup`` flattens to
-    group_id / group_name / group_health plus a per-check ``tests`` list
-    (testId / testName / testHealth / testShortDescription).
-    """
+    """One health-service query fires, scoped to the cluster; groups + tests flatten."""
     summary = _vsan_summary(
         overall="green",
         groups=[
@@ -1250,26 +1102,21 @@ async def test_host_vsan_health_queries_health_summary_for_cluster() -> None:
             },
         ],
     )
-    dispatch = _RecordingDispatchChild({_VSAN_QUERY_OP: summary})
+    conn = _RecordingConnector({_VSAN_PATH: summary})
 
     out = await host_vsan_health_composite(
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c123"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
 
-    assert len(dispatch.calls) == 1
-    call = dispatch.calls[0]
-    assert call["op_id"] == _VSAN_QUERY_OP
-    assert call["connector_id"] == "vmware-rest-9.0"
-    # The health query targets the vsan-cluster-health-system singleton
-    # and carries the cluster MoRef.
-    assert call["params"]["moId"] == "vsan-cluster-health-system"
-    assert call["params"]["cluster"] == {
-        "type": "ClusterComputeResource",
-        "value": "domain-c123",
-    }
+    assert len(conn.calls) == 1
+    call = conn.calls[0]
+    assert call["method"] == "POST"
+    # The singleton moId rides the path; the cluster MoRef is the body arg.
+    assert call["path"] == _VSAN_PATH
+    assert call["body"] == {"cluster": {"type": "ClusterComputeResource", "value": "domain-c123"}}
 
     assert out["cluster"] == "domain-c123"
     assert out["overall_health"] == "green"
@@ -1299,49 +1146,33 @@ async def test_host_vsan_health_queries_health_summary_for_cluster() -> None:
 
 @pytest.mark.asyncio
 async def test_host_vsan_health_read_is_best_effort_on_error() -> None:
-    """A failed health-service read nulls groups/overall + records a ``read_note``.
-
-    The cluster is already identified by the ``cluster`` param, so a
-    health-service error (vSAN disabled, endpoint reject) returns the
-    payload with ``overall_health`` / ``groups`` nulled and a
-    ``read_note`` rather than raising.
-    """
-    dispatch = _RecordingDispatchChild(
-        [
-            _connector_error_result(
-                _VSAN_QUERY_OP,
-                "Client error '400 Bad Request' for url "
-                "'https://vc/vsanHealth/VsanVcClusterHealthSystem/"
-                "vsan-cluster-health-system/VsanQueryVcClusterHealthSummary'",
-            )
-        ]
+    """A failed health-service read nulls groups/overall + records a ``read_note``."""
+    conn = _RecordingConnector(
+        [_http_error(400, "https://vc" + _VSAN_PATH.replace("/api", "/vsanHealth"))]
     )
     out = await host_vsan_health_composite(
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c404"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["cluster"] == "domain-c404"
     assert out["overall_health"] is None
     assert out["groups"] is None
-    assert "read_note" in out
     note = out["read_note"]
-    assert _VSAN_QUERY_OP in note
+    assert _VSAN_OP in note
     assert "400 Bad Request" in note
 
 
 @pytest.mark.asyncio
 async def test_host_vsan_health_tolerates_legacy_value_envelope() -> None:
     """A ``{"value": ...}`` envelope on the summary unwraps cleanly."""
-    dispatch = _RecordingDispatchChild(
-        [_ok_result(_VSAN_QUERY_OP, {"value": _vsan_summary(overall="red", groups=[])})]
-    )
+    conn = _RecordingConnector({_VSAN_PATH: {"value": _vsan_summary(overall="red", groups=[])}})
     out = await host_vsan_health_composite(
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c1"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["overall_health"] == "red"
     assert out["groups"] == []
@@ -1350,149 +1181,85 @@ async def test_host_vsan_health_tolerates_legacy_value_envelope() -> None:
 @pytest.mark.asyncio
 async def test_host_vsan_health_tolerates_missing_groups_key() -> None:
     """A summary without a ``groups`` list degrades to an empty group list."""
-    dispatch = _RecordingDispatchChild([_ok_result(_VSAN_QUERY_OP, {"overallHealth": "green"})])
+    conn = _RecordingConnector({_VSAN_PATH: {"overallHealth": "green"}})
     out = await host_vsan_health_composite(
         operator=_make_operator(),
         target=object(),
         params={"cluster": "domain-c1"},
-        dispatch_child=dispatch,
+        connector=conn,  # type: ignore[arg-type]
     )
     assert out["overall_health"] == "green"
     assert out["groups"] == []
 
 
 # ---------------------------------------------------------------------------
-# Error fan-out -- a sub-op error causes the handler to raise
+# Mount routing (modern + legacy) + zero-catalog-ingest contract
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_cluster_drs_recommendations_raises_on_sub_op_error() -> None:
-    """A sub-op ``status="error"`` causes the composite to raise ``RuntimeError``.
+async def test_read_sub_ops_route_through_legacy_rest_mount() -> None:
+    """Every sub-op is mounted, so a legacy/vcsim target routes onto ``/rest``.
 
-    Load-bearing for the dispatcher's outer exception branch: the
-    composite parent sees the failure as a structured
-    ``connector_error`` result with the underlying op_id and message
-    in ``extras["exception_class"]``.
+    A target whose session established on the legacy path serves ops only
+    under ``/rest`` (not ``/api``); the composite must mount each sub-op
+    through ``mount_op_path`` or it 404s. This is the modern+legacy mount
+    coverage the acceptance criteria require, at the unit level.
     """
-    dispatch = _RecordingDispatchChild(
-        {
-            "GET:/vcenter/cluster/{cluster}": _err_result(
-                "GET:/vcenter/cluster/{cluster}", "cluster not found"
-            ),
-        }
+    listing = [{"datastore": "datastore-1", "name": "ds-1"}]
+    conn = _RecordingConnector(
+        [listing, {"capacity": 1, "free_space": 1}, []],
+        mount_prefix="/rest",
     )
-    with pytest.raises(RuntimeError, match="returned status='error'"):
-        await cluster_drs_recommendations_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={"cluster": "bogus"},
-            dispatch_child=dispatch,
-        )
-
-
-@pytest.mark.asyncio
-async def test_datastore_usage_raises_on_listing_error() -> None:
-    """A failed listing surfaces as ``RuntimeError``; no per-DS calls fire."""
-    dispatch = _RecordingDispatchChild([_err_result("GET:/vcenter/datastore", "permission denied")])
-    with pytest.raises(RuntimeError, match="returned status='error'"):
-        await datastore_usage_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            dispatch_child=dispatch,
-        )
-    assert len(dispatch.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_event_tail_raises_on_sub_op_error() -> None:
-    """QueryEvents error surfaces as ``RuntimeError`` (no aggregation)."""
-    dispatch = _RecordingDispatchChild(
-        [_err_result("POST:/EventManager/{moId}/QueryEvents", "vi-json transient")]
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
     )
-    with pytest.raises(RuntimeError, match="returned status='error'"):
-        await event_tail_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            dispatch_child=dispatch,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Connector-id contract
-# ---------------------------------------------------------------------------
+    # Every recorded call lands under the legacy /rest mount.
+    assert all(c["path"].startswith("/rest/") for c in conn.calls)
+    assert conn.calls[0]["path"] == "/rest/vcenter/datastore"
+    assert out["datastores"][0]["id"] == "datastore-1"
 
 
 @pytest.mark.asyncio
-async def test_every_composite_uses_vmware_rest_9_0_connector_id() -> None:
-    """All seven read handlers dispatch sub-ops against ``vmware-rest-9.0`` exclusively.
+async def test_every_read_composite_dispatches_directly_on_the_session() -> None:
+    """All 7 read handlers reach their sub-ops via the connector session only.
 
-    Load-bearing for the issue body's *Why dispatch_child not direct
-    httpx* contract: the connector_id is what routes the recursive
-    dispatch back to :class:`VmwareRestConnector` for sub-call
-    authentication.
+    Load-bearing for the #2253 contract: no ``dispatch_child``, no
+    ingested descriptor, no L2 pre-flight -- so the composites work on a
+    fresh boot with zero catalog ingest. Each handler is exercised with a
+    minimal happy-path stub and must (a) record at least one session call
+    and (b) mount every path it hit.
     """
-    handlers: tuple[tuple[Any, dict[str, Any], dict[str, Any]], ...] = (
+    handlers: tuple[tuple[Any, dict[str, Any], list[Any]], ...] = (
         (
             cluster_drs_recommendations_composite,
             {"cluster": "c1"},
-            {
-                "GET:/vcenter/cluster/{cluster}": {},
-                "GET:/vcenter/cluster/{cluster}/drs": {},
-            },
+            [{}, {}],
         ),
-        (
-            event_tail_composite,
-            {},
-            {"POST:/EventManager/{moId}/QueryEvents": []},
-        ),
-        (
-            performance_summary_composite,
-            {"entity_moid": "vm-1"},
-            {
-                "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric": [],
-                "POST:/PerformanceManager/{moId}/QueryPerf": [],
-            },
-        ),
-        (
-            datastore_usage_composite,
-            {},
-            {"GET:/vcenter/datastore": []},
-        ),
-        (
-            network_portgroup_audit_composite,
-            {},
-            {
-                "GET:/vcenter/network/distributed-switches": [],
-                "GET:/vcenter/network": [],
-            },
-        ),
-        (
-            host_network_uplinks_composite,
-            {},
-            {"GET:/vcenter/host": []},
-        ),
+        (event_tail_composite, {}, [[]]),
+        (performance_summary_composite, {"entity_moid": "vm-1"}, [[], []]),
+        (datastore_usage_composite, {}, [[]]),
+        (network_portgroup_audit_composite, {}, [[], []]),
+        (host_network_uplinks_composite, {}, [[]]),
         (
             host_vsan_health_composite,
             {"cluster": "domain-c1"},
-            {
-                "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary": (
-                    {"overallHealth": "green", "groups": []}
-                )
-            },
+            [{"overallHealth": "green", "groups": []}],
         ),
     )
     for handler, params, responses in handlers:
-        dispatch = _RecordingDispatchChild(dict(responses))
+        conn = _RecordingConnector(list(responses))
         await handler(
             operator=_make_operator(),
             target=object(),
             params=params,
-            dispatch_child=dispatch,
+            connector=conn,  # type: ignore[arg-type]
         )
-        for call in dispatch.calls:
-            assert call["connector_id"] == "vmware-rest-9.0", (
-                f"{handler.__qualname__} dispatched to {call['connector_id']}"
-            )
+        assert conn.calls, f"{handler.__qualname__} issued no session sub-calls"
+        # Every session call went through a mount resolution.
+        assert len(conn.mount_calls) == len(conn.calls), (
+            f"{handler.__qualname__} bypassed mount_op_path on a sub-op"
+        )

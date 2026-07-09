@@ -356,14 +356,30 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 
 
 def _handler_requires_target(handler_ref: str) -> bool:
-    """True when *handler_ref* names a connector-bound (self-first) handler.
+    """True when *handler_ref* names a handler that reaches its connector via the target.
 
     Keys the no-target guard on **handler shape**, not just
-    ``source_kind`` — a typed/composite handler whose first parameter is
-    ``self`` is a connector method that only binds to its instance
-    *through* a resolved target, so dispatching it with ``target=None``
-    is a usage error (G0.20-T6 #1506). A module-level handler (no
-    ``self``) genuinely needs no target and must keep dispatching with
+    ``source_kind``. Two shapes reach their connector instance *through*
+    the resolved target, so dispatching them with ``target=None`` is a
+    usage error rather than a legitimate module-level no-target call:
+
+    * **Self-first (bound method)** -- a typed/composite handler whose
+      first parameter is ``self`` is a connector method that only binds
+      to its instance through a resolved target (G0.20-T6 #1506).
+    * **``connector``-declaring composite (direct-session, #2251)** -- a
+      composite handler that declares a ``connector`` parameter receives
+      the resolved connector instance the dispatcher built from the
+      target (see
+      :func:`~meho_backplane.operations._branches.dispatch_composite`).
+      With ``target=None`` the resolver produces ``connector_instance=None``,
+      which the handler would then dereference on its first
+      ``connector._get_json`` call and raise an
+      :exc:`AttributeError` deep in the handler body. Catching it here as
+      ``target_required`` gives the operator the same clear
+      omitted-argument diagnosis the self-first shape gets.
+
+    A module-level handler that declares neither (no ``self``, no
+    ``connector``) genuinely needs no target and keeps dispatching with
     ``connector_instance=None``.
 
     Mirrors the first-parameter check :func:`dispatch_typed` uses for its
@@ -379,7 +395,9 @@ def _handler_requires_target(handler_ref: str) -> bool:
     except (ImportError, TypeError):
         return False
     param_names = list(inspect.signature(handler).parameters.keys())
-    return bool(param_names) and param_names[0] == "self"
+    if param_names and param_names[0] == "self":
+        return True
+    return "connector" in param_names
 
 
 async def _resolve_connector_instance(
@@ -555,6 +573,11 @@ async def _run_source_kind_branch(
             target=target,
             params=params,
             dispatch_child=dispatch_child,
+            # Forward the instance the resolver already built for this
+            # composite's target (#2251). ``dispatch_composite`` hands it
+            # to the handler only when the handler declares a ``connector``
+            # parameter, so ``dispatch_child``-only handlers are untouched.
+            connector_instance=connector_instance,
         )
     # The DB CHECK constraint on source_kind prevents this in practice;
     # the explicit raise keeps the dispatcher's error contract honest

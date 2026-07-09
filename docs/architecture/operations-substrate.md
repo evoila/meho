@@ -313,6 +313,41 @@ async def vmware_vm_create_composite(
 
 Spelling the contract as a `typing.Protocol` rather than a raw `Callable` alias gives mypy + Pyright the keyword-argument shape (`connector_id` / `op_id` / `params` / `target`) so handler call sites are structurally type-checked. The Protocol → factory split also keeps the import graph one-directional (composite handlers depend on the contract; the dispatcher depends on the handlers).
 
+### Direct-session sub-calls (`connector` seam, #2251)
+
+`dispatch_child` is not the only sub-call capability. A composite handler can instead (or additionally) declare a `connector` parameter; `dispatch_composite` then forwards the connector instance the dispatcher already resolved for the composite's `target` (via `_resolve_connector_instance`). A handler that opts in issues sub-calls through the connector's own session (`connector._get_json` / `connector._post_json` + `connector.mount_op_path`) with **no** `endpoint_descriptor` lookup — the "two-world" posture (Goal #2247) that keeps a code-shipped op's dispatch path off a mutable catalog row.
+
+Both seams are forwarded **only when the handler declares the matching parameter**, so the `dispatch_child`-only handlers above are unchanged, and the registration guard (`validate_composite_handler_signature`) accepts a handler declaring either or both. Taking the direct path deliberately drops the per-sub-op audit row, param validation, recursion bound, and policy/broadcast that `dispatch_child` provides; those trade-offs — and why per-sub-op policy stays load-bearing for *write* composites — are documented on the "Why `dispatch_child` not direct httpx" note in [`connectors/vmware_rest/composites/_read.py`](../../backend/src/meho_backplane/connectors/vmware_rest/composites/_read.py). No shipped composite uses the direct seam yet; the incremental migrations are Initiative #2248/#2249.
+
+### Preserving write-composite policy on the direct path (`enforce_subop_policy`, #2254)
+
+The direct seam drops property 3 of `dispatch_child` — the per-sub-op policy-gate + approval-queue check. For a **read** composite that is fine (the top-level op is already gated). For a **write** composite it is load-bearing: a now-internal write sub-op may itself be `dangerous` / `requires_approval`, and executing it un-gated would regress the governance it had through `dispatch_child`.
+
+[`enforce_subop_policy(...)`](../../backend/src/meho_backplane/operations/composite.py) is the reusable seam that closes the gap. A direct-session write handler calls it **before** each governed sub-call, passing the sub-op's declared policy facts:
+
+```python
+gate = await enforce_subop_policy(
+    operator=operator,
+    connector_id="vmware-rest-9.0",
+    op_id="POST:/vcenter/vm",
+    safety_level="dangerous",
+    requires_approval=True,
+    target=target,
+    params=create_body,
+)
+if gate is not None:
+    return gate  # awaiting_approval / denied — do NOT run the write
+vm = await connector._post_json(target, "/vcenter/vm", operator=operator, json=create_body)
+```
+
+It re-runs the **same** `policy_gate` the dispatcher runs, against an in-memory `EndpointDescriptor` built from those facts (never persisted — that keeps the code-shipped op's dispatch path off a mutable catalog row). The verdict maps to:
+
+- **auto-execute** → returns `None`; the handler proceeds with its direct session call.
+- **needs-approval** → writes a durable `ApprovalRequest` for the sub-op via the public `create_pending_request` and returns an `awaiting_approval` `OperationResult`. The handler returns it verbatim, and the dispatcher passes a handler-returned `OperationResult` straight through (`_run_source_kind_branch` → `isinstance(branch_result, OperationResult)`), so the write **queues** instead of executing.
+- **deny** → returns a `denied` `OperationResult`; the write never runs.
+
+**Chosen model vs the rejected one.** All 8 vmware write composites are already `dangerous` + `requires_approval` at the **top-level op**, so the composite's own gate — which `dispatch()` runs before the handler body — is the *primary* governing decision, matching the RFC's "curated composite is the reviewed unit" framing (Goal #2247). The **rejected** alternative was to rely on that top-level decision *alone* ("top-level sufficiency"): simpler, but it silently collapses per-sub-op approval granularity — a composite that is itself auto-execute yet fans out to one approval-gated write sub-op would execute that write with no approval. `enforce_subop_policy` is the dumb-substrate complement (a plain function with no DSL/config framework, reusing `policy_gate` + the approval queue verbatim) that **guarantees** no internal write sub-op executes below the governance it had under `dispatch_child`. It ships the mechanism only; the 8 write composites consume it during their migration (Initiative #2249, #2256).
+
 ### `parent_audit_id` semantics
 
 The composite branch builds the `dispatch_child` callable via [`get_dispatch_child(...)`](../../backend/src/meho_backplane/operations/composite.py), passing the parent's `audit_id`. The factory closes over `parent_audit_id` and binds it on `parent_audit_id_var` for the duration of each child dispatch. The child's audit row reads the contextvar via `parent_audit_id_var.get()` and writes the UUID to its `audit_log.parent_audit_id` column.

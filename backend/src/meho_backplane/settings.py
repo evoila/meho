@@ -899,6 +899,33 @@ class Settings(BaseModel):
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
     vault_scheduler_token: str = Field(default="", repr=False)
+    # #2229 (Initiative #2227) — names the credential backend a schemeless
+    # target ``secret_ref`` resolves through. ``vault`` (the default) keeps
+    # every existing install on today's Vault KV-v2 read with no config
+    # change: a schemeless ``targets/<id>`` ref and an explicit
+    # ``vault:targets/<id>`` ref both dispatch to the Vault backend. A
+    # scheme-prefixed ref (``gsm:<project>/<secret>`` once #2230 registers
+    # the GSM backend) overrides this per-target. Setting it is a no-op for
+    # Vault installs. Chart wiring (``config.credentialBackend`` →
+    # ``CREDENTIAL_BACKEND``) lands with the GSM Helm surface in #2231.
+    credential_backend: str = Field(default="vault", min_length=1)
+    # #2230 (Initiative #2227) — optional service account the GCP Secret
+    # Manager credential backend impersonates when resolving a
+    # ``gsm:<project>/<secret>`` ref. Empty (the default) reads Secret
+    # Manager directly under the pod's own GKE Workload Identity ADC
+    # (``google.auth.default()``); a non-empty SA email wraps that ADC
+    # source in ``google.auth.impersonated_credentials`` targeting the SA,
+    # reusing the GcloudConnector impersonation chain. No effect on Vault
+    # installs. Chart wiring lands with the GSM Helm surface in #2231.
+    gsm_impersonate_sa: str = Field(default="")
+    # #2231 (Initiative #2227) — the GCP project the GSM credential backend
+    # reads under when a ``secret_ref`` (or the ``/api/v1/health`` federation
+    # probe) names no explicit project. Empty (the default) is correct for
+    # every Vault install; a ``gsm``-backend install sets it via
+    # ``config.gsmProject`` → ``GSM_PROJECT`` so the health federation proof
+    # can address ``gsm:<project>/<probe-secret>`` without a hard-coded
+    # project. No effect on Vault installs.
+    gsm_project: str = Field(default="")
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -1445,6 +1472,18 @@ def get_settings() -> Settings:
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
         vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
+        # Empty / whitespace-only ``CREDENTIAL_BACKEND`` falls back to the
+        # ``vault`` default so a blank chart value never yields an unknown
+        # ("") backend kind (``min_length=1`` on the field would reject it).
+        credential_backend=(os.environ.get("CREDENTIAL_BACKEND", "").strip() or "vault"),
+        # Optional impersonation SA for the GSM credential backend (#2230).
+        # Empty/whitespace-only ⇒ direct-ADC read (no impersonation).
+        gsm_impersonate_sa=os.environ.get("GSM_IMPERSONATE_SA", "").strip(),
+        # GCP project the GSM backend + health federation probe read under
+        # (#2231). Empty is correct for Vault installs; a gsm-backend install
+        # sets it via ``config.gsmProject``. Whitespace is stripped so a
+        # blank chart value round-trips as empty.
+        gsm_project=os.environ.get("GSM_PROJECT", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

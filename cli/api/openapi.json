@@ -25387,6 +25387,7 @@
               "k8s",
               "keycloak",
               "loki",
+              "mongodb",
               "nsx",
               "pfsense",
               "postgres",

@@ -3,7 +3,8 @@
 
 """Park-time ``proposed_effect`` previews for the 8 vmware write composites.
 
-G0.22-T3 (#1608) acceptance criteria:
+G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
+model:
 
 1. A parked ``vmware.composite.vm.power.bulk`` request's
    ``proposed_effect`` carries the requested ``action``, the ``filter``
@@ -11,24 +12,23 @@ G0.22-T3 (#1608) acceptance criteria:
    — asserted against the durable :class:`ApprovalRequest` row through
    the production :func:`~meho_backplane.operations.dispatch` park path.
 2. The preview path issues **only reads**: the park records exactly one
-   ``GET:/vcenter/vm`` leaf call and no power sub-op; the read-only
-   adapter additionally refuses any non-``GET:`` op_id structurally.
+   listing ``GET`` on the connector session and no mutating sub-op.
 3. The resolution logic is shared, not duplicated — the builders call
    the same :func:`._write._resolve_vm_list` /
-   :func:`._write._resolve_cluster_hosts` helpers the handlers use
-   (asserted via the wiring test + the helpers' single definition site).
+   :func:`._write._resolve_cluster_hosts` helpers the handlers use, now
+   directly on the connector session (no ``dispatch_child``, no ingested
+   descriptor), so the park-time preview works on a fresh boot with zero
+   catalog ingest.
 4. All 8 write composites register a builder (4 live-read + 4 param
    echo); the wiring test pins the full set.
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
-reason (visible through the REST / MCP serialisation helpers), so the
-reviewer can tell "blast-radius unknown" from a genuinely small action.
+reason (visible through the REST / MCP serialisation helpers).
 
-Harness: mirrors :mod:`tests.test_connectors_vmware_rest_composites_write_e2e`
-(recording leaf typed-ops + in-process SQLite dispatcher), trimmed to the
-two listing leaves the park-time previews actually read — at park time
-the composite handler never runs, so no other leaf descriptor is needed.
+Harness: the resolved connector instance the dispatcher hands the preview
+builder is a recording double seeded into the connector-instance cache;
+the park-time listing reads run directly on it.
 """
 
 from __future__ import annotations
@@ -45,20 +45,16 @@ import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.composites import (
     _write_preview,
     register_vmware_composite_operations,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.operations import (
-    dispatch,
-    register_typed_operation,
-    reset_dispatcher_caches,
-)
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations._preview import _PREVIEW_BUILDERS, PreviewContext
 from meho_backplane.settings import get_settings
 
@@ -80,7 +76,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Fixtures (mirror tests.test_connectors_vmware_rest_composites_write_e2e)
+# Fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -155,8 +151,6 @@ class _FakeVmwareTarget:
         self.fingerprint = _FakeFingerprint(version="9.0")
         self.preferred_impl_id: str | None = "vmware-rest"
         self.id: UUID = target_id or uuid.uuid4()
-        # Tenant-unique cache key component (#1642/#1672); without it
-        # ``target_cache_key`` raises AttributeError at runtime.
         self.tenant_id: UUID = _TENANT_ID
         self.name = "test-vcenter"
         self.host = "vcenter.test"
@@ -164,98 +158,83 @@ class _FakeVmwareTarget:
         self.auth_model = "shared_service_account"
 
 
-class _NoOpVmwareConnector(Connector):
-    """Resolver-satisfying connector — the typed leaf path never invokes it."""
+# ---------------------------------------------------------------------------
+# Recording connector double (seeded as the dispatcher's resolved instance)
+# ---------------------------------------------------------------------------
 
-    product = "vmware"
-    version = "9.0"
-    impl_id = "vmware-rest"
 
-    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
-        raise NotImplementedError
+class _RecordingConnector:
+    """Records the listing reads the park-time preview builders issue.
 
-    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
-        raise NotImplementedError
+    Seeded as the dispatcher's resolved connector instance so the migrated
+    preview builders' shared read helpers (:func:`._write._resolve_vm_list` /
+    :func:`._write._resolve_cluster_hosts`) run directly on it. Records
+    ``(verb, spec-relative path, query)`` and serves a canned envelope keyed
+    by spec path. A spec path registered in ``failures`` raises to drive the
+    #1628 ``preview_unavailable`` fail-soft branch; the message carries the
+    op-id-shaped ``GET:<path>`` string so the reviewer-facing
+    ``preview_error`` names the read that could not resolve.
+    """
 
-    async def execute(  # type: ignore[override]
+    _MOUNT = "/api"
+
+    def __init__(self) -> None:
+        self.responses: dict[str, Any] = {}
+        self.failures: dict[str, str] = {}
+        self.calls: list[tuple[str, str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        spec = self._spec(path)
+        self.calls.append(("GET", spec, params))
+        if spec in self.failures:
+            raise RuntimeError(f"GET:{spec} listing failed: {self.failures[spec]}")
+        return self.responses.get(spec, {"value": []})
+
+    async def _post_json(
         self,
         target: Any,
-        op_id: str,
-        params: dict[str, Any],
-    ) -> OperationResult:
-        raise NotImplementedError
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        data: Any = None,
+        extra_headers: Any = None,
+    ) -> Any:
+        spec = self._spec(path)
+        self.calls.append((verb, spec, None))
+        return {"value": {}}
+
+    @property
+    def read_calls(self) -> list[tuple[str, Any]]:
+        """(spec-path, query) for every recorded GET."""
+        return [(spec, query) for verb, spec, query in self.calls if verb == "GET"]
+
+    @property
+    def specs(self) -> list[str]:
+        return [spec for _, spec, _ in self.calls]
 
 
-# ---------------------------------------------------------------------------
-# Recording leaf stubs — only the two listing reads the previews issue
-# ---------------------------------------------------------------------------
-
-#: Ordered record of every leaf op_id dispatched in the current test.
-_CALLS: list[tuple[str, dict[str, Any]]] = []
-
-#: Per-op canned response payload (vSphere REST envelope shape).
-_RESPONSES: dict[str, Any] = {}
-
-#: op_ids whose stub should raise (drives the fail-soft branch).
-_FAILURES: dict[str, str] = {}
-
-
-def _record(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Append a leaf call and resolve its canned payload, raising on failure."""
-    _CALLS.append((op_id, dict(params)))
-    if op_id in _FAILURES:
-        raise RuntimeError(_FAILURES[op_id])
-    return _RESPONSES.get(op_id, {"value": []})
-
-
-async def _h_list_vms(target: Any, params: dict[str, Any]) -> dict[str, Any]:
-    return _record("GET:/vcenter/vm", params)
-
-
-async def _h_list_cluster_hosts(target: Any, params: dict[str, Any]) -> dict[str, Any]:
-    return _record("GET:/vcenter/cluster/{cluster}/host", params)
-
-
-_LEAF_HANDLERS: dict[str, Any] = {
-    "GET:/vcenter/vm": _h_list_vms,
-    "GET:/vcenter/cluster/{cluster}/host": _h_list_cluster_hosts,
-}
-
-
-def _reset_recorder() -> None:
-    _CALLS.clear()
-    _RESPONSES.clear()
-    _FAILURES.clear()
-
-
-async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> None:
-    """Register the connector, the 15 composites, and the listing leaves."""
+async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> _RecordingConnector:
+    """Register the connector + 13 composites and seed the recording instance."""
     register_connector_v2(
         product="vmware",
         version="9.0",
         impl_id="vmware-rest",
-        cls=_NoOpVmwareConnector,
+        cls=VmwareRestConnector,
     )
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
-    permissive_schema = {"type": "object", "additionalProperties": True}
-    for op_id, handler in _LEAF_HANDLERS.items():
-        await register_typed_operation(
-            product="vmware",
-            version="9.0",
-            impl_id="vmware-rest",
-            op_id=op_id,
-            handler=handler,
-            summary=f"Stub leaf op {op_id} for the write-preview tests.",
-            description=f"Stub leaf op {op_id} for the write-preview tests.",
-            parameter_schema=permissive_schema,
-            when_to_use=None,
-            embedding_service=stub_embedding_service,
-        )
-    _reset_recorder()
-
-
-def _ops_in_calls() -> list[str]:
-    return [op_id for op_id, _ in _CALLS]
+    recorder = _RecordingConnector()
+    _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = recorder  # type: ignore[assignment]
+    return recorder
 
 
 async def _park(
@@ -287,44 +266,45 @@ async def _park(
 
 
 def test_all_eight_write_composites_register_a_preview_builder() -> None:
-    """Importing the composites package wires a builder per write composite.
-
-    The side-effect import in ``composites/__init__`` must register every
-    ``requires_approval=True`` composite; a rename or dropped entry would
-    silently regress that op to the identifier-only default.
-    """
+    """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
 
 # ===========================================================================
-# Read-only adapter — structural GET-only guard (criterion 2, belt)
+# Live-read builders decline without a connector (structural guard)
 # ===========================================================================
 
 
-def _make_preview_ctx(params: dict[str, Any]) -> PreviewContext:
+def _make_preview_ctx(params: dict[str, Any], *, connector_instance: Any = None) -> PreviewContext:
     """A :class:`PreviewContext` for builder-direct unit tests."""
     return PreviewContext(
         descriptor=object(),  # type: ignore[arg-type]  # echo builders ignore it
-        connector_instance=None,
+        connector_instance=connector_instance,
         operator=_make_operator(),
         target=_FakeVmwareTarget(),
         params=params,
     )
 
 
-async def test_read_only_adapter_refuses_non_get_op_ids() -> None:
-    """The adapter rejects any mutating op_id before lookup or I/O fires."""
-    adapter = _write_preview._read_only_dispatch_child(_make_preview_ctx({}))
-    for op_id in (
-        "POST:/vcenter/vm/{vm}/power?action=start",
-        "DELETE:/vcenter/vm/{vm}",
-        "PATCH:/vcenter/vm/{vm}/network",
+async def test_live_read_builders_decline_without_a_connector_instance() -> None:
+    """The four fan-out builders decline (return None) when no connector resolved.
+
+    Post-#2256 the live-read builders resolve their blast radius on the
+    connector session; with ``connector_instance=None`` there is nothing to
+    read, so they decline to the identifier-only default rather than raise.
+    """
+    for builder, params in (
+        (_write_preview._vm_power_bulk_preview, {"action": "stop"}),
+        (_write_preview._host_evacuate_preview, {"host": "host-1"}),
+        (
+            _write_preview._host_detach_from_vds_preview,
+            {"host": "host-1", "dvs": "dvs-1", "fallback_network": "net"},
+        ),
+        (_write_preview._cluster_patch_preview, {"cluster": "domain-c1"}),
     ):
-        result = await adapter(connector_id=_CONNECTOR_ID, op_id=op_id, params={})
-        assert result.status == "error"
-        assert "GET-only" in (result.error or "")
+        assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
 
 
 # ===========================================================================
@@ -437,14 +417,9 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
 async def test_power_bulk_park_carries_action_filter_and_resolved_set(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The parked row's ``proposed_effect`` names the blast radius (criterion 1).
-
-    The reviewer sees the requested ``action``, the ``filter`` echoed, and
-    the resolved VM identities with the uncapped count — not just
-    ``{op_id, connector_id, target_id}``.
-    """
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/vm"] = {
+    """The parked row's ``proposed_effect`` names the blast radius (criterion 1)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
         "value": [
             {"vm": "vm-a", "name": "web-a", "power_state": "POWERED_ON", "cpu_count": 2},
             {"vm": "vm-b", "name": "web-b", "power_state": "POWERED_OFF", "cpu_count": 4},
@@ -470,32 +445,27 @@ async def test_power_bulk_park_carries_action_filter_and_resolved_set(
         "safety_level": "dangerous",
     }
     # The filter reached the listing read in the handler's wire shape.
-    assert _CALLS == [("GET:/vcenter/vm", {"filter.names": ["web-*"]})]
+    assert recorder.read_calls == [("/vcenter/vm", {"filter.names": ["web-*"]})]
 
 
 async def test_power_bulk_park_issues_only_the_listing_read(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """No power mutation fires on the park path (criterion 2).
-
-    The recorded leaf calls contain exactly the one listing GET — no
-    ``POST:/vcenter/vm/{vm}/power?action=...`` — even though the listing
-    resolved VMs the approved dispatch would act on.
-    """
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/vm"] = {"value": [{"vm": "vm-a"}, {"vm": "vm-b"}]}
+    """No power mutation fires on the park path (criterion 2)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-a"}, {"vm": "vm-b"}]}
 
     await _park("vmware.composite.vm.power.bulk", {"action": "start"})
 
-    assert _ops_in_calls() == ["GET:/vcenter/vm"]
+    assert recorder.specs == ["/vcenter/vm"]
 
 
 async def test_power_bulk_resolved_list_is_capped_with_true_total(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """A wide filter caps ``resolved`` at the preview cap; ``total_resolved`` is uncapped."""
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/vm"] = {
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
         "value": [{"vm": f"vm-{i}", "name": f"node-{i}"} for i in range(25)]
     }
 
@@ -510,18 +480,9 @@ async def test_power_bulk_resolved_list_is_capped_with_true_total(
 async def test_power_bulk_preview_failure_parks_with_unavailable_marker(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A failing listing read parks with identifiers + an explicit marker (#1628).
-
-    Pre-#1628 the row degraded silently to the bare identifier-only
-    default — indistinguishable from a genuinely small action, defeating
-    the four-eyes purpose of the preview on any deploy where the L2 read
-    can't execute. The park (the safety-relevant action) still proceeds
-    — ``_park`` asserts ``awaiting_approval`` + a PENDING row — but the
-    reviewer now sees "blast-radius unknown" plus the read's failure
-    reason alongside the identifier fields.
-    """
-    await _bootstrap_registry(stub_embedding_service)
-    _FAILURES["GET:/vcenter/vm"] = "vCenter listing unavailable"
+    """A failing listing read parks with identifiers + an explicit marker (#1628)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm"] = "vCenter listing unavailable"
 
     target = _FakeVmwareTarget()
     _, row = await _park(
@@ -531,39 +492,25 @@ async def test_power_bulk_preview_failure_parks_with_unavailable_marker(
     )
 
     effect = row.proposed_effect
-    # The identifier fields stay — the marker rides alongside them.
     assert effect["op_id"] == "vmware.composite.vm.power.bulk"
     assert effect["connector_id"] == _CONNECTOR_ID
     assert effect["target_id"] == str(target.id)
     assert effect["op_class"] == "other"
     assert effect["preview_unavailable"] is True
-    # The reason names the failed listing read and its error, not just
-    # "failed" — the reviewer learns *what* could not be resolved.
     assert "GET:/vcenter/vm" in effect["preview_error"]
     assert "vCenter listing unavailable" in effect["preview_error"]
-    # No "preview" envelope key: a failed preview is structurally
-    # distinct from a successful one.
     assert "preview" not in effect
 
 
 async def test_preview_unavailable_marker_reaches_reviewer_surfaces(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The marker is reviewer-visible on the REST view and the MCP row dict (#1628).
-
-    ``GET /api/v1/approvals[/{id}]`` serialises the row through
-    :func:`meho_backplane.api.v1.approvals._view` and
-    ``meho.approvals.list`` / ``.get`` through
-    :func:`meho_backplane.mcp.tools.approvals._row_to_dict`; both pass
-    ``proposed_effect`` through verbatim. Pinning the passthrough for
-    the marker keeps a future field projection from silently hiding a
-    failed preview from the approval queue.
-    """
+    """The marker is reviewer-visible on the REST view and the MCP row dict (#1628)."""
     from meho_backplane.api.v1.approvals import _view
     from meho_backplane.mcp.tools.approvals import _row_to_dict
 
-    await _bootstrap_registry(stub_embedding_service)
-    _FAILURES["GET:/vcenter/vm"] = "vCenter listing unavailable"
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm"] = "vCenter listing unavailable"
 
     _, row = await _park("vmware.composite.vm.power.bulk", {"action": "reset"})
 
@@ -586,8 +533,8 @@ async def test_preview_unavailable_marker_reaches_reviewer_surfaces(
 async def test_host_evacuate_park_resolves_vm_set_on_host(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/vm"] = {
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
         "value": [{"vm": "vm-a", "name": "app-a", "cluster": "domain-c1"}]
     }
 
@@ -604,14 +551,14 @@ async def test_host_evacuate_park_resolves_vm_set_on_host(
         "safety_level": "dangerous",
     }
     # Only the listing read fired — no recursive migrate, no maintenance.
-    assert _CALLS == [("GET:/vcenter/vm", {"filter.hosts": ["host-1"]})]
+    assert recorder.read_calls == [("/vcenter/vm", {"filter.hosts": ["host-1"]})]
 
 
 async def test_host_detach_from_vds_park_resolves_vm_set_on_host(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/vm"] = {"value": [{"vm": "vm-a", "name": "app-a"}]}
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-a", "name": "app-a"}]}
 
     _, row = await _park(
         "vmware.composite.host.detach_from_vds",
@@ -629,14 +576,14 @@ async def test_host_detach_from_vds_park_resolves_vm_set_on_host(
         },
         "safety_level": "dangerous",
     }
-    assert _ops_in_calls() == ["GET:/vcenter/vm"]
+    assert recorder.specs == ["/vcenter/vm"]
 
 
 async def test_cluster_patch_park_resolves_host_set(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    await _bootstrap_registry(stub_embedding_service)
-    _RESPONSES["GET:/vcenter/cluster/{cluster}/host"] = {
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/cluster/domain-c1/host"] = {
         "value": [
             {"host": "host-1", "name": "esx-1"},
             {"host": "host-2", "name": "esx-2"},
@@ -659,7 +606,7 @@ async def test_cluster_patch_park_resolves_host_set(
         "safety_level": "dangerous",
     }
     # Only the host listing fired — no maintenance / patch sub-ops.
-    assert _ops_in_calls() == ["GET:/vcenter/cluster/{cluster}/host"]
+    assert recorder.specs == ["/vcenter/cluster/domain-c1/host"]
 
 
 # ===========================================================================
@@ -671,7 +618,7 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """The echo previews enrich the parked row with zero connector I/O."""
-    await _bootstrap_registry(stub_embedding_service)
+    recorder = await _bootstrap_registry(stub_embedding_service)
 
     _, row = await _park(
         "vmware.composite.vm.create",
@@ -691,4 +638,4 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
         },
         "safety_level": "dangerous",
     }
-    assert _CALLS == []
+    assert recorder.calls == []

@@ -188,10 +188,10 @@
         "keycloakAudience",
         "keycloakJwksCacheTtlSeconds",
         "keycloakJwtLeewaySeconds",
-        "vaultAddr",
         "vaultOidcRole",
         "vaultOidcMountPath",
         "vaultTimeoutSeconds",
+        "credentialBackend",
         "databasePoolSize",
         "databasePoolTimeout",
         "retrievalEmbeddingModel",
@@ -208,10 +208,26 @@
         },
         "keycloakJwksCacheTtlSeconds": { "type": "string", "pattern": "^[0-9]+$" },
         "keycloakJwtLeewaySeconds": { "type": "string", "pattern": "^[0-9]+$" },
-        "vaultAddr": { "type": "string", "format": "uri", "minLength": 1 },
+        "vaultAddr": {
+          "type": "string",
+          "description": "Vault address rendered as `VAULT_ADDR`. Required (non-empty, `uri`) when `config.credentialBackend: vault` — enforced by the root-level `allOf` — so a `gsm` install may leave it blank (the field still renders, harmlessly empty, until the backplane makes VAULT_ADDR optional in #2232)."
+        },
         "vaultOidcRole": { "type": "string", "minLength": 1 },
         "vaultOidcMountPath": { "type": "string", "minLength": 1 },
         "vaultTimeoutSeconds": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+        "credentialBackend": {
+          "type": "string",
+          "enum": ["vault", "gsm"],
+          "description": "Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (Initiative #2227), rendered as the `CREDENTIAL_BACKEND` env var. `vault` (default) keeps the Vault KV-v2 read — the health proof reads `secret/meho/test/federation` — and the root-level `allOf` then requires a non-empty `vault.address`. `gsm` selects the GCP Secret Manager backend for a Vault-free install — the health proof reads `gsm:<config.gsmProject>/meho-test-federation` — and the `allOf` then requires `gsm.enabled: true` with a non-empty `gsm.project`. Constrained to the registered backend kinds so a typo fails at install rather than yielding an unknown backend at runtime."
+        },
+        "gsmProject": {
+          "type": "string",
+          "description": "GCP project id the GSM credential backend + health federation proof read secrets under (Initiative #2227), rendered as `GSM_PROJECT`. Empty is correct for every Vault install (the field is harmless and unused). Required-in-practice for a `gsm` install; the operator-facing top-level `gsm.project` carries the schema-required declaration, this is the value the backplane actually reads at runtime (typically identical)."
+        },
+        "gsmImpersonateSa": {
+          "type": "string",
+          "description": "Optional service account email the GSM backend impersonates when reading Secret Manager (Initiative #2227), rendered as `GSM_IMPERSONATE_SA`. Empty (default) reads directly under the pod's GKE Workload Identity ADC; a non-empty value wraps that ADC source in impersonated credentials (the GcloudConnector chain). No service-account JSON key is ever used. Harmless empty on a Vault install."
+        },
         "databasePoolSize": { "type": "string", "pattern": "^[0-9]+$" },
         "databasePoolTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
         "retrievalEmbeddingModel": {
@@ -266,13 +282,11 @@
     "vault": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["address"],
+      "description": "Vault credential backend. `address` is required (non-empty, `uri`) only when `config.credentialBackend: vault` — enforced by the root-level `allOf` conditional — so a `gsm` install may leave it blank. The block itself is always present (it ships safe-by-default values); the conditional gates the strictness.",
       "properties": {
         "address": {
           "type": "string",
-          "minLength": 1,
-          "format": "uri",
-          "description": "Vault address — required."
+          "description": "Vault address. Required (non-empty, `uri`-shaped) when `config.credentialBackend: vault`; may be empty on a `gsm` (Vault-free) install. The conditional requirement lives in the root-level `allOf`."
         },
         "authMethod": {
           "type": "string",
@@ -285,6 +299,41 @@
           "required": ["kv"],
           "properties": {
             "kv": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "gsm": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "GCP Secret Manager credential backend (Initiative #2227). Mirrors the `vault` block: an operator-facing top-level declaration the schema validates, paired with the runtime `config.gsmProject` / `config.gsmImpersonateSa` env values. `project` is required (non-empty) and `enabled` must be `true` only when `config.credentialBackend: gsm` — enforced by the root-level `allOf`. `workloadIdentityFederation` is an inert Phase-2 (#2232) stub: declared so a GSM adopter can pin the shape, but no template consumes it yet.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the deployment uses the GSM credential backend. Must be `true` when `config.credentialBackend: gsm`; the schema leaves it unconstrained (default `false`) otherwise so a Vault install carries the block inert."
+        },
+        "project": {
+          "type": "string",
+          "description": "GCP project id hosting the MEHO target credentials and the `meho-test-federation` health-probe secret. Required (non-empty) when `config.credentialBackend: gsm`. Typically identical to `config.gsmProject` (the value the backplane reads at runtime)."
+        },
+        "workloadIdentityFederation": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Workload Identity Federation parameters for per-operator GCP token exchange. Phase-2 stub (#2232) — declared but not consumed by any template; the SA-direct Phase-1 backend ignores it. All fields optional and empty by default.",
+          "properties": {
+            "poolId": {
+              "type": "string",
+              "description": "Workload Identity pool id (Phase-2 stub, #2232)."
+            },
+            "providerId": {
+              "type": "string",
+              "description": "Workload Identity provider id within the pool (Phase-2 stub, #2232)."
+            },
+            "serviceAccount": {
+              "type": "string",
+              "description": "Service account the federated identity impersonates (Phase-2 stub, #2232)."
+            }
           }
         }
       }
@@ -780,6 +829,61 @@
       }
     }
   },
+  "allOf": [
+    {
+      "description": "When `config.credentialBackend` is `vault` (the default), the deployment reads credentials + the health federation proof from Vault, so `vault.address` must be a non-empty `uri`. A `gsm` install skips this and may leave `vault.address` blank.",
+      "if": {
+        "properties": {
+          "config": {
+            "properties": { "credentialBackend": { "const": "vault" } },
+            "required": ["credentialBackend"]
+          }
+        },
+        "required": ["config"]
+      },
+      "then": {
+        "properties": {
+          "vault": {
+            "required": ["address"],
+            "properties": {
+              "address": { "type": "string", "minLength": 1, "format": "uri" }
+            }
+          },
+          "config": {
+            "required": ["vaultAddr"],
+            "properties": {
+              "vaultAddr": { "type": "string", "minLength": 1, "format": "uri" }
+            }
+          }
+        },
+        "required": ["vault", "config"]
+      }
+    },
+    {
+      "description": "When `config.credentialBackend` is `gsm`, the deployment reads credentials + the health federation proof from GCP Secret Manager, so `gsm.enabled` must be `true` and `gsm.project` a non-empty project id. This lets a GSM-only install pass with a blank `vault.address`, while rejecting a `gsm` selection that never enabled or configured the GSM block.",
+      "if": {
+        "properties": {
+          "config": {
+            "properties": { "credentialBackend": { "const": "gsm" } },
+            "required": ["credentialBackend"]
+          }
+        },
+        "required": ["config"]
+      },
+      "then": {
+        "properties": {
+          "gsm": {
+            "required": ["enabled", "project"],
+            "properties": {
+              "enabled": { "const": true },
+              "project": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "required": ["gsm"]
+      }
+    }
+  ],
   "definitions": {
     "httpProbe": {
       "type": "object",

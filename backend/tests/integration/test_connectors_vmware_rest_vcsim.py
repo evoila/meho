@@ -367,3 +367,132 @@ async def test_host_usage_over_legacy_mount_routes_to_rest(
     rows = result["hosts"]
     assert [r["id"] for r in rows] == ["host-11", "host-22"]
     assert rows[0]["hardware"]["cpu_mhz"] == 3000
+
+
+# ---------------------------------------------------------------------------
+# Read composite direct-session dispatch (#2253) — end-to-end transport +
+# mount routing with ZERO ingested descriptors (fresh-boot contract)
+# ---------------------------------------------------------------------------
+
+#: ``GET /vcenter/datastore`` listing (2-datastore seed, bare modern shape).
+_DATASTORE_LISTING: list[dict[str, Any]] = [
+    {"datastore": "datastore-11", "name": "ds-a", "type": "VMFS"},
+    {"datastore": "datastore-22", "name": "ds-b", "type": "NFS"},
+]
+
+#: Per-datastore ``GET /vcenter/datastore/{ds}`` detail bodies.
+_DATASTORE_DETAIL: dict[str, dict[str, Any]] = {
+    "datastore-11": {"capacity": 1000, "free_space": 400, "type": "VMFS"},
+    "datastore-22": {"capacity": 5000, "free_space": 2500, "type": "NFS"},
+}
+
+
+def _register_datastore_composite_routes(mock: respx.MockRouter, *, mount: str) -> None:
+    """Register the datastore-usage composite's sub-op surface under *mount*.
+
+    The composite issues, directly on the session (no ingested descriptor,
+    no dispatch_child): the datastore listing, one per-datastore detail
+    GET, and one per-datastore VM-placement GET (``filter.datastores``).
+    All are mounted onto ``mount`` (``/api`` modern or ``/rest`` legacy) by
+    ``mount_op_path``.
+    """
+    mock.get(f"{mount}/vcenter/datastore").respond(200, json=_DATASTORE_LISTING)
+    for ds_id, detail in _DATASTORE_DETAIL.items():
+        mock.get(f"{mount}/vcenter/datastore/{ds_id}").respond(200, json=detail)
+    # A single VM-placement stub serves every per-datastore ``filter.datastores``
+    # query; the composite only counts names, so one VM per datastore is enough.
+    mock.get(f"{mount}/vcenter/vm").respond(200, json=[{"name": "vm-x"}])
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_composite_over_modern_mount(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """The read composite aggregates directly on the session, mounted onto /api.
+
+    Exercises the full #2253 direct-session path end to end against the
+    real connector transport (respx-intercepted): session establish ->
+    ``mount_op_path`` -> ``_get_json`` per sub-op -> aggregation. No
+    ingested ``endpoint_descriptor`` rows exist here, proving the
+    fresh-boot / zero-catalog-ingest contract.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._read import (
+        datastore_usage_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        _register_datastore_composite_routes(mock, mount="/api")
+        mock.delete("/api/session").respond(204)
+        try:
+            out = await datastore_usage_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    rows = out["datastores"]
+    assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
+    assert rows[0]["capacity"] == 1000
+    assert rows[0]["free_space"] == 400
+    assert rows[0]["vm_count"] == 1
+    assert rows[0]["vm_names"] == ["vm-x"]
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_composite_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target (modern /api/session 404s) mounts the composite onto /rest.
+
+    Reproduces the vcsim / old-vCenter topology: the modern session
+    endpoint 404s, the connector falls back to the legacy path, and every
+    composite sub-op must route through ``/rest`` via ``mount_op_path`` or
+    it 404s. This is the modern+legacy mount-fallback coverage the #2253
+    acceptance criteria require, on the composite path.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._read import (
+        datastore_usage_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        # Modern session endpoint absent (404) -> legacy fallback.
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        # Sub-ops served ONLY under the legacy /rest mount.
+        _register_datastore_composite_routes(mock, mount="/rest")
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            out = await datastore_usage_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    rows = out["datastores"]
+    assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
+    assert rows[1]["capacity"] == 5000

@@ -356,25 +356,31 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 
 
 def _handler_requires_target(handler_ref: str) -> bool:
-    """True when *handler_ref* reaches its connector *through* the target.
+    """True when *handler_ref* names a handler that reaches its connector via the target.
 
     Keys the no-target guard on **handler shape**, not just
-    ``source_kind``. Two shapes require a target:
+    ``source_kind``. Two shapes reach their connector instance *through*
+    the resolved target, so dispatching them with ``target=None`` is a
+    usage error rather than a legitimate module-level no-target call:
 
-    * A typed/composite handler whose first parameter is ``self`` is a
-      connector method that only binds to its instance *through* a
-      resolved target, so dispatching it with ``target=None`` is a usage
-      error (G0.20-T6 #1506).
-    * A module-level composite handler that declares a ``connector``
-      parameter opts into the direct-session substrate (#2251): the
-      dispatcher forwards the connector instance it resolved from the
-      target, so ``target=None`` leaves ``connector=None`` and the
-      handler crashes on its first session call. Surfacing it as
-      ``target_required`` here fails cleanly instead (the carry-forward
-      guard for the I-B direct-session migrations, #2255 / #2253).
+    * **Self-first (bound method)** -- a typed/composite handler whose
+      first parameter is ``self`` is a connector method that only binds
+      to its instance through a resolved target (G0.20-T6 #1506).
+    * **``connector``-declaring composite (direct-session, #2251)** -- a
+      composite handler that declares a ``connector`` parameter receives
+      the resolved connector instance the dispatcher built from the
+      target (see
+      :func:`~meho_backplane.operations._branches.dispatch_composite`).
+      With ``target=None`` the resolver produces ``connector_instance=None``,
+      which the handler would then dereference on its first
+      ``connector._get_json`` call and raise an
+      :exc:`AttributeError` deep in the handler body. Catching it here as
+      ``target_required`` gives the operator the same clear
+      omitted-argument diagnosis the self-first shape gets.
 
-    A module-level handler that declares neither shape genuinely needs no
-    target and must keep dispatching with ``connector_instance=None``.
+    A module-level handler that declares neither (no ``self``, no
+    ``connector``) genuinely needs no target and keeps dispatching with
+    ``connector_instance=None``.
 
     Mirrors the first-parameter check :func:`dispatch_typed` uses for its
     self-guard so the two stay in agreement on what "unbound" means.

@@ -462,3 +462,34 @@ def test_gsm_impersonate_sa_reads_and_strips_env(
         assert get_settings().gsm_impersonate_sa == "reader@proj.iam.gserviceaccount.com"
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #2231 (Initiative #2227) — GSM_PROJECT env knob
+# ---------------------------------------------------------------------------
+
+
+def test_gsm_project_defaults_to_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``GSM_PROJECT`` → empty (correct for every Vault install)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("GSM_PROJECT", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_project == ""
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_project_reads_and_strips_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``GSM_PROJECT`` names the GCP project the GSM backend reads under; stripped."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("GSM_PROJECT", "  my-gcp-project \n")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_project == "my-gcp-project"
+    finally:
+        get_settings.cache_clear()

@@ -68,6 +68,7 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations.dispatcher import _handler_requires_target
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -239,6 +240,24 @@ async def _module_composite_handler(
         params={"path": params.get("path", "/")},
     )
     return {"parent": "ok", "child_status": child_result.status}
+
+
+async def _module_composite_handler_connector(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: Any,
+) -> dict[str, Any]:
+    """Direct-session composite handler that declares the ``connector`` kwarg.
+
+    The #2251/#2253 shape: a composite that issues its sub-calls on the
+    resolved connector instance rather than through ``dispatch_child``. It
+    reaches that instance *through* the resolved target, so
+    :func:`_handler_requires_target` must treat it like the self-first
+    shape and flag ``target=None`` as ``target_required`` (#2253
+    carry-forward) rather than forwarding ``connector=None``.
+    """
+    return {"has_connector": connector is not None}
 
 
 async def _module_handler_raises(
@@ -916,40 +935,24 @@ async def test_dispatch_module_level_handler_no_target_still_dispatches(
     assert result.result["target_is_none"] is True
 
 
-def test_handler_requires_target_true_for_connector_declaring_composite() -> None:
-    """A module-level composite declaring ``connector`` requires a target (#2255).
+def test_handler_requires_target_flags_connector_declaring_composite() -> None:
+    """A ``connector``-declaring composite needs a target (#2253 carry-forward).
 
-    The direct-session substrate (#2251) resolves the connector instance
-    *from* the target and forwards it; dispatching with ``target=None``
-    would leave ``connector=None`` and crash the handler on its first
-    session call. The guard surfaces ``target_required`` instead -- the
-    carry-forward from PR #2261's review for the I-B migrations.
+    :func:`_handler_requires_target` keys the no-target guard on handler
+    shape. A direct-session composite reaches its connector instance
+    through the resolved target (the dispatcher builds the instance from a
+    non-None target), so dispatching it with ``target=None`` would forward
+    ``connector=None`` and ``AttributeError`` on the first
+    ``connector._get_json`` call. The guard must therefore treat it like
+    the self-first shape and return ``True`` so the caller surfaces the
+    clean ``target_required`` envelope. A ``dispatch_child``-only composite
+    and a plain module-level typed handler both stay ``False`` -- neither
+    dereferences a per-target connector instance.
     """
-    from meho_backplane.operations.dispatcher import _handler_requires_target
-
-    assert (
-        _handler_requires_target(
-            "tests.fixtures.composites.handlers.composite_connector_only_handler"
-        )
-        is True
-    )
-
-
-def test_handler_requires_target_false_for_dispatch_child_only_composite() -> None:
-    """A module-level ``dispatch_child``-only composite still needs no target.
-
-    Regression guard: extending the check to ``connector``-declaring
-    handlers must not sweep in the existing ``dispatch_child``-only
-    handlers, which keep dispatching with ``connector_instance=None``.
-    """
-    from meho_backplane.operations.dispatcher import _handler_requires_target
-
-    assert (
-        _handler_requires_target(
-            "tests.fixtures.composites.handlers.composite_dispatch_child_handler"
-        )
-        is False
-    )
+    module = "tests.test_operations_dispatcher"
+    assert _handler_requires_target(f"{module}._module_composite_handler_connector") is True
+    assert _handler_requires_target(f"{module}._module_composite_handler") is False
+    assert _handler_requires_target(f"{module}._module_handler_target_optional") is False
 
 
 @pytest.mark.asyncio

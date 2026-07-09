@@ -91,6 +91,13 @@ _SYSTEM_TENANT_ID: UUID = UUID(int=0)
 #: glob — so a caller cannot smuggle a tenant escape through it. A
 #: regression test pins this equal to the health route's
 #: ``_FEDERATION_PROOF_PATH`` rendered onto the default ``secret`` mount.
+#:
+#: This guard is Vault-specific: it only runs on the ``vault.kv.*`` op path.
+#: The #2231 backend-agnostic federation proof reads a non-Vault backend's
+#: probe secret (``gsm:<project>/<probe-secret>``) through the
+#: credential-backend seam, which never traverses this guard — the GSM
+#: backend reads under MEHO's own deployment identity, not a per-operator
+#: tenant scope, so its probe secret is reachable without an entry here.
 PLATFORM_EXEMPT_PATHS: frozenset[str] = frozenset({"secret/meho/test/federation"})
 
 

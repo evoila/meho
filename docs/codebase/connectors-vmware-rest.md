@@ -30,12 +30,26 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `event_tail_composite`, `performance_summary_composite`,
   `datastore_usage_composite`, `network_portgroup_audit_composite`,
   `host_network_uplinks_composite`, `host_vsan_health_composite`).
-  Each accepts `(operator, target, params, dispatch_child)` per the
-  `DispatchChild` Protocol and orchestrates 1-3 sub-op dispatches
-  back into the same `vmware-rest-9.0` connector. Registered with
-  `safety_level="safe"` + `requires_approval=False` — read-only
-  overrides of `register_composite_operation()`'s `dangerous` / `True`
-  defaults. `host_network_uplinks_composite` (`#2080`) lists hosts via
+  Since `#2253` each accepts `(operator, target, params, connector)`
+  and issues its 1-3 sub-ops **directly on the resolved connector
+  session** — `connector._get_json` / `connector._post_json` mounted
+  through `connector.mount_op_path` (`_read_sub_op`) — with **no**
+  `dispatch_child`, **no** ingested `endpoint_descriptor` lookup, and
+  **no** L2 pre-flight, so the read composites work on a fresh boot
+  with zero vCenter-catalog ingest (the `composite_l2_missing` defect
+  class, consumer signal 20, is gone for reads). The `connector` kwarg
+  is the substrate `#2251` added to the composite handler contract; the
+  dispatcher forwards the instance it already resolved for the
+  composite's target. The direct path drops two of `dispatch_child`'s
+  four `#508` guarantees (bounded recursion, per-sub-op param
+  validation) and relocates the other two (audit-tree linkage collapses
+  to the top-level composite audit row; per-sub-op policy/broadcast is
+  the top-level op's) — acceptable for **reads**, which is why the
+  write composites keep `dispatch_child` (their sub-ops may be
+  approval-gated). Registered with `safety_level="safe"` +
+  `requires_approval=False` — read-only overrides of
+  `register_composite_operation()`'s `dangerous` / `True` defaults.
+  `host_network_uplinks_composite` (`#2080`) lists hosts via
   `GET:/vcenter/host`, then per host reads `config.network.pnic` +
   `config.network.proxySwitch` through the vi-json PropertyCollector
   `RetrievePropertiesEx` method — the pnic link-state / uplink mapping
@@ -77,9 +91,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (`host_usage(self, operator, target, params)`) that the dispatcher
   binds to the resolved connector instance and calls directly — no
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
-  therefore works on a **fresh boot with zero catalog ingest**, which a
-  composite cannot (a composite's `dispatch_child` legs resolve against
-  `endpoint_descriptor` rows that only exist post-ingest). The metadata
+  therefore works on a **fresh boot with zero catalog ingest** — the same
+  direct-session property the 7 read composites now share (`#2253`); only
+  the **write** composites still resolve their `dispatch_child` legs
+  against `endpoint_descriptor` rows that exist post-ingest. The metadata
   lives in a frozen `VmwareTypedOp` dataclass (mirroring
   `argocd/ops.py::ArgoCdOp`); the implementation
   (`host_usage_impl(connector, operator, target, params)`) lists hosts

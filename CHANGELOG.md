@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — Discard verb on draft runbooks in the operator console
+
+- **A `tenant_admin` can now discard an unwanted draft runbook template from
+  the operator console** (`/ui/runbooks/<slug>`) — the draft close-out leg the
+  engine's Discard verb (#2127) already exposed on REST/MCP but the UI had no
+  affordance for. A draft's action row gains a **Discard** button behind the
+  standard confirm dialog; confirming deletes the draft and `HX-Redirect`s back
+  to the catalog. Discard is draft-only: a published / deprecated version is
+  retired via **Deprecate** (preserving lifecycle history), and Deprecate stays
+  hidden on drafts — deprecate-on-draft is engine-illegal (`draft → published →
+  deprecated` is one-directional). (#2241)
+
 ### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
 
 - **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry

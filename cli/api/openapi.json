@@ -14686,6 +14686,58 @@
         }
       }
     },
+    "/ui/runbooks/{slug}/discard": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Discard",
+        "description": "Discard (delete) ``(slug, version)`` draft; admin only.\n\nOn success the draft row is deleted, so there is no fragment to\nre-render -- return an empty ``204`` carrying ``HX-Redirect:\n/ui/runbooks`` so HTMX navigates back to the catalog (HTMX honours the\nredirect header before the 204-no-swap rule). A non-draft version\nre-renders the inline ``alert-error`` fragment instead (the engine\nrejects discard-on-non-draft), so a stale detail page surfaces the\ntyped-400 rather than silently navigating away.",
+        "operationId": "runbooks_discard_ui_runbooks__slug__discard_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_discard_ui_runbooks__slug__discard_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks/runs": {
       "get": {
         "tags": [
@@ -19656,6 +19708,18 @@
         },
         "type": "object",
         "title": "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post"
+      },
+      "Body_runbooks_discard_ui_runbooks__slug__discard_post": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_discard_ui_runbooks__slug__discard_post"
       },
       "Body_runbooks_editor_create_ui_runbooks_new_post": {
         "properties": {

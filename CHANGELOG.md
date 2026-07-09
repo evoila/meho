@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
+
+- **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry
+  unquoted ISO dates or timestamps no longer crashes the descriptor
+  INSERT** with `StatementError: Object of type datetime is not JSON
+  serializable` (#2272). Stock PyYAML applied the YAML 1.1 implicit
+  `timestamp` resolver, turning an unquoted `2000-01-23T04:56:07.000+00:00`
+  into a `datetime` (and `2024-01-15` into a `date`) that the JSON(B)
+  descriptor columns cannot encode; the spec-ingest loader now keeps such
+  scalars as the verbatim string the author wrote (OAS 3.1 limits YAML
+  tags to the JSON Schema ruleset, which excludes the timestamp tag).
+  Ingest also gained a fail-closed serializability check at the shared
+  proto-build boundary, so `dry_run=true` now rejects a non-encodable
+  spec with the same structured `invalid_schema` 400 the real run raises
+  instead of green-lighting it. Scoped to spec ingest — no engine-wide
+  serializer change. (#2272)
+
 ### Removed — the L2 composite failure-coping apparatus (two-world op model)
 
 - **The dispatch-time L2 pre-flight and its structured errors are deleted, not

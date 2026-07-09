@@ -15,6 +15,7 @@ HTTPS endpoints so the same parsing assertions remain valid.
 
 from __future__ import annotations
 
+import datetime
 import json
 import socket
 from collections.abc import Generator
@@ -52,6 +53,8 @@ PARAMETER_REFS_30 = FIXTURES / "parameter_refs_30.yaml"
 RESPONSE_REFS_30 = FIXTURES / "response_refs_30.yaml"
 REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
 HANDAUTHORED_MINIMAL_30 = FIXTURES / "handauthored_minimal_30.yaml"
+TIMESTAMP_EXAMPLES_30 = FIXTURES / "timestamp_examples_30.yaml"
+NONSERIALIZABLE_EXAMPLE_30 = FIXTURES / "nonserializable_example_30.yaml"
 
 # Stable HTTPS URL prefix used by tests that serve fixture content through
 # respx. Using a dedicated subdomain makes it easy to route all fixture
@@ -194,6 +197,70 @@ def test_parse_petstore_30_safety_heuristic() -> None:
     assert ops["DELETE:/pets/{petId}"].safety_level == "dangerous"
     assert ops["PUT:/pets/{petId}/photos"].safety_level == "caution"
     assert ops["HEAD:/pets/{petId}/photos"].safety_level == "safe"
+
+
+# -- parse_openapi: YAML 1.1 timestamp typing (#2272) ----------------------
+
+
+def test_parse_unquoted_yaml_timestamps_stay_strings() -> None:
+    """Unquoted date / date-time ``example:`` scalars persist as raw text.
+
+    Stock PyYAML 1.1 implicit resolvers would construct ``datetime`` /
+    ``date`` objects the descriptor INSERT cannot JSON-encode (#2272). The
+    ingest loader overrides the timestamp constructor so the author's
+    exact spelling survives into ``parameter_schema`` / ``response_schema``.
+    """
+    rows = parse_openapi(
+        "file:///timestamp_examples_30.yaml",
+        content=TIMESTAMP_EXAMPLES_30.read_text(),
+    )
+    op = _by_op_id(rows)["GET:/events"]
+
+    params = op.parameter_schema["properties"]
+    assert params["since"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert isinstance(params["since"]["example"], str)
+    assert params["on_date"]["example"] == "2024-01-15"
+    assert isinstance(params["on_date"]["example"], str)
+
+    assert op.response_schema is not None
+    resp = op.response_schema["properties"]
+    assert resp["observed_on"]["example"] == "2024-01-15"
+    assert resp["observed_at"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    # A quoted timestamp keeps round-tripping as a string (no regression).
+    assert resp["quoted_at"]["example"] == "2019-07-21T17:32:28Z"
+
+    # The whole proto is now JSON-serializable — the exact property the
+    # descriptor INSERT relies on and the bug violated.
+    json.dumps(op.parameter_schema)
+    json.dumps(op.response_schema)
+
+
+def test_ingest_timestamp_override_leaves_shared_safe_loader_unmutated() -> None:
+    """The ingest loader override must not leak to other ``yaml.safe_load`` sites.
+
+    ``add_constructor`` copies the constructor table onto the ingest
+    subclass (PyYAML copy-on-write), so ``yaml.safe_load`` — used by the
+    catalog / kubeconfig / topology-import parsers that are out of scope
+    for #2272 — must still apply the stock YAML 1.1 timestamp resolver.
+    """
+    assert isinstance(yaml.safe_load("d: 2024-01-15\n")["d"], datetime.date)
+
+
+def test_parse_non_serializable_example_raises_invalid_schema() -> None:
+    """A proto value stdlib json cannot encode fails at parse time (#2272).
+
+    The proto-build boundary asserts serializability so the effectful
+    ingest leg and the parse-only ``dry_run`` leg fail identically,
+    instead of the real run crashing at ``session.flush()`` while dry-run
+    green-lights the spec.
+    """
+    with pytest.raises(InvalidSchemaError) as excinfo:
+        parse_openapi(
+            "file:///nonserializable_example_30.yaml",
+            content=NONSERIALIZABLE_EXAMPLE_30.read_text(),
+        )
+    assert "GET:/blobs" in str(excinfo.value)
+    assert "not JSON-serializable" in str(excinfo.value)
 
 
 def test_parse_petstore_30_path_and_query_param_locations() -> None:

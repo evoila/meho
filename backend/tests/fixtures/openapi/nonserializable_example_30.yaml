@@ -1,0 +1,25 @@
+# Parity fixture for #2272 — a spec whose parsed proto carries a value
+# stdlib json.dumps cannot encode, independent of the timestamp fix. A
+# `!!binary` example constructs `bytes`, so it exercises the proto-build
+# serializability guard: both the effectful ingest leg and the parse-only
+# dry_run leg must reject it identically (structured invalid_schema 400),
+# rather than the real run crashing at flush while dry_run green-lights it.
+openapi: 3.0.3
+info:
+  title: nonserializable-example
+  version: '1.0'
+paths:
+  /blobs:
+    get:
+      summary: fetch a blob keyed by an opaque marker
+      parameters:
+        - name: marker
+          in: query
+          required: false
+          schema:
+            type: string
+            # `!!binary` → Python bytes → not JSON-serializable.
+            example: !!binary aGVsbG8=
+      responses:
+        '200':
+          description: ok

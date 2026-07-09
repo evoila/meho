@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing 7-composite handler module
+# (>1200 lines before #2251); this task only appends the direct-session
+# opt-in documentation to the existing "four reasons" note. Splitting the
+# module is I-B migration work (Initiative #2248/#2249), out of scope here.
 
 """Read-only ``vmware.composite.*`` handler functions (7 composites).
 
@@ -43,6 +47,44 @@ four load-bearing reasons (per #508's issue body + the
    httpx evades both.
 4. **Param validation** -- each sub-op's ``parameter_schema`` validates
    inbound params at dispatch time; direct httpx skips validation.
+
+Direct-session opt-in (the substrate, #2251)
+--------------------------------------------
+
+The composite handler contract also lets a handler receive the
+resolved connector instance directly, by declaring a ``connector``
+parameter alongside (or instead of) ``dispatch_child``. The dispatcher
+forwards the instance it already resolved for the composite's target
+(:func:`~meho_backplane.operations.dispatcher._resolve_connector_instance`);
+:func:`~meho_backplane.operations._branches.dispatch_composite` passes
+it only when the handler declares the parameter, so the existing
+``dispatch_child``-only handlers below are unchanged. A handler that
+opts in issues its sub-calls through the connector's own session
+(``connector._get_json`` / ``connector._post_json`` +
+``connector.mount_op_path``) with **no** ``endpoint_descriptor``
+lookup.
+
+This is the substrate the I-B migrations (Initiative #2248) build on;
+no composite in this module is migrated yet. Taking the direct path
+deliberately drops two of the four ``dispatch_child`` guarantees and
+relocates the other two:
+
+* **(2) Bounded recursion is moot** -- a direct session call cannot
+  re-enter the dispatcher, so there is no recursion to bound.
+* **(4) Per-sub-op param validation goes away** -- for a
+  code-constructed request body this is the point, not a loss:
+  re-validating a hand-built vmomi body against a persisted spec
+  schema is the schema-drift defect the two-world model (Goal #2247)
+  exists to remove.
+* **(1) Audit-tree linkage** collapses to the top-level op's own
+  audit row (the row a forensic query reads anyway); the per-sub-op
+  child rows disappear.
+* **(3) Per-sub-op policy-gate + broadcast is evaded** -- acceptable
+  for **read** composites (the top-level op is already gated), but
+  **load-bearing for write** composites whose sub-ops may be
+  approval-gated. Migrating a write composite to the direct path must
+  first resolve how the top-level policy/approval gate still covers
+  the now-internal writes (Initiative #2249, the property-3 question).
 
 Op_id contract for sub-ops
 --------------------------

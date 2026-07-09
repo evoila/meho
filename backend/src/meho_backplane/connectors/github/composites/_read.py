@@ -27,8 +27,8 @@ reads through the resolved :class:`GitHubRestConnector`'s own session
 (``connector._get_json`` against ``connector.mount_op_path``), bypassing
 ``endpoint_descriptor`` entirely. This is the #2251 direct-session
 substrate: it makes the composite work on a **fresh deploy with no gh
-catalog ingest** (the #2050 ``composite_l2_missing`` dead-end is gone),
-so the gh-only ``composite_backing`` machinery is no longer needed here.
+catalog ingest** (the #2050 unbacked-composite dead-end is gone), so no
+gh-only backing machinery is needed here.
 
 Taking the direct path deliberately drops two of the four guarantees the
 old ``dispatch_child`` seam carried (documented on the vmware-rest

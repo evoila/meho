@@ -24,9 +24,8 @@ G0.23-T1 (#1627) acceptance criteria:
   and ``mcp/tools/operations.py::_call_operation_handler``), so the
   parity test drives that shared funnel.
 
-The builder-shape tests mirror the #1601
-``test_result_composite_l2_disabled_shape_matches_t11_convention``
-discipline (``docs/codebase/error-message-shape.md``): stable code,
+The builder-shape tests mirror the
+``docs/codebase/error-message-shape.md`` discipline: stable code,
 diagnostic-bearing human message with a remediation imperative + doc
 reference, structured ``extras`` payload.
 """
@@ -561,8 +560,8 @@ async def test_call_operation_envelope_carries_connector_unsupported(
     ``await call_operation(...)`` verbatim and the MCP
     ``call_operation`` tool is a thin shim over the same function, so
     asserting on the serialized dict envelope here covers both
-    surfaces -- the same structural parity argument the
-    ``composite_l2_*`` envelopes rely on.
+    surfaces -- the same structural parity argument every structured
+    error envelope relies on.
     """
     assert ensure_connector_class_registered(
         product="acme",

@@ -36,7 +36,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   through `connector.mount_op_path` (`_read_sub_op`) — with **no**
   `dispatch_child`, **no** ingested `endpoint_descriptor` lookup, and
   **no** L2 pre-flight, so the read composites work on a fresh boot
-  with zero vCenter-catalog ingest (the `composite_l2_missing` defect
+  with zero vCenter-catalog ingest (the missing-L2 dead-end defect
   class, consumer signal 20, is gone for reads). The `connector` kwarg
   is the substrate `#2251` added to the composite handler contract; the
   dispatcher forwards the instance it already resolved for the
@@ -338,134 +338,39 @@ those direct sub-calls ramp 0 (host.evacuate's own reads/writes) → 1
 holds; this connector's recursive composite is the first production
 caller.
 
-### L1/L2 dispatch contract + pre-flight (G0.14-T10 / #1151) — retired-in-place
+### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-> **Historical, superseded by the two-world migration (Goal `#2247`).**
-> The section below describes the pre-`#2253`/`#2256` model where every
-> composite fanned out to **ingested** L2 rows via `dispatch_child` and
-> guarded a missing catalog with a pre-flight. All 15 composites now issue
-> their raw-REST sub-ops **directly on the connector session** (reads
-> `#2253`, writes `#2256`), so they no longer touch ingested rows and no
-> longer call `preflight_l2_dependencies`. The `composites/_preflight.py`
-> module and the `CompositeL2Dependency*` exceptions are kept intact but
-> unused pending their removal in `#2259`; the `_SUB_OPS_*` tuples in
-> `_read.py` / `_write.py` are retained as the canonical sub-op-path
-> manifest the ingest-reconcile acceptance guard checks. The
-> platform-wide registration-time invariant
-> (`operations.composite_invariant`, `#2262`) is the replacement safety
-> net: a code-shipped op that declares a sub-op resolving to an
-> `ingested` row fails the boot closed.
+The 15 composites are hand-authored aggregators the connector ships as
+`source_kind='composite'` descriptors. Each composite's body issues its
+raw-REST sub-ops (`GET:/vcenter/datastore`,
+`POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
+connector's own authenticated session** — the connector instance is
+injected into the handler (Task #2251), so the sub-calls never resolve an
+`endpoint_descriptor` row and work on a fresh boot with zero catalog
+ingest (reads migrated in `#2253`, writes in `#2256`).
 
-The 15 composites are the **L1** surface: hand-authored aggregators
-each connector ships as `source_kind='composite'` descriptors. Every
-composite's body fans out to **L2** raw-REST primitives
-(`GET:/vcenter/datastore`, `POST:/vcenter/vm/{vm}/power?action=start`,
-etc.). Pre-migration these went through `dispatch_child(...)` against the
-~3,470 ingested descriptor rows derived from `vcenter.yaml` +
-`vi-json.yaml`.
+Because no composite dispatches through an ingested row, the entire old
+failure-coping apparatus is gone (Task #2259): the dispatch-time
+`preflight_l2_dependencies` pre-flight, the `CompositeL2Dependency*`
+exceptions, and the `composite_l2_missing` / `composite_l2_disabled`
+structured errors are deleted, not guarded. The `_SUB_OPS_*` tuples in
+`_read.py` / `_write.py` are retained purely as the canonical
+sub-op-path manifest the ingest-reconcile acceptance guard
+(`tests/acceptance/test_portgroup_audit_op_id_reconcile.py` and
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`)
+checks against the vCenter spec.
 
-The L2 surface is **not** registered by default. Operators bring it in
-by running `meho connector ingest --catalog vmware/9.0`, which posts
-the spec sources from
-`backend/src/meho_backplane/operations/ingest/catalog.yaml` through
-the ingest pipeline. Until that ingest runs, the L2 descriptor rows do
-not exist and any composite that tried to dispatch into them would
-crash mid-call with the dispatcher's generic `unknown_op` error — the
-coupling the direct-session migration removed.
+The sole remaining safety net is the platform-wide registration-time
+invariant (`operations.composite_invariant`, `#2252`): if any future
+code-shipped op declared a `dispatch_child` sub-op that resolved to an
+`ingested` row, the boot would fail closed. See
+`docs/codebase/composite-ingested-dispatch-invariant.md`.
 
-Each composite handler runs an explicit pre-flight check
-(`preflight_l2_dependencies` in `composites/_preflight.py`) before any
-`dispatch_child(...)` call. The pre-flight walks the composite's
-declared sub-op-ids against `endpoint_descriptor`; if any are missing,
-it raises `CompositeL2DependencyMissing`. The dispatcher catches that
-exception specifically (ahead of the generic exception branch) and
-surfaces it as a structured `composite_l2_missing` error per the
-`docs/codebase/error-message-shape.md` convention (G0.14-T11 #1141).
-The response shape is:
-
-```json
-{
-  "status": "error",
-  "op_id": "vmware.composite.datastore.usage",
-  "error": "composite_l2_missing: composite '...' depends on L2 sub-ops not registered ...",
-  "extras": {
-    "error_code": "composite_l2_missing",
-    "missing_op_ids": ["GET:/vcenter/datastore", ...],
-    "catalog_command": "meho connector ingest --catalog vmware/9.0"
-  }
-}
-```
-
-The first call against a stale catalog pays the DB walk; subsequent
-calls hit a per-process cache and short-circuit. A negative result
-(missing or disabled L2) is **not** cached -- the operator's expected
-next action is to remediate and retry, and we want the retry to see
-fresh state from the database.
-
-### Disabled vs absent L2 (`composite_l2_disabled`, #1601)
-
-`lookup_descriptor` hard-filters `is_enabled = TRUE`, so a sub-op whose
-descriptor row **exists but is disabled** (`is_enabled = false`)
-resolves to `None` exactly like one that was never ingested. On a
-default `vmware-rest-9.0` deploy the ~3,470 L2 ops land
-ingested-but-disabled, so collapsing both into `composite_l2_missing`
-would tell the operator to re-run `meho connector ingest` -- which has
-already happened. The pre-flight therefore classifies each
-non-dispatchable sub-op with the `is_enabled`-agnostic
-`descriptor_exists_any_state` probe (used **only** to classify -- a
-disabled op stays non-dispatchable, it is never transient-enabled at
-dispatch):
-
-- **present but disabled** -> `CompositeL2DependencyDisabled` ->
-  structured `composite_l2_disabled`:
-
-  ```json
-  {
-    "status": "error",
-    "op_id": "vmware.composite.datastore.usage",
-    "error": "composite_l2_disabled: ... present in this connector's catalog but disabled ... 'meho connector edit-op vmware-rest-9.0 <op_id> --enable' ...",
-    "extras": {
-      "error_code": "composite_l2_disabled",
-      "disabled_op_ids": ["GET:/vcenter/datastore", ...],
-      "connector_id": "vmware-rest-9.0"
-    }
-  }
-  ```
-
-  The remediation names a **real** verb: per-op
-  `meho connector edit-op <connector_id> <op_id> --enable`. Connector-level
-  `meho connector enable <connector_id>` is named only as the caveated
-  alternative -- it does **not** re-enable spec-ingested ops, which land
-  `group_id = NULL` and the enable cascade filters on `group_id` (see
-  `ingest/_internals.py` / `ingest/_upsert.py`), so per-op `edit-op
-  --enable` is the deterministic path. The original report proposed a
-  group-level enable verb; no such verb exists, so the remediation never
-  references one.
-
-- **truly absent** (no row in any state) -> unchanged
-  `composite_l2_missing` + the catalog-ingest remediation above.
-
-When a single walk turns up both states, **disabled takes precedence**
--- only one exception can surface, and the re-enable remediation is the
-one a default ingested-but-disabled deploy needs.
-
-Composite-to-composite sub-ops (`vmware.composite.*`, today only
-`host.evacuate` -> `vm.migrate`) are deliberately skipped by the
-pre-flight: their registration is guaranteed by the same lifespan
-registrar that brings their parent composite in, so validating them
-would create a startup-order false positive without catching any real
-gap.
-
-Three options were considered for the L2-dependency strategy
-(per #1151's *Desired state*); Option B (lazy pre-resolve on first
-call) was chosen as it (a) closes signal 20's actual gap (a
-remediation-bearing error message) without (b) blocking on
-T9 (#1150)'s server-side catalog-driven ingest landing first, (c)
-disrupting the boot order, or (d) inverting the catalog ingest
-posture (an explicit operator action by design since v0.5.1).
-See `composites/_preflight.py`'s module docstring for the full
-trade-off matrix vs. Options A (eager-at-registration) and C
-(ship-L1+L2-as-unit).
+Composite-to-composite recursion (`vmware.composite.*`, today only
+`host.evacuate` -> `vm.migrate`) keeps its `dispatch_child` path: those
+sub-ops resolve to registrar-guaranteed `source_kind='composite'` rows,
+not ingested primitives, and the invariant skips `*.composite.*` sub-ops
+for that reason.
 
 ### Write-composite partial-failure conventions
 

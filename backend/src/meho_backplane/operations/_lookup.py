@@ -152,12 +152,10 @@ async def descriptor_exists_any_state(
     The ``is_enabled``-agnostic sibling of :func:`lookup_descriptor`,
     used **only to classify** a sub-op that :func:`lookup_descriptor`
     could not resolve. It never returns a descriptor and is never used
-    to dispatch -- a disabled op stays non-dispatchable. Its sole job is
-    to tell *present-but-disabled* (a row exists, ``is_enabled = false``)
-    apart from *truly absent* (no row at all), so the composite pre-flight
-    can emit ``composite_l2_disabled`` (remediation: re-enable the op)
-    rather than ``composite_l2_missing`` (remediation: ingest the catalog)
-    for a deploy whose L2 surface is ingested-but-disabled (#1601).
+    to dispatch -- a disabled op stays non-dispatchable. Its job is to
+    tell *present-but-disabled* (a row exists, ``is_enabled = false``)
+    apart from *truly absent* (no row at all) for callers that need to
+    distinguish the two remediation paths (re-enable vs ingest).
 
     Scoping mirrors :func:`lookup_descriptor`'s tenant-then-global
     visibility: a row counts when it is this tenant's

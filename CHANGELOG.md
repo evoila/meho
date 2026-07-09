@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Removed — the L2 composite failure-coping apparatus (two-world op model)
+
+- **The dispatch-time L2 pre-flight and its structured errors are deleted, not
+  guarded** (#2259). Now that every code-shipped composite dispatches its
+  sub-ops directly on the connector session (#2253/#2255/#2256), nothing
+  depends on ingested catalog rows, so the whole coping apparatus is retired:
+  vmware's `preflight_l2_dependencies` + the `composite_l2_missing` /
+  `composite_l2_disabled` error codes (and their `CompositeL2Dependency*`
+  exceptions), github's import-time `UnbackedEnabledCompositeError` load guard
+  and its `composite_backing` registry, and the `unbacked` / `next_step`
+  markers `search_operations` attached to composite hits. The platform-wide
+  registration-time invariant (#2252) is the sole remaining check: a
+  code-shipped op whose declared `dispatch_child` sub-op resolves to an
+  ingested row still fails the boot closed. Part of the two-world op model
+  (Goal #2247, Initiative #2248). Operator-visible change: the
+  `composite_l2_missing` / `composite_l2_disabled` error envelopes and the
+  `unbacked=true` search-hit flag no longer appear — composites simply work on
+  a fresh boot with zero catalog ingest.
+
 ### Changed — vmware `host.vsan_health` + `host.network_uplinks` re-shipped as typed ops
 
 - **`vmware.host.vsan_health` and `vmware.host.network_uplinks` are now

@@ -195,6 +195,30 @@ config:
   vaultOidcRole: "meho-mcp"
   vaultOidcMountPath: "jwt"
   vaultTimeoutSeconds: "10.0"
+  # Credential backend a schemeless target `secret_ref` (and the
+  # `/api/v1/health` federation proof) resolves through (#2227). `vault`
+  # (the default) keeps every existing install on today's Vault KV-v2 read
+  # with no change — a schemeless `targets/<id>` ref and an explicit
+  # `vault:targets/<id>` ref both dispatch to the Vault backend, and the
+  # health proof reads `secret/meho/test/federation` unchanged. Set to
+  # `gsm` for a GCP-native, Vault-free install: schemeless refs then
+  # resolve through GCP Secret Manager and the health proof reads
+  # `gsm:<gsmProject>/meho-test-federation`. Rendered as `CREDENTIAL_BACKEND`.
+  # The schema requires `vault.address` only when this is `vault`, and
+  # requires `gsm.enabled: true` + `gsm.project` when this is `gsm`.
+  credentialBackend: "vault"
+  # GCP project the GSM credential backend + health federation proof read
+  # secrets under (#2227). Empty is correct for every Vault install; a
+  # `gsm`-backend install sets it to the project hosting the MEHO target
+  # credentials + the `meho-test-federation` probe secret. Rendered as
+  # `GSM_PROJECT`. Typically mirrors the top-level `gsm.project`.
+  gsmProject: ""
+  # Optional service account the GSM backend impersonates when reading
+  # Secret Manager (#2227). Empty (the default) reads directly under the
+  # pod's own GKE Workload Identity ADC; a non-empty SA email wraps that
+  # ADC source in impersonated credentials (the GcloudConnector chain). No
+  # service-account JSON key is ever used. Rendered as `GSM_IMPERSONATE_SA`.
+  gsmImpersonateSa: ""
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
   # MCP audience binding (G0.8-T4 #633). The `/mcp` router is mounted
@@ -359,6 +383,36 @@ vault:
     # -- KV v2 mount + base path for operator secrets. Federation-proof reads
     # happen under `<paths.kv>/test/federation` (see backend health.py).
     kv: secret/meho
+
+# GCP Secret Manager credential backend (Initiative #2227). Mirrors the
+# `vault.*` block: a top-level operator-facing declaration that the schema
+# validates (required when `config.credentialBackend: gsm`), paired with
+# the runtime `config.gsmProject` / `config.gsmImpersonateSa` env values the
+# backplane reads. A Vault install leaves this at `enabled: false` and the
+# block is inert.
+gsm:
+  # -- Whether the deployment uses the GSM credential backend. Set true
+  # together with `config.credentialBackend: gsm` for a Vault-free,
+  # GCP-native install. When false (the default) the block is inert and the
+  # schema does not require `project`.
+  enabled: false
+  # -- GCP project id hosting the MEHO target credentials and the
+  # `meho-test-federation` health-probe secret. Required (non-empty) when
+  # `gsm.enabled: true`. Typically the same value as `config.gsmProject`
+  # (which is the value the backplane actually reads at runtime).
+  project: ""
+  # -- Workload Identity Federation parameters for per-operator GCP token
+  # exchange. STUB for Phase 2 (#2232) — declared so a GSM adopter can pin
+  # the shape now, but NO template consumes these yet and the SA-direct
+  # Phase 1 backend ignores them. Leave empty until #2232 wires the STS
+  # token-exchange path.
+  workloadIdentityFederation:
+    # -- Workload Identity **pool** id (Phase 2 stub, #2232).
+    poolId: ""
+    # -- Workload Identity **provider** id within the pool (Phase 2 stub).
+    providerId: ""
+    # -- Service account the federated identity impersonates (Phase 2 stub).
+    serviceAccount: ""
 
 keycloak:
   # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT

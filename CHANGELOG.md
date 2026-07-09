@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — GCP Secret Manager credential backend (Phase 1, SA-direct)
+
+- Resolve a target's `gsm:<project>/<secret>[#field]` `secret_ref` through
+  a new `gsm` credential backend on the #2229 resolver seam, reading GCP
+  Secret Manager under MEHO's own GKE Workload Identity ADC (optionally
+  impersonating a configured SA via `GSM_IMPERSONATE_SA`) — a Vault-free
+  install path for GCP-native adopters. A bare ref returns the whole JSON
+  payload; a `#field` fragment selects one key. No service-account JSON
+  key is ever used (honours `constraints/iam.disableServiceAccountKeyCreation`).
+  Per-operator GCP federation and the Helm surface are deferred to #2232 /
+  #2231. (#2230)
+
 ## [0.20.0] - 2026-07-08
 
 ### Fixed — ssh-family connectors resolve `secret_ref` from Vault

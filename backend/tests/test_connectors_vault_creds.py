@@ -485,16 +485,20 @@ async def test_explicit_vault_scheme_resolves_identically_to_schemeless(
 async def test_unknown_scheme_raises_no_backend_error_without_touching_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``gsm:`` ref (backend lands in #2230) fails loudly, never a silent Vault read."""
+    """An unregistered scheme fails loudly, never a silent Vault read.
+
+    ``gsm`` is now a registered backend (#2230), so this uses a genuinely
+    unknown kind to pin the fail-closed dispatch contract.
+    """
     fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
 
     with pytest.raises(UnknownCredentialBackendError) as exc:
         await load_basic_credentials(
-            _Target(secret_ref="gsm:my-project/vc-lab-01"), _make_operator()
+            _Target(secret_ref="azurekv:my-vault/vc-lab-01"), _make_operator()
         )
 
     msg = str(exc.value)
-    assert "no credential backend registered for kind 'gsm'" in msg
+    assert "no credential backend registered for kind 'azurekv'" in msg
     # Vault was never reached — dispatch failed before any login / read.
     assert fake.auth.jwt.login_calls == []
     assert fake.secrets.kv.v2.read_calls == []

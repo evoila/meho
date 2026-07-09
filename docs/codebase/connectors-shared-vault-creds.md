@@ -25,9 +25,11 @@ registry. A schemeless ref (`targets/<id>`) resolves through the
 deployment default (`config.credentialBackend` / `CREDENTIAL_BACKEND`,
 default `vault`) and an explicit `vault:targets/<id>` ref resolves
 identically — both dispatch to `VaultCredentialBackend`, today's KV-v2
-read, byte-for-byte. An unknown scheme (`gsm:` before #2230 registers the
-GSM backend) raises `UnknownCredentialBackendError` instead of a silent
-Vault attempt. The seam is the target-credential analogue of the
+read, byte-for-byte. A `gsm:<project>/<secret>[#field]` ref resolves
+through `GcpSecretManagerBackend` (#2230, see `## GCP Secret Manager
+backend (gsm)` below); any other unknown scheme raises
+`UnknownCredentialBackendError` instead of a silent Vault attempt. The
+seam is the target-credential analogue of the
 `SECRET_ENDPOINT_REGISTRY` the `secret.move` broker already uses; the two
 are separate registries because they serve different contracts (the
 broker moves one opaque value; a credential backend returns a named-field
@@ -206,6 +208,64 @@ Chart wiring (`config.credentialBackend` → `CREDENTIAL_BACKEND` in the
 Helm configmap) lands with the GSM Helm surface in #2231; the setting is
 already read here so a value flows the moment the chart exposes it.
 
+## GCP Secret Manager backend (gsm)
+
+`backend/src/meho_backplane/connectors/_shared/gsm_creds.py` registers
+`GcpSecretManagerBackend` under kind `gsm` (#2230, Initiative #2227) — the
+second backend on the seam, so a GCP-native adopter runs Vault-free. The
+`_shared` package `__init__` imports the module so the `register_credential_backend("gsm", ...)`
+call runs eagerly, exactly as `vault_creds` does for `vault`.
+
+**Auth model — SA-direct under GKE Workload Identity (Phase 1).** The read
+runs under MEHO's *own* identity: the pod's Application Default Credentials
+(`google.auth.default()`), which on GKE resolve to the deployment's
+Workload Identity service account. A configured deployment-level SA
+(`GSM_IMPERSONATE_SA` / `Settings.gsm_impersonate_sa`, empty by default)
+wraps that ADC source in `google.auth.impersonated_credentials.Credentials`
+targeting the SA — the same ADC + impersonation chain `GcloudConnector`
+drives (`gcloud/connector.py:_fetch_token_sync`). No service-account JSON
+key ever enters the flow, honouring `constraints/iam.disableServiceAccountKeyCreation`
+by never using key material. Per-operator GCP federation (STS token
+exchange) is #2232, out of scope here; MEHO's audit still attributes to
+the Keycloak `sub` (the policy/audit seam is untouched), so Phase 1 loses
+only *GCP-layer* per-operator attribution.
+
+**Ref grammar.** The scheme-stripped store ref is
+`<project-id>/<secret-name>[/versions/<version>][#<field>]`:
+
+- bare `proj/secret` — reads the **latest** version, returns the whole
+  JSON object as the field dict.
+- pinned `proj/secret/versions/5` — reads that exact version.
+- `#field` — `proj/secret#password` — returns just `{field: value}`.
+
+Both forms require the decoded payload to be a JSON **object** (the seam
+contract returns a named-field dict the loader's `_extract_fields`
+consumes, exactly as the Vault backend returns a KV-v2 data dict) — a
+non-JSON / non-object payload, or a missing field, raises
+`GcpSecretManagerReadError`. That error type is the GSM analogue of
+`VaultCredentialsReadError`: distinct and actionable, raised on a
+malformed ref, an empty/unresolvable ADC source, access-denied
+(`PermissionDenied`), not-found (`NotFound`), or a transport failure —
+never a bare `google.api_core` exception, never echoing a value. The
+`SecretManagerServiceClient.access_secret_version` call is synchronous, so
+it runs off the event loop via `asyncio.to_thread` (the hvac precedent).
+The structlog `gsm_secret_accessed` event carries only `target` /
+`project` / `secret_name` / resolved `version` / `field` name.
+
+**Operator-JWT guard interaction.** The shared loader's empty-`raw_jwt`
+fail-closed guard (`_resolve_and_load`) still runs before dispatch, so a
+system-initiated call (`raw_jwt=""`) cannot resolve a `gsm:` ref either —
+identical to Vault today. Phase 1 deliberately keeps that guard rather than
+relaxing it for the deployment-identity backend; a future change that
+needs system-context GSM reads would move the guard into
+`VaultCredentialBackend`.
+
+**Test seams.** The backend takes injectable `adc_loader` (replaces
+`google.auth.default`) and `client_factory` (replaces
+`SecretManagerServiceClient`) so the unit suite drives parse / decode /
+impersonation / error / no-secret-in-logs behaviour with a canned payload
+and no live GCP (`tests/test_connectors_gsm_creds.py`).
+
 ## Dependencies
 
 - **`hvac`** (2.4.0 resolved) — `client.secrets.kv.v2.read_secret_version`
@@ -218,6 +278,13 @@ already read here so a value flows the moment the chart exposes it.
 - **`meho_backplane.auth.operator.Operator`** — the frozen request-scoped
   operator whose `raw_jwt` is forwarded to Vault.
 - **`structlog`** — the `vault_basic_credentials_loaded` event.
+- **`google-cloud-secret-manager`** (2.29.0 resolved) — the `gsm` backend's
+  `SecretManagerServiceClient.access_secret_version(name=...)` →
+  `response.payload.data` (bytes). Synchronous; wrapped in
+  `asyncio.to_thread`.
+- **`google-auth`** (already a dep) — `google.auth.default()` for the ADC
+  source and `google.auth.impersonated_credentials.Credentials` for the
+  optional SA impersonation the `gsm` backend reuses from `GcloudConnector`.
 
 ## Known issues
 

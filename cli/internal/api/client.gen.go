@@ -334,6 +334,7 @@ const (
 	Keycloak TargetCreateProduct = "keycloak"
 	Nsx      TargetCreateProduct = "nsx"
 	Pfsense  TargetCreateProduct = "pfsense"
+	Rabbitmq TargetCreateProduct = "rabbitmq"
 	Sddc     TargetCreateProduct = "sddc"
 	Vault    TargetCreateProduct = "vault"
 	Vcfa     TargetCreateProduct = "vcfa"

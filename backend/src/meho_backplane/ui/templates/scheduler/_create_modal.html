@@ -160,8 +160,21 @@
       </div>
 
       {# ---------- shared fields ---------- #}
+      {# Inputs is required for cron/one_off (they fire with no other prompt
+         source, so an input-less trigger fails every fire) and optional for
+         event (its future dispatch junction may derive the prompt from the
+         matched event). The label tracks the Alpine kind-switch. #}
       <label class="form-control">
-        <span class="label-text">Run inputs (JSON object, optional)</span>
+        <span class="label-text">
+          Run inputs (JSON object)<span
+            class="opacity-60"
+            x-show="kind !== 'event'"
+          > — required, must render a prompt</span><span
+            class="opacity-60"
+            x-cloak
+            x-show="kind === 'event'"
+          > — optional</span>
+        </span>
         <textarea
           name="inputs"
           class="textarea textarea-bordered textarea-sm font-mono"

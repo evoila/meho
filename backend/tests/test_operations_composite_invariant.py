@@ -15,15 +15,16 @@ enforcement:
   - a declared sub-op resolving to an ``ingested`` row -> raises, naming
     the op + every offending sub-op;
   - sub-ops resolving to ``composite`` / ``typed`` rows -> passes;
-  - a declared sub-op absent from the table -> passes (absence is the
-    retired ``composite_l2_missing`` class, not this invariant);
+  - a declared sub-op absent from the table -> passes (absence means the
+    op is simply not ingested here, not this invariant's concern);
   - ``*.composite.*`` recursion sub-ops -> skipped, never probed.
 
 * :func:`assert_registered_composites_have_no_ingested_dispatch` — the
-  platform-wide sweep over the composite-backing registry, including the
-  routing check that github's real ``gh.composite.pr_status_summary``
-  backing is folded into the shared invariant and passes on a fresh
-  deploy (no gh L2 rows ingested).
+  platform-wide sweep over the dispatch-surface registry: it raises for a
+  synthetic composite that declares an ingested sub-op, passes for one
+  that declares only code-shipped sub-ops, and is a clean no-op for the
+  empty registry (the production shape, since every shipped composite
+  dispatches its sub-ops directly on the connector session).
 """
 
 from __future__ import annotations
@@ -36,16 +37,13 @@ import pytest
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
-from meho_backplane.operations import composite_backing as _backing
-from meho_backplane.operations.composite_backing import (
-    register_composite_backing,
-    registered_composite_backings,
-    reset_composite_backing_registry,
-)
+from meho_backplane.operations import composite_invariant as _invariant
 from meho_backplane.operations.composite_invariant import (
     IngestedDispatchDependencyError,
     assert_no_ingested_dispatch_dependency,
     assert_registered_composites_have_no_ingested_dispatch,
+    register_composite_dispatch_surface,
+    reset_composite_dispatch_surface_registry,
 )
 from meho_backplane.settings import get_settings
 
@@ -58,10 +56,6 @@ _IMPL_ID = "synth"
 _SUB_OP_A = "GET:/widgets"
 _SUB_OP_B = "GET:/widgets/{id}"
 _TYPED_SUB_OP = "synth.widget.list"
-
-# github's real composite surface (registered at import time by the
-# gh-rest composite package) — the routing check.
-_GH_COMPOSITE_OP_ID = "gh.composite.pr_status_summary"
 
 
 @pytest.fixture(autouse=True)
@@ -76,19 +70,20 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_backing_registry() -> Iterator[None]:
-    """Isolate the process-wide backing registry, restoring the import-time set.
+def _reset_dispatch_surface_registry() -> Iterator[None]:
+    """Isolate the process-wide dispatch-surface registry across tests.
 
-    Same discipline as :mod:`tests.test_operations_composite_backing`: clear
-    to a known synthetic surface for the test, then restore the entries the
-    gh-rest package registered at import so a sibling module relying on them
-    is not left with an empty registry.
+    Snapshot the registry, clear it to a known synthetic surface for the
+    test, then restore the snapshot so a sibling module is not left with a
+    mutated registry. In production the registry is empty (every shipped
+    composite dispatches its sub-ops directly on the connector session), but
+    a stray entry from another test must not leak in either direction.
     """
-    saved = dict(_backing._REGISTRY)
-    reset_composite_backing_registry()
+    saved = dict(_invariant._REGISTRY)
+    reset_composite_dispatch_surface_registry()
     yield
-    reset_composite_backing_registry()
-    _backing._REGISTRY.update(saved)
+    reset_composite_dispatch_surface_registry()
+    _invariant._REGISTRY.update(saved)
 
 
 async def _seed_descriptor(*, op_id: str, source_kind: str, is_enabled: bool = True) -> None:
@@ -213,19 +208,18 @@ async def test_skips_composite_recursion_sub_ops() -> None:
 
 
 # ---------------------------------------------------------------------------
-# platform-wide sweep + github routing
+# platform-wide sweep over the dispatch-surface registry
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_sweep_raises_for_registered_synthetic_composite() -> None:
-    """The registry sweep applies the primitive to every registered backing."""
+    """The registry sweep applies the primitive to every registered surface."""
     await _seed_descriptor(op_id=_SUB_OP_A, source_kind="ingested")
-    register_composite_backing(
+    register_composite_dispatch_surface(
         composite_op_id="synth.composite.widget.audit",
         connector_id=_CONNECTOR_ID,
         sub_op_ids=(_SUB_OP_A,),
-        catalog_command="meho connector ingest --catalog synth/1.0",
     )
     with pytest.raises(IngestedDispatchDependencyError):
         await assert_registered_composites_have_no_ingested_dispatch()
@@ -235,39 +229,23 @@ async def test_sweep_raises_for_registered_synthetic_composite() -> None:
 async def test_sweep_passes_for_code_shipped_only_registry() -> None:
     """A registry whose composites only depend on code-shipped sub-ops passes."""
     await _seed_descriptor(op_id=_TYPED_SUB_OP, source_kind="typed")
-    register_composite_backing(
+    register_composite_dispatch_surface(
         composite_op_id="synth.composite.widget.audit",
         connector_id=_CONNECTOR_ID,
         sub_op_ids=(_TYPED_SUB_OP,),
-        catalog_command="meho connector ingest --catalog synth/1.0",
     )
     # No raise.
     await assert_registered_composites_have_no_ingested_dispatch()
 
 
 @pytest.mark.asyncio
-async def test_github_real_backing_routed_through_shared_invariant() -> None:
-    """github's real composite backing is swept by the shared invariant and passes fresh.
+async def test_sweep_passes_for_empty_registry() -> None:
+    """The production shape: no composite declares a descriptor-routed surface.
 
-    Restores the import-time gh-rest backing (the autouse fixture cleared
-    it), then runs the platform-wide sweep with no gh L2 rows ingested —
-    the fresh-deploy state. The sweep must pass, proving github is folded
-    into the one shared check (its bespoke ``UnbackedEnabledCompositeError``
-    guard is retired separately in #2259) rather than needing per-connector
-    wiring here.
+    Every shipped composite dispatches its sub-ops directly on the connector
+    session (Goal #2247), so nothing registers a dispatch surface and the
+    sweep is a clean no-op. The seam still exists for a future
+    ``dispatch_child``-routed composite; this asserts the empty case passes.
     """
-    # Re-register github's real backing (fixture cleared the registry).
-    register_composite_backing(
-        composite_op_id=_GH_COMPOSITE_OP_ID,
-        connector_id="gh-rest-3",
-        sub_op_ids=(
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}",
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs",
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-        ),
-        catalog_command="meho connector ingest --catalog gh/3",
-    )
-    assert _GH_COMPOSITE_OP_ID in registered_composite_backings()
-    # Fresh deploy: no gh L2 rows ingested -> the code-shipped composite is
-    # not (yet) routed through an ingested row, so the sweep passes.
+    assert _invariant.registered_composite_dispatch_surfaces() == {}
     await assert_registered_composites_have_no_ingested_dispatch()

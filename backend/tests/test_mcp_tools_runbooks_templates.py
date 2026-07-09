@@ -47,8 +47,9 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunbookRun
-from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.db.models import RunbookRun, RunbookTemplate
+from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.runbooks.hydration_errors import TEMPLATE_BODY_VALIDATION_FAILED
 from meho_backplane.runbooks.schemas import DraftTemplateRequest, PublishTemplateRequest
 from meho_backplane.runbooks.service import RunbookTemplateService
 from tests.mcp_test_fixtures import (
@@ -596,6 +597,101 @@ async def test_show_tool_operator_with_no_run_denied(
     body = _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
     assert body["error"]["code"] == INVALID_PARAMS
     assert "opacity_floor" in body["error"]["message"]
+
+
+async def _seed_poisoned_template(tenant_id: uuid.UUID) -> None:
+    """Insert a published template whose only step has an empty body.
+
+    Goes through the ORM (not the service) so the #2122 ``min_length=1``
+    constraint -- enforced on the Pydantic request models, not the DB model
+    -- is bypassed, reproducing a legacy pre-v0.20.0 row that reached
+    storage before the constraint existed.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            RunbookTemplate(
+                tenant_id=tenant_id,
+                slug="cert-rotate",
+                version=1,
+                title="Rotate cert",
+                description="Rotate the expiring TLS cert.",
+                steps=[
+                    {
+                        "id": "revoke",
+                        "title": "Revoke",
+                        "body": "",
+                        "type": "manual",
+                        "verify": {"type": "confirm", "prompt": "Done?"},
+                    }
+                ],
+                target_kind="host",
+                status="published",
+                created_by="seed-admin",
+                edited_by="seed-admin",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.asyncio
+async def test_show_tool_admin_hydration_failure_returns_structured_internal_error(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #3: a poisoned stored body → structured ``-32603`` with ``data`` (admin).
+
+    Not the dispatcher catch-all's opaque ``internal error: ValidationError``:
+    the handler classifies the hydration failure into :class:`McpInternalError`
+    with the shared envelope on ``error.data``.
+    """
+    client, op = client_with_operator
+    await _seed_poisoned_template(op.tenant_id)
+
+    body = _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
+    assert body["error"]["code"] == INTERNAL_ERROR
+    data = body["error"]["data"]
+    assert data["error"] == TEMPLATE_BODY_VALIDATION_FAILED
+    assert data["slug"] == "cert-rotate"
+    assert data["errors"][0]["type"] == "string_too_short"
+    # The message is the actionable envelope, not the opaque class name.
+    assert "migration 0054" in body["error"]["message"]
+    assert body["error"]["message"] != "internal error: ValidationError"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_show_tool_operator_hydration_failure_returns_structured_internal_error(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #3: the operator path also surfaces the structured ``-32603`` envelope.
+
+    The operator is authorized (a completed run against the pinned version);
+    the corrupt stored body surfaces as the structured internal error while
+    hydrating the resolved latest version.
+    """
+    client, op = client_with_operator
+    await _seed_poisoned_template(op.tenant_id)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            RunbookRun(
+                tenant_id=op.tenant_id,
+                template_slug="cert-rotate",
+                template_version=1,
+                assigned_to=op.sub,
+                target="host:edge-01",
+                params={},
+                state="completed",
+                started_by=op.sub,
+            )
+        )
+        await session.commit()
+
+    body = _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
+    assert body["error"]["code"] == INTERNAL_ERROR
+    assert body["error"]["data"]["error"] == TEMPLATE_BODY_VALIDATION_FAILED
+    assert body["error"]["data"]["slug"] == "cert-rotate"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

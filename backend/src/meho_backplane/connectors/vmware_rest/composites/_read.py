@@ -35,7 +35,7 @@ each sub-op against an ``ingested`` ``endpoint_descriptor`` row. That
 coupled every read composite to a per-deploy vCenter-catalog ingest:
 until an operator ran ``meho connector ingest --catalog vmware/9.0`` the
 ``GET:/vcenter/datastore`` / ``POST:/PropertyCollector/...`` sub-ops had
-no descriptor row and the composite failed with ``composite_l2_missing``
+no descriptor row and the composite could not dispatch them
 (consumer signal 20, ``claude-rdc-hetzner-dc#697``). The two-world op
 model (Goal #2247) removes that coupling: the handler receives the
 resolved connector instance (the ``connector`` kwarg the #2251 substrate

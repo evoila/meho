@@ -47,8 +47,13 @@ DBOS rebase swaps only the loop module.
     `active`/`paused`/`cancelled`/`fired`).
   - `inputs` (JSON-shaped, nullable; `_coerce_inputs` renders it to the
     run's user-prompt input string — `"prompt"` key when present, else the
-    dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). A `""`
-    result is refused typed at fire time, see the no-input guard below.
+    dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). For
+    `kind=cron`/`one_off` a payload that renders no usable prompt (no
+    `inputs`, `inputs: {}`, or a whitespace-only `"prompt"`) is **rejected
+    at create** with a 422 (payload-only check, see the no-input guard
+    below); `kind=event` is exempt. A `""` result that slips through (an
+    event trigger, or a row inserted around the wire schema) is still
+    refused typed at fire time.
   - `work_ref` (nullable Text, migration `0043`, #1663) — the opaque
     external change-ticket reference (`"gh:evoila/meho#13"`, a Jira key,
     a CR id) the trigger works under. Set at create time (triggers have
@@ -355,13 +360,28 @@ lock — see "Known issues / limitations" (#1502).
   per blocking run per tick, not for the run's whole lifetime. Driving
   the abandoned background run to a terminal state (lease/heartbeat
   reaper) is a separate concern (T1 #1501), not this loop's job.
-- **No-inputs trigger fails typed, not at create** (#1505) — a trigger
-  created without `inputs` (or whose `inputs` render to a whitespace-only
-  prompt) is *accepted* at create: whether a user turn is needed depends
-  on the referenced agent definition, which the wire-shape validator does
-  not load. At fire time `run_scheduled` detects the empty prompt
-  (`prompt_is_effectively_empty`) **before** the model call and finalises
-  the run `failed` with a `scheduled_run_no_input`-tagged `error`
+- **No-usable-prompt cron/one_off rejected at create; fire-time guard is
+  defense-in-depth** (#1505 fire-time, #2244 create-time) — a `cron` or
+  `one_off` trigger whose `inputs` render no usable prompt (no `inputs`,
+  `inputs: {}`, or a whitespace-only `"prompt"`) is **rejected at create**
+  with a 422. The check lives in `ScheduledTriggerCreate`'s
+  discriminated-union validator (`_payload_yields_prompt`) and is
+  **payload-only** — it loads no agent definition, so it sidesteps the
+  layering objection that originally kept this fire-time-only: a cron that
+  fires every tick and a one_off that burns its single fire with no user
+  turn are deterministic failures the payload alone reveals. It also closes
+  the `inputs: {}` edge, which `_coerce_inputs` renders to the literal
+  `"{}"` — non-whitespace, so it slips past the fire-time guard and reaches
+  the model as a meaningless `"{}"` turn. `kind=event` is **exempt**: its
+  future payload-dispatch junction (`events/drain.py`, still a no-op at
+  HEAD) may legitimately derive the prompt from the matched event, so an
+  input-less event trigger stays creatable.
+
+  The fire-time guard is retained as defense-in-depth for the paths the
+  create check does not cover — an `event` trigger, or a row inserted
+  directly around the wire schema. At fire time `run_scheduled` detects the
+  empty prompt (`prompt_is_effectively_empty`) **before** the model call and
+  finalises the run `failed` with a `scheduled_run_no_input`-tagged `error`
   (`SCHEDULED_RUN_NO_INPUT_CLASS`), rather than letting it reach the
   provider as a system-prompt-only request with an empty `messages` array
   (every supported backend 400s on that). The scheduler logs

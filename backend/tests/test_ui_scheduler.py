@@ -662,6 +662,7 @@ def test_create_submit_persists_cron_trigger_and_redirects() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -701,6 +702,33 @@ def test_create_submit_invalid_cron_rerenders_modal_with_error() -> None:
     assert _trigger_count(_TENANT_A) == 0
 
 
+def test_create_submit_input_less_cron_rerenders_modal_with_error() -> None:
+    """A cron create with no inputs surfaces the 422 as a form-error banner (#2244)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "cron",
+                "agent_definition_id": str(_AGENT_ID),
+                "cron_expr": "0 9 * * *",
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "non-empty user prompt" in response.text
+    assert _trigger_count(_TENANT_A) == 0
+
+
 def test_create_submit_rejects_operator_with_403() -> None:
     """An operator POST to create is 403'd server-side (the hidden button is UX only)."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -716,6 +744,7 @@ def test_create_submit_rejects_operator_with_403() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -741,6 +770,7 @@ def test_create_submit_unknown_agent_rerenders_modal() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -767,6 +797,7 @@ def test_create_submit_without_csrf_is_403() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers={"HX-Request": "true"},  # no X-CSRF-Token

@@ -78,6 +78,15 @@ dependencies = [
     # so a slim wheel install doesn't fail at first ``encode`` call).
     # No stdlib alternative exists for RS256 signing.
     "pyjwt[crypto]>=2.13.0,<3",
+    # MongoDB wire-protocol driver for the read-only ``mongodb`` connector
+    # (#2237). Uses PyMongo's **native async API** (``AsyncMongoClient``,
+    # GA since PyMongo 4.13) rather than Motor: MongoDB deprecated Motor on
+    # 2025-05-14 in favour of the PyMongo Async API (Motor reaches
+    # end-of-life 2026-05-14), so a brand-new connector adopts the
+    # unified async client directly and pulls no separate ``motor`` dep.
+    # AsyncMongoClient runs commands off the event loop natively (no
+    # ``asyncio.to_thread`` wrapper needed).
+    "pymongo>=4.13,<5",
 ]
 
 [dependency-groups]

@@ -335,36 +335,37 @@ def test_importing_github_composites_queues_registrar() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Direct-session migration (#2255): the composite no longer dispatches
-# ingested L2 rows, so it registers no ``composite_backing`` entry and the
-# gh-only ``UnbackedEnabledCompositeError`` guard is neither invoked nor
-# needed here (the platform invariant #2252 supersedes it; #2259 removes
-# the class).
+# Direct-session migration (#2255) + apparatus retirement (#2259): the
+# composite reads through the ``GitHubRestConnector`` session directly, so it
+# declares no descriptor-routed dispatch surface, and the gh-only
+# ``UnbackedEnabledCompositeError`` load guard is gone (the platform-wide
+# invariant #2252 is the sole remaining check).
 # ---------------------------------------------------------------------------
 
 
-def test_composite_registers_no_composite_backing() -> None:
-    """No gh composite backing is registered after import (#2255 dropped it).
+def test_composite_declares_no_dispatch_surface() -> None:
+    """The gh composite registers no descriptor-routed dispatch surface (#2259).
 
-    The composite reads through the ``GitHubRestConnector`` session
-    directly, so there are no ingested L2 sub-ops to keep a
-    ``composite_backing`` safety net for. Its absence is the fresh-deploy
-    fix (#2050): nothing can dead-end at ``composite_l2_missing`` because
-    the composite never resolves an ``endpoint_descriptor`` row.
+    ``gh.composite.pr_status_summary`` reads through the connector session
+    directly, so it never resolves an ``endpoint_descriptor`` row and has no
+    surface to declare to the two-world invariant's registry -- the empty
+    registry is the fresh-deploy shape.
     """
-    from meho_backplane.operations.composite_backing import registered_composite_backing
+    from meho_backplane.operations.composite_invariant import (
+        registered_composite_dispatch_surfaces,
+    )
 
-    assert registered_composite_backing("gh.composite.pr_status_summary") is None
+    assert "gh.composite.pr_status_summary" not in registered_composite_dispatch_surfaces()
 
 
-def test_register_module_has_no_backing_registrar() -> None:
-    """``_register`` neither imports nor calls ``register_composite_backing`` (AC #3)."""
+def test_register_module_has_no_backing_machinery() -> None:
+    """``_register`` retired the gh-only backing guard + registrar (#2259)."""
     from meho_backplane.connectors.github.composites import _register as reg
 
     assert not hasattr(reg, "register_composite_backing")
     assert not hasattr(reg, "_register_and_assert_composite_backings")
-    # The retained-but-dormant guard class is still exported for #2259.
-    assert issubclass(reg.UnbackedEnabledCompositeError, RuntimeError)
+    # The gh-only load guard is deleted; the platform invariant supersedes it.
+    assert not hasattr(reg, "UnbackedEnabledCompositeError")
 
 
 def test_handler_is_module_level_coroutine_function() -> None:

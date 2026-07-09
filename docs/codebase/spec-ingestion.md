@@ -1697,13 +1697,6 @@ CI / unit tests inject a deterministic stub via
 `IngestionPipelineService(..., llm_client_factory=...)` (or
 `set_llm_client_factory(...)`) so the grouping pass stays hermetic.
 
-The `composite_l2_missing` error envelope
-(`operations/_errors.py:result_composite_l2_missing`) surfaces a
-catalog-ingest command as the escape hatch from a missing L2 sub-op;
-that escape hatch now completes the ingest when the key is set, and
-its envelope text names the `ANTHROPIC_API_KEY` requirement (and the
-503 a keyless deploy still gets) so operators know the prerequisite.
-
 **Out of scope (#1386).** The grouping pass talks to Anthropic
 directly rather than routing through the G11.5 per-tenant model
 resolver (Bedrock / vLLM / VCF PAIF, egress-aware). Ingest grouping is

@@ -4277,6 +4277,72 @@
               }
             }
           },
+          "500": {
+            "description": "The stored template body fails the current step schema and cannot be hydrated -- e.g. an empty step body predating the v0.20.0 non-empty-body requirement. Apply Alembic migration 0054 to backfill legacy rows; see docs/codebase/runbook-template-hydration.md.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "template_body_validation_failed"
+                          ]
+                        },
+                        "slug": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "errors": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string"
+                              },
+                              "loc": {
+                                "type": "array",
+                                "items": {}
+                              },
+                              "msg": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "loc",
+                              "msg"
+                            ]
+                          }
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "slug",
+                        "version",
+                        "errors",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -24581,7 +24647,7 @@
           "agent_definition_id"
         ],
         "title": "ScheduledTriggerCreate",
-        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*inputs* is optional and unvalidated here **by design**. Whether a\ntrigger needs a user prompt depends on the referenced agent\ndefinition, which this pure wire-shape validator does not (and must\nnot) load -- the definition FK is checked one layer down in the\nservice. A no-inputs trigger is therefore *accepted* at create and the\nno-usable-prompt case is handled at fire time: the scheduled-run seam\nfinalises the run ``failed`` with a typed\n:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error\nrather than letting it reach the provider as an empty-``messages`` 400\n(#1505). This keeps a definition that legitimately needs no user turn\nfrom being over-rejected at create while still surfacing the doomed\nno-prompt fire as a typed, greppable failure.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field.\n\n*work_ref* (optional, work_ref I3-T3 #1663) is the opaque external\nchange-ticket reference the trigger -- and every run it dispatches --\nworks under. Pinned on the trigger row at create time and inherited\nby each dispatched run's ``agent_run.work_ref`` and audit rows via\nthe shared ``work_ref_var`` ContextVar. Set-at-create-only: triggers\nhave no UPDATE path. Omit when the trigger carries no change ticket."
+        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*inputs* is the JSON payload rendered into the run's user-prompt string\nat fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).\nFor ``kind=cron`` and ``kind=one_off`` it **must** render a non-empty\nuser turn: :meth:`_validate_discriminated_union` rejects an input-less\ntrigger -- and the ``inputs: {}`` case, which would otherwise render the\nliteral ``\"{}\"`` -- with a 422 at create. The check is payload-only\n(:func:`_payload_yields_prompt`); it loads no agent definition, so it\ndoes not resurrect the layering objection that kept #1505 fire-time-only\n-- a cron that fires every tick and a one_off that burns its single fire\nwith no user turn are deterministic failures the wire shape can see\nwithout extra I/O. ``kind=event`` is **exempt**: its future\npayload-dispatch junction may derive the prompt from the matched event,\nso an input-less event trigger stays creatable.\n\nThe fire-time typed guard remains as defense-in-depth\n(:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):\nit still finalises a no-prompt fire ``failed`` before the model call for\n``event`` triggers and for any row inserted directly around this wire\nschema. See ``docs/codebase/scheduler.md``.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field.\n\n*work_ref* (optional, work_ref I3-T3 #1663) is the opaque external\nchange-ticket reference the trigger -- and every run it dispatches --\nworks under. Pinned on the trigger row at create time and inherited\nby each dispatched run's ``agent_run.work_ref`` and audit rows via\nthe shared ``work_ref_var`` ContextVar. Set-at-create-only: triggers\nhave no UPDATE path. Omit when the trigger carries no change ticket."
       },
       "ScheduledTriggerInFlightPolicy": {
         "type": "string",
@@ -25387,6 +25453,7 @@
               "k8s",
               "keycloak",
               "loki",
+              "mongodb",
               "nsx",
               "pfsense",
               "postgres",

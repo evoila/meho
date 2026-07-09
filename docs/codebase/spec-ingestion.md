@@ -1310,6 +1310,26 @@ The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
 also keeps the surface trivially testable.
 
+**YAML scalar typing (#2272).** The YAML leg decodes with
+`_SpecYamlLoader`, a `CSafeLoader` / `SafeLoader` subclass that overrides
+the YAML 1.1 implicit `timestamp` resolver to hand back the scalar's raw
+text. Without it an unquoted `example: 2000-01-23T04:56:07.000+00:00`
+constructs a `datetime` (and a date-only `2024-01-15` a `date`) that
+rides verbatim into the `parameter_schema` / `response_schema` JSON(B)
+columns and crashes `session.flush()` with `Object of type datetime is
+not JSON serializable` (the engine sets no `json_serializer`, so stdlib
+`json.dumps` runs). OAS 3.1 limits YAML tags to the JSON Schema ruleset,
+which excludes the timestamp tag, so the resolver was over-typing a value
+the author meant as a string. `add_constructor` copies the constructor
+table onto the subclass (PyYAML copy-on-write), leaving the
+`yaml.safe_load` sites elsewhere (catalog / kubeconfig / topology import)
+on the stock resolver. As defence-in-depth, `_build_proto` asserts each
+schema is JSON-serializable at the proto-build boundary both the real and
+`dry_run` legs share, so any non-encodable value (a `!!binary` example,
+say) fails identically — a structured `invalid_schema` 400 at parse time
+— instead of crashing the real INSERT while `dry_run=true` green-lights
+the same spec.
+
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /
 version-gate steps but returns the spec's `info.version` string
@@ -1374,7 +1394,7 @@ parse_openapi
 │  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
 │  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
 │  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
-├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
+├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations
    └─ _build_proto         # per (method, path) verb under paths
@@ -1382,7 +1402,8 @@ parse_openapi
       │  ├─ _resolve_shallow_ref      # $ref → #/components/schemas/X
       │  ├─ _build_param_property     # one property per path/query/header
       │  └─ _build_body_property      # requestBody under "body" key
-      └─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      ├─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      └─ _assert_json_serializable    # fail-closed: param/response schema must JSON-encode (#2272)
 ```
 
 `_resolve_shallow_ref` is the load-bearing helper. It inlines exactly
@@ -1811,6 +1832,13 @@ Both delegate to `ReviewService.delete_connector`
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
+* **Non-crashing YAML 1.1 over-typings kept as-is.** The implicit
+  `timestamp` resolver is normalised to text (#2272), but other YAML 1.1
+  implicit resolutions in `example:` values — `on`/`off`/`yes`/`no` →
+  bool, sexagesimal `1:30` → `90` — still resolve per YAML 1.1 because
+  they stay JSON-serializable and so never break the descriptor INSERT.
+  A silent-fidelity nit only; file separately if a real spec surfaces a
+  wrong value.
 
 ## References
 

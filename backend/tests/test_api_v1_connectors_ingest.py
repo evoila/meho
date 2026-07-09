@@ -169,6 +169,9 @@ _INGEST_TEST_PUBLIC_IP = "93.184.216.34"
 _SPEC_HOST = "specs.example.test"
 _SPEC_BASE = f"https://{_SPEC_HOST}"
 
+# On-disk OpenAPI fixtures served through the respx HTTPS mock.
+_OPENAPI_FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
+
 # All test hostnames that must resolve to a public IP via the mock.
 _INGEST_TEST_HOSTS = frozenset(
     {
@@ -2192,6 +2195,47 @@ paths:
     assert body["grouping"] is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ingest_non_serializable_example_fails_identically_on_both_legs(
+    client: TestClient, dry_run: bool
+) -> None:
+    """A spec whose proto isn't JSON-serializable fails the same on both legs (#2272).
+
+    Before the proto-build serializability guard, the effectful ingest
+    leg crashed at ``session.flush()`` with an opaque ``StatementError``
+    while the parse-only ``dry_run`` leg green-lit the identical spec —
+    a false green. Both legs now surface the same structured
+    ``invalid_schema`` 400 at parse time. The fixture carries a
+    ``!!binary`` example (``bytes``) so it stays non-serializable
+    independently of the timestamp loader fix.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "nonserializable_example_30.yaml",
+            path="nonserializable-example.yaml",
+        )
+        request_body: dict[str, Any] = {
+            "product": "blobsvc",
+            "version": "1.0",
+            "impl_id": "blobsvc-rest",
+            "specs": [{"uri": spec_url}],
+        }
+        if dry_run:
+            request_body["dry_run"] = True
+        else:
+            request_body["async"] = False
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json=request_body,
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["detail"] == "invalid_schema"
+
+
 def test_ingest_happy_path_runs_full_pipeline(
     client: TestClient,
     tmp_path: Any,
@@ -2483,6 +2527,79 @@ paths:
         )
         rows = result.scalars().all()
     assert {row.tenant_id for row in rows} == {tenant_a}
+
+
+@pytest.mark.asyncio
+async def test_ingest_yaml_timestamp_examples_persist_as_strings(
+    client: TestClient,
+) -> None:
+    """A YAML spec with unquoted date/timestamp examples ingests + persists verbatim (#2272).
+
+    The descriptor INSERT used to crash with ``StatementError: Object of
+    type datetime is not JSON serializable`` because YAML 1.1 typed the
+    unquoted ``example:`` scalars as ``datetime`` / ``date``. The ingest
+    loader now keeps them as the author's raw strings, so the row lands
+    and the persisted ``parameter_schema`` / ``response_schema`` carry the
+    exact strings the spec author wrote.
+    """
+    propose_json = (
+        '[{"group_key": "events", "name": "Events", '
+        '"when_to_use": "Use these operations to inspect events."}]'
+    )
+    assign_json = '{"GET:/events": "events"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "timestamp_examples_30.yaml",
+            path="timestamp-examples.yaml",
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "tsexample",
+                "version": "1.0",
+                "impl_id": "tsexample-rest",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.product == "tsexample"),
+        )
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+
+    since = row.parameter_schema["properties"]["since"]
+    assert since["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert isinstance(since["example"], str)
+    assert row.parameter_schema["properties"]["on_date"]["example"] == "2024-01-15"
+
+    assert row.response_schema is not None
+    resp_props = row.response_schema["properties"]
+    assert resp_props["observed_on"]["example"] == "2024-01-15"
+    assert resp_props["observed_at"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert resp_props["quoted_at"]["example"] == "2019-07-21T17:32:28Z"
 
 
 def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:

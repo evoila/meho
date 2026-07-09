@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — vmware `host.vsan_health` + `host.network_uplinks` re-shipped as typed ops
+
+- **`vmware.host.vsan_health` and `vmware.host.network_uplinks` are now
+  `source_kind="typed"` bound-method ops, and the two composites
+  (`vmware.composite.host.vsan_health` / `vmware.composite.host.network_uplinks`)
+  are removed** (#2258): both now read directly on the connector session via
+  `RetrievePropertiesEx` / `VsanQueryVcClusterHealthSummary`, mounted through
+  `mount_op_path`, in the `vmware.host.usage` (#2257) mould — one row per
+  host/cluster, working on a fresh boot with **zero catalog ingest**. Output
+  is byte-for-byte compatible with the composite versions, including the
+  per-host / per-cluster best-effort `read_note` on a partial failure. The
+  registered vmware composite total drops 15→13 (7→5 read); the two reads
+  keep `safety_level="safe"` / `requires_approval=False`. Part of the
+  two-world op model (Goal #2247, Initiative #2250). No new auth model —
+  `vmware-rest-9.0` stays State 2.
+
 ### Added — GCP Secret Manager backend Phase 2 (per-operator Workload Identity Federation)
 
 - The `gsm` credential backend now supports a **per-operator** read path via

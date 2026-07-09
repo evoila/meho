@@ -496,3 +496,161 @@ async def test_datastore_usage_composite_over_legacy_mount_routes_to_rest(
     rows = out["datastores"]
     assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
     assert rows[1]["capacity"] == 5000
+
+
+# ---------------------------------------------------------------------------
+# vmware.host.network_uplinks + vmware.host.vsan_health typed ops (#2258) —
+# end-to-end transport + mount routing with ZERO ingested descriptors
+# ---------------------------------------------------------------------------
+
+#: Per-host ``config.network.pnic`` + ``config.network.proxySwitch``
+#: values the network-uplinks RetrievePropertiesEx side-effect returns.
+_HOST_PNICS: list[dict[str, Any]] = [
+    {
+        "device": "vmnic0",
+        "mac": "aa:bb:cc:00:00:00",
+        "driver": "ixgbe",
+        "linkSpeed": {"speedMb": 10000, "duplex": True},
+    },
+    {"device": "vmnic1", "mac": "aa:bb:cc:00:00:01", "driver": "ixgbe"},
+]
+_HOST_PROXY_SWITCHES: list[dict[str, Any]] = [
+    {
+        "key": "key-vim.host.HostProxySwitch-1",
+        "dvsName": "DVS-A",
+        "dvsUuid": "50 01 aa bb",
+        "pnic": ["key-vim.host.PhysicalNic-vmnic0"],
+    }
+]
+
+
+def _network_props_response(request: httpx.Request) -> httpx.Response:
+    """Build a RetrieveResult echoing the POSTed host moId with network props."""
+    body = json.loads(request.content)
+    moid = body["specSet"][0]["objectSet"][0]["obj"]["value"]
+    return httpx.Response(
+        200,
+        json={
+            "objects": [
+                {
+                    "obj": {"type": "HostSystem", "value": moid},
+                    "propSet": [
+                        {"name": "config.network.pnic", "val": _HOST_PNICS},
+                        {"name": "config.network.proxySwitch", "val": _HOST_PROXY_SWITCHES},
+                    ],
+                }
+            ]
+        },
+    )
+
+
+#: ``VsanQueryVcClusterHealthSummary`` body the vsan-health route returns.
+_VSAN_SUMMARY: dict[str, Any] = {
+    "overallHealth": "green",
+    "groups": [
+        {
+            "groupId": "com.vmware.vsan.health.test.network",
+            "groupName": "Network",
+            "groupHealth": "green",
+            "groupTests": [
+                {
+                    "testId": "com.vmware.vsan.health.test.hostconnectivity",
+                    "testName": "vSAN cluster partition",
+                    "testHealth": "green",
+                    "testShortDescription": "Checks host connectivity.",
+                }
+            ],
+        }
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_host_network_uplinks_over_modern_mount_returns_per_host_pnics(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """host_network_uplinks() lists hosts then reads pnics per host, mounted onto /api.
+
+    Exercises the full #2258 typed-op path end to end against the real
+    connector transport (respx-intercepted) with ZERO ingested
+    descriptors — the fresh-boot / zero-catalog-ingest contract.
+    """
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/vcenter/host").respond(200, json=HOST_LISTING)
+        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+            side_effect=_network_props_response
+        )
+        mock.delete("/api/session").respond(204)
+        try:
+            result = await connector.host_network_uplinks(_operator(), vcsim_target, {})
+        finally:
+            await connector.aclose()
+
+    rows = result["hosts"]
+    assert [r["id"] for r in rows] == ["host-11", "host-22"]
+    assert rows[0]["pnics"][0] == {
+        "device": "vmnic0",
+        "mac": "aa:bb:cc:00:00:00",
+        "driver": "ixgbe",
+        "link_up": True,
+        "speed_mb": 10000,
+        "duplex": True,
+    }
+    assert rows[0]["pnics"][1]["link_up"] is False
+    assert rows[0]["proxy_switches"][0]["uplink_pnics"] == ["vmnic0"]
+    assert "read_note" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target mounts the vsan-health query onto /rest.
+
+    The modern ``POST /api/session`` 404s, the connector falls back to the
+    legacy path, and the ``VsanQueryVcClusterHealthSummary`` call must
+    route through ``/rest`` via ``mount_op_path`` or it 404s — the
+    modern+legacy mount coverage on the #2258 typed-op path, with zero
+    ingested descriptors.
+    """
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+    vsan_path = (
+        "/rest/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
+    )
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        mock.post(vsan_path).respond(200, json=_VSAN_SUMMARY)
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            result = await connector.host_vsan_health(
+                _operator(), vcsim_target, {"cluster": "domain-c123"}
+            )
+        finally:
+            await connector.aclose()
+
+    assert result["cluster"] == "domain-c123"
+    assert result["overall_health"] == "green"
+    assert result["groups"][0]["group_id"] == "com.vmware.vsan.health.test.network"
+    assert result["groups"][0]["tests"][0]["test_health"] == "green"
+    assert "read_note" not in result

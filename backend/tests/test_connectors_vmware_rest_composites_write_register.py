@@ -12,9 +12,9 @@ Coverage matrix (G3.1-T6 / #509 acceptance criteria):
   in ``composites/_write``.
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster``
   per the canary's stub-LLM taxonomy.
-* Combined with #508's 5 reads plus #2080's host.network_uplinks
-  and #2135's host.vsan_health reads, the registrar produces **15
-  rows** total -- the Definition-of-done line in #227's body.
+* Combined with #508's 5 read composites, the registrar produces
+  **13 rows** total. (The former host.network_uplinks / host.vsan_health
+  reads were re-shipped as typed ops in #2258.)
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
   with the documented required keys.
 * Module-level handler shape (no closures / partials / lambdas).
@@ -66,20 +66,19 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.patch",
 )
 
-# 7 reads (T5 / #508 shipped 5; #2080 adds host.network_uplinks;
-# #2135 adds host.vsan_health) -- carried over so the combined-count
-# assertion does not have to import _read constants.
+# 5 reads (T5 / #508) -- carried over so the combined-count assertion
+# does not have to import _read constants. (The former
+# host.network_uplinks / host.vsan_health reads were re-shipped as typed
+# ops in #2258.)
 _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.cluster.drs_recommendations",
     "vmware.composite.event.tail",
     "vmware.composite.performance.summary",
     "vmware.composite.datastore.usage",
     "vmware.composite.network.portgroup.audit",
-    "vmware.composite.host.network_uplinks",
-    "vmware.composite.host.vsan_health",
 )
 
-# 15 total -- the #227 G3.1 Definition-of-done line.
+# 13 total -- 5 read (T5 / #508) + 8 write (T6 / #509).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -188,10 +187,10 @@ async def test_register_vmware_composite_operations_inserts_eight_write_rows(
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_fifteen_composite_rows(
+async def test_full_registration_produces_thirteen_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """7 reads (#508 + #2080 + #2135) + 8 writes (#509) = 15 rows. Definition-of-done bar."""
+    """5 reads (#508) + 8 writes (#509) = 13 rows. Definition-of-done bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -205,7 +204,7 @@ async def test_full_registration_produces_fifteen_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 15
+    assert len(rows) == 13
 
 
 @pytest.mark.asyncio
@@ -456,17 +455,17 @@ async def test_write_composite_tags_include_composite_and_write(
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_fifteen(
+async def test_register_vmware_composite_operations_is_idempotent_across_thirteen(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 15 rows total, embedding called 15x once."""
+    """Running the registrar twice -> 13 rows total, embedding called 13x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 15
+    assert first_count == 13
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 15.
+    # pipeline; the row count stays at 13.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -480,7 +479,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_fifteen
             .scalars()
             .all()
         )
-    assert len(rows) == 15
+    assert len(rows) == 13
 
 
 # ---------------------------------------------------------------------------

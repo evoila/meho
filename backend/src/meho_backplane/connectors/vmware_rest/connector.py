@@ -651,6 +651,67 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_usage_impl(self, operator, target, params)
 
+    async def host_network_uplinks(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.network_uplinks`` -- per-host pnic link state + uplinks.
+
+        A ``source_kind="typed"`` op (#2258, re-shipped from the former
+        ``vmware.composite.host.network_uplinks``): the dispatcher binds
+        this method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Lists
+        hosts then reads ``config.network.pnic`` +
+        ``config.network.proxySwitch`` per host via PropertyCollector
+        directly on the connector session -- no ``dispatch_child``, no
+        ingested descriptor -- so it works on a fresh boot with zero
+        catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks.host_network_uplinks_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"hosts": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (
+            host_network_uplinks_impl,
+        )
+
+        return await host_network_uplinks_impl(self, operator, target, params)
+
+    async def host_vsan_health(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.vsan_health`` -- per-cluster vSAN health roll-up.
+
+        A ``source_kind="typed"`` op (#2258, re-shipped from the former
+        ``vmware.composite.host.vsan_health``): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`).
+        Queries ``VsanQueryVcClusterHealthSummary`` on the
+        ``vsan-cluster-health-system`` singleton scoped to the target
+        cluster's MoRef, directly on the connector session -- no
+        ``dispatch_child``, no ingested descriptor -- so it works on a
+        fresh boot with zero catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health.host_vsan_health_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns
+        ``{"cluster": ..., "overall_health": ..., "groups": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
+            host_vsan_health_impl,
+        )
+
+        return await host_vsan_health_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

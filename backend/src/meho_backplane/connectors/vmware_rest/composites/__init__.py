@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 15 composites land before
+``endpoint_descriptor`` upserts for the 13 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -24,9 +24,11 @@ Schema 2020-12 parameter + response contracts.
 
 Scope:
 
-* 7 read composites (G3.1-T5 / #508 shipped 5; #2080 adds
-  ``host.network_uplinks``; #2135 adds ``host.vsan_health``) --
+* 5 read composites (G3.1-T5 / #508) --
   ``safety_level="safe"`` + ``requires_approval=False`` overrides.
+  (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
+  were re-shipped as ``source_kind="typed"`` ops in #2258; see
+  :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
 * 8 write composites (G3.1-T6 / #509) -- inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults.
   The 8 cover every state-mutating workflow Goal #214 names as
@@ -44,8 +46,6 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
-    host_network_uplinks_composite,
-    host_vsan_health_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
@@ -83,8 +83,6 @@ __all__ = [
     "event_tail_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
-    "host_network_uplinks_composite",
-    "host_vsan_health_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
     "preflight_l2_dependencies",

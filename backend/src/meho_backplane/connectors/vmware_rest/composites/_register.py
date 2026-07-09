@@ -40,6 +40,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -205,7 +206,11 @@ class _CompositeSpec(NamedTuple):
     """
 
     op_id: str
-    handler: Callable[..., Awaitable[dict[str, Any]]]
+    # Read composites return a plain aggregation dict; migrated write
+    # composites (#2256) may instead return an ``OperationResult`` verbatim
+    # when the direct-session governance seam parks/denies an internal write,
+    # so the handler contract widens to that union.
+    handler: Callable[..., Awaitable[dict[str, Any] | OperationResult]]
     summary: str
     description: str
     parameter_schema: dict[str, Any]

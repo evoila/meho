@@ -9,36 +9,57 @@
 
 """Write-shaped ``vmware.composite.*`` handler functions (8 composites).
 
-Companion to :mod:`._read`. Same handler-shape contract -- each handler
-is a module-level ``async def`` taking the dispatcher's composite-branch
-keyword args ``(operator, target, params, dispatch_child)`` and
-returning a single aggregated dict via ``dispatch_child`` calls to
-2-N typed sub-ops (or, for :func:`host_evacuate_composite`, recursive
-calls into another vmware.composite).
+Companion to :mod:`._read`. Post-#2256 each handler is a module-level
+``async def`` taking the dispatcher's composite-branch keyword args
+``(operator, target, params, connector)`` -- the resolved connector
+instance the #2251 substrate injects -- and issues every raw-REST sub-op
+**directly on the connector's own authenticated session**
+(``connector._get_json`` / ``connector._post_json`` mounted through
+``connector.mount_op_path``) with no ``endpoint_descriptor`` lookup, so
+the composite works on a fresh boot with **zero catalog ingest**
+(Initiative #2249 / Goal #2247, the I-A write migration).
 
-The 8 composites this module ships (G3.1-T6 / #509):
+The one exception is :func:`host_evacuate_composite`, which additionally
+declares ``dispatch_child`` for its recursive call into
+``vmware.composite.vm.migrate`` -- a ``source_kind="composite"`` sub-op
+routed through a registrar-guaranteed row (never an ingested primitive),
+so that recursion keeps its ``dispatch_child`` path per #2248.
 
-* :func:`vm_create_composite` -- folder lookup -> ``POST:/vcenter/vm``
-  -> NIC attach loop -> optional power-on. Partial-failure rollback
-  via ``DELETE:/vcenter/vm/{vm}``.
-* :func:`vm_clone_composite` -- content-library deploy with task
-  polling. Long-running; ``wait_for_completion=False`` returns the
-  task id immediately.
-* :func:`vm_snapshot_revert_composite` -- list -> match by name ->
-  revert. Idempotent; ambiguity-rejection on name collision.
-* :func:`vm_migrate_composite` -- DRS recommendation lookup ->
-  relocate. ``target_host`` overrides DRS.
-* :func:`vm_power_bulk_composite` -- filter -> fan-out power action.
-  Per-VM partial-failure tolerated by default.
-* :func:`host_evacuate_composite` -- list VMs on host -> recursive
-  :func:`vm_migrate_composite` per VM -> maintenance-enter. First
-  production composite that calls another composite via
-  ``dispatch_child``.
-* :func:`host_detach_from_vds_composite` -- per-VM NIC migration to
-  a fallback network -> DVS host-detach. Refuses detach when any NIC
-  migration failed.
-* :func:`cluster_patch_composite` -- sequential per-host maintenance
-  + patch + exit. Stops the loop on the first per-host failure.
+Preserving write governance on the direct path
+----------------------------------------------
+
+``dispatch_child`` re-ran the dispatcher's per-sub-op policy/approval
+gate (property 3 of #508's four guarantees); a direct session call
+bypasses :func:`~meho_backplane.operations.dispatcher.dispatch`, so a
+now-internal *write* sub-op would otherwise execute un-gated. Every
+mutating sub-call therefore routes through
+:func:`~meho_backplane.operations.composite.enforce_subop_policy`
+(Task #2254) **before** the direct ``connector._post_json`` fires: the
+seam re-runs the same ``policy_gate`` against an in-memory descriptor
+carrying the sub-op's declared governance and returns an
+``awaiting_approval`` / ``denied`` :class:`OperationResult` when the gate
+does not clear. The handler returns that verbatim -- the dispatcher
+passes a handler-returned :class:`OperationResult` straight through, so an
+internal write **queues** (or is denied) instead of silently running.
+
+Sub-op governance posture
+-------------------------
+
+Each write sub-op declares ``safety_level="dangerous"`` +
+``requires_approval=False``. The ``dangerous`` label is the honest
+intrinsic-risk classification (create / delete / power / relocate /
+patch / maintenance are all state-mutating); ``requires_approval=False``
+keeps the **top-level composite** (``requires_approval=True`` in
+:mod:`._register`) the single primary approval gate. Flooring a sub-op to
+``requires_approval=True`` would double-gate: the approval-resume path
+re-runs the handler with the top-level gate already satisfied, but
+:func:`enforce_subop_policy` is not resume-aware, so it would re-queue the
+first internal write forever. With ``requires_approval=False`` the seam
+still (a) auto-executes for a human/service operator whose composite was
+already approved, and (b) denies -- or, with an explicit
+per-``(principal, op, target)`` grant, queues -- a ``dangerous`` write for
+an agent principal, so no internal write drops below the governance it had
+under ``dispatch_child``.
 
 Every sub-op_id below is the canonical ``METHOD:/path`` key produced
 by :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`
@@ -46,7 +67,12 @@ from the ingested ``vcenter.yaml`` (G3.1-T2 / #408) and
 ``vi-json.yaml`` (G3.1-T3 / #503). The path strings come from
 inspecting the canonical ``GOVC_PARITY_BENCHMARK`` tuple at
 ``backend/tests/acceptance/test_g07_vsphere_canary.py`` and the
-vSphere REST URL anchors in #509's issue body -- never guessed.
+vSphere REST URL anchors in #509's issue body -- never guessed. Post-#2256
+they no longer resolve an ``endpoint_descriptor`` row; each handler splits
+the ``METHOD:/path`` into its verb + spec-relative path, substitutes the
+``{var}`` path params, and mounts the remainder onto the target's live
+``/api`` (modern) / ``/rest`` (legacy/vcsim) prefix for the direct call
+(see :func:`_read_sub_op` / :func:`_write_sub_op`).
 
 Each composite returns a structured ``{"status": ...}`` envelope so
 callers can branch on ``status`` without parsing free-form prose. The
@@ -57,15 +83,18 @@ status enums are listed on each composite's ``response_schema`` in
 from __future__ import annotations
 
 import asyncio
+import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites._preflight import (
-    preflight_l2_dependencies,
-)
-from meho_backplane.operations.composite import DispatchChild
+from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
     "cluster_patch_composite",
@@ -79,19 +108,32 @@ __all__ = [
 ]
 
 
-# Connector_id every write composite dispatches sub-ops against.
+# Connector_id every write composite governs its sub-ops against (fed to
+# :func:`enforce_subop_policy` for the in-memory descriptor + the
+# ``vmware.composite.vm.migrate`` recursion routed through ``dispatch_child``).
 _CONNECTOR_ID = "vmware-rest-9.0"
+
+# Declared governance for every raw-REST *write* sub-op. ``dangerous`` is
+# the intrinsic-risk label; ``requires_approval=False`` keeps the top-level
+# composite the single approval gate (see the module docstring on why
+# flooring a sub-op to True would double-gate the resume path).
+_WRITE_SAFETY_LEVEL = "dangerous"
+_WRITE_REQUIRES_APPROVAL = False
+
+# ``{var}`` path-template placeholder pattern. vCenter moids are bare
+# ``[A-Za-z0-9-]`` tokens, so a plain ``str.format`` matches the RFC6570
+# simple-expansion the ingested path did.
+_PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 # vCenter REST op_ids (canonical METHOD:/path keys from vcenter.yaml).
 #
 # Action-bearing endpoints. vCenter's OpenAPI spec models POST-with-side-effect
 # endpoints as ``/<path>?action=<verb>`` — i.e. the action verb is part of the
-# path key, not a body parameter. The ingestion pipeline preserves the query
-# verbatim, so the canonical ``op_id`` for "power on a VM" is
-# ``POST:/vcenter/vm/{vm}/power?action=start`` (not ``POST:/vcenter/vm/{vm}/power``
-# with ``action=start`` in body params — that op_id is not a descriptor row).
-# These constants therefore embed the action verb. Endpoints whose action verb
-# is operator-chosen (power start/stop, maintenance enter/exit) build the op_id
+# path key, not a body parameter. The canonical ``op_id`` for "power on a VM" is
+# ``POST:/vcenter/vm/{vm}/power?action=start``; the ``?action=<verb>`` rides on
+# the mounted path verbatim (httpx sends it as the request query string), so no
+# ``action`` body param is ever constructed. Endpoints whose action verb is
+# operator-chosen (power start/stop, maintenance enter/exit) build the op_id
 # per-call via :func:`_power_vm_op_id` / :func:`_host_maintenance_op_id`.
 _OP_LIST_FOLDERS = "GET:/vcenter/folder"
 _OP_LIST_VMS = "GET:/vcenter/vm"
@@ -115,10 +157,9 @@ def _power_vm_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/power``.
 
     vCenter exposes ``start`` / ``stop`` / ``suspend`` / ``reset`` as four
-    distinct descriptor rows under the ``?action=<verb>`` discriminator. The
-    composite picks the row at call time so each action lands on its own
-    audit row + policy evaluation, not as a free-form ``action`` parameter
-    on a single shared op_id (which wouldn't resolve against an ingested row).
+    distinct ``?action=<verb>`` keys. The composite picks the key at call time
+    so each action lands on its own governance evaluation, not as a free-form
+    ``action`` parameter on a single shared op_id.
     """
     return f"POST:/vcenter/vm/{{vm}}/power?action={action}"
 
@@ -126,17 +167,19 @@ def _power_vm_op_id(action: str) -> str:
 def _host_maintenance_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``PATCH:/vcenter/host/{host}/maintenance``.
 
-    Maintenance enter / exit are two descriptor rows under ``?action=enter`` /
+    Maintenance enter / exit are two keys under ``?action=enter`` /
     ``?action=exit``; same reasoning as :func:`_power_vm_op_id`.
     """
     return f"PATCH:/vcenter/host/{{host}}/maintenance?action={action}"
 
 
-# Recursive composite sub-op_id (host.evacuate -> vm.migrate).
+# Recursive composite sub-op_id (host.evacuate -> vm.migrate). Routed
+# through ``dispatch_child`` (a registrar-guaranteed ``source_kind="composite"``
+# row), not the direct session -- per #2248 the composite->composite recursion
+# is out of scope for the ingested-dispatch migration.
 _OP_COMPOSITE_VM_MIGRATE = "vmware.composite.vm.migrate"
 
-# Composite op_ids -- used by the preflight cache key. Mirrors the
-# pattern in ``_read.py``.
+# Composite op_ids -- retained as the canonical documentation anchor.
 _COMPOSITE_OP_ID_VM_CREATE = "vmware.composite.vm.create"
 _COMPOSITE_OP_ID_VM_CLONE = "vmware.composite.vm.clone"
 _COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT = "vmware.composite.vm.snapshot.revert"
@@ -146,16 +189,14 @@ _COMPOSITE_OP_ID_HOST_EVACUATE = "vmware.composite.host.evacuate"
 _COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS = "vmware.composite.host.detach_from_vds"
 _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
 
-# Per-composite sub-op-id tuples consumed by the L2 pre-flight check
-# (G0.14-T10 / #1151). Each tuple lists every raw-REST L2 sub-op the
-# composite might dispatch against. Composite-to-composite sub-ops
-# (``vmware.composite.*``) are *not* included -- the preflight helper
-# skips them because they are registered by the same lifespan
-# registrar that brought their parent composite in.
-#
-# Action-discriminated endpoints (power start/stop/suspend/reset;
-# maintenance enter/exit) are spelled out per action because each verb
-# is a distinct ``endpoint_descriptor`` row, not a shared base path.
+# Per-composite sub-op-id tuples. Pre-#2256 these fed the L2 pre-flight
+# check that guarded a missing catalog ingest; the direct-session migration
+# removed that coupling, so the tuples now serve as the canonical sub-op-path
+# manifest the ingest-reconcile acceptance guard
+# (``tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py``)
+# checks against the vCenter spec. Composite-to-composite sub-ops
+# (``vmware.composite.*``) are listed for host.evacuate but are routed through
+# ``dispatch_child``, not the direct session.
 _POWER_ACTIONS: tuple[str, ...] = ("start", "stop", "suspend", "reset")
 _SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_LIST_FOLDERS,
@@ -181,9 +222,6 @@ _SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
     _OP_LIST_VMS,
     *(_power_vm_op_id(action) for action in _POWER_ACTIONS),
 )
-# host.evacuate dispatches to vm.migrate (composite -> composite); the
-# preflight helper skips ``vmware.composite.*`` entries. It also calls
-# maintenance enter directly.
 _SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_LIST_VMS,
     _OP_COMPOSITE_VM_MIGRATE,
@@ -210,14 +248,92 @@ def _unwrap_value(payload: Any) -> Any:
     return payload
 
 
-def _require_ok(result: OperationResult) -> Any:
-    """Return :attr:`OperationResult.result` or raise on a non-OK status."""
-    if result.status != "ok":
-        raise RuntimeError(
-            f"composite sub-op {result.op_id!r} returned status="
-            f"{result.status!r}: {result.error or '<no error message>'}"
-        )
-    return result.result
+def _split_sub_op(op_id: str, params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    """Split *op_id* + *params* into ``(method, spec-relative path, remainder)``.
+
+    Extracts the ``{var}`` names from the ``METHOD:/path`` template,
+    substitutes the matching *params* entries into the path (any
+    ``?action=<verb>`` query segment rides along verbatim), and returns the
+    remaining params -- the query bucket for a ``GET`` or the JSON body for a
+    write. Mirrors the ``x-meho-param-loc`` path/query/body split the ingested
+    dispatch performed, without any descriptor lookup.
+    """
+    method, _, path_template = op_id.partition(":")
+    var_names = _PATH_VAR_RE.findall(path_template)
+    path_params = {name: params[name] for name in var_names}
+    path = path_template.format(**path_params) if path_params else path_template
+    remainder = {k: v for k, v in params.items() if k not in path_params}
+    return method, path, remainder
+
+
+async def _read_sub_op(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    op_id: str,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    """Issue one read sub-call (``GET``) directly on the connector session.
+
+    Splits the canonical ``METHOD:/path`` *op_id*, mounts the substituted
+    path onto the target's live ``/api`` / ``/rest`` prefix, and dispatches
+    through :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._get_json`
+    (tenacity-retried, idempotent) with the remainder params as the query
+    bucket. Read sub-ops carry no governance gate -- they are the safe
+    resolution reads the write composites build their request bodies from.
+    Transport / status failures raise :exc:`httpx.HTTPError`; load-bearing
+    callers let it propagate (the dispatcher wraps it as ``connector_error``
+    for the composite parent).
+    """
+    method, path, query = _split_sub_op(op_id, params or {})
+    if method != "GET":
+        raise RuntimeError(f"_read_sub_op called with non-GET op_id {op_id!r}")
+    mounted = await connector.mount_op_path(target, path, operator)
+    return await connector._get_json(target, mounted, operator=operator, params=query or None)
+
+
+async def _write_sub_op(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    op_id: str,
+    params: dict[str, Any],
+) -> tuple[OperationResult | None, Any]:
+    """Gate then issue one *write* sub-call directly on the connector session.
+
+    Runs :func:`~meho_backplane.operations.composite.enforce_subop_policy`
+    with the sub-op's full logical *params* (so the durable
+    :class:`~meho_backplane.db.models.ApprovalRequest` names the entity the
+    write would touch) and the declared ``dangerous`` /
+    ``requires_approval=False`` governance. When the seam returns a result
+    (``awaiting_approval`` / ``denied``) the write is **not** issued -- the
+    ``(gate, None)`` tuple signals the caller to return that
+    :class:`OperationResult` verbatim. When the seam clears the gate
+    (``None``), the sub-op is split into ``(verb, path, body)`` and dispatched
+    through
+    :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._post_json`
+    (honouring the actual ``POST`` / ``PATCH`` / ``DELETE`` verb); the parsed
+    JSON payload rides back as ``(None, payload)``. Transport failures raise
+    :exc:`httpx.HTTPError` for the caller to catch (partial-failure legs) or
+    let propagate (load-bearing legs).
+    """
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        safety_level=_WRITE_SAFETY_LEVEL,
+        requires_approval=_WRITE_REQUIRES_APPROVAL,
+        target=target,
+        params=params,
+    )
+    if gate is not None:
+        return gate, None
+    method, path, body = _split_sub_op(op_id, params)
+    mounted = await connector.mount_op_path(target, path, operator)
+    payload = await connector._post_json(
+        target, mounted, operator=operator, verb=method, json=body or None
+    )
+    return None, payload
 
 
 def _rolled_back(
@@ -238,33 +354,36 @@ def _rolled_back(
 
 async def _resolve_vm_list(
     *,
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     filter_dict: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Resolve a VM filter to its listing rows via ``GET:/vcenter/vm``.
 
-    Read-only: issues exactly one listing GET, never a mutation. Filter
-    keys are forwarded as ``filter.<key>`` query params per the vCenter
-    listing contract.
+    Read-only: issues exactly one listing GET directly on the connector
+    session, never a mutation. Filter keys are forwarded as ``filter.<key>``
+    query params per the vCenter listing contract.
 
     Shared seam (#1608): the write handlers that fan out over a filtered
     VM set (:func:`vm_power_bulk_composite`, :func:`host_evacuate_composite`,
-    :func:`host_detach_from_vds_composite`) call this at dispatch time,
-    and their park-time preview builders (:mod:`._write_preview`) call the
-    same function at approval-park time — so the entity set the reviewer
-    sees in ``proposed_effect`` is resolved by the same code path the
-    approved dispatch will use.
+    :func:`host_detach_from_vds_composite`) call this at dispatch time, and
+    their park-time preview builders (:mod:`._write_preview`) call the same
+    function against the resolved connector at approval-park time — so the
+    entity set the reviewer sees in ``proposed_effect`` is resolved by the
+    same code path the approved dispatch will use.
 
-    Raises :class:`RuntimeError` when the listing sub-op fails or returns
-    a non-list payload. Non-dict rows are dropped (the listing contract
-    yields summary objects); per-row key validation stays with callers.
+    Raises :class:`RuntimeError` when the listing returns a non-list
+    payload and :exc:`httpx.HTTPError` when the sub-op transport fails.
+    Non-dict rows are dropped (the listing contract yields summary objects);
+    per-row key validation stays with callers.
     """
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VMS,
-            params={f"filter.{k}": v for k, v in filter_dict.items()},
-        )
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_VMS,
+        {f"filter.{k}": v for k, v in filter_dict.items()},
     )
     vms = _unwrap_value(listing)
     if not isinstance(vms, list):
@@ -274,25 +393,23 @@ async def _resolve_vm_list(
 
 async def _resolve_cluster_hosts(
     *,
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     cluster_moid: str,
 ) -> list[dict[str, Any]]:
     """Resolve a cluster's host listing rows via ``GET:/vcenter/cluster/{cluster}/host``.
 
-    Read-only single GET. Shared between :func:`cluster_patch_composite`
-    (dispatch time) and its park-time preview builder in
-    :mod:`._write_preview` (#1608) — same rationale as
+    Read-only single GET directly on the connector session. Shared between
+    :func:`cluster_patch_composite` (dispatch time) and its park-time preview
+    builder in :mod:`._write_preview` (#1608) — same rationale as
     :func:`_resolve_vm_list`.
 
-    Raises :class:`RuntimeError` when the listing sub-op fails or returns
-    a non-list payload. Non-dict rows are dropped.
+    Raises :class:`RuntimeError` on a non-list payload and
+    :exc:`httpx.HTTPError` on a transport fault. Non-dict rows are dropped.
     """
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_CLUSTER_HOSTS,
-            params={"cluster": cluster_moid},
-        )
+    listing = await _read_sub_op(
+        connector, target, operator, _OP_LIST_CLUSTER_HOSTS, {"cluster": cluster_moid}
     )
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
@@ -308,7 +425,11 @@ async def _resolve_cluster_hosts(
 
 
 async def _resolve_folder_moid(
-    *, dispatch_child: DispatchChild, folder_name: str
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    folder_name: str,
 ) -> tuple[str | None, str | None]:
     """Look up a folder moid by display name.
 
@@ -317,12 +438,8 @@ async def _resolve_folder_moid(
     envelope. Failure modes: empty match list, listing row missing
     the ``folder`` key.
     """
-    folder_listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_FOLDERS,
-            params={"filter.names": [folder_name]},
-        )
+    folder_listing = await _read_sub_op(
+        connector, target, operator, _OP_LIST_FOLDERS, {"filter.names": [folder_name]}
     )
     folder_entries = _unwrap_value(folder_listing)
     if not isinstance(folder_entries, list) or not folder_entries:
@@ -334,74 +451,25 @@ async def _resolve_folder_moid(
     return folder_moid_raw, None
 
 
-async def _dispatch_create_vm(
+async def _rollback_created_vm(
     *,
-    dispatch_child: DispatchChild,
-    folder_moid: str,
-    name: str,
-    guest_os: str,
-    cpu_count: int,
-    memory_mib: int,
-) -> tuple[str | None, str | None]:
-    """POST:/vcenter/vm; return ``(vm_id, None)`` or ``(None, error_reason)``."""
-    create_result = await dispatch_child(
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_CREATE_VM,
-        params={
-            "spec": {
-                "name": name,
-                "guest_OS": guest_os,
-                "placement": {"folder": folder_moid},
-                "cpu": {"count": cpu_count},
-                "memory": {"size_MiB": memory_mib},
-            },
-        },
-    )
-    if create_result.status != "ok":
-        return None, (
-            f"create returned status={create_result.status!r}: "
-            f"{create_result.error or '<no error message>'}"
-        )
-    vm_id_raw = _unwrap_value(create_result.result)
-    if not isinstance(vm_id_raw, str):
-        return None, f"create returned non-string vm id payload: {type(vm_id_raw).__name__}"
-    return vm_id_raw, None
-
-
-async def _attach_vm_nics(
-    *,
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     vm_id: str,
-    nics: list[dict[str, Any]],
-) -> str | None:
-    """Attach NICs one-by-one; return ``None`` on success or a failure reason."""
-    for nic in nics:
-        nic_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_ATTACH_VM_NIC,
-            params={"vm": vm_id, "spec": nic},
-        )
-        if nic_result.status != "ok":
-            return (
-                f"nic attach for network={nic.get('network')!r} failed: "
-                f"{nic_result.error or '<no error message>'}"
-            )
-    return None
-
-
-async def _rollback_created_vm(*, dispatch_child: DispatchChild, vm_id: str) -> None:
+) -> None:
     """Issue ``DELETE:/vcenter/vm/{vm}`` to remove a half-created VM.
 
-    Best-effort: rollback failures are not surfaced -- the operator
-    already knows the create flow failed. If the DELETE returns
-    non-ok, the audit row of that sub-op records it for forensic
-    review.
+    Best-effort: rollback faults are swallowed -- the operator already knows
+    the create flow failed, and a denied/queued rollback sub-op or a
+    transport error must not mask the original failure. A gate result from
+    the seam is ignored here for the same reason (the rollback DELETE is a
+    cleanup, not an operator-requested action).
     """
-    await dispatch_child(
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_DELETE_VM,
-        params={"vm": vm_id},
-    )
+    try:
+        await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
+    except httpx.HTTPError:
+        return
 
 
 async def vm_create_composite(
@@ -409,19 +477,13 @@ async def vm_create_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Create a VM with NIC attach + optional power-on; rollback on failure.
 
     Op-id: ``vmware.composite.vm.create``. See module docstring for the
-    sub-op chain and rollback semantics.
+    sub-op chain, the direct-session governance seam, and rollback semantics.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_VM_CREATE,
-        sub_op_ids=_SUB_OPS_VM_CREATE,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     folder_name = params["folder_name"]
     name = params["name"]
     guest_os = params["guest_os"]
@@ -433,45 +495,74 @@ async def vm_create_composite(
     steps: list[str] = []
 
     folder_moid, folder_err = await _resolve_folder_moid(
-        dispatch_child=dispatch_child, folder_name=folder_name
+        connector=connector, target=target, operator=operator, folder_name=folder_name
     )
     if folder_moid is None:
         return _rolled_back(steps=steps, failed_step="folder_lookup", reason=folder_err or "")
     steps.append("folder_lookup")
 
-    vm_id, create_err = await _dispatch_create_vm(
-        dispatch_child=dispatch_child,
-        folder_moid=folder_moid,
-        name=name,
-        guest_os=guest_os,
-        cpu_count=cpu_count,
-        memory_mib=memory_mib,
-    )
-    if vm_id is None:
+    create_spec = {
+        "spec": {
+            "name": name,
+            "guest_OS": guest_os,
+            "placement": {"folder": folder_moid},
+            "cpu": {"count": cpu_count},
+            "memory": {"size_MiB": memory_mib},
+        },
+    }
+    try:
+        gate, create_payload = await _write_sub_op(
+            connector, target, operator, _OP_CREATE_VM, create_spec
+        )
+    except httpx.HTTPError as exc:
         # Create failed; nothing to roll back.
-        return _rolled_back(steps=steps, failed_step="create", reason=create_err or "")
+        return _rolled_back(steps=steps, failed_step="create", reason=f"create failed: {exc}")
+    if gate is not None:
+        return gate
+    vm_id = _unwrap_value(create_payload)
+    if not isinstance(vm_id, str):
+        return _rolled_back(
+            steps=steps,
+            failed_step="create",
+            reason=f"create returned non-string vm id payload: {type(vm_id).__name__}",
+        )
     steps.append("create")
 
-    nic_err = await _attach_vm_nics(dispatch_child=dispatch_child, vm_id=vm_id, nics=nics)
-    if nic_err is not None:
-        await _rollback_created_vm(dispatch_child=dispatch_child, vm_id=vm_id)
-        return _rolled_back(steps=steps, failed_step="nic_attach", reason=nic_err)
+    for nic in nics:
+        try:
+            gate, _ = await _write_sub_op(
+                connector, target, operator, _OP_ATTACH_VM_NIC, {"vm": vm_id, "spec": nic}
+            )
+        except httpx.HTTPError as exc:
+            await _rollback_created_vm(
+                connector=connector, target=target, operator=operator, vm_id=vm_id
+            )
+            return _rolled_back(
+                steps=steps,
+                failed_step="nic_attach",
+                reason=f"nic attach for network={nic.get('network')!r} failed: {exc}",
+            )
+        if gate is not None:
+            return gate
     if nics:
         steps.append("nic_attach")
 
     if power_on:
-        power_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_power_vm_op_id("start"),
-            params={"vm": vm_id},
-        )
-        if power_result.status != "ok":
-            await _rollback_created_vm(dispatch_child=dispatch_child, vm_id=vm_id)
+        try:
+            gate, _ = await _write_sub_op(
+                connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+            )
+        except httpx.HTTPError as exc:
+            await _rollback_created_vm(
+                connector=connector, target=target, operator=operator, vm_id=vm_id
+            )
             return _rolled_back(
                 steps=steps,
                 failed_step="power_on",
-                reason=f"power_on failed: {power_result.error or '<no error message>'}",
+                reason=f"power_on failed: {exc}",
             )
+        if gate is not None:
+            return gate
         steps.append("power_on")
 
     return {
@@ -513,7 +604,9 @@ def _extract_clone_vm_id(task_result_payload: Any) -> str | None:
 
 async def _poll_clone_task(
     *,
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     task_id: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
@@ -526,12 +619,8 @@ async def _poll_clone_task(
     deadline = time.monotonic() + timeout_seconds
     poll_interval = 1.0
     while time.monotonic() < deadline:
-        task_payload = _require_ok(
-            await dispatch_child(
-                connector_id=_CONNECTOR_ID,
-                op_id=_OP_GET_TASK,
-                params={"task": task_id},
-            )
+        task_payload = await _read_sub_op(
+            connector, target, operator, _OP_GET_TASK, {"task": task_id}
         )
         task = _unwrap_value(task_payload)
         if isinstance(task, dict):
@@ -566,20 +655,14 @@ async def vm_clone_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Clone a VM from a content-library template; poll the deploy task.
 
     Op-id: ``vmware.composite.vm.clone``. Long-running -- blocks for
     up to ``timeout_seconds`` (default 600) when
     ``wait_for_completion=True``.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_VM_CLONE,
-        sub_op_ids=_SUB_OPS_VM_CLONE,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     source_vm = params["source_vm"]
     target_name = params["target_name"]
     library_item = params["library_item"]
@@ -587,25 +670,18 @@ async def vm_clone_composite(
     timeout_seconds = int(params.get("timeout_seconds", 600))
 
     # Source config drives CloneSpec; the read is a no-op when the
-    # source VM lookup fails (RuntimeError surfaces upstream).
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_GET_VM,
-            params={"vm": source_vm},
-        )
-    )
+    # source VM lookup fails (httpx.HTTPError surfaces upstream).
+    await _read_sub_op(connector, target, operator, _OP_GET_VM, {"vm": source_vm})
 
-    deploy_payload = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_DEPLOY_LIBRARY_VM,
-            params={
-                "library_item": library_item,
-                "spec": {"name": target_name},
-            },
-        )
+    gate, deploy_payload = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_DEPLOY_LIBRARY_VM,
+        {"library_item": library_item, "spec": {"name": target_name}},
     )
+    if gate is not None:
+        return gate
     task_id = _extract_clone_task_id(deploy_payload)
     if task_id is None:
         raise RuntimeError(f"vm.clone: deploy returned no task id (payload={deploy_payload!r})")
@@ -619,7 +695,9 @@ async def vm_clone_composite(
         }
 
     return await _poll_clone_task(
-        dispatch_child=dispatch_child,
+        connector=connector,
+        target=target,
+        operator=operator,
         task_id=task_id,
         timeout_seconds=timeout_seconds,
     )
@@ -635,29 +713,19 @@ async def vm_snapshot_revert_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Revert a VM to a named snapshot. Idempotent; ambiguity-rejecting.
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
     Revert never dispatches on either.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT,
-        sub_op_ids=_SUB_OPS_VM_SNAPSHOT_REVERT,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     vm_moid = params["vm"]
     snapshot_name = params["snapshot_name"]
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VM_SNAPSHOTS,
-            params={"vm": vm_moid},
-        )
+    listing = await _read_sub_op(
+        connector, target, operator, _OP_LIST_VM_SNAPSHOTS, {"vm": vm_moid}
     )
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
@@ -691,13 +759,15 @@ async def vm_snapshot_revert_composite(
             "candidates": matches,
             "guidance": "matched snapshot row missing ``snapshot`` key",
         }
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_REVERT_VM_SNAPSHOT,
-            params={"vm": vm_moid, "snap": snapshot_moid},
-        )
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_REVERT_VM_SNAPSHOT,
+        {"vm": vm_moid, "snap": snapshot_moid},
     )
+    if gate is not None:
+        return gate
     return {
         "status": "reverted",
         "snapshot_id": snapshot_moid,
@@ -731,20 +801,19 @@ async def vm_migrate_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Migrate a VM via DRS recommendation or explicit ``target_host``.
 
     Op-id: ``vmware.composite.vm.migrate``. ``target_host`` overrides
     the DRS lookup. No-recommendation path returns
     ``status='no_recommendation'`` so the caller can re-dispatch.
+
+    Also the recursion target of :func:`host_evacuate_composite`: invoked
+    through ``dispatch_child`` there, the dispatcher resolves this composite
+    and injects ``connector`` so its own relocate write runs on the direct
+    session under the governance seam, exactly as a top-level dispatch does.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_VM_MIGRATE,
-        sub_op_ids=_SUB_OPS_VM_MIGRATE,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     vm_moid = params["vm"]
     cluster_moid = params["cluster"]
     explicit_target = params.get("target_host")
@@ -755,12 +824,12 @@ async def vm_migrate_composite(
         target_host = explicit_target
         source = "operator"
     else:
-        recs_payload = _require_ok(
-            await dispatch_child(
-                connector_id=_CONNECTOR_ID,
-                op_id=_OP_GET_DRS_RECOMMENDATIONS,
-                params={"cluster": cluster_moid},
-            )
+        recs_payload = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_GET_DRS_RECOMMENDATIONS,
+            {"cluster": cluster_moid},
         )
         target_host = _pick_drs_target_host(_unwrap_value(recs_payload), vm_moid)
         if target_host is not None:
@@ -777,16 +846,15 @@ async def vm_migrate_composite(
             ),
         }
 
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_RELOCATE_VM,
-            params={
-                "vm": vm_moid,
-                "spec": {"placement": {"host": target_host}},
-            },
-        )
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_RELOCATE_VM,
+        {"vm": vm_moid, "spec": {"placement": {"host": target_host}}},
     )
+    if gate is not None:
+        return gate
     return {
         "status": "migrated",
         "target_host": target_host,
@@ -805,28 +873,24 @@ async def vm_power_bulk_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Apply a power action to every VM matching a filter; aggregate results.
 
     Op-id: ``vmware.composite.vm.power.bulk``. ``fail_fast=True``
-    aborts on first failure; default tolerates per-VM failures.
+    aborts on first failure; default tolerates per-VM failures. A governance
+    verdict is identical across the fan-out (same op_id + target), so a
+    gated/denied per-VM power short-circuits the whole composite with the
+    seam's result rather than half-executing the batch.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_VM_POWER_BULK,
-        sub_op_ids=_SUB_OPS_VM_POWER_BULK,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     filter_dict: dict[str, Any] = dict(params.get("filter") or {})
     action = params["action"]
     fail_fast = bool(params.get("fail_fast", False))
-    # Resolve the action verb to a concrete descriptor op_id once before the
-    # fan-out loop. Each ``?action=<verb>`` is a distinct descriptor row, so
-    # every per-VM dispatch must target the matching one.
     power_op_id = _power_vm_op_id(action)
 
-    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict=filter_dict)
+    vms = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict=filter_dict
+    )
 
     results: list[dict[str, Any]] = []
     ok_count = 0
@@ -836,26 +900,19 @@ async def vm_power_bulk_composite(
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
-        power_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=power_op_id,
-            params={"vm": vm_moid},
-        )
-        if power_result.status == "ok":
-            results.append({"vm": vm_moid, "status": "ok", "error": None})
-            ok_count += 1
-        else:
-            results.append(
-                {
-                    "vm": vm_moid,
-                    "status": "error",
-                    "error": power_result.error or "<no error message>",
-                }
-            )
+        try:
+            gate, _ = await _write_sub_op(connector, target, operator, power_op_id, {"vm": vm_moid})
+        except httpx.HTTPError as exc:
+            results.append({"vm": vm_moid, "status": "error", "error": str(exc)})
             err_count += 1
             if fail_fast:
                 aborted = True
                 break
+            continue
+        if gate is not None:
+            return gate
+        results.append({"vm": vm_moid, "status": "ok", "error": None})
+        ok_count += 1
     return {
         "results": results,
         "summary": {"ok": ok_count, "error": err_count},
@@ -886,23 +943,24 @@ async def host_evacuate_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
+    connector: VmwareRestConnector,
     dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+) -> dict[str, Any] | OperationResult:
     """Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.
 
-    Op-id: ``vmware.composite.host.evacuate``. First production
-    composite that calls another composite via ``dispatch_child``.
+    Op-id: ``vmware.composite.host.evacuate``. First production composite
+    that calls another composite via ``dispatch_child`` -- that recursion
+    into ``vmware.composite.vm.migrate`` stays on the ``dispatch_child`` path
+    (a registrar-guaranteed ``source_kind="composite"`` row, #2248), while
+    the host's own VM listing read and the maintenance-enter write run
+    directly on the injected ``connector`` session.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_HOST_EVACUATE,
-        sub_op_ids=_SUB_OPS_HOST_EVACUATE,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
 
-    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict={"hosts": [host_moid]})
+    vms = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
+    )
 
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
@@ -949,13 +1007,11 @@ async def host_evacuate_composite(
                 "maintenance_entered": False,
             }
 
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_host_maintenance_op_id("enter"),
-            params={"host": host_moid},
-        )
+    gate, _ = await _write_sub_op(
+        connector, target, operator, _host_maintenance_op_id("enter"), {"host": host_moid}
     )
+    if gate is not None:
+        return gate
     return {
         "status": "partial" if failed else "evacuated",
         "host": host_moid,
@@ -975,32 +1031,24 @@ async def host_detach_from_vds_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Migrate host VM NICs off a DVS to a standard switch, then remove host from DVS.
 
     Op-id: ``vmware.composite.host.detach_from_vds``. Refuses the DVS
     detach when any NIC migration failed -- vSphere would reject the
     step-4 detach anyway.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS,
-        sub_op_ids=_SUB_OPS_HOST_DETACH_FROM_VDS,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     host_moid = params["host"]
     dvs_moid = params["dvs"]
     fallback_network = params["fallback_network"]
 
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_PORTGROUPS,
-            params={"filter.hosts": [host_moid]},
-        )
+    await _read_sub_op(
+        connector, target, operator, _OP_LIST_PORTGROUPS, {"filter.hosts": [host_moid]}
     )
-    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict={"hosts": [host_moid]})
+    vms = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
+    )
 
     vms_migrated: list[str] = []
     migration_failures: list[dict[str, str]] = []
@@ -1008,17 +1056,20 @@ async def host_detach_from_vds_composite(
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
-        nic_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_ATTACH_VM_NIC,
-            params={"vm": vm_moid, "spec": {"network": fallback_network}},
-        )
-        if nic_result.status == "ok":
-            vms_migrated.append(vm_moid)
-        else:
-            migration_failures.append(
-                {"vm": vm_moid, "error": nic_result.error or "<no error message>"}
+        try:
+            gate, _ = await _write_sub_op(
+                connector,
+                target,
+                operator,
+                _OP_ATTACH_VM_NIC,
+                {"vm": vm_moid, "spec": {"network": fallback_network}},
             )
+        except httpx.HTTPError as exc:
+            migration_failures.append({"vm": vm_moid, "error": str(exc)})
+            continue
+        if gate is not None:
+            return gate
+        vms_migrated.append(vm_moid)
 
     if migration_failures:
         return {
@@ -1028,13 +1079,15 @@ async def host_detach_from_vds_composite(
             "vms_migrated": vms_migrated,
         }
 
-    _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_REMOVE_DVS_HOST,
-            params={"dvs": dvs_moid, "host": host_moid},
-        )
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_REMOVE_DVS_HOST,
+        {"dvs": dvs_moid, "host": host_moid},
     )
+    if gate is not None:
+        return gate
     return {
         "status": "detached",
         "host": host_moid,
@@ -1048,10 +1101,9 @@ async def host_detach_from_vds_composite(
 # ===========================================================================
 
 
-# Per-step (step-name, op_id_builder, extra-params-builder) tuples. The op_id
-# builder yields the concrete ``?action=<verb>`` descriptor key per step;
-# extra-params adds the ``method`` body field that ``POST:/vcenter/host/{host}
-# ?action=patch`` consumes (the patch verb has a non-trivial body schema; the
+# Per-step (step-name, op_id) tuples. The op_id yields the concrete
+# ``?action=<verb>`` key per step; the patch step additionally carries a
+# ``method`` body field (the patch verb has a non-trivial body schema; the
 # maintenance verbs do not).
 _CLUSTER_PATCH_STEPS: tuple[tuple[str, str], ...] = (
     ("maintenance_enter", _host_maintenance_op_id("enter")),
@@ -1078,22 +1130,30 @@ def _cluster_patch_step_params(
 
 async def _patch_one_host(
     *,
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     host_moid: str,
     patch_method: str,
-) -> str | None:
-    """Sequential maintenance + patch + exit on a single host; return error reason or None."""
+) -> tuple[OperationResult | None, str | None]:
+    """Sequential maintenance + patch + exit on a single host.
+
+    Returns ``(gate, None)`` when a step's governance seam parks/denies the
+    write (the caller returns the :class:`OperationResult` verbatim),
+    ``(None, error_reason)`` when a step's transport fails, or
+    ``(None, None)`` on full success.
+    """
     for step, op_id in _CLUSTER_PATCH_STEPS:
-        step_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=op_id,
-            params=_cluster_patch_step_params(
-                step=step, host_moid=host_moid, patch_method=patch_method
-            ),
+        step_params = _cluster_patch_step_params(
+            step=step, host_moid=host_moid, patch_method=patch_method
         )
-        if step_result.status != "ok":
-            return f"{step} on {host_moid!r} failed: {step_result.error or '<no error message>'}"
-    return None
+        try:
+            gate, _ = await _write_sub_op(connector, target, operator, op_id, step_params)
+        except httpx.HTTPError as exc:
+            return None, f"{step} on {host_moid!r} failed: {exc}"
+        if gate is not None:
+            return gate, None
+    return None, None
 
 
 async def cluster_patch_composite(
@@ -1101,24 +1161,20 @@ async def cluster_patch_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
-) -> dict[str, Any]:
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
     """Sequentially patch every host in a cluster: maintenance + patch + exit.
 
     Op-id: ``vmware.composite.cluster.patch``. Sequential by design --
     concurrent host patches would force every cluster VM to vMotion
     at once.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_CLUSTER_PATCH,
-        sub_op_ids=_SUB_OPS_CLUSTER_PATCH,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     cluster_moid = params["cluster"]
     patch_method = params.get("patch_method", "default")
 
-    entries = await _resolve_cluster_hosts(dispatch_child=dispatch_child, cluster_moid=cluster_moid)
+    entries = await _resolve_cluster_hosts(
+        connector=connector, target=target, operator=operator, cluster_moid=cluster_moid
+    )
     host_moids: list[str] = []
     for entry in entries:
         host_moid = entry.get("host")
@@ -1127,9 +1183,15 @@ async def cluster_patch_composite(
 
     patched: list[str] = []
     for i, host_moid in enumerate(host_moids):
-        failure_reason = await _patch_one_host(
-            dispatch_child=dispatch_child, host_moid=host_moid, patch_method=patch_method
+        gate, failure_reason = await _patch_one_host(
+            connector=connector,
+            target=target,
+            operator=operator,
+            host_moid=host_moid,
+            patch_method=patch_method,
         )
+        if gate is not None:
+            return gate
         if failure_reason is not None:
             return {
                 "status": "stopped",

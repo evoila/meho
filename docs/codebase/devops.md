@@ -312,9 +312,9 @@ values overlay:
 | `ingress.host` | Per-environment; no generic placeholder is correct. Required only when `ingress.enabled: true` (the default) — relaxed when ingress is disabled |
 | `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
 | `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
-| `vault.address` | Per-environment Vault endpoint |
+| `vault.address` | Per-environment Vault endpoint. Required only when `config.credentialBackend: vault` (the default) — a `gsm` install leaves it blank (#2231) |
 | `keycloak.issuer` | Per-environment Keycloak issuer URL |
-| `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract) |
+| `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract). `config.vaultAddr` is required-when-`credentialBackend: vault`, like `vault.address` |
 | `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress, nothing set) the backend fails loudly at startup with the remediation rather than serving a dark `/mcp` (`_assert_mcp_resource_uri_configured` in `main.py`). The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
 | `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
 
@@ -342,11 +342,13 @@ them).
 | `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
-| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
+| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. Required only when `config.credentialBackend: vault` (the default); a `gsm` install leaves it blank (#2231). |
 | `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
 | `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
 | `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
-| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
+| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
+| `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
+| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys are inert Phase-2 (#2232) stubs. See `deploy/values-examples/values-gsm-example.yaml`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
 | `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |

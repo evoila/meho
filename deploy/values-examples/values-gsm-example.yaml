@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal GSM-backend (Vault-free) chart-values example — Initiative #2227.
+#
+# This is the GCP-native counterpart to values-rdc-example.yaml: it selects
+# the GCP Secret Manager credential backend (config.credentialBackend: gsm)
+# so target credentials and the /api/v1/health federation proof resolve
+# through Secret Manager instead of Vault. `vault.address` / `config.vaultAddr`
+# are deliberately left blank — the root-level conditional in
+# values.schema.json requires them ONLY when config.credentialBackend is
+# `vault`, so a GSM install passes schema validation without a Vault address.
+#
+# Prerequisites on the GCP side:
+#   * MEHO runs under a GKE Workload Identity service account (no SA JSON
+#     keys — config.gsmImpersonateSa optionally impersonates a reader SA).
+#   * The federation-proof secret exists:
+#       projects/<gsmProject>/secrets/meho-test-federation
+#     with a JSON-object value (e.g. {"ok":"true"}). The health deep-check
+#     reads `gsm:<gsmProject>/meho-test-federation` to prove the chain.
+#   * Per-target credential secrets are stored as JSON objects and referenced
+#     from targets via `gsm:<project>/<secret>[#field]` secret_refs.
+#
+# NOTE: the SA-direct GSM backend is Phase 1 (#2230). Per-operator GCP
+# token exchange (Workload Identity Federation) is Phase 2 (#2232); the
+# gsm.workloadIdentityFederation.* keys below are inert stubs until then.
+#
+# Replace every value marked "# CHANGE ME" before applying.
+
+image:
+  # An immutable tag from the image pipeline — never :latest / :main.
+  tag: "v0.1.0" # CHANGE ME
+
+ingress:
+  enabled: true
+  host: meho.gsm.example # CHANGE ME
+  tls:
+    enabled: true
+    secretName: meho-tls # CHANGE ME
+
+postgres:
+  host: postgres.gsm.example # CHANGE ME
+  credentialsSecret: meho-postgres # CHANGE ME (Secret holding DATABASE_URL at key `url`)
+
+keycloak:
+  issuer: https://keycloak.gsm.example/realms/meho # CHANGE ME
+  audience: meho-backplane
+
+config:
+  keycloakIssuerUrl: https://keycloak.gsm.example/realms/meho # CHANGE ME (must match keycloak.issuer)
+  keycloakAudience: meho-backplane
+  # --- GSM credential backend (Initiative #2227) ---
+  credentialBackend: gsm
+  gsmProject: my-gcp-project # CHANGE ME (project hosting MEHO secrets + the probe secret)
+  # Optional: impersonate a dedicated reader SA instead of reading directly
+  # under the pod's Workload Identity ADC. Leave "" for direct ADC.
+  gsmImpersonateSa: "" # e.g. meho-secret-reader@my-gcp-project.iam.gserviceaccount.com
+
+gsm:
+  enabled: true
+  project: my-gcp-project # CHANGE ME (typically identical to config.gsmProject)
+  # Phase-2 (#2232) Workload Identity Federation stubs — declared but inert.
+  workloadIdentityFederation:
+    poolId: ""
+    providerId: ""
+    serviceAccount: ""
+
+networkPolicy:
+  enabled: true
+  postgresCIDR: 10.0.1.0/24 # CHANGE ME
+  # Vault egress is unused on a GSM install, but the CIDR is still required
+  # by the schema when networkPolicy.enabled is true. Point it at a harmless
+  # unused subnet (no Vault egress rule is exercised without a Vault backend).
+  vaultCIDR: 10.0.2.0/24 # CHANGE ME (unused on GSM; kept to satisfy the schema)
+  keycloakCIDR: 10.0.3.0/24 # CHANGE ME

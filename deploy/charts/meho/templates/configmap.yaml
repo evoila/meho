@@ -53,6 +53,16 @@ data:
   VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
   VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
+  # Credential backend surface (Initiative #2227). `CREDENTIAL_BACKEND`
+  # names the store a schemeless target `secret_ref` and the
+  # `/api/v1/health` federation proof resolve through (`vault` default,
+  # `gsm` for a GCP-native install). `GSM_PROJECT` / `GSM_IMPERSONATE_SA`
+  # are read by the GSM backend (`connectors/_shared/gsm_creds.py`) and are
+  # harmless empty strings on a Vault install. The env-var names are the
+  # backplane's contract (`backend/src/meho_backplane/settings.py`).
+  CREDENTIAL_BACKEND: {{ .Values.config.credentialBackend | quote }}
+  GSM_PROJECT: {{ .Values.config.gsmProject | quote }}
+  GSM_IMPERSONATE_SA: {{ .Values.config.gsmImpersonateSa | quote }}
   DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
   # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache

@@ -26317,7 +26317,7 @@
           "read_ok"
         ],
         "title": "VaultStatus",
-        "description": "Vault federation-chain status.\n\n``reachable`` is true when the OIDC login succeeded (TCP + TLS +\nJWT forward all worked). ``read_ok`` is true when the test secret\nread succeeded against the resulting Vault token. ``detail`` carries\na short structured string for the CLI to render on failure paths \u2014\nnever an unbounded exception message."
+        "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
       },
       "_AnnotateEdgeRequest": {
         "properties": {

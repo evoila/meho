@@ -221,6 +221,61 @@ def test_mcp_require_session_id_non_truthy_stays_false(
         get_settings.cache_clear()
 
 
+# ---------------------------------------------------------------------------
+# #2277 — VAULT_ADDR optional for a Vault-free (gsm) install
+# ---------------------------------------------------------------------------
+
+
+def test_vault_addr_defaults_to_none_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GSM-backend install sets no ``VAULT_ADDR`` → ``vault_addr is None``.
+
+    ``get_settings()`` must construct cleanly (no ``KeyError``,
+    no ``HttpUrl`` validation error) so the app lifespan boots
+    Vault-free.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_addr is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vault_addr_blank_env_coerces_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank ``VAULT_ADDR`` (the configmap's ``""`` for a gsm deploy) → ``None``.
+
+    The Helm configmap now omits the key for a gsm install, but an
+    explicit empty string must still coerce to ``None`` rather than
+    tripping ``HttpUrl`` validation — belt-and-suspenders with the
+    chart guard.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_ADDR", "")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_addr is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vault_addr_set_env_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vault install with ``VAULT_ADDR`` set is unchanged — value flows through."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.example")
+    get_settings.cache_clear()
+    try:
+        assert str(get_settings().vault_addr).startswith("https://vault.example")
+    finally:
+        get_settings.cache_clear()
+
+
 def test_result_handle_max_spill_rows_defaults_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

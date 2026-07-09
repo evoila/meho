@@ -25386,6 +25386,7 @@
               "holodeck",
               "k8s",
               "keycloak",
+              "loki",
               "nsx",
               "pfsense",
               "sddc",

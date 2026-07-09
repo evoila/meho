@@ -332,6 +332,7 @@ const (
 	Holodeck TargetCreateProduct = "holodeck"
 	K8s      TargetCreateProduct = "k8s"
 	Keycloak TargetCreateProduct = "keycloak"
+	Loki     TargetCreateProduct = "loki"
 	Nsx      TargetCreateProduct = "nsx"
 	Pfsense  TargetCreateProduct = "pfsense"
 	Sddc     TargetCreateProduct = "sddc"

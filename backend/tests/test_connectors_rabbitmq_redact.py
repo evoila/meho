@@ -63,8 +63,11 @@ def test_shovel_parameter_fixture_is_fully_redacted() -> None:
             "component": "shovel",
             "name": "to-dr",
             "value": {
-                "src-uri": "amqp://svc:p@ssw0rd@primary:5672",
-                "dest-uri": ["amqps://svc:p@ssw0rd@dr:5671", "amqp://backup:pw@dr2"],
+                "src-uri": "amqp://svc:p@ssw0rd@primary:5672",  # trufflehog:ignore
+                "dest-uri": [
+                    "amqps://svc:p@ssw0rd@dr:5671",  # trufflehog:ignore
+                    "amqp://backup:pw@dr2",  # trufflehog:ignore
+                ],
                 "src-queue": "events",
                 "password": "should-not-appear",
             },

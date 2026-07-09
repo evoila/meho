@@ -654,3 +654,207 @@ async def test_host_vsan_health_over_legacy_mount_routes_to_rest(
     assert result["groups"][0]["group_id"] == "com.vmware.vsan.health.test.network"
     assert result["groups"][0]["tests"][0]["test_health"] == "green"
     assert "read_note" not in result
+
+
+# ---------------------------------------------------------------------------
+# Write composite direct-session dispatch (#2256) — per-op transport + mount
+# parity with ZERO ingested descriptors and the real governance seam
+# ---------------------------------------------------------------------------
+#
+# These exercise the migrated *write* composites end to end against the real
+# connector transport (respx-intercepted): session establish -> mount_op_path
+# -> enforce_subop_policy (auto-executes for the USER operator) -> the direct
+# _post_json write. No ingested endpoint_descriptor rows exist, proving the
+# fresh-boot contract on the write path (Task #2256, Initiative #2249).
+
+
+def _write_operator() -> Operator:
+    """USER operator — enforce_subop_policy auto-executes its dangerous writes.
+
+    The per-sub-op governance seam runs for real here; a human/service
+    principal on a ``requires_approval=False`` sub-op clears the gate
+    synchronously (no DB), so the write proceeds and the parity assertion
+    sees the real wire request.
+    """
+    return Operator(
+        sub="op-write-composite-parity",
+        name="Write Composite Parity",
+        email=None,
+        raw_jwt="<integration-raw-jwt>",
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+@pytest.mark.asyncio
+async def test_vm_create_composite_over_modern_mount(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """vm.create runs its folder read + create/NIC/power writes on the /api session.
+
+    Full #2256 direct-session write path end to end against the real connector
+    transport, with the real ``enforce_subop_policy`` seam clearing each write
+    for the USER operator. Zero ingested descriptors.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._write import vm_create_composite
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/vcenter/folder").respond(200, json=[{"folder": "group-1", "name": "prod"}])
+        create_route = mock.post("/api/vcenter/vm").respond(200, json="vm-1")
+        nic_route = mock.patch("/api/vcenter/vm/vm-1/network").respond(200, json={})
+        power_route = mock.post("/api/vcenter/vm/vm-1/power").respond(200, json={})
+        mock.delete("/api/session").respond(204)
+        try:
+            out = await vm_create_composite(
+                operator=_write_operator(),
+                target=vcsim_target,
+                params={
+                    "folder_name": "prod",
+                    "name": "web-01",
+                    "guest_os": "UBUNTU_64",
+                    "nics": [{"network": "net-1"}],
+                    "power_on_after_create": True,
+                },
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    assert out["status"] == "created"
+    assert out["vm_id"] == "vm-1"
+    assert out["steps_succeeded"] == ["folder_lookup", "create", "nic_attach", "power_on"]
+    # The create/NIC/power writes reached the wire on the modern /api mount.
+    assert create_route.called
+    assert nic_route.called
+    assert power_route.called
+    # The create body carries the spec wrapper the vCenter POST expects.
+    create_body = json.loads(create_route.calls.last.request.content)
+    assert create_body["spec"]["name"] == "web-01"
+    assert create_body["spec"]["placement"]["folder"] == "group-1"
+
+
+@pytest.mark.asyncio
+async def test_cluster_patch_composite_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target mounts cluster.patch's writes onto /rest.
+
+    The modern ``POST /api/session`` 404s, the connector falls back to the
+    legacy path, and every write sub-op (maintenance enter/exit PATCH, host
+    patch POST) must route through ``/rest`` via ``mount_op_path`` or it 404s
+    — the modern+legacy mount coverage on the #2256 write path.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._write import cluster_patch_composite
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/rest/vcenter/cluster/domain-c1/host").respond(200, json=[{"host": "host-1"}])
+        enter_route = mock.patch("/rest/vcenter/host/host-1/maintenance").respond(200, json={})
+        patch_route = mock.post("/rest/vcenter/host/host-1").respond(200, json={})
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            out = await cluster_patch_composite(
+                operator=_write_operator(),
+                target=vcsim_target,
+                params={"cluster": "domain-c1"},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    assert out["status"] == "completed"
+    assert out["patched_hosts"] == ["host-1"]
+    # maintenance enter + exit both hit the same PATCH route; the patch POST hit /rest.
+    assert enter_route.call_count == 2
+    assert patch_route.called
+
+
+@pytest.mark.asyncio
+async def test_host_evacuate_recursion_over_modern_mount(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """host.evacuate's vm.migrate recursion runs its relocate write on the session.
+
+    Parity for the composite->composite recursion (#2248 carve-out): the
+    ``dispatch_child`` call into ``vmware.composite.vm.migrate`` resolves the
+    same connector and runs the inner DRS read + relocate write on the direct
+    /api session, and host.evacuate then enters maintenance — all against the
+    real transport, zero ingested descriptors.
+    """
+    from meho_backplane.connectors.vmware_rest.composites._write import (
+        host_evacuate_composite,
+        vm_migrate_composite,
+    )
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+    operator = _write_operator()
+
+    async def _recursive_dispatch_child(
+        *, connector_id: str, op_id: str, params: dict[str, Any], target: Any = None
+    ) -> Any:
+        # Mirror the dispatcher's composite->composite recursion: resolve
+        # vm.migrate and run it on the same connector session.
+        from meho_backplane.connectors import OperationResult
+
+        assert op_id == "vmware.composite.vm.migrate"
+        inner = await vm_migrate_composite(
+            operator=operator, target=vcsim_target, params=params, connector=connector
+        )
+        return OperationResult(status="ok", op_id=op_id, result=inner, duration_ms=1.0)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/vcenter/vm").respond(200, json=[{"vm": "vm-a", "cluster": "domain-c1"}])
+        mock.get("/api/vcenter/cluster/domain-c1/drs/recommendations").respond(
+            200, json=[{"vm": "vm-a", "target_host": "host-target"}]
+        )
+        relocate_route = mock.post("/api/vcenter/vm/vm-a").respond(200, json={})
+        maintenance_route = mock.patch("/api/vcenter/host/host-1/maintenance").respond(200, json={})
+        mock.delete("/api/session").respond(204)
+        try:
+            out = await host_evacuate_composite(
+                operator=operator,
+                target=vcsim_target,
+                params={"host": "host-1"},
+                connector=connector,
+                dispatch_child=_recursive_dispatch_child,
+            )
+        finally:
+            await connector.aclose()
+
+    assert out["status"] == "evacuated"
+    assert out["migrated_vms"] == ["vm-a"]
+    assert out["maintenance_entered"] is True
+    # The recursion's relocate write and the host maintenance-enter write both
+    # reached the /api session.
+    assert relocate_route.called
+    assert maintenance_route.called
+    relocate_body = json.loads(relocate_route.calls.last.request.content)
+    assert relocate_body["spec"]["placement"]["host"] == "host-target"

@@ -60,6 +60,62 @@ _IDENTITY_SUB_MAX_LENGTH = 256
 _WORK_REF_MAX_LENGTH = 256
 
 
+def _payload_yields_prompt(inputs: dict[str, object] | None) -> bool:
+    """Return ``True`` when *inputs* renders a non-empty user prompt.
+
+    Payload-only mirror of the fire-time pair
+    :func:`~meho_backplane.scheduler.loop._coerce_inputs` +
+    :func:`~meho_backplane.agent.run.prompt_is_effectively_empty`, inlined
+    here so this pure wire-shape module stays free of an import into the
+    loop / invocation layer. The rendering contract mirrored: the
+    conventional ``"prompt"`` string key when present, else the dict
+    JSON-dumps to a non-empty payload the runtime forwards verbatim.
+
+    One deliberate tightening over the fire-time pair: an empty dict counts
+    as *no* prompt. ``_coerce_inputs`` renders ``{}`` to the literal string
+    ``"{}"``, which is non-whitespace and so slips past the fire-time
+    :func:`prompt_is_effectively_empty` guard and reaches the model as a
+    meaningless ``"{}"`` user turn; rejecting it at create closes that edge.
+    """
+    if not inputs:  # None or an empty dict -> no user turn
+        return False
+    prompt = inputs.get("prompt")
+    if isinstance(prompt, str):
+        return bool(prompt.strip())
+    # A non-empty dict without a string ``prompt`` key JSON-dumps to a
+    # non-empty payload (the ``_coerce_inputs`` fallback) -- a usable turn.
+    return True
+
+
+def _require_cron_fields(model: ScheduledTriggerCreate) -> None:
+    """Validate the ``cron`` discriminator fields (helper for the validator)."""
+    if not model.cron_expr:
+        raise ValueError("cron triggers require cron_expr")
+    if model.fire_at is not None or model.event_filter is not None:
+        raise ValueError("cron triggers must leave fire_at and event_filter null")
+    if not is_valid_cron_expr(model.cron_expr):
+        raise ValueError(f"invalid cron expression: {model.cron_expr!r}")
+    # ``resolve_timezone`` raises :class:`InvalidTimezoneError` (a ``ValueError``
+    # subclass) on an unknown IANA name; let it propagate so Pydantic renders 422.
+    resolve_timezone(model.timezone)
+
+
+def _require_one_off_fields(model: ScheduledTriggerCreate) -> None:
+    """Validate the ``one_off`` discriminator fields (helper for the validator)."""
+    if model.fire_at is None:
+        raise ValueError("one-off triggers require fire_at")
+    if model.cron_expr is not None or model.event_filter is not None:
+        raise ValueError("one-off triggers must leave cron_expr and event_filter null")
+
+
+def _require_event_fields(model: ScheduledTriggerCreate) -> None:
+    """Validate the ``event`` discriminator fields (helper for the validator)."""
+    if model.event_filter is None:
+        raise ValueError("event triggers require event_filter")
+    if model.cron_expr is not None or model.fire_at is not None:
+        raise ValueError("event triggers must leave cron_expr and fire_at null")
+
+
 class ScheduledTriggerCreate(BaseModel):
     """Request body for ``POST /api/v1/scheduler/triggers``.
 
@@ -80,18 +136,25 @@ class ScheduledTriggerCreate(BaseModel):
     ``"__scheduler__"`` to match the migration-time backstop the
     ORM-level default sets, so a minimal create body still validates.
 
-    *inputs* is optional and unvalidated here **by design**. Whether a
-    trigger needs a user prompt depends on the referenced agent
-    definition, which this pure wire-shape validator does not (and must
-    not) load -- the definition FK is checked one layer down in the
-    service. A no-inputs trigger is therefore *accepted* at create and the
-    no-usable-prompt case is handled at fire time: the scheduled-run seam
-    finalises the run ``failed`` with a typed
-    :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error
-    rather than letting it reach the provider as an empty-``messages`` 400
-    (#1505). This keeps a definition that legitimately needs no user turn
-    from being over-rejected at create while still surfacing the doomed
-    no-prompt fire as a typed, greppable failure.
+    *inputs* is the JSON payload rendered into the run's user-prompt string
+    at fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).
+    For ``kind=cron`` and ``kind=one_off`` it **must** render a non-empty
+    user turn: :meth:`_validate_discriminated_union` rejects an input-less
+    trigger -- and the ``inputs: {}`` case, which would otherwise render the
+    literal ``"{}"`` -- with a 422 at create. The check is payload-only
+    (:func:`_payload_yields_prompt`); it loads no agent definition, so it
+    does not resurrect the layering objection that kept #1505 fire-time-only
+    -- a cron that fires every tick and a one_off that burns its single fire
+    with no user turn are deterministic failures the wire shape can see
+    without extra I/O. ``kind=event`` is **exempt**: its future
+    payload-dispatch junction may derive the prompt from the matched event,
+    so an input-less event trigger stays creatable.
+
+    The fire-time typed guard remains as defense-in-depth
+    (:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):
+    it still finalises a no-prompt fire ``failed`` before the model call for
+    ``event`` triggers and for any row inserted directly around this wire
+    schema. See ``docs/codebase/scheduler.md``.
 
     *in_flight_policy* defaults to ``fail_into_audit`` per the consumer
     doc; operators wanting at-least-once semantics opt into ``resume``.
@@ -136,35 +199,33 @@ class ScheduledTriggerCreate(BaseModel):
         :class:`IntegrityError` chain to find the mistake. Validates
         the cron expression and timezone at wire time so a syntactically
         invalid cron string never reaches the repository (which would
-        also raise but only after the insert was attempted).
+        also raise but only after the insert was attempted). Also rejects a
+        ``cron`` / ``one_off`` trigger whose *inputs* render no usable prompt
+        (payload-only; see :func:`_payload_yields_prompt`), so an input-less
+        trigger doomed to fail every fire is caught at create.
         """
         if self.kind == ScheduledTriggerKind.CRON:
-            if not self.cron_expr:
-                raise ValueError("cron triggers require cron_expr")
-            if self.fire_at is not None or self.event_filter is not None:
-                raise ValueError(
-                    "cron triggers must leave fire_at and event_filter null",
-                )
-            if not is_valid_cron_expr(self.cron_expr):
-                raise ValueError(f"invalid cron expression: {self.cron_expr!r}")
-            # ``resolve_timezone`` raises :class:`InvalidTimezoneError`
-            # (a ``ValueError`` subclass) on an unknown IANA name; let
-            # the exception propagate so Pydantic renders it as 422.
-            resolve_timezone(self.timezone)
+            _require_cron_fields(self)
         elif self.kind == ScheduledTriggerKind.ONE_OFF:
-            if self.fire_at is None:
-                raise ValueError("one-off triggers require fire_at")
-            if self.cron_expr is not None or self.event_filter is not None:
-                raise ValueError(
-                    "one-off triggers must leave cron_expr and event_filter null",
-                )
+            _require_one_off_fields(self)
         elif self.kind == ScheduledTriggerKind.EVENT:
-            if self.event_filter is None:
-                raise ValueError("event triggers require event_filter")
-            if self.cron_expr is not None or self.fire_at is not None:
-                raise ValueError(
-                    "event triggers must leave cron_expr and fire_at null",
-                )
+            _require_event_fields(self)
+        # A cron / one_off trigger with no usable prompt is a deterministic
+        # failure the payload alone reveals: reject it at create rather than
+        # letting it fire uselessly (a cron every tick, a one_off once) and
+        # fail typed. Payload-only -- no definition load -- so #1505's
+        # layering objection does not apply. ``event`` is exempt (its future
+        # dispatch junction may derive the prompt from the matched event).
+        if self.kind in (ScheduledTriggerKind.CRON, ScheduledTriggerKind.ONE_OFF) and (
+            not _payload_yields_prompt(self.inputs)
+        ):
+            raise ValueError(
+                "cron and one_off triggers require inputs that render a "
+                "non-empty user prompt: set inputs.prompt to a non-empty "
+                "string, or provide a non-empty inputs payload (an input-less "
+                "trigger, or inputs: {}, has no user turn and would fail "
+                "every fire)",
+            )
         return self
 
 

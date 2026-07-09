@@ -4797,18 +4797,25 @@ type RunbookTemplateListResponse struct {
 // “"__scheduler__"“ to match the migration-time backstop the
 // ORM-level default sets, so a minimal create body still validates.
 //
-// *inputs* is optional and unvalidated here **by design**. Whether a
-// trigger needs a user prompt depends on the referenced agent
-// definition, which this pure wire-shape validator does not (and must
-// not) load -- the definition FK is checked one layer down in the
-// service. A no-inputs trigger is therefore *accepted* at create and the
-// no-usable-prompt case is handled at fire time: the scheduled-run seam
-// finalises the run “failed“ with a typed
-// :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error
-// rather than letting it reach the provider as an empty-“messages“ 400
-// (#1505). This keeps a definition that legitimately needs no user turn
-// from being over-rejected at create while still surfacing the doomed
-// no-prompt fire as a typed, greppable failure.
+// *inputs* is the JSON payload rendered into the run's user-prompt string
+// at fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).
+// For “kind=cron“ and “kind=one_off“ it **must** render a non-empty
+// user turn: :meth:`_validate_discriminated_union` rejects an input-less
+// trigger -- and the “inputs: {}“ case, which would otherwise render the
+// literal “"{}"“ -- with a 422 at create. The check is payload-only
+// (:func:`_payload_yields_prompt`); it loads no agent definition, so it
+// does not resurrect the layering objection that kept #1505 fire-time-only
+// -- a cron that fires every tick and a one_off that burns its single fire
+// with no user turn are deterministic failures the wire shape can see
+// without extra I/O. “kind=event“ is **exempt**: its future
+// payload-dispatch junction may derive the prompt from the matched event,
+// so an input-less event trigger stays creatable.
+//
+// The fire-time typed guard remains as defense-in-depth
+// (:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):
+// it still finalises a no-prompt fire “failed“ before the model call for
+// “event“ triggers and for any row inserted directly around this wire
+// schema. See “docs/codebase/scheduler.md“.
 //
 // *in_flight_policy* defaults to “fail_into_audit“ per the consumer
 // doc; operators wanting at-least-once semantics opt into “resume“.

@@ -907,6 +907,21 @@ def test_coerce_inputs_none_renders_empty_and_is_effectively_empty() -> None:
     assert not prompt_is_effectively_empty(_coerce_inputs({"prompt": "ping"}))
 
 
+def test_coerce_inputs_empty_dict_slips_past_fire_time_guard() -> None:
+    """``inputs: {}`` renders the literal ``"{}"`` and evades the fire-time guard.
+
+    This is exactly the edge the create-time check closes (#2244): an empty
+    dict JSON-dumps to ``"{}"``, which is non-whitespace, so
+    ``prompt_is_effectively_empty`` reads it as a (bogus) real prompt and the
+    doomed run reaches the model as a meaningless ``"{}"`` user turn. The
+    create-time ``_payload_yields_prompt`` check rejects ``{}`` at the schema
+    layer instead; this test pins the fire-time behaviour that motivates it so
+    a future ``_coerce_inputs`` change does not silently diverge.
+    """
+    assert _coerce_inputs({}) == "{}"
+    assert not prompt_is_effectively_empty(_coerce_inputs({}))
+
+
 @pytest.mark.asyncio
 async def test_one_off_no_inputs_fails_typed_without_model_call() -> None:
     """A no-inputs one-off fires but the run fails typed, never hitting the model.

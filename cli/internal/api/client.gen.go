@@ -37005,7 +37005,21 @@ type ShowTemplateApiV1RunbooksTemplatesSlugGetResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *ShowTemplateResponse
 	JSON422      *HTTPValidationError
+	JSON500      *struct {
+		Detail struct {
+			Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+			Errors []struct {
+				Loc  []interface{} `json:"loc"`
+				Msg  string        `json:"msg"`
+				Type string        `json:"type"`
+			} `json:"errors"`
+			Message string `json:"message"`
+			Slug    string `json:"slug"`
+			Version *int   `json:"version"`
+		} `json:"detail"`
+	}
 }
+type ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError string
 
 // Status returns HTTPResponse.Status
 func (r ShowTemplateApiV1RunbooksTemplatesSlugGetResponse) Status() string {
@@ -49027,6 +49041,25 @@ func ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse(rsp *http.Response) 
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest struct {
+			Detail struct {
+				Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+				Errors []struct {
+					Loc  []interface{} `json:"loc"`
+					Msg  string        `json:"msg"`
+					Type string        `json:"type"`
+				} `json:"errors"`
+				Message string `json:"message"`
+				Slug    string `json:"slug"`
+				Version *int   `json:"version"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
 
 	}
 

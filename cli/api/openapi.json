@@ -4277,6 +4277,72 @@
               }
             }
           },
+          "500": {
+            "description": "The stored template body fails the current step schema and cannot be hydrated -- e.g. an empty step body predating the v0.20.0 non-empty-body requirement. Apply Alembic migration 0054 to backfill legacy rows; see docs/codebase/runbook-template-hydration.md.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "template_body_validation_failed"
+                          ]
+                        },
+                        "slug": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "errors": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string"
+                              },
+                              "loc": {
+                                "type": "array",
+                                "items": {}
+                              },
+                              "msg": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "loc",
+                              "msg"
+                            ]
+                          }
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "slug",
+                        "version",
+                        "errors",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {

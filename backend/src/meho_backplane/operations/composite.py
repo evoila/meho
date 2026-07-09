@@ -88,6 +88,7 @@ References
 
 from __future__ import annotations
 
+import time
 import uuid
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Protocol
@@ -106,6 +107,7 @@ __all__ = [
     "CompositeRecursionLimitExceeded",
     "DispatchChild",
     "composite_depth_var",
+    "enforce_subop_policy",
     "get_dispatch_child",
 ]
 
@@ -493,3 +495,123 @@ def get_dispatch_child(
             parent_audit_id_var.reset(audit_token)
 
     return _dispatch_child
+
+
+async def enforce_subop_policy(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    target: Any,
+    params: dict[str, Any],
+) -> OperationResult | None:
+    """Re-apply the dispatcher policy/approval gate around a direct-session sub-op.
+
+    The reusable seam that keeps property 3 of #508's four
+    ``dispatch_child`` guarantees when a write composite migrates to the
+    direct-session path (Task #2254, Initiative #2249). A direct handler
+    bypasses :func:`~meho_backplane.operations.dispatcher.dispatch`, so a
+    now-internal write sub-op that is itself ``requires_approval`` /
+    ``dangerous`` would otherwise execute un-gated. The handler calls
+    this **before** each governed direct write sub-call with the sub-op's
+    declared policy facts; it re-runs the *same*
+    :func:`~meho_backplane.operations._validate.policy_gate` the
+    dispatcher runs, against an in-memory
+    :class:`~meho_backplane.db.models.EndpointDescriptor` built from those
+    facts (never persisted — two-world purity, Goal #2247):
+
+    * ``auto-execute`` → returns ``None``; the handler proceeds with its
+      direct ``connector._post_json(...)`` call.
+    * ``needs-approval`` → writes a durable
+      :class:`~meho_backplane.db.models.ApprovalRequest` for the sub-op
+      via :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+      and returns an ``awaiting_approval`` :class:`OperationResult`. The
+      handler returns it verbatim, and the dispatcher passes a
+      handler-returned :class:`OperationResult` straight through, so the
+      write **queues** instead of executing.
+    * ``deny`` → returns a ``denied`` :class:`OperationResult`; the write
+      never runs.
+
+    The seam ships the mechanism only; it does not execute the sub-op or
+    write its audit row (the top-level composite op owns the row that
+    attributes the writes). The chosen model, the rejected
+    "top-level-sufficiency" alternative, and the call-site example are
+    documented in ``docs/architecture/operations-substrate.md`` under
+    "Preserving write-composite policy on the direct path".
+    """
+    # Lazy imports: this module is imported by the dispatcher, so a
+    # top-level import of the policy/approval machinery (which imports
+    # back into the operations package) would risk an import cycle.
+    # Deferring to call time mirrors the pattern used by
+    # ``get_dispatch_child`` above and ``_handle_needs_approval`` in the
+    # dispatcher.
+    from meho_backplane.agent.invoke import current_agent_run_id_var
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+    from meho_backplane.operations._errors import (
+        result_awaiting_approval,
+        result_denied,
+    )
+    from meho_backplane.operations._lookup import parse_connector_id
+    from meho_backplane.operations._validate import compute_params_hash, policy_gate
+    from meho_backplane.operations.approval_queue import (
+        create_pending_request,
+        publish_approval_event,
+    )
+
+    started = time.monotonic()
+    product, version, impl_id = parse_connector_id(connector_id)
+
+    # An in-memory descriptor carrying only the policy-relevant fields.
+    # Never added to a session — it exists solely to feed ``policy_gate``
+    # the sub-op's declared governance, exactly as a persisted descriptor
+    # would for a ``dispatch()`` call.
+    descriptor = EndpointDescriptor(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        source_kind="composite",
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+        parameter_schema={},
+    )
+
+    verdict, reason = await policy_gate(operator=operator, descriptor=descriptor, target=target)
+    if verdict is PermissionVerdict.AUTO_EXECUTE:
+        return None
+
+    duration_ms = (time.monotonic() - started) * 1000.0
+    if verdict is PermissionVerdict.NEEDS_APPROVAL:
+        params_hash = compute_params_hash(params)
+        run_id = current_agent_run_id_var.get()
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            request = await create_pending_request(
+                session,
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                run_id=run_id,
+            )
+            await session.commit()
+        # Publish AFTER commit so a broadcast can never outlive a failed
+        # transaction; the helper is fail-open, so a broadcast outage
+        # does not block the durable decision.
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=request,
+            decision="pending",
+            principal_sub=operator.sub,
+            audit_id=request._audit_id,  # type: ignore[attr-defined]
+        )
+        return result_awaiting_approval(op_id, request.id, duration_ms)
+
+    # DENY, or any unexpected verdict — fail closed: the sub-op never
+    # runs. Only an explicit AUTO_EXECUTE clears the gate.
+    return result_denied(op_id, reason or "policy denied", duration_ms)

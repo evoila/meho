@@ -79,6 +79,7 @@ __all__ = [
     "CompositeBacking",
     "register_composite_backing",
     "registered_composite_backing",
+    "registered_composite_backings",
     "reset_composite_backing_registry",
     "unbacked_composite_next_step",
 ]
@@ -177,6 +178,19 @@ def registered_composite_backing(composite_op_id: str) -> CompositeBacking | Non
     treats it as an ordinary op and never attaches an unbacked marker.
     """
     return _REGISTRY.get(composite_op_id)
+
+
+def registered_composite_backings() -> dict[str, CompositeBacking]:
+    """Return a snapshot copy of every registered composite backing.
+
+    A shallow copy of the process-wide registry keyed by composite op_id.
+    Consumed by the platform-wide registration-time invariant
+    (:func:`~meho_backplane.operations.composite_invariant.assert_registered_composites_have_no_ingested_dispatch`),
+    which walks every registered composite's declared ``sub_op_ids`` to
+    assert none resolve to an ``ingested`` descriptor row. Returning a copy
+    keeps the caller from mutating the live registry while iterating.
+    """
+    return dict(_REGISTRY)
 
 
 def reset_composite_backing_registry() -> None:

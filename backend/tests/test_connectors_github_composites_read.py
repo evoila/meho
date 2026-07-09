@@ -1,66 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for ``gh.composite.pr_status_summary`` (G3.11-T4 #1224).
+"""Unit tests for ``gh.composite.pr_status_summary`` (direct-session, #2255).
 
-Coverage matrix:
+The composite migrated from ``dispatch_child``-through-ingested-rows to
+direct :class:`GitHubRestConnector` session calls (#2255): the handler
+declares a ``connector`` parameter and issues its three reads through
+``connector._get_json`` against ``connector.mount_op_path``, with no
+``endpoint_descriptor`` lookup. These tests drive the handler with a
+recording session stub.
 
-* Happy path -- three sub-ops fire in the expected order with the right
-  params; head SHA flows from the PR sub-call into the check-runs call;
+Coverage matrix (envelope semantics unchanged from the pre-migration
+behaviour -- parity is the acceptance gate):
+
+* Happy path -- three reads fire in the expected order with the right
+  wire paths; head SHA flows from the PR read into the check-runs path;
   the aggregated envelope matches the documented shape.
-* Parallelism -- the two secondary sub-ops fire concurrently
+* Parallelism -- the two secondary reads fire concurrently
   (``asyncio.gather``) rather than sequentially.
 * Partial-failure tolerance:
-  * Checks sub-call errors -> ``checks=None`` + ``checks_status="unknown"``;
+  * Checks read raises -> ``checks=None`` + ``checks_status="unknown"``;
     composite still returns the PR + reviews cleanly.
-  * Reviews sub-call errors -> ``reviews=None`` + ``review_status="unknown"``;
+  * Reviews read raises -> ``reviews=None`` + ``review_status="unknown"``;
     composite still returns the PR + checks cleanly.
-  * Both secondaries fail -> composite still returns the PR with the
+  * Both secondaries raise -> composite still returns the PR with the
     two None / "unknown" payloads.
-* Primary failure -- PR sub-call returns ``status="error"`` raises
-  ``RuntimeError`` (load-bearing for the dispatcher's
-  ``connector_error`` wrapping at the composite parent).
+* Primary failure -- the PR read raising propagates (the dispatcher's
+  outer branch maps it to ``connector_error``); no secondary read runs.
 * Malformed PR payload (no head.sha) raises ``RuntimeError``.
 * Status summarisers (``_summarize_checks`` / ``_summarize_reviews``)
   collapse the raw arrays into the agent-actionable enum values.
-
-The L2 pre-flight is exercised separately in
-``test_connectors_github_composites_l2_preflight.py``; this module
-primes the pre-flight cache so handler-direct tests skip the DB walk.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.github.composites import _preflight
 from meho_backplane.connectors.github.composites._read import (
     _summarize_checks,
     _summarize_reviews,
     pr_status_summary_composite,
 )
-
-
-@pytest.fixture(autouse=True)
-def _prime_preflight_cache() -> Iterator[None]:
-    """Prime the L2 pre-flight cache so handler-direct tests skip the DB walk.
-
-    Same pattern as the vmware-rest read-composite tests. The pre-flight
-    behaviour (cache miss + DB walk; missing-L2 -> structured exception)
-    is exercised in the dedicated preflight test module where a stub
-    ``lookup_descriptor`` covers both code paths.
-    """
-    _preflight.reset_preflight_cache()
-    _preflight._PREFLIGHT_CACHE.add("gh.composite.pr_status_summary")
-    yield
-    _preflight.reset_preflight_cache()
 
 
 def _make_operator() -> Operator:
@@ -75,62 +61,73 @@ def _make_operator() -> Operator:
     )
 
 
-def _ok_result(op_id: str, result: Any) -> OperationResult:
-    return OperationResult(status="ok", op_id=op_id, result=result, duration_ms=1.0)
+def _pr_path(owner: str = "evoila", repo: str = "meho", pull_number: int = 754) -> str:
+    return f"/repos/{owner}/{repo}/pulls/{pull_number}"
 
 
-def _err_result(op_id: str, error: str) -> OperationResult:
-    return OperationResult(status="error", op_id=op_id, error=error, duration_ms=1.0)
+def _checks_path(ref: str, owner: str = "evoila", repo: str = "meho") -> str:
+    return f"/repos/{owner}/{repo}/commits/{ref}/check-runs"
 
 
-class _RecordingDispatchChild:
-    """Lightweight ``dispatch_child`` stub matching the DispatchChild Protocol.
+def _reviews_path(owner: str = "evoila", repo: str = "meho", pull_number: int = 754) -> str:
+    return f"/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
 
-    Maps op_id -> canned :class:`OperationResult` (or raw payload, in
-    which case it's wrapped as ``status="ok"``). Records every call's
-    keyword args so the test can assert call-shape and parallelism.
+
+def _http_error(status_code: int) -> httpx.HTTPStatusError:
+    """Build an ``httpx.HTTPStatusError`` the way ``raise_for_status`` would."""
+    request = httpx.Request("GET", "https://api.github.com/x")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(f"http_{status_code}", request=request, response=response)
+
+
+class _RecordingConnector:
+    """Session stub matching the subset of ``GitHubRestConnector`` the handler uses.
+
+    Maps a wire path -> canned JSON payload (or an ``Exception`` to
+    raise). Records every ``_get_json`` path so the test can assert
+    call-shape and parallelism. ``mount_op_path`` is identity, mirroring
+    the github connector's inherited default.
     """
 
     def __init__(self, responses: dict[str, Any]) -> None:
         self._responses = responses
-        self.calls: list[dict[str, Any]] = []
-        # Allows simulating gather() concurrency by holding both
-        # secondary calls until the second one arrives.
+        self.calls: list[str] = []
         self.barrier: asyncio.Event | None = None
         self._gather_targets: set[str] = set()
-
-    def set_gather_barrier(self, op_ids: set[str]) -> None:
-        """Hold every dispatch of these op_ids until both have entered.
-
-        Used by ``test_secondary_sub_ops_run_in_parallel`` to demonstrate
-        that the handler issues both secondary calls concurrently. The
-        barrier releases when ``len(in_flight) == len(op_ids)``; a
-        sequential handler would deadlock on the first call.
-        """
-        self.barrier = asyncio.Event()
-        self._gather_targets = set(op_ids)
         self._in_flight: list[str] = []
 
-    async def __call__(
+    def set_gather_barrier(self, paths: set[str]) -> None:
+        """Hold every ``_get_json`` for these paths until all have entered.
+
+        A sequential handler would deadlock on the first call; the
+        gather()-based handler unblocks because both secondary reads land
+        before either awaits the barrier.
+        """
+        self.barrier = asyncio.Event()
+        self._gather_targets = set(paths)
+        self._in_flight = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return path
+
+    async def _get_json(
         self,
+        target: Any,
+        path: str,
         *,
-        connector_id: str,
-        op_id: str,
-        params: dict[str, Any],
-        target: Any = None,
-    ) -> OperationResult:
-        self.calls.append(
-            {"connector_id": connector_id, "op_id": op_id, "params": dict(params), "target": target}
-        )
-        if self.barrier is not None and op_id in self._gather_targets:
-            self._in_flight.append(op_id)
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        self.calls.append(path)
+        if self.barrier is not None and path in self._gather_targets:
+            self._in_flight.append(path)
             if len(self._in_flight) >= len(self._gather_targets):
                 self.barrier.set()
             await self.barrier.wait()
-        payload = self._responses[op_id]
-        if isinstance(payload, OperationResult):
-            return payload
-        return _ok_result(op_id, payload)
+        payload = self._responses[path]
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
 
 
 def _pr_payload(head_sha: str = "abc123", **overrides: Any) -> dict[str, Any]:
@@ -155,8 +152,8 @@ def _checks_payload(*runs: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_pr_status_summary_dispatches_three_sub_ops_in_order() -> None:
-    """PR first, then checks + reviews; head SHA flows into the checks call."""
+async def test_pr_status_summary_reads_three_sub_ops_in_order() -> None:
+    """PR first, then checks + reviews; head SHA flows into the checks path."""
     pr = _pr_payload(head_sha="76065a0")
     checks = _checks_payload(
         {"name": "build", "status": "completed", "conclusion": "success"},
@@ -165,34 +162,25 @@ async def test_pr_status_summary_dispatches_three_sub_ops_in_order() -> None:
     reviews = [
         {"user": {"login": "reviewer-a"}, "state": "APPROVED"},
     ]
-    dispatch = _RecordingDispatchChild(
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": pr,
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": checks,
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": reviews,
+            _pr_path(): pr,
+            _checks_path("76065a0"): checks,
+            _reviews_path(): reviews,
         }
     )
     out = await pr_status_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
-    # PR call fires first; the two secondaries can land in either order
-    # (asyncio.gather is not order-preserving for entry order).
-    assert dispatch.calls[0]["op_id"] == "GET:/repos/{owner}/{repo}/pulls/{pull_number}"
-    sub_op_ids = {c["op_id"] for c in dispatch.calls[1:]}
-    assert sub_op_ids == {
-        "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs",
-        "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-    }
-    # head SHA threaded into the checks call's ref param.
-    checks_call = next(
-        c
-        for c in dispatch.calls
-        if c["op_id"] == "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs"
-    )
-    assert checks_call["params"] == {"owner": "evoila", "repo": "meho", "ref": "76065a0"}
+    # PR read fires first; the two secondaries can land in either order
+    # (asyncio.gather is not entry-order-preserving).
+    assert connector.calls[0] == _pr_path()
+    assert set(connector.calls[1:]) == {_checks_path("76065a0"), _reviews_path()}
+    # head SHA threaded into the checks path's {ref} slot.
+    assert _checks_path("76065a0") in connector.calls
     # Aggregated envelope.
     assert out["pr"] == pr
     assert out["checks"] == checks
@@ -201,34 +189,26 @@ async def test_pr_status_summary_dispatches_three_sub_ops_in_order() -> None:
     assert out["mergeable_state"] == "clean"
     assert out["checks_status"] == "all_passed"
     assert out["review_status"] == "approved"
-    # All calls carry the connector id.
-    assert all(c["connector_id"] == "gh-rest-3" for c in dispatch.calls)
 
 
 @pytest.mark.asyncio
-async def test_pr_call_params_pass_through() -> None:
-    """``owner`` / ``repo`` / ``pull_number`` flow into the PR sub-call params."""
-    dispatch = _RecordingDispatchChild(
+async def test_pr_read_path_passes_through() -> None:
+    """``owner`` / ``repo`` / ``pull_number`` flow into the PR + reviews paths."""
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _checks_payload(),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": [],
+            _pr_path("octocat", "hello-world", 42): _pr_payload(),
+            _checks_path("abc123", "octocat", "hello-world"): _checks_payload(),
+            _reviews_path("octocat", "hello-world", 42): [],
         }
     )
     await pr_status_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"owner": "octocat", "repo": "hello-world", "pull_number": 42},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
-    pr_call = dispatch.calls[0]
-    assert pr_call["params"] == {"owner": "octocat", "repo": "hello-world", "pull_number": 42}
-    reviews_call = next(
-        c
-        for c in dispatch.calls
-        if c["op_id"] == "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
-    )
-    assert reviews_call["params"] == {"owner": "octocat", "repo": "hello-world", "pull_number": 42}
+    assert connector.calls[0] == _pr_path("octocat", "hello-world", 42)
+    assert _reviews_path("octocat", "hello-world", 42) in connector.calls
 
 
 # ---------------------------------------------------------------------------
@@ -237,33 +217,28 @@ async def test_pr_call_params_pass_through() -> None:
 
 
 @pytest.mark.asyncio
-async def test_secondary_sub_ops_run_in_parallel() -> None:
-    """The checks + reviews sub-calls fire concurrently via asyncio.gather.
+async def test_secondary_reads_run_in_parallel() -> None:
+    """The checks + reviews reads fire concurrently via asyncio.gather.
 
-    Set a barrier that both secondary calls must enter before either may
+    Set a barrier both secondary reads must enter before either may
     return. A sequential handler would deadlock; the gather()-based
-    handler unblocks cleanly because both calls land before either
-    awaits the barrier.
+    handler unblocks cleanly because both reads land before either awaits
+    the barrier.
     """
-    dispatch = _RecordingDispatchChild(
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _checks_payload(),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": [],
+            _pr_path(): _pr_payload(head_sha="76065a0"),
+            _checks_path("76065a0"): _checks_payload(),
+            _reviews_path(): [],
         }
     )
-    dispatch.set_gather_barrier(
-        {
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs",
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-        }
-    )
+    connector.set_gather_barrier({_checks_path("76065a0"), _reviews_path()})
     out = await asyncio.wait_for(
         pr_status_summary_composite(
             operator=_make_operator(),
             target=object(),
             params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-            dispatch_child=dispatch,
+            connector=connector,  # type: ignore[arg-type]
         ),
         timeout=2.0,
     )
@@ -271,20 +246,18 @@ async def test_secondary_sub_ops_run_in_parallel() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Partial-failure tolerance (acceptance criterion #3)
+# Partial-failure tolerance
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_checks_sub_op_failure_does_not_bail() -> None:
-    """A 404 on the checks call surfaces as ``checks=None`` + ``checks_status='unknown'``."""
-    dispatch = _RecordingDispatchChild(
+async def test_checks_read_failure_does_not_bail() -> None:
+    """A 404 on the checks read surfaces as ``checks=None`` + ``checks_status='unknown'``."""
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _err_result(
-                "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs", "not_found: 404"
-            ),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": [
+            _pr_path(): _pr_payload(head_sha="76065a0"),
+            _checks_path("76065a0"): _http_error(404),
+            _reviews_path(): [
                 {"user": {"login": "r1"}, "state": "APPROVED"},
             ],
         }
@@ -293,7 +266,7 @@ async def test_checks_sub_op_failure_does_not_bail() -> None:
         operator=_make_operator(),
         target=object(),
         params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
     assert out["checks"] is None
     assert out["checks_status"] == "unknown"
@@ -304,24 +277,22 @@ async def test_checks_sub_op_failure_does_not_bail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reviews_sub_op_failure_does_not_bail() -> None:
-    """Reviews call failure surfaces as ``reviews=None`` + ``review_status='unknown'``."""
-    dispatch = _RecordingDispatchChild(
+async def test_reviews_read_failure_does_not_bail() -> None:
+    """Reviews read failure surfaces as ``reviews=None`` + ``review_status='unknown'``."""
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _checks_payload(
+            _pr_path(): _pr_payload(head_sha="76065a0"),
+            _checks_path("76065a0"): _checks_payload(
                 {"name": "build", "status": "completed", "conclusion": "success"},
             ),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": _err_result(
-                "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews", "unauthorized: 401"
-            ),
+            _reviews_path(): _http_error(401),
         }
     )
     out = await pr_status_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
     assert out["reviews"] is None
     assert out["review_status"] == "unknown"
@@ -331,24 +302,20 @@ async def test_reviews_sub_op_failure_does_not_bail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_both_secondary_sub_ops_failing_still_returns_pr() -> None:
+async def test_both_secondary_reads_failing_still_returns_pr() -> None:
     """If both secondaries fail, the composite still surfaces the PR + 'unknown' states."""
-    dispatch = _RecordingDispatchChild(
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _err_result(
-                "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs", "rate_limited"
-            ),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": _err_result(
-                "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews", "rate_limited"
-            ),
+            _pr_path(): _pr_payload(head_sha="76065a0"),
+            _checks_path("76065a0"): _http_error(429),
+            _reviews_path(): _http_error(429),
         }
     )
     out = await pr_status_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
     assert out["pr"] is not None
     assert out["checks"] is None
@@ -363,35 +330,30 @@ async def test_both_secondary_sub_ops_failing_still_returns_pr() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pr_sub_op_failure_raises_runtime_error() -> None:
-    """PR sub-call error -> ``RuntimeError`` (dispatcher wraps as connector_error)."""
-    dispatch = _RecordingDispatchChild(
+async def test_pr_read_failure_propagates() -> None:
+    """PR read error -> propagates (dispatcher maps it to connector_error)."""
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _err_result(
-                "GET:/repos/{owner}/{repo}/pulls/{pull_number}", "not_found: 404"
-            ),
+            _pr_path(): _http_error(404),
         }
     )
-    with pytest.raises(RuntimeError, match="status='error'"):
+    with pytest.raises(httpx.HTTPStatusError):
         await pr_status_summary_composite(
             operator=_make_operator(),
             target=object(),
             params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-            dispatch_child=dispatch,
+            connector=connector,  # type: ignore[arg-type]
         )
-    # The composite bailed before issuing the secondary calls.
-    assert len(dispatch.calls) == 1
+    # The composite bailed before issuing the secondary reads.
+    assert connector.calls == [_pr_path()]
 
 
 @pytest.mark.asyncio
 async def test_pr_payload_missing_head_sha_raises_runtime_error() -> None:
-    """A PR payload with no head.sha cannot drive the checks call -> error."""
-    dispatch = _RecordingDispatchChild(
+    """A PR payload with no head.sha cannot drive the checks read -> error."""
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": {
-                "number": 754,
-                # No head -> no head.sha extractable.
-            },
+            _pr_path(): {"number": 754},  # No head -> no head.sha extractable.
         }
     )
     with pytest.raises(RuntimeError, match=r"head\.sha"):
@@ -399,8 +361,10 @@ async def test_pr_payload_missing_head_sha_raises_runtime_error() -> None:
             operator=_make_operator(),
             target=object(),
             params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-            dispatch_child=dispatch,
+            connector=connector,  # type: ignore[arg-type]
         )
+    # Only the PR read fired before the malformed-payload bail.
+    assert connector.calls == [_pr_path()]
 
 
 # ---------------------------------------------------------------------------
@@ -411,20 +375,18 @@ async def test_pr_payload_missing_head_sha_raises_runtime_error() -> None:
 @pytest.mark.asyncio
 async def test_mergeable_null_is_passed_through_verbatim() -> None:
     """``mergeable=None`` (GitHub still computing) flows through as-is."""
-    dispatch = _RecordingDispatchChild(
+    connector = _RecordingConnector(
         {
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}": _pr_payload(
-                mergeable=None, mergeable_state="unknown"
-            ),
-            "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs": _checks_payload(),
-            "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews": [],
+            _pr_path(): _pr_payload(head_sha="76065a0", mergeable=None, mergeable_state="unknown"),
+            _checks_path("76065a0"): _checks_payload(),
+            _reviews_path(): [],
         }
     )
     out = await pr_status_summary_composite(
         operator=_make_operator(),
         target=object(),
         params={"owner": "evoila", "repo": "meho", "pull_number": 754},
-        dispatch_child=dispatch,
+        connector=connector,  # type: ignore[arg-type]
     )
     assert out["mergeable"] is None
     assert out["mergeable_state"] == "unknown"
